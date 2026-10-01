@@ -74,6 +74,9 @@ export const CREATE_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000]
  *  contract in that repo (`cli/auth._SESSION_EXPIRED_RE` anchors on the same rendering). */
 const REFUSED_402 = 'failed (402): '
 
+/** The code, found in a body the CLI cut short (it keeps 400 characters of one) — so JSON cannot parse it. */
+const QUOTA_CODE_IN_TEXT = new RegExp(`"error_code"\\s*:\\s*"${FREE_NETWORK_LIMIT_CODE}"`)
+
 /** Said when the code is there but the CLI cut the sentence short (it keeps 400 characters of a body). */
 const QUOTA_FALLBACK = 'Your Free plan’s grid limit is reached, so no new grid could be created. Upgrade, or try again later.'
 
@@ -91,7 +94,7 @@ export function quotaRefusal(output: string): string | null {
     if (detail?.error_code !== FREE_NETWORK_LIMIT_CODE) return null
     return typeof detail.message === 'string' && detail.message.trim() ? detail.message : QUOTA_FALLBACK
   } catch {
-    return new RegExp(`"error_code"\\s*:\\s*"${FREE_NETWORK_LIMIT_CODE}"`).test(body) ? QUOTA_FALLBACK : null
+    return QUOTA_CODE_IN_TEXT.test(body) ? QUOTA_FALLBACK : null
   }
 }
 
