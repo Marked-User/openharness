@@ -405,7 +405,7 @@ async function ensureAccountGrid(note: (line: string) => void): Promise<{ status
   }
   if (!gridName) return { status: 'skipped', name: null }
   const ensured = await ensureHarnessGrid(gridName)
-  if (ensured.status === 'failed' || ensured.status === 'skipped') note(ensured.message)
+  if (ensured.status === 'failed' || ensured.status === 'skipped' || ensured.status === 'refused') note(ensured.message)
   else if (ensured.status === 'created') note(`Created your private grid '${gridName}'.`)
   return { status: ensured.status, name: gridName }
 }

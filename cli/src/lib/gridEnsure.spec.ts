@@ -26,10 +26,21 @@ const VERSION_OK: Turn = { stdout: 'grid 0.3.46\n' }
 const rows = (...names: string[]): string =>
   JSON.stringify(names.map((n) => ({ grid: n, type: 'permissioned-public', id: `grid-${n}` })))
 
+/** Every wait a retry asked for, in order — the retries never really sleep in a test. */
+let slept: number[] = []
+
 async function ensure(name = 'someone-7f3a91c4') {
   const { ensureHarnessGrid } = await import('./gridEnsure.js')
-  return ensureHarnessGrid(name)
+  slept = []
+  return ensureHarnessGrid(name, { sleep: async (ms) => { slept.push(ms) } })
 }
+
+/** What the public CLI prints for a control-plane refusal — `remote/control_plane._raise`, whose format
+ *  is a contract there (`cli/auth._SESSION_EXPIRED_RE` anchors on it) — around grid-apis' 402 body. */
+const QUOTA_MESSAGE = 'Free plan allows one network, and a network deleted in the last 30 days still counts. ' +
+  'You can create a new one from 2026-10-31 14:13 UTC, or upgrade to create one now'
+const QUOTA_REFUSAL = 'POST https://api-grid.autonomous.ai/v1/grid/managed-networks failed (402): ' +
+  JSON.stringify({ detail: { error_code: 'free_network_limit', message: QUOTA_MESSAGE } }) + '\n'
 
 describe('ensureHarnessGrid', () => {
   it('creates the grid when the account has none, as a private permissioned-public one', async () => {
@@ -94,6 +105,43 @@ describe('ensureHarnessGrid', () => {
     expect(result.message).toContain('control plane is unreachable')
   })
 
+  it('retries a failed create with backoff before saying it failed', async () => {
+    // A create that fails for a reason that can pass (the server low on memory, a restart, a network
+    // blip) is asked again, waiting longer each time — no longer reported failed at the first refusal.
+    const fake = fakeGrid({
+      version: VERSION_OK,
+      sync: {},
+      ls: { stdout: rows() },
+      start: { exit: 1, stderr: 'POST …/managed-networks failed (503): {"detail":"The server is low on memory right now"}\n' },
+    })
+    const result = await ensure()
+    expect(result.status).toBe('failed')
+    expect(fake.calls().filter((c) => c.includes('start')).length).toBe(3)
+    expect(slept).toEqual([2_000, 5_000])
+  })
+
+  it('creates the grid when a retry succeeds', async () => {
+    const fake = fakeGrid({
+      version: VERSION_OK,
+      sync: {},
+      ls: { stdout: rows() },
+      start: [{ exit: 1, stderr: 'the control plane is unreachable\n' }, {}],
+    })
+    expect(await ensure()).toEqual({ status: 'created', message: '' })
+    expect(fake.calls().filter((c) => c.includes('start')).length).toBe(2)
+    expect(slept).toEqual([2_000])
+  })
+
+  it('shows the Free plan’s refusal instead of retrying it', async () => {
+    // A 402 `free_network_limit` is the owner's plan, not a bad minute: asking again cannot succeed, so
+    // it is never retried, and the person reads the control plane's own sentence — which says when a new
+    // grid becomes possible — rather than the CLI's raw request line around it.
+    const fake = fakeGrid({ version: VERSION_OK, sync: {}, ls: { stdout: rows() }, start: { exit: 1, stderr: QUOTA_REFUSAL } })
+    expect(await ensure()).toEqual({ status: 'refused', message: QUOTA_MESSAGE })
+    expect(fake.calls().filter((c) => c.includes('start')).length).toBe(1)
+    expect(slept).toEqual([])
+  })
+
   it('skips, without touching the grid, when the binary is older than the floor', async () => {
     const fake = fakeGrid({ version: { stdout: 'grid 0.3.34\n' } })
     const result = await ensure()
@@ -111,5 +159,29 @@ describe('ensureHarnessGrid', () => {
   it('refuses an empty name rather than creating a grid called nothing', async () => {
     fakeGrid({ version: VERSION_OK })
     expect((await ensure('   ')).status).toBe('skipped')
+  })
+})
+
+describe('quotaRefusal', () => {
+  it('reads the control plane’s sentence out of the CLI’s refusal line', async () => {
+    const { quotaRefusal } = await import('./gridEnsure.js')
+    expect(quotaRefusal(QUOTA_REFUSAL)).toBe(QUOTA_MESSAGE)
+    expect(quotaRefusal(`some warning first\n${QUOTA_REFUSAL}`)).toBe(QUOTA_MESSAGE)
+  })
+
+  it('is not fooled by another refusal', async () => {
+    const { quotaRefusal } = await import('./gridEnsure.js')
+    expect(quotaRefusal('POST …/managed-networks failed (402): {"detail":"Insufficient balance"}')).toBeNull()
+    expect(quotaRefusal('POST …/managed-networks failed (409): {"detail":"You already have a network with this name"}')).toBeNull()
+    expect(quotaRefusal('POST …/managed-networks failed (503): {"detail":{"error_code":"free_network_limit"}}')).toBeNull()
+    expect(quotaRefusal('the control plane is unreachable')).toBeNull()
+  })
+
+  it('still knows the refusal when the CLI cut the body short', async () => {
+    // The CLI keeps the first 400 characters of a body, so a long sentence can arrive as broken JSON.
+    // The code is near the front and still decides; the person then gets a sentence of our own.
+    const { quotaRefusal } = await import('./gridEnsure.js')
+    const cut = QUOTA_REFUSAL.slice(0, QUOTA_REFUSAL.indexOf('You can'))
+    expect(quotaRefusal(cut)).toMatch(/Free plan/)
   })
 })
