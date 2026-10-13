@@ -103,6 +103,106 @@ async function restart() {
   store = new StoppedAgentStore(archive); registry = new (registry.constructor as new () => typeof registry)(); registry.load()
 }
 
+async function reserveMarker(dispatch = true, permissionMode: 'full' | 'ask' | undefined = 'full', omitPermission = false) {
+  const receipts = new AgentCreationReceipts(join(root, 'receipts')), request = { ...nativeRearmRequest(saved.nativeControl!)! }
+  if (omitPermission) delete request.permissionMode
+  else request.permissionMode = permissionMode
+  const fingerprint = creationFingerprint({ kind: 'native-rearm', agentId: saved.agentId, operation: 'resume', source: 'saved',
+    ...(omitPermission ? {} : { permissionMode }) })
+  let marker!: ReturnType<StoppedAgentStore['reserveNativeResume']>
+  await receipts.runIntent(saved.nativeControl!.rearm!.requestId, fingerprint, request, { service: 'native', detail: 'Preparing' }, async (_value, owner) => {
+    const current = () => { if (!owner.current()) throw Error('original receipt revoked') }
+    marker = store.reserveNativeResume(saved, { verify: current, current })
+    return dispatch ? async () => {
+      receipts.recordNativeRelaunchProcess(marker.link.requestId, { fingerprint, request },
+        { boot: 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', pid: 43, birth: '123456' }, fence)
+      return { state: 'unconfirmed' }
+    } : null
+  })
+  return { receipts, marker, confirm: () => receipts.confirmNativeRelaunch(marker.link.requestId, { fingerprint, request,
+    outcome: { state: 'created', agentId: saved.agentId, resumed: true } }, fence) }
+}
+
+it('finishes the original confirmed Resume marker after later live Cancel without probing or launching again', async () => {
+  const p = await reserveMarker(), live = commit(); p.confirm()
+  const intent = control(live)
+  const stopped = registry.commitNativeControl(live, { ...intent,
+    cancel: { ...intent.cancel, request: { ...intent.cancel.request, requestId: 'later-live-cancel-request' } } }, () => {})
+  const authority = { verify: registry.readNativeControl(stopped).verify, current: () => {} }
+  const completion = p.receipts.readNativeResumeCleanup(p.marker.link)
+  expect(() => store.finishNativeResume(p.marker.link, authority, completion)).not.toThrow()
+  expect(existsSync(join(archive, `${saved.agentId}.resume`))).toBe(false)
+  expect(p.receipts.status(p.marker.link.requestId)).toMatchObject({ state: 'created', resumed: true })
+  expect(registry.byAgent(saved.agentId)?.nativeControl).toEqual(stopped.nativeControl)
+})
+
+it.each(['omitted', 'different'])('preserves the marker when a created receipt has %s original permissions', async mode => {
+  const p = await reserveMarker(true, 'ask', mode === 'omitted'); commit(); p.confirm()
+  const file = join(archive, `${saved.agentId}.resume`), before = readFileSync(file, 'utf8'), archived = readFileSync(fault.archive, 'utf8')
+  const completion = p.receipts.readNativeResumeCleanup(p.marker.link)
+  expect(completion.kind).toBe('created')
+  expect(() => store.finishNativeResume(p.marker.link, fence, completion)).toThrow('account for the original')
+  expect(readFileSync(file, 'utf8')).toBe(before); expect(readFileSync(fault.archive, 'utf8')).toBe(archived)
+})
+
+it('does not clear an unreadable marker without its saved owner', () => {
+  const file = join(archive, `${saved.agentId}.resume`)
+  writeFileSync(file, '{', { mode: 0o600 }); rmSync(fault.archive)
+  expect(() => store.finishResume(saved.agentId)).toThrow()
+  expect(readFileSync(file, 'utf8')).toBe('{')
+})
+
+it('cleans a revoked undispatched marker before clearing its original saved reservation', async () => {
+  const p = await reserveMarker(false)
+  p.receipts.cancelIntent(p.marker.link.requestId)
+  const cancelled = store.commitNativeControl(saved, { ...saved.nativeControl!,
+    cancel: { ...saved.nativeControl!.cancel, request: { ...saved.nativeControl!.cancel.request, requestId: 'early-cancel-request' } },
+    rearm: { ...saved.nativeControl!.rearm!, revoked: true } }, fence)
+  const absence = registry.readNativeAbsence(saved.agentId)
+  const completion = p.receipts.readNativeResumeCleanup(p.marker.link)
+  expect(() => store.finishNativeResume(p.marker.link, { verify: absence.verify, current: () => {} }, completion)).not.toThrow()
+  expect(store.get(saved.agentId)?.nativeControl).toEqual(cancelled.nativeControl)
+  expect(existsSync(join(archive, `${saved.agentId}.resume`))).toBe(false)
+  expect(() => p.marker.verify()).toThrow()
+  const cleared = store.commitNativeControl(cancelled, { version: 1, cancel: cancelled.nativeControl!.cancel }, fence)
+  expect(cleared.nativeControl?.rearm).toBeUndefined()
+})
+
+it('a closed visit accounts for marker cleanup even without a created receipt', async () => {
+  const p = await reserveMarker(), stopped = visit(); checkpoint(stopped); finish(retire(stopped))
+  expect(p.receipts.status(p.marker.link.requestId)).toEqual({ state: 'unconfirmed' })
+  const absence = registry.readNativeAbsence(saved.agentId)
+  expect(() => store.finishNativeResume(p.marker.link, { verify: absence.verify, current: () => {} })).not.toThrow()
+  expect(existsSync(join(archive, `${saved.agentId}.resume`))).toBe(false)
+})
+
+it('cannot clear a native marker using legacy cleanup, generic authority or a matching token', async () => {
+  const p = await reserveMarker(false), file = join(archive, `${saved.agentId}.resume`), before = readFileSync(file, 'utf8')
+  for (const token of [undefined, p.marker.link.launchToken]) {
+    expect(() => store.finishResume(saved.agentId, token, fence)).toThrow('original receipt and archive link')
+    expect(readFileSync(file, 'utf8')).toBe(before)
+  }
+  expect(() => store.finishNativeResume(p.marker.link, fence)).toThrow('account for the original')
+})
+
+it('keeps confirmed creation successful when marker cleanup fails and retries metadata only', async () => {
+  const p = await reserveMarker(); commit(); p.confirm()
+  const completion = p.receipts.readNativeResumeCleanup(p.marker.link)
+  const unavailable = { verify: () => { throw Error('live association unavailable') }, current: () => {} }
+  expect(() => store.finishNativeResume(p.marker.link, unavailable, completion)).toThrow('live association unavailable')
+  expect(existsSync(join(archive, `${saved.agentId}.resume`))).toBe(true)
+  expect(p.receipts.status(p.marker.link.requestId)).toMatchObject({ state: 'created' })
+  expect(() => store.finishNativeResume(p.marker.link, fence, completion)).not.toThrow()
+  expect(() => store.finishNativeResume(p.marker.link, fence, completion)).not.toThrow()
+})
+
+it('does not use a prior closed visit to clean another request with the same launch token', async () => {
+  const p = await reserveMarker(), row = visit(); checkpoint(row); finish(retire(row))
+  const before = readFileSync(join(archive, `${saved.agentId}.resume`), 'utf8')
+  expect(() => store.finishNativeResume({ ...p.marker.link, requestId: 'different-resume-request' }, fence)).toThrow()
+  expect(readFileSync(join(archive, `${saved.agentId}.resume`), 'utf8')).toBe(before)
+})
+
 it('checkpoints before retirement, returns saved ownership, then removes the live route', () => {
   const row = visit(), stopped = stopProof(row), publications: string[] = []
   fault.published = phase => {

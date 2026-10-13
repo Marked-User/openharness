@@ -8,10 +8,11 @@ import { AtomicWriteUnconfirmed, atomicWriteJson, projectDisplayName, strictPers
 import { readPrivateStateFile, secureStateDirectory } from './secureState.js'
 import { sameProcessIdentity } from './terminalRuntime.js'
 import { inspectNativeControlFile } from './nativeControlFile.js'
-import { nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
+import { nativeRearmRequest, nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
 import { parseNativeArchiveEnvelope, parseNativeArchiveTransfer, parseNativeArchiveReturn, parseNativeArchiveRetirement,
-  type NativeArchiveTransfer, type NativeArchiveReturn, type NativeArchiveRetirement } from './nativeArchive.js'
-import { creationFingerprint } from './agentCreationReceipt.js'
+  parseNativeArchiveLink, type NativeArchiveLink, type NativeArchiveTransfer, type NativeArchiveReturn, type NativeArchiveRetirement } from './nativeArchive.js'
+import { creationFingerprint, type NativeResumeCleanupProof } from './agentCreationReceipt.js'
+import { NativeResumeMarkers } from './nativeResumeMarker.js'
 
 const SAFE_ID = /^[a-zA-Z0-9_-]{1,128}$/
 const CATALOG_CACHE_RECORDS = 2048
@@ -56,8 +57,11 @@ export class StoppedAgentStore {
   private readonly uncertain = new Map<string, { before: string; bytes: string; candidate: RegisteredSession;
     returnRole?: NativeArchiveReturn; verifyDirectory(): void }>()
   private readonly uncertainTransfers = new Map<string, { bytes: string; verifyPublished(): void; verifyDirectory(): void }>()
+  private readonly nativeMarkers: NativeResumeMarkers
 
-  constructor(private readonly directory = join(env.ADAPTER_DATA_DIR, 'stopped-agents')) {}
+  constructor(private readonly directory = join(env.ADAPTER_DATA_DIR, 'stopped-agents')) {
+    this.nativeMarkers = new NativeResumeMarkers(directory)
+  }
 
   get(agentId: string): RegisteredSession | null {
     return this.readRecord(agentId)?.session ?? null
@@ -457,6 +461,65 @@ export class StoppedAgentStore {
     return true
   }
 
+  /** Preparation already owns the full creation intent, before any dispatch
+   * claim or marker. A matching old marker is never another execution permit. */
+  reserveNativeResume(input: RegisteredSession, authority: SavedNativeControlFence): { link: NativeArchiveLink; verify(): void } {
+    const original = structuredClone(input), { verify: verifyAuthority, current } = authority
+    return this.write(() => {
+      const source = this.inspectResumeSource(original), rearm = original.nativeControl!.rearm!
+      if (source.transfer) throw Error('The original native Resume already belongs to its live handoff.')
+      const link = parseNativeArchiveLink({ version: 1, agentId: original.agentId, requestId: rearm.requestId,
+        launchToken: rearm.launchToken, target: rearm.target })!
+      const verifySource = () => { source.verify(); verifyAuthority(); source.verify(); current() }
+      source.confirm(verifySource)
+      const marker = this.nativeMarkers.reserve(link, { verify: verifySource, current })
+      const verify = () => { marker.verify(); verifySource() }
+      verify()
+      return { link, verify }
+    })
+  }
+
+  /** Only an exact created receipt plus its transferred visit, an accounted
+   * closed visit, or an undispatched revoked request may clear its own marker.
+   * The caller also retains the live association or confirmed Registry absence. */
+  finishNativeResume(input: NativeArchiveLink, authority: SavedNativeControlFence, completion?: NativeResumeCleanupProof): void {
+    const link = parseNativeArchiveLink(input), { verify: verifyAuthority, current } = authority
+    if (!link) throw Error('The original native Resume identity is unavailable.')
+    const receipt = completion && { kind: completion.kind, link: structuredClone(completion.link),
+      request: structuredClone(completion.request), verify: completion.verify }
+    if (receipt && creationFingerprint(receipt.link) !== creationFingerprint(link)) throw Error('The Resume receipt belongs to a different visit.')
+    this.write(() => {
+      if (this.uncertain.has(link.agentId)) throw Error('Waiting for the original saved native control publication.')
+      const source = inspectNativeControlFile(join(this.directory, `${link.agentId}.json`), this.directory)
+      const record = this.decodeRecord(JSON.parse(source.content!), link.agentId)
+      const pending = this.uncertainTransfers.get(link.agentId)
+      const closed = record.returnRole?.phase === 'saved' && creationFingerprint(record.returnRole.link) === creationFingerprint(link)
+      const transferred = record.transfer && creationFingerprint(record.transfer.link) === creationFingerprint(link)
+        && record.session.nativeControl && receipt
+        && creationFingerprint(nativeRearmRequest(record.session.nativeControl)) === creationFingerprint(receipt.request)
+      const reserved = record.session.nativeControl?.rearm
+      const undispatched = receipt?.kind === 'not-dispatched' && !record.transfer && record.returnRole?.phase !== 'returning'
+        && !record.session.active && !!reserved?.revoked && !reserved.replacement
+        && reserved.source === 'saved' && reserved.operation === 'resume'
+        && reserved.requestId === link.requestId && reserved.launchToken === link.launchToken && reserved.target === link.target
+        && creationFingerprint(nativeRearmRequest(record.session.nativeControl!)) === creationFingerprint(receipt.request)
+      if (!closed && !(transferred && receipt?.kind === 'created') && !undispatched) {
+        throw Error('Waiting to account for the original native Resume before clearing its marker.')
+      }
+      const verify = () => {
+        receipt?.verify(); verifyAuthority(); source.verify()
+        if (pending) {
+          if (source.content !== pending.bytes) throw Error('The original native archive completion changed.')
+          pending.verifyDirectory(); pending.verifyPublished()
+        }
+        current()
+      }
+      source.confirm(verify)
+      this.nativeMarkers.finish(link, { verify, current })
+      verify()
+    })
+  }
+
   /** Reserve before tmux allocation. A crash between allocation and registry persistence
    * must not permit a second process under a new request/receipt ID. */
   beginResume(agentId: string): string | null {
@@ -496,11 +559,9 @@ export class StoppedAgentStore {
    * Clear only a verified outcome. Unknown allocation/readiness keeps its reservation.
    *
    * `token` asks for the reservation to be cleared only if it is still the caller's own, which can
-   * only be answered by parsing the marker. Without one the caller is clearing it unconditionally,
-   * so the CONTENTS are not parsed — a reservation left behind by a crash can be half-written, and
-   * refusing to clear THAT is refusing exactly the case a takeover exists for. The file is still
-   * opened the same guarded way either way, so a symlink or anything else unsafe in its place
-   * fails closed rather than being unlinked on trust.
+   * only be answered by parsing the marker. A known legacy saved harness may clear a
+   * half-written reservation without a token. Native markers require the original
+   * receipt and visit, even after the saved row has transferred to the live owner.
    */
   finishResume(agentId: string, token?: string, authority?: SavedNativeControlFence): void {
     this.write(() => this.finishResumeUnlocked(agentId, token, authority))
@@ -515,8 +576,14 @@ export class StoppedAgentStore {
       secureStateDirectory(this.directory, false)
       marker = inspectNativeControlFile(file, this.directory)
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
-    if (token !== undefined && JSON.parse(marker.content!).token !== token) return
     const saved = this.get(agentId)
+    let value: unknown
+    try { value = JSON.parse(marker.content!) }
+    catch (error) { if (!saved || saved.nativeControl || token !== undefined) throw error }
+    if (value && typeof value === 'object' && Object.hasOwn(value, 'nativeArchive')) {
+      throw Error('The native Resume marker requires its original receipt and archive link.')
+    }
+    if (token !== undefined && (value as { token?: unknown } | null)?.token !== token) return
     if (this.uncertain.has(agentId) || saved?.nativeControl && !authority) {
       throw Error('Waiting to confirm the exact native resume handoff before clearing its reservation.')
     }

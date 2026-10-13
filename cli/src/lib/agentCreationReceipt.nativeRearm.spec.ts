@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentCreationReceipts, creationFingerprint, type AgentCreationOutcome } from './agentCreationReceipt.js'
+import type { NativeArchiveLink } from './nativeArchive.js'
 
 const faults = vi.hoisted(() => ({ linked: false, failDirectory: false, beforeLink: undefined as (() => void) | undefined,
   inspect: undefined as ((path: string) => void) | undefined, captureResult: undefined as (() => void) | undefined,
@@ -50,6 +51,89 @@ async function uncertain() {
   await value.receipts.runIntent(id, fingerprint, request, held, async () => effect)
   return { ...value, effect }
 }
+
+async function savedCompletion(kind: 'created' | 'cancelled' | 'not-dispatched' | 'pending' | 'uncertain' | 'generic-failure' | 'direct-success' | 'no-witness' = 'created', permissionMode?: 'full') {
+  const p = fixture()
+  const link: NativeArchiveLink = { version: 1, agentId: request.agentId, requestId: id, launchToken: request.launchToken, target: 'a'.repeat(64) }
+  const value = { ...request, source: 'saved', target: link.target, ...(permissionMode ? { permissionMode } : {}) }
+  const fingerprint = creationFingerprint({ kind: 'native-rearm', agentId: link.agentId, operation: 'resume', source: 'saved',
+    ...(permissionMode ? { permissionMode } : {}) })
+  await p.receipts.runIntent(id, fingerprint, value, held, async () => kind === 'pending' || kind === 'cancelled' ? null : async () => {
+    if (kind === 'created') p.receipts.recordNativeRelaunchProcess(id, { fingerprint, request: value }, processOwner, fence())
+    if (kind === 'not-dispatched') return { state: 'failed', error: 'NATIVE_REARM_NOT_DISPATCHED' }
+    if (kind === 'generic-failure') return { state: 'failed', error: 'OTHER_FAILURE' }
+    if (kind === 'direct-success') return outcome
+    return { state: 'unconfirmed' }
+  })
+  if (kind === 'cancelled') p.receipts.cancelIntent(id)
+  if (kind === 'created' || kind === 'no-witness') p.receipts.confirmNativeRelaunch(id, { fingerprint, request: value, outcome }, fence())
+  return { ...p, link, request: value, fingerprint }
+}
+
+it.each(['created', 'cancelled', 'not-dispatched'] as const)('reads exact %s Resume cleanup without another dispatch or native process probe', async kind => {
+  const p = await savedCompletion(kind, 'full'), cold = new AgentCreationReceipts(p.directory)
+  const proof = cold.readNativeResumeCleanup(p.link)
+  expect(proof.kind).toBe(kind === 'created' ? 'created' : 'not-dispatched')
+  expect(proof.request).toEqual(p.request); expect(proof.link).toEqual(p.link)
+  expect(() => proof.verify()).not.toThrow()
+  expect(Object.isFrozen(proof.request)).toBe(true)
+  expect(proof.outcome).toEqual(cold.status(id))
+})
+
+it.each(['pending', 'uncertain', 'generic-failure', 'direct-success', 'no-witness'] as const)('holds %s receipt evidence instead of inferring cleanup authority', async kind => {
+  const p = await savedCompletion(kind)
+  expect(() => p.receipts.readNativeResumeCleanup(p.link)).toThrow()
+})
+
+it.each(['agentId', 'requestId', 'launchToken', 'target'] as const)('binds Resume cleanup to the original link %s', async field => {
+  const p = await savedCompletion()
+  const changed = { ...p.link, [field]: field === 'target' ? 'b'.repeat(64) : 'different-identity-value' }
+  expect(() => p.receipts.readNativeResumeCleanup(changed)).toThrow()
+})
+
+it.each(['source', 'operation', 'permission', 'extra', 'fingerprint'])('refuses a coherent but different original %s request', async field => {
+  const p = await savedCompletion('cancelled'), raw = JSON.parse(readFileSync(p.file(), 'utf8'))
+  if (field === 'source') raw.request.source = 'live'
+  if (field === 'operation') raw.request.operation = 'restart'
+  if (field === 'permission') raw.request.permissionMode = 'unknown'
+  if (field === 'extra') raw.request.extra = true
+  if (field === 'fingerprint') raw.fingerprint = 'b'.repeat(64)
+  raw.checksum = creationFingerprint({ fingerprint: raw.fingerprint, request: raw.request, held: raw.held })
+  writeFileSync(p.file(), JSON.stringify(raw), { mode: 0o600 })
+  expect(() => p.receipts.readNativeResumeCleanup(p.link)).toThrow()
+})
+
+it.each(['', 'claim', 'result', 'confirmation', 'process'])('pins original %s receipt evidence for metadata cleanup', async part => {
+  const p = await savedCompletion(), proof = p.receipts.readNativeResumeCleanup(p.link), file = p.file(part)
+  writeFileSync(`${file}.new`, readFileSync(file), { mode: 0o600 }); renameSync(`${file}.new`, file)
+  expect(() => proof.verify()).toThrow()
+  expect(() => new AgentCreationReceipts(p.directory).readNativeResumeCleanup(p.link).verify()).not.toThrow()
+})
+
+it.each(['confirmation', 'process'])('retains %s absence for early Cancel cleanup', async part => {
+  const p = await savedCompletion('cancelled'), proof = p.receipts.readNativeResumeCleanup(p.link)
+  writeFileSync(p.file(part), '{}', { mode: 0o600 })
+  expect(() => proof.verify()).toThrow()
+})
+
+it('does not use an in-memory not-dispatched result when its durable result is missing', async () => {
+  const p = await savedCompletion('not-dispatched')
+  rmSync(p.file('result'))
+  expect(p.receipts.status(id).state).toBe('unconfirmed')
+  expect(() => p.receipts.readNativeResumeCleanup(p.link)).toThrow()
+})
+
+it('does not bind a request-less cancellation tombstone to a marker by ID alone', () => {
+  const p = fixture(); p.receipts.cancelIntent(id)
+  expect(() => p.receipts.readNativeResumeCleanup({ version: 1, agentId: request.agentId,
+    requestId: id, launchToken: request.launchToken, target: 'a'.repeat(64) })).toThrow()
+})
+
+it('confirms the exact receipt files and parent before granting metadata cleanup', async () => {
+  const p = await savedCompletion('cancelled')
+  faults.linked = true; faults.failDirectory = true
+  expect(() => p.receipts.readNativeResumeCleanup(p.link)).toThrow('sync unavailable')
+})
 
 it('durably refines only the original native allocation and never hands recovery a dispatch callback', async () => {
   const { directory, receipts, file, confirm, effect } = await uncertain()

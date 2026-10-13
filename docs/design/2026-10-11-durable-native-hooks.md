@@ -512,6 +512,36 @@ overlapped 18:33–18:56. Merge, publication and external waiting remain zero.
 Physical proof producers, marker cleanup, orchestration, activation and full-PR
 acceptance remain excluded from this scoped approval.
 
+Native Resume metadata completion now uses the existing `.resume` marker and
+full original archive link, with no new dispatch journal. Cleanup requires an
+explicit confirmed created receipt, an accounted closed visit, or the exact
+revoked request's durable cancellation/known-not-dispatched receipt. It never
+infers allocation outcome from missing process evidence. The transferred-created
+path compares the full original request, including omitted permission choices;
+a later Cancel cannot invalidate the original successful creation or supply
+another request's cleanup authority.
+
+Marker publication retains its actual writer and original private parent.
+Cleanup pins that parent's descriptor, retains removal authority before unlink,
+and confirms absence after directory sync and close. Failed unlink can retry the
+same surviving inode; after-effect errors, substituted parents and reappearing
+markers remain held. Legacy cleanup refuses native markers and unreadable markers
+without a known saved owner.
+
+Types and all 398 cases in eight affected files pass
+(`20261013T191913.761725Z-31304`, 23.0/191.2 seconds), including architecture.
+The complete mutation baseline and all 12 deliberate wiring faults pass by
+assertion (`20261013T192340.928092Z-46531`, 188.2 seconds). Earlier runs
+`20261013T190631.497090Z-87372` and `20261013T191504.080084Z-17800` remain
+failed evidence: fixtures reused a Cancel ID, mutated a frozen request, expected
+a removed durable result to stay failed, or lacked explicit legacy ownership.
+No golden was changed. Independent review approved this scope over `4fbc56b11`
+after correcting full-request matching, descriptor acquisition and pre-unlink
+uncertainty. The approval excludes production orchestration and activation.
+Implementation/review ran approximately 19:00–19:27 UTC October 13, with
+validation overlapping 19:06–19:27. Merge, release and external waiting remain
+zero. Saved recovery, physical adapters and integrated acceptance remain open.
+
 Before activation, native marker cleanup also needs an explicit early-Cancel
 path: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R

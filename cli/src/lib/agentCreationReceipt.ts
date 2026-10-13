@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { readPrivateStateFile, secureStateDirectory } from './secureState.js'
 import { hookPreparationRoutes, inspectHookFile } from '../engines/kit/nativeHookFiles.js'
 import { inspectNativeControlFile } from './nativeControlFile.js'
+import { parseNativeArchiveLink, type NativeArchiveLink } from './nativeArchive.js'
 
 export type AgentCreationOutcome =
   | { state: 'created'; agentId: string; level?: 'native' | 'handoff'; resumed?: boolean }
@@ -45,6 +46,16 @@ export interface NativeRelaunchProcess {
   birth: string
 }
 export type NativeRelaunchRequest = Pick<NativeRelaunchConfirmation, 'fingerprint' | 'request'>
+
+/** Metadata cleanup only. Neither outcome grants launch, admission or signal
+ * permission. The full original request survives later Cancel and Restart. */
+export interface NativeResumeCleanupProof {
+  readonly link: NativeArchiveLink
+  readonly request: Readonly<Record<string, unknown>>
+  readonly kind: 'created' | 'not-dispatched'
+  readonly outcome: AgentCreationStatus
+  verify(): void
+}
 
 /** An undispatched request can be recovered. A claimed request cannot: even a
  * dead owner may have left a live child, or changed a project before it died. */
@@ -400,6 +411,63 @@ export class AgentCreationReceipts {
     const verify = () => { authority.verify(); published.verify(); publication!.verify(); retained(); authority.current() }
     verify(); retain?.({ verify }); verify()
     return answer
+  }
+
+  /** A completed Resume can finish metadata after its engine exits. An early
+   * Cancel needs an exclusive cancel claim or a durable known-not-dispatched
+   * result; a missing witness alone cannot account for a claimed allocation. */
+  readNativeResumeCleanup(input: NativeArchiveLink): NativeResumeCleanupProof {
+    const link = parseNativeArchiveLink(input)
+    if (!link) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    const id = link.requestId, receipt = this.read(id)
+    if (receipt?.version !== 2 || 'cancelled' in receipt) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    const permission = receipt.request.permissionMode
+    if (permission !== undefined && !['ask', 'auto', 'plan', 'full'].includes(permission as string)) {
+      throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    }
+    const request = Object.freeze({ kind: 'native-rearm', creationId: id, agentId: link.agentId,
+      operation: 'resume', source: 'saved', target: link.target, launchToken: link.launchToken,
+      ...(permission === undefined ? {} : { permissionMode: permission }),
+    })
+    const fingerprint = creationFingerprint({ kind: 'native-rearm', agentId: link.agentId, operation: 'resume', source: 'saved',
+      ...(permission === undefined ? {} : { permissionMode: permission }),
+    })
+    if (receipt.fingerprint !== fingerprint || creationFingerprint(receipt.request) !== creationFingerprint(request)) {
+      throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    }
+    const status = this.intentStatus(id, receipt, false), claim = this.claim(id)
+    const result = this.readIntentPart<IntentResult>(this.intentFile(id, 'result'))
+    const confirmation = this.readIntentPart<IntentConfirmation>(this.intentFile(id, 'confirmation'))
+    const process = this.readIntentPart<IntentProcess>(this.intentFile(id, 'process'))
+    const created = status.state === 'created' && status.agentId === link.agentId && status.resumed === true
+      && !!confirmation && !!process
+    const undispatched = !confirmation && !process && (claim?.kind === 'cancel' && status.state === 'cancelled'
+      || claim?.kind === 'dispatch' && result?.outcome.state === 'failed'
+        && result.outcome.error === 'NATIVE_REARM_NOT_DISPATCHED' && status.state === 'failed')
+    if (!created && !undispatched) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    const files = [this.file(id), ...(['claim', 'result', 'confirmation', 'process'] as const).map(part => this.intentFile(id, part))]
+    const values = [receipt, claim, result, confirmation, process]
+    const retained = files.map((file, index) => {
+      const proof = inspectHookFile(file, 0o600)
+      if (creationFingerprint(proof.content === null ? null : JSON.parse(proof.content)) !== creationFingerprint(values[index])) {
+        throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
+      }
+      return proof
+    })
+    const verify = () => {
+      for (const part of retained) part.verify()
+      if (creationFingerprint(this.intentStatus(id, receipt, false)) !== creationFingerprint(status)) {
+        throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
+      }
+      for (const part of retained) part.verify()
+    }
+    // Observing a peer's rename is not durability. Confirm each present part
+    // while retaining the original claim/result and every recorded absence.
+    for (let index = 0; index < files.length; index++) if (retained[index].content !== null) {
+      inspectNativeControlFile(files[index], this.directory).confirm(verify)
+    }
+    verify()
+    return Object.freeze({ link, request, kind: created ? 'created' : 'not-dispatched', outcome: Object.freeze({ ...status }), verify })
   }
 
   /** Only the original successful publisher may continue to exec. A matching
