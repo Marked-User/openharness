@@ -468,12 +468,15 @@ static void test_talk_sending_copy(void) {
     CHECK(who && who->pro_font == &ci_rg_30 && who->fg == CI_MUTED && who->y > head->y);
     CHECK(note && note->pro_font == &ci_rg_26 && note->fg == CI_MUTED && note->y > who->y);
     int lines = 0;
+    char joined[160] = "";
     for (int i = 0; i < S.count; i++)
         if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ci_rg_26 && S.runs[i].y > CI_BAR_H) {   // the bar's Back label is 26 too
             CHECK(S.runs[i].w <= 583 && S.runs[i].x >= (POD_W - 583) / 2 - 1);
-            lines++;
+            if (lines++) strncat(joined, " ", sizeof joined - strlen(joined) - 1);
+            strncat(joined, S.runs[i].text, sizeof joined - strlen(joined) - 1);
         }
-    CHECK(lines == 2 && find_text("it again."));
+    // where it breaks depends on the face (two lines in Helvetica, three in Liberation); the whole note shows, uncut
+    CHECK(lines >= 2 && lines <= 3 && !strcmp(joined, "One request is pending. Going back will not send it again."));
     CHECK(!find_text_eq("Listening.") && !find_text_eq("Tap to send."));
 }
 

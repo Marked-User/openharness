@@ -65,8 +65,8 @@ void pod_view_talk(pod_out_frame_t *f, const pod_nav_t *nav, const pod_model_t *
             pod_pet_draw_on(s, (POD_W - SEND) / 2, PET_SEND_Y, SEND, a->engine, POD_SCENE_SEND, now_ms, nav->send_started_ms, GROUND);
         centered(s, 402, 640, &ci_bd_45, CI_INK, "Sending your words\xe2\x80\xa6");
         centered(s, 481, 640, &ci_rg_30, muted, name);
-        char rows[2][POD_ROW_MAX];
-        int n = ci_wrap("One request is pending. Going back will not send it again.", &ci_rg_26, 583, 2, rows);
+        char rows[3][POD_ROW_MAX];   // two lines in Helvetica, three in Liberation: never cut
+        int n = ci_wrap("One request is pending. Going back will not send it again.", &ci_rg_26, 583, 3, rows);
         for (int i = 0; i < n; i++) centered(s, 543 + i * 37, 583, &ci_rg_26, muted, rows[i]);
         return;
     }
