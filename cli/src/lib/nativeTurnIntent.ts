@@ -19,6 +19,10 @@ export interface NativeTurnIntent {
     readonly operation: 'restart' | 'resume'
     readonly target: string
     readonly launchToken: string
+    /** Retain the complete request before its creation receipt is published.
+     * Older incomplete reservations stay readable but cannot be dispatched. */
+    readonly source?: 'live' | 'saved'
+    readonly permissionMode?: 'ask' | 'auto' | 'plan' | 'full'
     /** Cancel revokes admission without forgetting an already claimed launch.
      * Its exact receipt must be reconciled before another launch is reserved. */
     readonly revoked?: true
@@ -48,8 +52,12 @@ export function parseNativeTurnIntent(value: unknown): NativeTurnIntent | null {
   const rearm = value.rearm
   if (rearm !== undefined) {
     if (!object(rearm) || !exact(rearm, ['agentId', 'launchToken', 'operation', 'requestId', 'target',
+      ...(rearm.source === undefined ? [] : ['source']), ...(rearm.permissionMode === undefined ? [] : ['permissionMode']),
       ...(rearm.replacement === undefined ? [] : ['replacement']), ...(rearm.revoked === undefined ? [] : ['revoked'])].sort().join(','))
       || rearm.revoked !== undefined && rearm.revoked !== true
+      || rearm.source !== undefined && rearm.source !== 'live' && rearm.source !== 'saved'
+      || rearm.permissionMode !== undefined && (!rearm.source || rearm.operation !== 'resume'
+        || !['ask', 'auto', 'plan', 'full'].includes(rearm.permissionMode as string))
       || !token(rearm.requestId) || !identifier(rearm.agentId) || (rearm.operation !== 'restart' && rearm.operation !== 'resume')
       || !digest(rearm.target) || !token(rearm.launchToken)) return null
     if (rearm.replacement !== undefined && (!object(rearm.replacement) || !exact(rearm.replacement, 'processKey,sessionId')
@@ -68,7 +76,20 @@ export function nativeTurnTarget(row: RegisteredSession): string {
   return createHash('sha256').update(JSON.stringify([row.agentId, row.registeredAt, row.engine, row.sessionId, row.boundAt,
     row.active, row.processIdentity && [row.processIdentity.pid, row.processIdentity.executable, row.processIdentity.startMarker, row.processIdentity.startTicks ?? null],
     row.runtimes.map(route => [route.backend, route.paneId]), row.primaryRuntimeKey, row.tmuxPane ?? null, row.cwd,
-    row.transcriptPath, row.codexHome ?? null, row.hermesHome ?? null])).digest('hex')
+    row.transcriptPath, row.codexHome ?? null, row.hermesHome ?? null,
+    row.permissionMode ?? null, row.bypassPermission === true])).digest('hex')
+}
+
+/** Recovery reconstructs only the immutable reserved request, including whether
+ * the user omitted a permission override. It never fills options from today's
+ * row or caller. Revoked requests retain the same bytes for receipt cancellation. */
+export function nativeRearmRequest(intent: NativeTurnIntent): Readonly<Record<string, unknown>> | null {
+  const rearm = parseNativeTurnIntent(intent)?.rearm
+  if (!rearm?.source) return null
+  return Object.freeze({ kind: 'native-rearm', creationId: rearm.requestId, agentId: rearm.agentId,
+    operation: rearm.operation, target: rearm.target, launchToken: rearm.launchToken, source: rearm.source,
+    ...(rearm.permissionMode === undefined ? {} : { permissionMode: rearm.permissionMode }),
+  })
 }
 
 export function nativeTurnAdmitted(intent: NativeTurnIntent | undefined, owner: { agentId: string; sessionId: string; processKey: string }): boolean {
@@ -102,8 +123,10 @@ export function nativeTurnTransition(row: RegisteredSession, next: NativeTurnInt
   // The caller's fence must prove the revoked receipt never dispatched, or the
   // exact original allocation is now accounted for. Age is not that proof.
   if (!proposed) return reserved.revoked === true
-  if (!same([reserved.requestId, reserved.agentId, reserved.operation, reserved.target, reserved.launchToken, reserved.revoked],
-    [proposed.requestId, proposed.agentId, proposed.operation, proposed.target, proposed.launchToken, proposed.revoked])) return false
+  if (!same([reserved.requestId, reserved.agentId, reserved.operation, reserved.target, reserved.launchToken, reserved.revoked,
+    reserved.source, reserved.permissionMode],
+    [proposed.requestId, proposed.agentId, proposed.operation, proposed.target, proposed.launchToken, proposed.revoked,
+      proposed.source, proposed.permissionMode])) return false
   if (reserved.replacement) return same([reserved.replacement.processKey, reserved.replacement.sessionId],
     proposed.replacement && [proposed.replacement.processKey, proposed.replacement.sessionId])
   return !proposed.replacement || proposed.agentId === row.agentId && proposed.replacement.sessionId === row.sessionId

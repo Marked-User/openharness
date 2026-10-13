@@ -12,7 +12,7 @@ import { resolveBinaryOnPath } from '../../lib/binaryOnPath.js'
 import { harnessPaneOwner, ownerCommand } from '../../lib/harnessSessionLabel.js'
 import { AgentCreationReceipts, creationFingerprint } from '../../lib/agentCreationReceipt.js'
 import { buildEngineLaunchArgv } from '../../lib/engineLaunch.js'
-import { nativeTurnTarget, type NativeTurnIntent } from '../../lib/nativeTurnIntent.js'
+import { nativeRearmRequest, nativeTurnTarget, type NativeTurnIntent } from '../../lib/nativeTurnIntent.js'
 import { prepareProcessImageHelper, type ProcessImageArtifact } from '../../lib/nativeProcessImageArtifact.js'
 import { probeNativeProcessControl, type NativeControlHelpers } from '../../lib/nativeProcessControlProbe.js'
 import type { RegisteredSession } from '../../lib/registry.js'
@@ -82,9 +82,9 @@ async function fixture(hold = false, spaced = false) {
   const target = nativeTurnTarget(saved)
   const control: NativeTurnIntent = { version: 1, cancel: { processKey: null, target, request: {
     requestId: 'original-cancel-request', nonce: 'original-cancel-nonce', agentId, conversationId: saved.sessionId, frontier: { index: -1, digest: null },
-  } }, rearm: { requestId: id, agentId, operation: 'restart', launchToken: token, target } }
+  } }, rearm: { requestId: id, agentId, operation: 'restart', launchToken: token, target, source: 'live' } }
   writeFileSync(join(directory, 'registry.json'), JSON.stringify([{ ...saved, nativeControl: control }]), { mode: 0o600 })
-  const request = { kind: 'native-rearm', creationId: id, operation: 'restart', agentId, launchToken: token, target }, fingerprint = creationFingerprint(request)
+  const request = nativeRearmRequest(control)!, fingerprint = creationFingerprint(request)
   const receipts = new AgentCreationReceipts(join(directory, 'agent-creations'))
   await receipts.runIntent(id, fingerprint, request, { service: 'native', detail: 'fixture' }, async () => async () => ({ state: 'unconfirmed' }))
   const marker = join(directory, 'engine.json'), resumed = join(directory, 'continued'), engine = join(directory, 'cursor-agent')

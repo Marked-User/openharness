@@ -185,9 +185,37 @@ its cleanup fixture targeted an incidental descriptor rather than the retained
 directory; the corrected fixture closes the real descriptor before injecting the
 failure. Independent review approved the settlement delta over `237ea9a20`,
 conditional on these completed checks. Implementation/review ran approximately
-12:58–13:19 UTC on October 13, with validation overlapping; merge, publication and
+12:58–13:17 UTC on October 13, with validation overlapping; merge, publication and
 external waiting remain zero. Controller integration and final acceptance are
 still required; this checkpoint is not approval to activate or land the PR.
+
+The reservation now retains its original live/saved source and optional requested
+Resume permission mode. Reconstruction preserves omission and the exact bytes of
+a revoked request; it does not infer missing metadata from current defaults.
+Source and mode cannot change during confirmation. Original persisted permission
+mode and normalized bypass choice participate in the target identity. The writer
+requires those original permissions through its final check; requested permissions
+belong to the prepared launch and confirmed replacement, not a premature source
+rewrite. Witness and replacement proof reject option/source disagreement.
+
+The controller must reserve this complete R before publishing its creation
+receipt, checking existing receipt compatibility first. Saving the receipt first
+would leave a crash window in which a later Cancel cannot revoke an absent R.
+Recovery must scan reservations in both stores after readiness, reconstruct the
+same request, and durably cancel a revoked missing receipt before clearing R.
+Older incomplete reservations remain visibly held. This ordering and controller
+recovery are still integration requirements, not completed behavior.
+
+Types and 365 cases in ten files pass with 100% intent-rule coverage and unchanged
+launch/native-control goldens (`20261013T133034.824357Z-64179`, 26.0 and 61.9
+seconds). All nine deliberate option/target/writer/proof faults fail assertions
+(`20261013T133335.013257Z-75406`, 18.7 seconds). The complete reservation format
+also passes types and all 16 private packaged-writer/process/tmux cases
+(`20261013T133439.678226Z-78114`, 5.1 and 22.7 seconds). Independent review approved
+the reservation-semantics delta over `ba6980d4b`, conditional on these completed
+checks; it does not approve controller recovery or activation. Implementation and
+review ran approximately 13:18–13:36 UTC on October 13, with validation overlapping;
+merge, publication and external waiting remain zero.
 
 October 13 recap checkpoint: the recaps port now derives a bounded summary from
 the exact answer retained for an owner and generation. Core copies the input

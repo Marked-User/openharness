@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { nativeTurnAdmitted, nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
+import { nativeRearmRequest, nativeTurnAdmitted, nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
 import type { RegisteredSession } from './registry.js'
 
 const cancel = () => ({ processKey: 'boot\0cursor\0original', target: 'a'.repeat(64), request: {
@@ -45,6 +45,11 @@ it.each([
   ...[null, [], {}, { ...rearm(), extra: true }, { ...rearm(), operation: 'automatic-restore' },
     { ...rearm(), requestId: 7 }, { ...rearm(), requestId: 'short' }, { ...rearm(), target: 'short' }, { ...rearm(), launchToken: 'short' },
     { ...rearm(), revoked: false }, { ...rearm(), revoked: undefined },
+    { ...rearm(), source: 'unknown' }, { ...rearm(), source: undefined },
+    { ...rearm(), source: 'saved', permissionMode: undefined }, { ...rearm(), source: 'saved', permissionMode: 'full' },
+    { ...rearm(), operation: 'resume', permissionMode: 'full' },
+    { ...rearm(), operation: 'resume', source: 'saved', permissionMode: 'unknown' },
+    { ...rearm(), operation: 'resume', source: 'saved', permissionMode: null },
     ...[undefined, '', 'x'.repeat(201), 'bad\nagent'].map(agentId => ({ ...rearm(), agentId })),
     ...[null, [], {}, { ...replacement(), extra: true }, { ...replacement(), processKey: cancel().processKey },
       { ...replacement(), processKey: '' }, { ...replacement(), sessionId: '' },
@@ -103,13 +108,47 @@ it('binds a durable target to the original process, conversation and routes, ind
   const row = targetRow()
   const target = nativeTurnTarget(row)
   expect(nativeTurnTarget({ ...row, processIdentity: { startMarker: 'birth', executable: '<cursor>', pid: 42 },
-    runtimes: [{ paneId: '%1', backend: 'tmux' }], codexHome: null, hermesHome: null, evidenceRevision: 10, identityHold: 'Waiting.' })).toBe(target)
+    runtimes: [{ paneId: '%1', backend: 'tmux' }], codexHome: null, hermesHome: null, bypassPermission: false,
+    evidenceRevision: 10, identityHold: 'Waiting.' })).toBe(target)
   for (const altered of [
     { agentId: 'other' }, { registeredAt: 3 }, { engine: 'codex' }, { sessionId: 'other' }, { boundAt: 4 }, { active: false },
     { processIdentity: null }, { processIdentity: { ...row.processIdentity!, startTicks: 5 } },
     { runtimes: [{ backend: 'tmux', paneId: '%2' }] }, { primaryRuntimeKey: 'tmux:%2' }, { tmuxPane: undefined },
     { cwd: '/fixture/other' }, { transcriptPath: '/fixture/transcript' }, { codexHome: '/fixture/codex' }, { hermesHome: '/fixture/hermes' },
+    { permissionMode: 'ask' }, { bypassPermission: true },
   ]) expect(nativeTurnTarget({ ...row, ...altered } as RegisteredSession)).not.toBe(target)
+})
+
+it.each([undefined, 'ask', 'auto', 'plan', 'full'] as const)('reconstructs the immutable reserved request with permission override %s', permissionMode => {
+  const row = targetRow(), control = intent()
+  row.nativeControl = control
+  const next: NativeTurnIntent = { ...control, rearm: { ...rearm(), operation: 'resume', source: 'saved', target: nativeTurnTarget(row),
+    ...(permissionMode === undefined ? {} : { permissionMode }) } }
+  expect(parseNativeTurnIntent(next)).toEqual(next)
+  expect(nativeTurnTransition(row, next)).toBe(true)
+  row.nativeControl = next
+  const request = nativeRearmRequest(next)!
+  expect(Object.isFrozen(request)).toBe(true)
+  expect(request).toEqual({ kind: 'native-rearm', creationId: next.rearm!.requestId, agentId: row.agentId,
+    operation: 'resume', source: 'saved', target: nativeTurnTarget(row), launchToken: next.rearm!.launchToken,
+    ...(permissionMode === undefined ? {} : { permissionMode }) })
+  for (const change of [{ source: 'live' as const }, { source: undefined },
+    { permissionMode: permissionMode === 'full' ? 'ask' as const : 'full' as const }]) {
+    expect(nativeTurnTransition(row, { ...next, rearm: { ...next.rearm!, ...change } })).toBe(false)
+  }
+  const revoked: NativeTurnIntent = { version: 1, cancel: { ...control.cancel, target: nativeTurnTarget(row), processKey: null,
+    request: { ...control.cancel.request, requestId: 'later-cancel-request' } }, rearm: { ...next.rearm!, revoked: true } }
+  expect(nativeTurnTransition(row, revoked)).toBe(true)
+  expect(nativeRearmRequest(revoked)).toEqual(request)
+  row.nativeControl = revoked
+  expect(nativeTurnTransition(row, next)).toBe(false)
+})
+
+it('does not reconstruct missing or incomplete reservation metadata from present-day defaults', () => {
+  expect(nativeRearmRequest(intent())).toBeNull()
+  expect(nativeRearmRequest({ ...intent(), rearm: rearm() })).toBeNull()
+  expect(nativeRearmRequest({ ...intent(), version: 2 } as unknown as NativeTurnIntent)).toBeNull()
+  expect(nativeRearmRequest({ ...intent(), rearm: { ...rearm(), source: 'live' } })).toMatchObject({ source: 'live', operation: 'restart' })
 })
 
 it('requires Cancel, original reservation and exact confirmation in order', () => {

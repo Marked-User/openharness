@@ -45,10 +45,13 @@ export function inspectNativeRearmWitness(text: string): NativeRearmWitnessReque
     || value.source !== 'live' && value.source !== 'saved' || !validCreationId(value.id) || !object(value.dependencies)
     || typeof value.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(value.fingerprint) || !object(value.request)) return held('request is unsupported')
   const control = parseNativeTurnIntent(value.control), rearm = control?.rearm, request = value.request
-  if (!rearm || rearm.revoked || rearm.replacement || Object.keys(request).sort().join(',') !== 'agentId,creationId,kind,launchToken,operation,target'
+  if (!rearm || rearm.revoked || rearm.replacement || Object.keys(request).sort().join(',') !== ['agentId', 'creationId', 'kind', 'launchToken', 'operation', 'target',
+    ...(rearm.source === undefined ? [] : ['source']), ...(rearm.permissionMode === undefined ? [] : ['permissionMode'])].sort().join(',')
     || request.kind !== 'native-rearm' || request.creationId !== value.id
     || rearm.requestId !== value.id || request.agentId !== rearm.agentId || request.operation !== rearm.operation
     || request.launchToken !== rearm.launchToken || request.target !== rearm.target
+    || request.source !== rearm.source || rearm.source !== undefined && value.source !== rearm.source
+    || request.permissionMode !== rearm.permissionMode
     || !/^[a-zA-Z0-9_-]{1,128}$/.test(rearm.agentId)) return held('reservation is unavailable or revoked')
   return { ...value, control } as unknown as NativeRearmWitnessRequest
 }

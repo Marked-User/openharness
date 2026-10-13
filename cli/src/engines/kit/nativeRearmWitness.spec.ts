@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { AgentCreationReceipts, creationFingerprint } from '../../lib/agentCreationReceipt.js'
 import type { NativeControlRow } from '../../lib/nativeProcessControlProbe.js'
-import { nativeTurnTarget } from '../../lib/nativeTurnIntent.js'
+import { nativeRearmRequest, nativeTurnTarget, type NativeTurnIntent } from '../../lib/nativeTurnIntent.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import type { NativeLaunch } from '../nativeLaunch.js'
 import { inspectNativeRearmWitness, prepareNativeRearmWitness, writeNativeRearmWitness, type NativeRearmWitnessRequest } from './nativeRearmWitness.js'
@@ -24,7 +24,7 @@ const row = (pid: number, parentPid: number): NativeControlRow => ({ pid, parent
   command: pid === 42 ? 'sh' : 'node', imagePath: pid === 42 ? realpathSync(process.platform === 'darwin' ? '/bin/bash' : '/bin/sh') : '/fixture/node', argv: ['fixture'], fds: [] })
 beforeEach(() => { clock.now = 0; root = realpathSync(mkdtempSync(join(tmpdir(), 'rearm-writer-'))) })
 afterEach(() => { vi.restoreAllMocks(); rmSync(root, { recursive: true, force: true }) })
-async function fixture(source: 'live' | 'saved' = 'live') {
+async function fixture(source: 'live' | 'saved' = 'live', options?: Pick<NonNullable<NativeTurnIntent['rearm']>, 'permissionMode'>) {
   const engine = join(root, 'engine'), settings = join(root, 'settings')
   writeFileSync(engine, '#!/bin/sh\nexit 0\n', { mode: 0o700 }); writeFileSync(settings, 'original hooks', { mode: 0o600 })
   const executable = executableSnapshot(nativeVersionProbe({ args: [], output: /^$/, timeoutMs: 100 }, () => engine))!
@@ -38,10 +38,11 @@ async function fixture(source: 'live' | 'saved' = 'live') {
     processIdentity: { pid: 41, executable: '/fixture/cursor', startMarker: 'fixture-birth' }, runtimes: [{ backend: 'tmux', paneId: '%1' }],
     primaryRuntimeKey: 'tmux:%1', tmuxPane: '%1', cwd: '/fixture/project', transcriptPath: null } as RegisteredSession
   const target = nativeTurnTarget(session)
-  const control = { version: 1 as const, cancel: { processKey: null, target, request: {
+  const control: NativeTurnIntent = { version: 1 as const, cancel: { processKey: null, target, request: {
     requestId: 'original-cancel-request', nonce: 'original-cancel-nonce', agentId, conversationId: 'fixture-session', frontier: { index: -1, digest: null },
-  } }, rearm: { requestId: id, agentId, operation: source === 'live' ? 'restart' as const : 'resume' as const, launchToken: token, target } }
-  const request = { kind: 'native-rearm', creationId: id, operation: control.rearm.operation, agentId, launchToken: token, target }
+  } }, rearm: { requestId: id, agentId, operation: source === 'live' ? 'restart' as const : 'resume' as const, launchToken: token, target,
+    ...(options ? { source, ...options } : {}) } }
+  const request = nativeRearmRequest(control) ?? { kind: 'native-rearm', creationId: id, operation: control.rearm!.operation, agentId, launchToken: token, target }
   const input: NativeRearmWitnessRequest = { version: 1, dataDir: root, source, id, fingerprint: creationFingerprint(request), request, control,
     dependencies: nativeLaunchProof(launch) }
   const receipts = new AgentCreationReceipts(join(root, 'agent-creations'))
@@ -66,6 +67,32 @@ it.each(['live', 'saved'] as const)('hands only the original %s reservation and 
   expect(proof.process).toEqual({ boot: 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', pid: 42, birth: '4200' }); proof.verify()
   expect(await p.write()).toBe(false)
   expect(p.probe).toHaveBeenCalledTimes(3)
+})
+
+it.each([undefined, 'ask', 'auto', 'plan', 'full'] as const)('retains a saved permission override %s without rewriting original control before exec', async permissionMode => {
+  const p = await fixture('saved', permissionMode === undefined ? {} : { permissionMode })
+  const original = readFileSync(p.file, 'utf8')
+  expect(await p.write()).toBe(true)
+  expect(readFileSync(p.file, 'utf8')).toBe(original)
+  expect(p.input.request).toEqual(nativeRearmRequest(p.input.control))
+})
+
+it.each(['source', 'outer-source', 'permission', 'omission', 'saved-mode', 'saved-bypass'] as const)('holds a %s change to the original reserved launch options', async change => {
+  const p = await fixture('saved', { permissionMode: 'full' })
+  p.input.request = { ...p.input.request }
+  if (change === 'source') p.input.request.source = 'live'
+  if (change === 'outer-source') p.input.source = 'live'
+  if (change === 'permission') p.input.request.permissionMode = 'ask'
+  if (change === 'omission') delete p.input.request.permissionMode
+  if (change === 'saved-mode' || change === 'saved-bypass') {
+    const value = JSON.parse(readFileSync(p.file, 'utf8'))
+    if (change === 'saved-mode') value.session.permissionMode = 'full'
+    else value.session.bypassPermission = true
+    writeFileSync(p.file, JSON.stringify(value), { mode: 0o600 })
+  }
+  await expect(p.write()).rejects.toThrow()
+  expect(p.probe).not.toHaveBeenCalled()
+  expect(existsSync(p.witness)).toBe(false)
 })
 
 it.each(['reparent', 'child', 'parent', 'image', 'missing', 'control', 'witness', 'deadline', 'executable', 'settings'] as const)(

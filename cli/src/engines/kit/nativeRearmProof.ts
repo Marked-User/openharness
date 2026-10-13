@@ -105,6 +105,7 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
           || row.primaryRuntimeKey !== `tmux:${row.tmuxPane}` || !/^%\d+$/.test(row.tmuxPane ?? '')
           || rearm.agentId !== row.agentId || intent.kind !== 'native-rearm' || intent.creationId !== rearm.requestId
           || intent.agentId !== rearm.agentId || intent.operation !== rearm.operation || intent.target !== rearm.target
+          || intent.source !== rearm.source || intent.permissionMode !== rearm.permissionMode
           || intent.launchToken !== rearm.launchToken) return held('reservation or current binding is unavailable')
         const declared = enginePathOverride('cursor')
         const current = () => {

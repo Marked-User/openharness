@@ -62,6 +62,23 @@ it('proves only the recorded Cursor incarnation and original direct pane placeme
   expect(proof.verify).toThrow('witness replaced')
 })
 
+it.each(['same', 'source', 'permission', 'omitted'] as const)('proves replacement only for %s reserved launch options', async change => {
+  const p = fixture()
+  p.row.nativeControl = { ...p.row.nativeControl!, rearm: { ...p.row.nativeControl!.rearm!,
+    operation: 'resume', source: 'saved', permissionMode: 'full' } }
+  const request: Record<string, unknown> = p.request.request
+  Object.assign(request, { operation: 'resume', source: 'saved', permissionMode: 'full' })
+  if (change === 'source') request.source = 'live'
+  if (change === 'permission') request.permissionMode = 'ask'
+  if (change === 'omitted') delete request.permissionMode
+  if (change === 'same') expect((await p.run()).key).toContain('cursor')
+  else {
+    await expect(p.run()).rejects.toThrow('reservation or current binding')
+    expect(p.probe).not.toHaveBeenCalled()
+    expect(p.receipts.readNativeRelaunchProcess).not.toHaveBeenCalled()
+  }
+})
+
 it.each(['engine', 'inactive', 'session', 'process', 'control', 'revoked', 'routes', 'backend', 'pane', 'primary',
   'agent', 'kind', 'id', 'operation', 'target', 'token'] as const)('holds %s reservation changes before reading process evidence', async change => {
   const p = fixture()
