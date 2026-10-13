@@ -708,6 +708,32 @@ conditional on those completed gates. Implementation/review ran approximately
 publication and external waiting remain zero. Physical production wiring and
 activation are still excluded. Current main remains `ce68e2fac`.
 
+Native rearm wrappers now claim a pane-local allocation marker before engine
+exec and revoke it before fallback code or shell startup. Every claim, release
+and close checks the current daemon owner, original launch prefix, root PID and
+pane identity inside the tmux command queue. Released and foreign markers cannot
+be reclaimed. Missing acknowledgements, including a successful mutation whose
+reply was lost, leave an inert wrapper. A stalled client is bounded. Original
+PID and start-command evidence alone cannot authorize killing a manual successor.
+
+Types and all 211 cases in seven complete files pass, with one pre-existing skip
+(`20261013T212135.365053Z-69443`, 4.8/93.4 seconds); both launch goldens are
+unchanged. Additional true lost-acknowledgement and causal identity cases pass
+with types in the two complete private-tmux/writer files: 42 cases
+(`20261013T212605.294350Z-91341`, 4.8/35.6 seconds). Complete mutation baselines
+pass and all eleven deliberately broken marker/wrapper faults fail assertions
+(`20261013T212752.116063Z-98990`, 65.4 seconds). An earlier invocation omitted
+`/bin` from PATH and remains failed evidence, including its cleanup warning;
+a subsequent process audit found no remaining validation children.
+
+Independent review corrected foreign-marker overwrite and stale-prefix owner
+substitution, then approved the scoped change conditional on these gates. Initial
+non-rearm launches, physical Stop composition and activation remain excluded.
+A future same-pane relaunch needs explicitly fenced marker transfer; it must not
+weaken claim to overwrite a successor. Implementation/review ran approximately
+21:15–21:28 UTC October 13, with validation overlapping through 21:29. Merge,
+publication and external waiting remain zero.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R

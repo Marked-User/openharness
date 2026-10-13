@@ -9,9 +9,10 @@ import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
 import { buildNativeHook } from '../../../scripts/lib/nativeHookBundle.mjs'
 import { env } from '../../config/env.js'
 import { resolveBinaryOnPath } from '../../lib/binaryOnPath.js'
-import { harnessPaneOwner, ownerCommand } from '../../lib/harnessSessionLabel.js'
+import { HARNESS_OWNER_OPTION, harnessPaneOwner, ownerCommand } from '../../lib/harnessSessionLabel.js'
 import { AgentCreationReceipts, creationFingerprint } from '../../lib/agentCreationReceipt.js'
 import { buildEngineLaunchArgv } from '../../lib/engineLaunch.js'
+import { NATIVE_PANE_ALLOCATION_OPTION } from '../../lib/nativePaneAllocation.js'
 import { nativeRearmRequest, nativeTurnTarget, type NativeTurnIntent } from '../../lib/nativeTurnIntent.js'
 import { prepareProcessImageHelper, type ProcessImageArtifact } from '../../lib/nativeProcessImageArtifact.js'
 import { probeNativeProcessControl, type NativeControlHelpers } from '../../lib/nativeProcessControlProbe.js'
@@ -32,6 +33,7 @@ import { shellSingleQuote } from '../../lib/shellQuote.js'
 const artifactPath = process.env.HARNESS_PROCESS_IMAGES_ARTIFACT
 const supported = process.platform === 'linux' || process.platform === 'darwin' && !!artifactPath
 const originalRuntime = env.ADAPTER_RUNTIME_DIR
+const originalData = env.ADAPTER_DATA_DIR
 let root: string, artifact: string, images: ProcessImageArtifact | undefined, tmux: IsolatedTmux | undefined
 const children: Array<{ child: ReturnType<typeof spawn>; closed: Promise<void> }> = []
 let sequence = 0
@@ -53,7 +55,7 @@ afterEach(async () => {
     await closed
   }
   vi.unstubAllEnvs()
-  vi.unstubAllGlobals(); env.ADAPTER_RUNTIME_DIR = originalRuntime
+  vi.unstubAllGlobals(); env.ADAPTER_RUNTIME_DIR = originalRuntime; env.ADAPTER_DATA_DIR = originalData
 })
 afterAll(() => rmSync(root, { recursive: true, force: true }))
 function environment(directory: string) {
@@ -122,9 +124,12 @@ async function paneLaunch(p: Awaited<ReturnType<typeof fixture>>, shell = '/bin/
   vi.stubEnv('TMUX', undefined); vi.stubEnv('TMUX_PANE', undefined); vi.stubEnv('TMUX_TMPDIR', tmux.root)
   vi.stubEnv('HOME', join(root, 'home')); vi.stubEnv('ZDOTDIR', join(root, 'home'))
   env.ADAPTER_RUNTIME_DIR = join(p.directory, 'probe-runtime')
+  env.ADAPTER_DATA_DIR = p.directory
   if (images) vi.stubGlobal('__DARWIN_PROCESS_IMAGES__', JSON.stringify(images))
-  const argv = buildEngineLaunchArgv('cursor', { native: p.launch }, shell, process.execPath, '/fixture/grid', null)
-  await tmux.run('new-session', '-d', '-s', 'fixture-rearm', ...(wrapped ? ownerCommand(harnessPaneOwner(p.directory), argv) : argv))
+  const owner = harnessPaneOwner(p.directory)
+  const argv = buildEngineLaunchArgv('cursor', { native: p.launch }, shell, process.execPath, '/fixture/grid', resolveBinaryOnPath('tmux'))
+  await tmux.run('new-session', '-d', '-s', 'fixture-rearm', ...(wrapped ? ownerCommand(owner, argv) : argv),
+    ';', 'set-option', '-p', HARNESS_OWNER_OPTION, owner)
   return tmux.run('display-message', '-p', '-t', 'fixture-rearm', '#{pane_id}')
 }
 
@@ -164,6 +169,8 @@ it.skipIf(!supported)('the existing top-level wrapper resumes the witnessed engi
   try { await vi.waitFor(() => expect(existsSync(p.marker)).toBe(true), { timeout: 8000 }) }
   catch (error) { console.log(await tmux!.run('capture-pane', '-p', '-t', 'fixture-rearm')); throw error }
   const pid = JSON.parse(readFileSync(p.marker, 'utf8')).pid
+  const rootPid = await tmux!.run('display-message', '-p', '-t', pane, '#{pane_pid}')
+  expect(await tmux!.run('display-message', '-p', '-t', pane, `#{${NATIVE_PANE_ALLOCATION_OPTION}}`)).toBe(`active:${p.launch.token}:${rootPid}`)
   expect(existsSync(join(p.directory, 'agent-creations', `${p.input.id}.json.process`))).toBe(true)
   expect(p.receipts.readNativeRelaunchProcess(p.input.id, p.input).process.pid).toBe(pid)
   const candidate = await replacement(p, pane, pid)
@@ -235,9 +242,12 @@ it.skipIf(!supported)('an exited witness cannot be adopted by a manually started
   const p = await fixture(), pane = await paneLaunch(p)
   await vi.waitFor(() => expect(existsSync(p.marker)).toBe(true), { timeout: 8000 })
   const pid = JSON.parse(readFileSync(p.marker, 'utf8')).pid, original = await replacement(p, pane, pid)
+  const rootPid = await tmux!.run('display-message', '-p', '-t', pane, '#{pane_pid}')
   await original.prove()
   process.kill(pid, 'SIGTERM')
   await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), { timeout: 5000 })
+  await vi.waitFor(async () => expect(await tmux!.run('display-message', '-p', '-t', pane,
+    `#{${NATIVE_PANE_ALLOCATION_OPTION}}`)).toBe(`released:${p.launch.token}:${rootPid}`), { timeout: 4000 })
   await expect(original.prove()).rejects.toThrow()
   await tmux!.run('respawn-pane', '-k', '-t', pane, process.execPath, p.engine)
   await vi.waitFor(() => expect(JSON.parse(readFileSync(p.marker, 'utf8')).pid).not.toBe(pid), { timeout: 8000 })
