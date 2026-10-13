@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "pod/classic/ci.h"
 #include "pod/pod_view.h"
 #include "pod/pod_view_shared.h"
 #include "pro_canvas.h"
@@ -18,57 +19,18 @@ static pod_nav_t N;
 static pod_out_frame_t F;
 static ht_scene_t S;
 
+static bool with_banner;   // the glue will add the banner: the views leave its runs spare
 static void render(uint32_t now) {
     memset(&F, 0, sizeof F);
-    ht_scene_clear(&S, ht_rgb(0xffffff));
+    ht_scene_clear(&S, ht_rgb(0xf6f6f0));
     F.scene = &S;
+    F.banner = with_banner;
     pod_render(&F, &N, &M, now);
 }
 static const ht_run_t *find_text(const char *prefix) {
     for (int i = 0; i < S.count; i++)
         if (S.runs[i].pro_kind == K_TEXT && !strncmp(S.runs[i].text, prefix, strlen(prefix))) return &S.runs[i];
     return NULL;
-}
-const char *pod_working_verb(uint32_t secs);   // pod_view_shared.h
-// The working LCD pill (S5): a dark rounded rect, three green bars, the verb "<verb>..." in light ink and the time
-// "m:ss" in green on the right. find_working_chip is the verb run; find_pill_time the time run; find_pill the rect.
-static const ht_run_t *find_working_chip(void) {
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].fg == ht_rgb(0x26292b) && strstr(S.runs[i].text, "...")) return &S.runs[i];
-    return NULL;
-}
-static const ht_run_t *find_pill_time(void) {
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].fg == ht_rgb(0x1f9d4c)) return &S.runs[i];
-    return NULL;
-}
-// The pill has no shape (no rim, no fill): only the bars, the verb and the time. Its box is derived from them: the bars'
-// bottom is 30 px into the 40 px box, the bars start 16 px in, the time ends 16 px short of the right edge.
-static bool pill_box(int *x0, int *y0, int *x1, int *y1) {
-    int bx = -1, bb = -1, tr = -1;
-    for (int i = 0; i < S.count; i++) {
-        const ht_run_t *r = &S.runs[i];
-        if (r->pro_kind == K_RECT && r->fg == ht_rgb(0x2a9a57) && r->w == 5) {
-            if (bx < 0 || r->x < bx) bx = r->x;
-            if (r->y + r->pro_height > bb) bb = r->y + r->pro_height;
-        }
-        if (r->pro_kind == K_TEXT && r->fg == ht_rgb(0x1f9d4c)) tr = r->x + r->w;
-    }
-    if (bx < 0 || tr < 0) return false;
-    *x0 = bx - 16; *y0 = bb - 30; *x1 = tr + 16; *y1 = *y0 + 40;
-    return true;
-}
-static const ht_run_t *find_pill(void) {
-    static ht_run_t box;
-    int x0, y0, x1, y1;
-    if (!pill_box(&x0, &y0, &x1, &y1)) return NULL;
-    box.x = x0; box.y = y0; box.w = x1 - x0; box.pro_height = 40;
-    return &box;
-}
-static int count_green_bars(void) {
-    int n = 0;
-    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x2a9a57) && S.runs[i].w == 5) n++;
-    return n;
 }
 static const pod_hit_t *find_hit(pod_action_t a) {
     for (int i = 0; i < F.hit_count; i++) if (F.hits[i].action == a) return &F.hits[i];
@@ -85,11 +47,11 @@ static int count_rects(uint16_t ink, int w) {
         if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ink && S.runs[i].w == w) n++;
     return n;
 }
-// Whether the screen holds exactly the runs pod_pet_draw adds for this pet, in a row.
-static bool has_pet(int x, int y, int side, const char *engine, pod_scene_t scene, uint32_t now, uint32_t started) {
+// Whether the screen holds exactly the runs pod_pet_draw_on adds for this pet (on `ground`), in a row.
+static bool has_pet_on(int x, int y, int side, const char *engine, pod_scene_t scene, uint32_t now, uint32_t started, uint32_t ground) {
     static ht_scene_t scratch;
     ht_scene_clear(&scratch, 0);
-    pod_pet_draw(&scratch, x, y, side, engine, scene, now, started);
+    pod_pet_draw_on(&scratch, x, y, side, engine, scene, now, started, ground);
     for (int at = 0; at + scratch.count <= S.count; at++) {
         bool same = true;
         for (int i = 0; i < scratch.count && same; i++) same = !memcmp(&S.runs[at + i], &scratch.runs[i], sizeof S.runs[0]);
@@ -98,10 +60,6 @@ static bool has_pet(int x, int y, int side, const char *engine, pod_scene_t scen
     return false;
 }
 
-// Option A: the pet is album art on the left, side 180 inside a 196 square at (26, 84); a pet-less engine's cover fills the 196 square.
-static bool art_has_pet(const char *engine, pod_scene_t scene, uint32_t now, uint32_t started) {
-    return pod_pet_for(engine) ? has_pet(34, 92, 180, engine, scene, now, started) : has_pet(26, 84, 196, engine, scene, now, started);
-}
 
 // One tab with: c claude (working), x codex (asking), m muse (idle, no recap), u cursor (idle), d claude (done, recap).
 static const char *const ID[] = {"c", "x", "m", "u", "d"};
@@ -144,85 +102,9 @@ static void open_view(const char *id, pod_view_t v) {
     CHECK(N.stack[N.depth - 1].view == v);
 }
 
-static void agent_test_scene_by_state(void) {
-    build();
-    open_view("c", POD_V_AGENT);
-    render(3000);
-    CHECK(art_has_pet("claude", POD_SCENE_WORK, 3000, 0));
-    CHECK(find_text("agent-c") && find_text("Desktop") && find_working_chip() && !strncmp(find_working_chip()->text, pod_working_verb(134), strlen(pod_working_verb(134))) && find_pill_time() && !strncmp(find_pill_time()->text, "2:", 2));
-    CHECK(find_text("Editing touch") != NULL);
-    open_view("x", POD_V_AGENT);
-    render(3000);
-    CHECK(art_has_pet("codex", POD_SCENE_ASK, 3000, 0));
-    CHECK(find_text("Needs you") && find_text("Run the migration") && find_text("Answer in the Harness app"));
-    CHECK(find_text("Answer in the Harness app")->fg == ht_rgb(0xb46a00));
-    open_view("m", POD_V_AGENT);
-    render(3000);
-    CHECK(art_has_pet("muse", POD_SCENE_REST, 3000, 0));
-    CHECK(find_text("Idle") == NULL && find_text("Press") == NULL && find_text("to talk") == NULL);   // idle: no chip
-    CHECK(find_text("agent-m")->pro_font == &ht_pro_32);
-    CHECK(find_hit(POD_A_BACK) != NULL);
-}
 
-static void agent_test_option_a_layout(void) {
-    build();
-    open_view("c", POD_V_AGENT);
-    render(3000);
-    const ht_run_t *name = find_text("agent-c"), *title = find_text("Desktop");
-    CHECK(name && name->x >= 248 && name->y < 130 && name->pro_font == &ht_pro_32);
-    // the pet stands on the glass left of the title block: no square of any colour behind it
-    bool square = false, pet = false;
-    for (int i = 0; i < S.count; i++) {
-        const ht_run_t *r = &S.runs[i];
-        if (r->pro_kind == K_RECT && r->w == 196 && r->x == 26) square = true;
-        if (r->pro_kind >= 16 && r->x >= 26 && r->x + r->w <= name->x) pet = true;
-    }
-    CHECK(!square && pet && title != NULL);
-    // S5 LCD pill when working: dark pill across the head column, three green bars, the verb, the time on the right.
-    const ht_run_t *chip = find_working_chip(), *pill = find_pill(), *tm = find_pill_time();
-    int bx0, by0, bx1, by1;
-    CHECK(chip && pill && tm && pill_box(&bx0, &by0, &bx1, &by1) && bx0 == 248 && bx1 == 694 && by1 - by0 == 40 && pill->w == 694 - 248);
-    for (int i = 0; i < S.count; i++) CHECK(!(S.runs[i].pro_kind == K_RECT && S.runs[i].w > 100 && S.runs[i].y >= by0 && S.runs[i].y < by1));   // no pill shape
-    CHECK(chip->y > 170 && chip->y < 280 && chip->y >= pill->y && chip->y + ht_pro_24.height <= pill->y + 40 && chip->pro_font == &ht_pro_24);
-    CHECK(tm->x + tm->w == 694 - 16 && tm->y >= pill->y && tm->pro_font == &ht_pro_24 && tm->x > chip->x + chip->w);
-    CHECK(count_green_bars() == 3);
-    // the engine is its own grey line under the name (above the tab), and no longer follows a chip
-    CHECK(find_text("Claude") == NULL && title->y > name->y);   // no engine line: the pet says it
-    CHECK(pill->y >= find_text("Mac Studio")->y + ht_pro_24.height);
-    // no time / "working" row under the bar; the activity starts right under it
-    CHECK(find_text("working") == NULL && find_text("idle") == NULL);
-    for (int i = 0; i < S.count; i++) CHECK(!(S.runs[i].pro_kind == K_TEXT && S.runs[i].y > 300 && S.runs[i].y < 322 && S.runs[i].x == 28));
-    const ht_run_t *act = find_text("Editing touch");
-    // the body starts 14 px under the art (no live bar any more: the LCD pill plays)
-    CHECK(act && act->x == 28 && act->y == 84 + 196 + 14 && act->pro_font == &ht_pro_24 && act->fg == ht_rgb(0x111111));
-    for (int i = 0; i < S.count; i++) CHECK(!(S.runs[i].pro_kind == K_RECT && S.runs[i].w == 664 && S.runs[i].pro_height == 9));
-    open_view("x", POD_V_AGENT);
-    render(3000);
-    chip = find_text("Needs you");
-    CHECK(chip && chip->fg == ht_rgb(0xb46a00) && chip->y < 280);
-    CHECK(find_pill() == NULL && count_green_bars() == 0);
-    {   // no engine line, nothing to the right of the chip
-        CHECK(find_text("Codex") == NULL);
-        for (int i = 0; i < S.count; i++) CHECK(!(S.runs[i].pro_kind == K_TEXT && S.runs[i].y >= chip->y - 2 && S.runs[i].y < chip->y + 38 && S.runs[i].x > chip->x + chip->w));
-    }
-    const ht_run_t *q = find_text("Run the migration");
-    CHECK(q && q->y > 300 && q->y > chip->y + 30 && find_text("Answer in the Harness app")->y > q->y);
-    CHECK(find_text("working") == NULL);
-    open_view("m", POD_V_AGENT);
-    render(3000);
-    CHECK(find_text("Idle") == NULL && find_text("Press") == NULL);   // idle: no chip (owner, 2026-10-11)
-    CHECK(find_text("idle") == NULL && find_pill() == NULL);
-    // Item 1: nothing at all under the head of an idle agent: no bar, no text below it, only the transport.
-    for (int i = 0; i < S.count; i++) {
-        const ht_run_t *r = &S.runs[i];
-        CHECK(!(r->pro_kind == K_RECT && r->fg == ht_rgb(0xe5e9e5)));
-        CHECK(!(r->pro_kind == K_TEXT && r->y > 300 && r->y < POD_TRANSPORT_Y));
-        CHECK(!(r->pro_kind == POD_TRI && r->y > 280 && r->y < POD_TRANSPORT_Y));
-    }
-}
-// Items 9 and 10: the chip carries the dial's rotating verb; a working agent without activity text has an empty body.
+// The shared verb helpers (the Console and the old pill still use them).
 static bool any_text_has(const char *needle);
-// Claude's own spinner verb in the activity ("Infusing…") is the pill's word, not body text; a sentence stays in the body.
 static void agent_test_spinner_verb(void) {
     char w[POD_VERB_MAX];
     const int room = pod_lcd_verb_room(694 - 248);
@@ -231,158 +113,20 @@ static void agent_test_spinner_verb(void) {
     CHECK(!pod_activity_verb("Working", w, sizeof w, room) && !pod_activity_verb("Working...", w, sizeof w, room));
     CHECK(!pod_activity_verb("", w, sizeof w, room) && !pod_activity_verb(NULL, w, sizeof w, room));
     CHECK(!pod_activity_verb("Editing touch_gt911.c - turning the touch the same way as the panel", w, sizeof w, room));   // too long: the body
-    build();
-    pod_model_turn(&M, "c", "started", NULL, 0, 10);
-    pod_model_turn(&M, "c", "verb", "Infusing\xe2\x80\xa6", 0, 20);
-    open_view("c", POD_V_AGENT);
-    render(9000);   // the made-up verb would be "Brewing" here
-    const ht_run_t *chip = find_working_chip();
-    CHECK(chip && !strncmp(chip->text, "Infusing...", 11));
-    for (int i = 0; i < S.count; i++) CHECK(!(S.runs[i].pro_kind == K_TEXT && S.runs[i].y >= 294 && S.runs[i].y < POD_TRANSPORT_Y));
-    pod_model_turn(&M, "c", "activity", "Editing touch_gt911.c - turning the touch the same way as the panel", 0, 30);
-    render(9000);
-    chip = find_working_chip();
-    CHECK(chip && !strncmp(chip->text, "Infusing...", 11) && any_text_has("Editing touch_gt911.c"));   // the verb keeps the pill; the sentence is the body
+    CHECK(!strcmp(pod_working_verb(0), "Working") && !strcmp(pod_working_verb(6), "Brewing") && !strcmp(pod_working_verb(6 * 14), "Working"));
 }
 
-static void agent_test_verb_and_empty_body(void) {
-    build();
-    CHECK(!strcmp(pod_working_verb(0), "Working") && !strcmp(pod_working_verb(5), "Working"));
-    CHECK(!strcmp(pod_working_verb(6), "Brewing") && !strcmp(pod_working_verb(12), "Cooking"));
-    CHECK(!strcmp(pod_working_verb(6 * 14), "Working"));   // it wraps
-    // Started 10 ms, now 3000 ms: ~3 s in, so "Working", then the verb moves on every 6 s.
-    pod_model_turn(&M, "c", "started", NULL, 0, 10);   // a new turn starts blank (an empty activity read keeps the line)
-    pod_model_turn(&M, "c", "activity", "", 0, 10);
-    open_view("c", POD_V_AGENT);
-    render(3000);
-    const ht_run_t *chip = find_working_chip();
-    CHECK(chip && !strncmp(chip->text, "Working...", 10) && find_pill_time() && !strncmp(find_pill_time()->text, "0:0", 3));
-    render(10000);
-    chip = find_working_chip();
-    CHECK(chip && !strncmp(chip->text, "Brewing...", 10) && find_pill_time() && !strncmp(find_pill_time()->text, "0:", 2));
-    render(25000);
-    chip = find_working_chip();
-    CHECK(chip && !strncmp(chip->text, pod_working_verb(24), strlen(pod_working_verb(24))));
-    // No placeholder: nothing under the bar while there is no activity text.
-    render(3000);
-    for (int i = 0; i < S.count; i++) CHECK(!(S.runs[i].pro_kind == K_TEXT && S.runs[i].y >= 294 && S.runs[i].y < POD_TRANSPORT_Y));
-    // The chip fits the head column whatever the verb; the engine name follows it.
-    for (int k = 0; k < 14; k++) {
-        uint32_t t = 3000 + 6000u * (uint32_t)k;
-        pod_model_turn(&M, "c", "activity", "", k * 6, t);   // heartbeats keep the turn alive; the cable carries the elapsed seconds
-        render(t);
-        chip = find_working_chip();
-        CHECK(chip && !strncmp(chip->text, pod_working_verb((uint32_t)k * 6), strlen(pod_working_verb((uint32_t)k * 6))));
-        CHECK(chip && find_pill_time() && chip->x + chip->w < find_pill_time()->x && find_pill_time()->x + find_pill_time()->w <= 694 && find_text("Claude") == NULL);
-    }
-    // Done: the verb is gone with the working chip.
-    pod_model_turn(&M, "c", "done", NULL, 0, 90000);
-    open_view("c", POD_V_RECAP);
-    render(91000);
-    CHECK(find_working_chip() == NULL);
-}
-// Item 7: an agent of an offline machine, known only from the tab's member metadata.
-static void offline_test_views(void) {
-    build();
-    cable_swarm_t sw1[1];
-    memset(sw1, 0, sizeof sw1);
-    snprintf(sw1[0].id, SWARM_ID_MAX, "s0"); snprintf(sw1[0].name, CABLE_NAME_MAX, "Desktop");
-    sw1[0].panes = 6; sw1[0].agents = 6;
-    const char *ids6[] = {"c", "x", "m", "u", "d", "off"};
-    const char *const *idl6[1] = {ids6};
-    uint8_t cnt6[1] = {6};
-    static pod_member_meta_t meta[1][POD_PANES_MAX];
-    memset(meta, 0, sizeof meta);
-    meta[0][5] = (pod_member_meta_t){"Stylist", "codex", "Diego's Mac", true, false};
-    pod_model_swarms_meta(&M, sw1, idl6, cnt6, 1, "s0", NULL, 0, meta);
-    CHECK(pod_model_find(&M, "off") && pod_model_find(&M, "off")->state == POD_OFFLINE);
-    // The Tab list: greyed name and sub, "Offline" on the right, still a row that opens.
-    pod_nav_init(&N);
-    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
-    render(3000);
-    const ht_run_t *nm = find_text("Stylist"), *off = find_text("Offline");
-    CHECK(nm && nm->fg == ht_rgb(0xa0a4a0) && off && off->fg == ht_rgb(0xa0a4a0) && off->x + off->w >= 690);
-    const ht_run_t *sub = NULL;
-    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && strstr(S.runs[i].text, "Diego")) sub = &S.runs[i];
-    CHECK(sub && sub->fg == ht_rgb(0xa0a4a0) && !strncmp(sub->text, "Codex", 5));
-    CHECK(find_text("agent-c") && find_text("agent-c")->fg != ht_rgb(0xa0a4a0));   // the others are not greyed
-    // The Tabs grid card draws its mark dimmed (a faded image run), and only for the offline pane.
-    pod_nav_init(&N);
-    render(3000);
-    int faded = 0;
-    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_IMAGE && S.runs[i].radius == POD_MARK_DIM) faded++;
-    CHECK(faded == 1);
-    // Opening it: the Agent screen with a grey "Offline" chip, no bar or body, and no talking.
-    pod_nav_init(&N);
-    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
-    pod_out_t o = pod_nav_act(&N, &M, POD_A_OPEN_AGENT, 5, 0);
-    CHECK(o.fx == POD_FX_AGENT_OPEN && N.stack[N.depth - 1].view == POD_V_AGENT);
-    render(3000);
-    const ht_run_t *chip = find_text("Offline");
-    CHECK(chip && chip->fg == ht_rgb(0xa0a4a0) && find_text("Stylist") && find_text("6 of 6") == NULL);
-    CHECK(find_working_chip() == NULL && find_text("Idle") == NULL);
-    for (int i = 0; i < S.count; i++) CHECK(!(S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0xe5e9e5)));
-    o = pod_nav_act(&N, &M, POD_A_TALK, 0, 1000);
-    CHECK(o.fx == POD_FX_NONE && N.stack[N.depth - 1].view == POD_V_AGENT);
-    // The machine leaves the metadata: the frame goes back to the tab's list.
-    memset(meta, 0, sizeof meta);
-    pod_model_swarms_meta(&M, sw1, idl6, cnt6, 1, "s0", NULL, 0, meta);
-    pod_nav_sync(&N, &M);
-    CHECK(N.depth == 2 && N.stack[1].view == POD_V_TAB);
-}
-// Item 3: the Agent screen's status bar says "Recap"; the tab name is in the head.
-static void agent_test_status_title(void) {
-    build();
-    open_view("c", POD_V_AGENT);
-    render(3000);
-    const ht_run_t *t = find_text("Recap");
-    CHECK(t && t->y < POD_STATUS_H);
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].y < POD_STATUS_H) CHECK(strcmp(S.runs[i].text, "Desktop") != 0);
-    CHECK(find_text("1 of 5") == NULL);   // no "N of M" (owner, 2026-10-10)
-    open_view("d", POD_V_RECAP);
-    render(3000);
-    CHECK(find_text("Recap") && find_text("Recap")->y < POD_STATUS_H);
-    open_view("c", POD_V_TALK);
-    render(3000);
-    CHECK(find_text("agent-c") && find_text("agent-c")->y < POD_STATUS_H && find_text("Talking") == NULL);   // Listening: the name
-}
-// No "N of M" in the status bar, from a tab list or from Recent (owner, 2026-10-10: "bo 3 of 3 di").
+// No "N of M" in the bar, from a tab list or from Recent (owner, 2026-10-10: "bo 3 of 3 di").
 static void agent_test_position(void) {
     build();
     open_view("x", POD_V_AGENT);
     render(3000);
     for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].y < POD_STATUS_H) CHECK(strstr(S.runs[i].text, " of ") == NULL);
+        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].y < CI_BAR_H) CHECK(strstr(S.runs[i].text, " of ") == NULL);
     open_view("d", POD_V_RECAP);
     render(3000);
     for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].y < POD_STATUS_H) CHECK(strstr(S.runs[i].text, " of ") == NULL);
-}
-static int body_texts(uint16_t ink, const ht_run_t *out[], int max);
-static void agent_test_activity_cap(void) {
-    build();
-    char big[900] = "";
-    for (int i = 1; i <= 80; i++) { char t[40]; snprintf(t, sizeof t, "word%d ", i); strcat(big, t); }
-    pod_model_turn(&M, "c", "activity", big, 134, 10);
-    open_view("c", POD_V_AGENT);
-    render(3000);
-    int rows = 0;
-    const ht_run_t *last = NULL;
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ht_pro_24 && S.runs[i].y >= 294 && S.runs[i].y < POD_TRANSPORT_Y) { rows++; last = &S.runs[i]; }
-    CHECK(rows == 8 && last && last->y + ht_pro_24.height <= POD_TRANSPORT_Y);
-    CHECK(strstr(last->text, "word80") == NULL);   // the model keeps 512 bytes: never past 8 rows
-    // a long name: one line, cut with "..."; a newline in it is a space (owner, 2026-10-11)
-    pod_model_agent(&M, "c", "hello from my home\narea network gateway device in the garage and more words after", "claude", "Mac Studio");
-    render(3000);
-    int nrows = 0;
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ht_pro_32 && S.runs[i].y > 60 && S.runs[i].y < 180 && S.runs[i].x >= 248) nrows++;
-    CHECK(nrows == 1);
-    const ht_run_t *nm = NULL;
-    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && !strncmp(S.runs[i].text, "hello from my home area", 23)) nm = &S.runs[i];
-    CHECK(nm && strstr(nm->text, "...") && nm->y == 92);
+        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].y < CI_BAR_H) CHECK(strstr(S.runs[i].text, " of ") == NULL);
 }
 
 // A 600 byte Vietnamese activity: the model cuts it at a codepoint boundary, the view fills 8 rows and ends with "...".
@@ -394,34 +138,6 @@ static bool utf8_valid(const char *s) {
         p += n;
     }
     return true;
-}
-static void agent_test_activity_vietnamese(void) {
-    build();
-    char big[700] = "";
-    while (strlen(big) < 600) strcat(big, "Đang kiểm tra những nguyên nhân khiến thiết bị không kết nối được ");
-    pod_model_turn(&M, "c", "activity", big, 134, 10);
-    const pod_agent_t *a = pod_model_find(&M, "c");
-    CHECK(strlen(a->activity) > 400 && strlen(a->activity) <= sizeof a->activity - 1 && utf8_valid(a->activity));
-    open_view("c", POD_V_AGENT);
-    render(3000);
-    int rows = 0;
-    const ht_run_t *last = NULL;
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ht_pro_24 && S.runs[i].y >= 294 && S.runs[i].y < POD_TRANSPORT_Y) {
-            rows++; last = &S.runs[i];
-            CHECK(utf8_valid(S.runs[i].text));
-        }
-    size_t ln = last ? strlen(last->text) : 0;
-    CHECK(rows >= 5 && rows <= 8 && last && last->y + ht_pro_24.height <= POD_TRANSPORT_Y);
-    // the Pro font has no ellipsis glyph: the run text normalises "\xe2\x80\xa6" to three dots
-    CHECK(ln >= 3 && !strcmp(last->text + ln - 3, "..."));
-    // the footer's word goes to the pill and leaves the body's sentence alone
-    const ht_run_t *ink[8];
-    int before = body_texts(ht_rgb(0x111111), ink, 8);
-    pod_model_turn(&M, "c", "verb", "Reading files", 134, 11);
-    render(3000);
-    CHECK(find_working_chip() && !strncmp(find_working_chip()->text, "Reading files", 13));
-    CHECK(before >= 5 && body_texts(ht_rgb(0x111111), ink, 8) == before);
 }
 
 static void agent_test_one_pet(void) {
@@ -452,183 +168,37 @@ static void agent_test_runs_constant(void) {
         open_view(cases[k].id, cases[k].v);
         render(1000);
         int want = S.count;
-        CHECK(want > POD_TRANSPORT_RUNS && want <= HT_RUNS);
+        CHECK(want > 0 && want <= HT_RUNS);
         for (uint32_t t = 1000; t < 7000; t += 137) { render(t); CHECK(S.count == want); }
     }
 }
 
-static void recap_test_rest_pet(void) {
-    build();
-    open_view("d", POD_V_RECAP);
-    render(4000);
-    CHECK(has_pet(46, 76, 132, "claude", POD_SCENE_REST, 4000, 0));
-    CHECK(find_text("agent-d") && find_text("Done") && find_text("Desktop"));
-    // A working agent's recap shows the work scene and says so.
-    open_view("c", POD_V_RECAP);
-    render(4000);
-    CHECK(has_pet(46, 76, 132, "claude", POD_SCENE_WORK, 4000, 0));
-    CHECK(find_working_chip() && find_text("The recap comes when this turn ends.") != NULL);
-    for (int i = 0; i < F.hit_count; i++) CHECK(F.hits[i].y + F.hits[i].h <= 60 || F.hits[i].y >= POD_TRANSPORT_Y);   // no hit in the body
-    open_view("m", POD_V_RECAP);
-    render(4000);
-    CHECK(find_text("Idle") == NULL && find_text("The recap comes") == NULL);   // idle says nothing
-}
 
 static bool any_text_has(const char *part) {
     for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && strstr(S.runs[i].text, part)) return true;
     return false;
 }
-static int text_rows_between(int y0, int y1) {
-    int n = 0;
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ht_pro_32 && S.runs[i].y >= y0 && S.runs[i].y < y1) n++;
-    return n;
-}
-// The recap is plain wrapped text in one ink, no highlighted line and no hit in the body.
-static void recap_test_plain_text(void) {
-    build();
-    open_view("d", POD_V_RECAP);
-    render(0);
-    const ht_run_t *a = find_text("First line.");
-    CHECK(a != NULL && a->fg == ht_rgb(0x111111) && a->pro_font == &ht_pro_32);
-    CHECK(strstr(a->text, "Second line.") && strstr(a->text, "Third line."));   // the lines joined with spaces, one row here
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT) CHECK(S.runs[i].fg != ht_rgb(0xbfc3bf));
-    for (int i = 0; i < F.hit_count; i++) CHECK(F.hits[i].y + F.hits[i].h <= 60 || F.hits[i].y >= POD_TRANSPORT_Y);
-    CHECK(pod_recap_max_row(&N, &M) == 0);
-}
-// Item 5: at most 50 words of the recap, then "..." (Vietnamese text, counted by whitespace).
-static void recap_test_fifty_words(void) {
-    build();
-    char big[1800] = "";
-    for (int i = 1; i <= 120; i++) { char w[40]; snprintf(w, sizeof w, "%sTiếng%d", i > 1 ? " " : "", i); strcat(big, w); }
-    pod_model_recap(&M, "d", big, false);
-    CHECK(strstr(pod_model_find(&M, "d")->recap, "Tiếng120") != NULL);
-    open_view("d", POD_V_RECAP);
-    render(0);
-    // 50 words of this width take more rows than fit: the drag reaches the end, which is word 50 and "...".
-    CHECK(any_text_has("Tiếng1 ") && pod_recap_max_row(&N, &M) > 0);
-    pod_nav_act(&N, &M, POD_A_SCROLL, 1000, 0);
-    render(0);
-    char all[2400] = "";
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ht_pro_32 && S.runs[i].y >= 200) { if (*all) strcat(all, " "); strcat(all, S.runs[i].text); }
-    CHECK(strstr(all, "Tiếng50...") != NULL && strstr(all, "Tiếng51") == NULL && utf8_valid(all));
-    size_t n = strlen(all);
-    CHECK(n > 3 && !strcmp(all + n - 3, "..."));
-    // Exactly 50 words: nothing added.
-    char fifty[1000] = "";
-    for (int i = 1; i <= 50; i++) { char w[40]; snprintf(w, sizeof w, "%sw%d", i > 1 ? " " : "", i); strcat(fifty, w); }
-    pod_model_recap(&M, "d", fifty, false);
-    render(0);
-    CHECK(any_text_has("w50") && !any_text_has("..."));
-}
-static void recap_test_scrolls_when_long(void) {
-    build();
-    char big[900] = "";
-    for (int i = 1; i <= 30; i++) { char s[40]; snprintf(s, sizeof s, "Sentence-%02d-wide-token ", i); strcat(big, s); }   // 30 words, one per row (the cap is 50)
-    pod_model_recap(&M, "d", big, false);
-    open_view("d", POD_V_RECAP);
-    render(0);
-    int shown = text_rows_between(200, POD_TRANSPORT_Y);
-    int max = pod_recap_max_row(&N, &M);
-    CHECK(shown >= 7 && max > 0 && pod_scroll_max(&N, &M) == max && pod_scroll_pitch(&N) == ht_pro_32.height);
-    CHECK(any_text_has("Sentence-01-") && !any_text_has("Sentence-30-"));
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ht_pro_32 && S.runs[i].y >= 200)
-            CHECK(S.runs[i].y + ht_pro_32.height <= POD_TRANSPORT_Y - 8);
-    int rows = S.count;
-    pod_nav_act(&N, &M, POD_A_SCROLL, 1000, 0);   // past the end: the draw clamps
-    render(0);
-    CHECK(any_text_has("Sentence-30-") && !any_text_has("Sentence-01-") && S.count >= rows - 2);
-    pod_nav_act(&N, &M, POD_A_SCROLL, -1000, 0);
-    render(0);
-    CHECK(any_text_has("Sentence-01-"));
-}
 
-// "..." on the last visible row: more below, or the source was cut; none on a short whole recap.
-static int dots_rows(void) {
-    int n = 0;
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ht_pro_32 && S.runs[i].y >= 200) {
-            size_t l = strlen(S.runs[i].text);
-            if (l >= 3 && !strcmp(S.runs[i].text + l - 3, "...")) n++;
-        }
-    return n;
-}
-static void recap_test_ellipsis(void) {
-    build();
-    open_view("d", POD_V_RECAP);
-    render(0);
-    CHECK(dots_rows() == 0);                                   // short and whole
-    pod_model_recap(&M, "d", "Fixed the parser and then +", false);
-    render(0);
-    CHECK(dots_rows() == 1 && any_text_has("Fixed the parser and then...") && !any_text_has("+"));
-    char big[1400] = "";
-    for (int i = 1; i <= 45; i++) { char s[40]; snprintf(s, sizeof s, "Sentence-%02d-wide-token ", i); strcat(big, s); }
-    pod_model_recap(&M, "d", big, false);
-    render(0);
-    int shown = text_rows_between(200, POD_TRANSPORT_Y);
-    CHECK(shown >= 7 && dots_rows() == 1);                      // fills the space, last row ends "..."
-    const ht_run_t *lastrow = NULL;
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ht_pro_32 && S.runs[i].y >= 200) lastrow = &S.runs[i];
-    CHECK(lastrow && lastrow->y + ht_pro_32.height <= POD_TRANSPORT_Y - 8 && ht_pro_width(&ht_pro_32, lastrow->text) <= 640);
-    pod_nav_act(&N, &M, POD_A_SCROLL, 1000, 0);                 // scrolled to the end: whole text, no dots
-    render(0);
-    CHECK(any_text_has("Sentence-45-") && dots_rows() == 0);
-    pod_model_recap(&M, "d", "A long one that ends with a cut\xE2\x80\xA6", false);
-    render(0);
-    CHECK(dots_rows() == 1);
-}
 
 static int count_kind_run(int kind);
-static int arcs_lit(void) {
+static const ht_run_t *find_in(const ht_pro_font_t *font, const char *prefix);
+// ---- Classic Voice (listening and sending): the Index look draws no bell, no transport and no buttons; one full-screen TALK
+// hit sends. The look itself is pinned in test_pod_views_inbox.c (test_talk_*).
+static int wave_bars(void) {
     int n = 0;
-    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == POD_ARC && S.runs[i].w > 0) n++;
+    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x2c6e64) && S.runs[i].w == 5) n++;
     return n;
-}
-// N2 (mockup pro-listen.html): no pet, so the word Listening one letter a run, a light passing over the letters, and
-// three arcs each side drifting in; no "to ... press" line, the title is the agent's name, the send button a paper plane.
-// The send button: the play button's own gradient, and the plane's ink (its four triangles' box) centred on it.
-static void send_button_ok(void) {
-    int grads = 0, x0 = 9999, x1 = -9999, y0 = 9999, y1 = -9999, tris = 0;
-    for (int i = 0; i < S.count; i++) {
-        const ht_run_t *r = &S.runs[i];
-        if (r->pro_kind == POD_GRAD && r->w == 100 && r->y >= POD_TRANSPORT_Y) grads++;
-        if (r->pro_kind == POD_TRI && r->y >= POD_TRANSPORT_Y && r->x > 300 && r->x + r->w < 420) {
-            tris++;
-            if (r->x < x0) x0 = r->x;
-            if (r->x + r->w > x1) x1 = r->x + r->w;
-            if (r->y < y0) y0 = r->y;
-            if (r->y + r->pro_height > y1) y1 = r->y + r->pro_height;
-        }
-    }
-    CHECK(grads == 1 && tris == 4);
-    CHECK(abs((x0 + x1) - 2 * 360) <= 2 && abs((y0 + y1) - 2 * (POD_TRANSPORT_Y + 63)) <= 2);
 }
 static void talk_test_word_without_pet(void) {
     build();
     CHECK(!pod_pet_has("cursor", POD_SCENE_LISTEN));
     open_view("u", POD_V_TALK);
     render(4000);
-    CHECK(count_cells() == 0);
-    const ht_run_t *L = find_text("L");
-    CHECK(L && find_text("g") && find_text("Listening") == NULL && find_text("to ") == NULL);
-    CHECK(L->y > POD_STATUS_H && L->y + ht_pro_32.height < POD_TRANSPORT_Y);
-    CHECK(find_text("agent-u") && find_text("agent-u")->y < POD_STATUS_H);
-    CHECK(count_kind_run(POD_ARC) >= 6 && arcs_lit() >= 2 && arcs_lit() % 2 == 0);
+    CHECK(count_cells() == 0 && wave_bars() == 13);   // no pet: the text and the bars alone
+    CHECK(find_in(&ci_rg_48, "Listening.") && find_in(&ci_rg_24, "Tap to send.") && find_in(&ci_bd_23, "agent-u"));
     CHECK(count_rects(ht_rgb(0xff3b30), 12) == 0);
-    send_button_ok();
     int runs = S.count;
-    uint16_t ink0 = L->fg;
-    int moved = 0;
-    for (uint32_t t = 4000; t < 5700; t += 105) {
-        render(t);
-        CHECK(S.count == runs);                                 // the arcs keep their slots
-        moved += find_text("L")->fg != ink0;
-    }
-    CHECK(moved > 0);                                           // the light passes
+    for (uint32_t t = 4000; t < 5700; t += 105) { render(t); CHECK(S.count == runs); }   // the bars keep their slots
 }
 
 static void talk_test_listen_with_pet(void) {
@@ -636,42 +206,30 @@ static void talk_test_listen_with_pet(void) {
     CHECK(pod_pet_has("claude", POD_SCENE_LISTEN));
     open_view("c", POD_V_TALK);
     render(4000);
-    CHECK(count_rects(ht_rgb(0xff3b30), 12) == 0);
-    CHECK(has_pet(230, (POD_STATUS_H + POD_TRANSPORT_Y) / 2 - 130, 260, "claude", POD_SCENE_LISTEN, 4000, 1000));
-    CHECK(find_text("Listening") == NULL && find_text("agent-c") && find_text("agent-c")->y < POD_STATUS_H);
-    send_button_ok();
-    CHECK(find_text("SEND") == NULL && find_text("TALK") == NULL && find_text("TABS") != NULL && find_text("PANES") != NULL);
+    CHECK(has_pet_on(219, 192, 281, "claude", POD_SCENE_LISTEN, 4000, 1000, 0xf6f6f0));
+    CHECK(find_in(&ci_rg_48, "Listening.") && find_in(&ci_bd_23, "agent-c") && find_in(&ci_rg_23, "To "));
+    CHECK(find_text("TABS") == NULL && find_text("TALK") == NULL && find_text("PANES") == NULL && find_text("SEND") == NULL);
 }
 
-static void transport_test_hit_sizes(void) {
+static void transport_test_hit_sizes(void) {   // Voice has no transport: the Back hit and one full-screen TALK hit
     build();
-    static const struct { const char *id; pod_view_t v; } cases[] = {
-        {"c", POD_V_AGENT}, {"x", POD_V_AGENT}, {"m", POD_V_AGENT}, {"c", POD_V_RECAP}, {"d", POD_V_RECAP},
-        {"c", POD_V_TALK}, {"u", POD_V_TALK},
-    };
-    for (unsigned k = 0; k < sizeof cases / sizeof cases[0]; k++) {
-        open_view(cases[k].id, cases[k].v);
+    static const char *const ids[] = {"c", "u"};
+    for (unsigned k = 0; k < 2; k++) {
+        open_view(ids[k], POD_V_TALK);
         render(2000);
-        int transport = 0;
-        for (int i = 0; i < F.hit_count; i++) {
-            const pod_hit_t *h = &F.hits[i];
-            CHECK(h->x >= 0 && h->x + h->w <= 720 && h->y >= 0 && h->y + h->h <= 720);
-            if (h->y >= POD_TRANSPORT_Y) { CHECK(h->w >= 80 && h->h >= 80); transport++; }
-        }
-        CHECK(transport == 5);
-        CHECK(find_hit(POD_A_TABS) && find_hit(POD_A_PANES) && find_hit(POD_A_PREV) && find_hit(POD_A_TALK) && find_hit(POD_A_NEXT));
-        CHECK(find_hit(POD_A_RECAP) == NULL);
-        CHECK(find_text("RECAP") == NULL && find_text("TALK") == NULL);
-        CHECK(find_hit(POD_A_BACK) != NULL);
+        CHECK(F.hit_count == 2);
+        const pod_hit_t *talk = find_hit(POD_A_TALK), *back = find_hit(POD_A_BACK);
+        CHECK(talk && talk->x == 0 && talk->y == 88 && talk->w == 720 && talk->h == 632);
+        CHECK(back && back->x == 0 && back->y == 0 && back->w == 173 && back->h == 88);
+        CHECK(!find_hit(POD_A_TABS) && !find_hit(POD_A_PANES) && !find_hit(POD_A_PREV) && !find_hit(POD_A_NEXT) && !find_hit(POD_A_INBOX));
     }
 }
 
-// After the stop tap the voice screen stays up as "sending": the pet in the listen slot plays SEND from the tap and holds
-// its last step; a pet-less engine gets the three-dot sweep and the word Sending. The Agent screen never plays SEND.
+// After the stop tap the voice screen stays up as "sending": the pet plays SEND from the tap and holds its last step; a pet-less
+// engine gets the text alone. The Agent screen never plays SEND.
 static void send_test_pet_in_listen_slot(void) {
     static const char *const eng[] = {"c", "x", "m"};
     static const char *const name[] = {"claude", "codex", "muse"};
-    const int cy = (POD_STATUS_H + POD_TRANSPORT_Y) / 2;
     for (int k = 0; k < 3; k++) {
         build();
         open_view(eng[k], POD_V_TALK);
@@ -681,15 +239,14 @@ static void send_test_pet_in_listen_slot(void) {
         CHECK(sc != NULL);
         uint32_t len = (uint32_t)sc->steps * sc->step_ms;
         render(6000 + 50);
-        CHECK(has_pet(230, cy - 130, 260, name[k], POD_SCENE_SEND, 6050, 6000));
-        CHECK(!has_pet(230, cy - 130, 260, name[k], POD_SCENE_LISTEN, 6050, 1000));
-        CHECK(find_text("Sending") == NULL && find_text("Listening") == NULL);
-        CHECK(find_text("agent-") && find_text("agent-")->y < POD_STATUS_H);
+        CHECK(has_pet_on(255, 186, 209, name[k], POD_SCENE_SEND, 6050, 6000, 0xf6f6f0));
+        CHECK(!has_pet_on(219, 192, 281, name[k], POD_SCENE_LISTEN, 6050, 1000, 0xf6f6f0));
+        CHECK(find_in(&ci_bd_45, "Sending your words") && !find_in(&ci_rg_48, "Listening.") && find_in(&ci_rg_30, "agent-"));
         int want = S.count;
         render(6000 + len - 1);
-        CHECK(has_pet(230, cy - 130, 260, name[k], POD_SCENE_SEND, 6000 + len - 1, 6000) && S.count == want);
+        CHECK(has_pet_on(255, 186, 209, name[k], POD_SCENE_SEND, 6000 + len - 1, 6000, 0xf6f6f0) && S.count == want);
         render(6000 + len + 5000);   // held on its last step
-        CHECK(has_pet(230, cy - 130, 260, name[k], POD_SCENE_SEND, 6000 + len + 5000, 6000));
+        CHECK(has_pet_on(255, 186, 209, name[k], POD_SCENE_SEND, 6000 + len + 5000, 6000, 0xf6f6f0));
         CHECK(pod_view_talk_next_ms(&N, &M, 6000 + len + 5000) > 0);
         // the turn begins: the Agent screen shows the working gif, no SEND
         pod_model_sent(&M, ID[k], 6100);
@@ -697,7 +254,7 @@ static void send_test_pet_in_listen_slot(void) {
         pod_nav_sync(&N, &M);
         CHECK(N.stack[N.depth - 1].view == POD_V_AGENT);
         render(6300);
-        CHECK(!has_pet(34, 92, 180, name[k], POD_SCENE_SEND, 6300, 6000));
+        CHECK(!has_pet_on(32, 104, 104, name[k], POD_SCENE_SEND, 6300, 6000, 0xf6f6f0));
     }
     // A tap on the voice screen while sending does nothing.
     CHECK(pod_nav_act(&N, &M, POD_A_TALK, 0, 7000).fx != POD_FX_VOICE_END);
@@ -706,33 +263,21 @@ static void send_test_word_without_pet(void) {
     build();
     CHECK(!pod_pet_has("cursor", POD_SCENE_SEND));
     open_view("u", POD_V_TALK);
-    render(4000);
-    const ht_run_t *L = find_text("L");
-    CHECK(L);
-    int lx = L->x, ly = L->y;
     pod_nav_act(&N, &M, POD_A_TALK, 0, 6000);
     render(6000);
-    const ht_run_t *Sg = find_text("S");
-    CHECK(Sg && find_text("g") && find_text("L") == NULL && find_text("Sending") == NULL);
-    CHECK(Sg->y == ly && Sg->y > POD_STATUS_H && Sg->y + ht_pro_32.height < POD_TRANSPORT_Y);
-    (void)lx;
-    CHECK(count_kind_run(POD_ARC) == 0 && arcs_lit() == 0);
-    int runs = S.count, moved = 0;
-    uint16_t ink0 = Sg->fg;
+    CHECK(count_cells() == 0 && find_in(&ci_bd_45, "Sending your words") && !find_in(&ci_rg_48, "Listening.") && wave_bars() == 0);
+    int runs = S.count;
     for (uint32_t t = 6000; t < 7600; t += 105) {
         render(t);
         CHECK(S.count == runs);   // constant per frame
-        moved += find_text("S")->fg != ink0;
         CHECK(pod_view_talk_next_ms(&N, &M, t) == POD_PET_STEP_MS);
     }
-    CHECK(moved > 0);             // the light passes
-    send_button_ok();
 }
 
 static int chrome_arcs(void) {   // arcs in the status bar and transport (the pets draw their own)
     int n = 0;
     for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == POD_ARC && S.runs[i].w > 0 && (S.runs[i].y < POD_STATUS_H || S.runs[i].y >= POD_TRANSPORT_Y)) n++;
+        if (S.runs[i].pro_kind == POD_ARC && S.runs[i].w > 0 && (S.runs[i].y < CI_BAR_H || S.runs[i].y >= POD_TRANSPORT_Y)) n++;
     return n;
 }
 static int count_kind_run(int kind) {
@@ -746,11 +291,11 @@ static void icon_test_triangles(void) {
     build();
     open_view("m", POD_V_AGENT);
     render(3000);
-    // chevron 4 + prev and next 2; the middle button is the mic, whose one chrome arc is its cradle.
-    CHECK(count_kind_run(POD_TRI) == 4 + 2 && chrome_arcs() == 1);
+    // the bar's chevron (4); two chrome arcs: the outline bell's dome and the Talk mic's cradle.
+    CHECK(count_kind_run(POD_TRI) == 4 && chrome_arcs() == 2);
     open_view("d", POD_V_RECAP);
     render(3000);
-    CHECK(count_kind_run(POD_TRI) == 4 + 2 + 4 && chrome_arcs() == 1);   // + the Done tick (4)
+    CHECK(count_kind_run(POD_TRI) == 4 + 4 && chrome_arcs() == 2);   // + the band's tick (4)
 }
 // The chevron is one clean stroke: no gaps at the joint, nothing outside its outline.
 static void icon_test_chevron_solid(void) {
@@ -781,102 +326,7 @@ static void icon_test_chevron_solid(void) {
     CHECK(inked > 40);
     CHECK(buf[(20 + 13) * W + 17] == blue || buf[(20 + 13) * W + 16] == blue || buf[(20 + 12) * W + 17] == blue);   // the joint
 }
-static void who_test_line_and_names(void) {
-    build();
-    open_view("c", POD_V_AGENT);
-    render(3000);
-    const ht_run_t *tab = NULL;
-    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && !strcmp(S.runs[i].text, "Desktop") && S.runs[i].fg == ht_rgb(0x1f63d1)) tab = &S.runs[i];
-    const ht_run_t *mach = find_text("Mac Studio");
-    CHECK(tab && tab->fg == ht_rgb(0x1f63d1) && mach && mach->fg == ht_rgb(0x7b7d84));
-    // Item 4: the tab alone on its line, the machine alone on the next (no dot), the chip under both.
-    CHECK(!strcmp(tab->text, "Desktop") && !strcmp(mach->text, "Mac Studio") && !any_text_has("\xc2\xb7"));
-    CHECK(tab->x == 248 && mach->x == 248 && mach->y >= tab->y + ht_pro_24.height - 2);
-    const ht_run_t *chipw = find_working_chip();
-    CHECK(chipw && find_pill() && find_pill()->y >= mach->y + ht_pro_24.height - 2 && find_pill()->y + 40 < 294);
-    CHECK(!any_text_has("pane "));
-    open_view("d", POD_V_RECAP);
-    render(3000);
-    CHECK(find_text("Desktop") && find_text("Mac Studio") && !any_text_has("pane ") && find_text("Claude") == NULL);
-    {   // the tab, the machine and the "Done" line stack above the body, which starts at 272
-        const ht_run_t *t1 = find_text("Desktop"), *m1 = find_text("Mac Studio"), *d1 = find_text("Done");
-        CHECK(t1->y + ht_pro_24.height <= m1->y + 2 && m1->y + ht_pro_24.height <= d1->y + 2 && d1->y + ht_pro_24.height <= 272);
-    }
-    // No machine: just the tab.
-    pod_model_agent(&M, "m", "agent-m", "muse", "");
-    open_view("m", POD_V_AGENT);
-    render(3000);
-    CHECK(find_text("Desktop") && !any_text_has("\xc2\xb7"));
-    // A long name: one line in 32, cut with "...", on the Agent screen and the Recap.
-    const char *longname = "hello from my home area network gateway device in the garage";
-    pod_model_agent(&M, "m", longname, "muse", "Mac Studio");
-    open_view("m", POD_V_AGENT);
-    render(3000);
-    const ht_run_t *n = find_text("hello from");
-    CHECK(n && n->pro_font == &ht_pro_32);
-    open_view("m", POD_V_RECAP);
-    render(3000);
-    int rows = 0;
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ht_pro_32 && S.runs[i].y < 170 && S.runs[i].y > 60) rows++;
-    CHECK(rows == 1);
-    CHECK(find_text("hello from")->pro_font == &ht_pro_32 && strstr(find_text("hello from")->text, "..."));
-    const ht_run_t *who = NULL, *last = NULL;
-    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && !strcmp(S.runs[i].text, "Desktop") && S.runs[i].fg == ht_rgb(0x1f63d1)) who = &S.runs[i];
-    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ht_pro_32 && S.runs[i].y < 170 && S.runs[i].y > 60) last = &S.runs[i];
-    CHECK(who && last && who->y >= last->y + 36);   // the info line sits under the name
-    {   // and the recap body starts under the three info lines
-        const ht_run_t *dn = find_text("Mac Studio");   // idle: the machine is the head's last line
-        CHECK(find_text("Idle") == NULL && dn && dn->y + ht_pro_24.height <= 302);
-    }
-    // A short name is one line in 32 on both screens.
-    pod_model_agent(&M, "m", "short", "muse", "Mac Studio");
-    open_view("m", POD_V_RECAP);
-    render(3000);
-    CHECK(find_text("short")->pro_font == &ht_pro_32);
-    open_view("m", POD_V_AGENT);
-    render(3000);
-    CHECK(find_text("short")->pro_font == &ht_pro_32);
-}
 
-// S5 LCD: the status is a dark pill only while working; the engine is a line under the name; same 14 px rhythm.
-static void lcd_test_agent_and_recap(void) {
-    build();
-    open_view("c", POD_V_AGENT);
-    render(3000);
-    const ht_run_t *name = find_text("agent-c"), *tab = find_text("Desktop"), *mach = find_text("Mac Studio"), *pill = find_pill();
-    CHECK(name && tab && mach && pill && find_text("Claude") == NULL);
-    CHECK(tab->y - name->y == 9 + 23 + 14 - 6);                 // the first line sits 14 px under the name's baseline
-    CHECK(mach->y - tab->y == 31);
-    CHECK(pill->y == mach->y + 6 + 17 + 14);                    // and so does the pill under the machine line
-    CHECK(pill->y + 40 <= 294);
-    // The bars move between ticks; the run count stays put.
-    int count1 = S.count;
-    render(3150);
-    CHECK(S.count == count1 && count_green_bars() == 3);
-    {   // bar heights differ between the two ticks
-        ht_run_t a[3], b[3]; int na = 0, nb = 0;
-        render(3000);
-        for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x2a9a57) && na < 3) a[na++] = S.runs[i];
-        render(3150);
-        for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x2a9a57) && nb < 3) b[nb++] = S.runs[i];
-        int diff = 0;
-        for (int k = 0; k < 3; k++) diff += a[k].pro_height != b[k].pro_height;
-        CHECK(na == 3 && nb == 3 && diff > 0);
-    }
-    // Recap while working: the same pill, the engine line, the body under it; Done keeps its line, no pill.
-    open_view("c", POD_V_RECAP);
-    render(3000);
-    pill = find_pill();
-    CHECK(pill && find_working_chip() && find_pill_time() && count_green_bars() == 3 && !any_text_has("\xe2\x96\xae"));
-    CHECK(find_text("Claude") == NULL && find_text("Desktop") && find_text("Desktop")->x == 201);
-    { int a0, b0, a1, b1; CHECK(pill_box(&a0, &b0, &a1, &b1) && a0 == 201 && b1 - b0 == 40); }
-    CHECK(pill->y >= find_text("Mac Studio")->y + ht_pro_24.height);
-    CHECK(find_text("The recap comes when this turn ends.")->y >= pill->y + 40);
-    open_view("d", POD_V_RECAP);
-    render(3000);
-    CHECK(find_pill() == NULL && find_text("Done") && find_text("Claude") == NULL);
-}
 
 
 // ---- the pill takes the glass's colour; the steps of a working turn ----------------------------------------
@@ -923,103 +373,431 @@ static void lcd_test_content_only(void) {
     }
 }
 
-static int body_texts(uint16_t ink, const ht_run_t *out[], int max) {
+
+
+
+// ---- Classic Index: Agent and Recap -------------------------------------------------------------------------------
+
+static bool has_pet104(const char *engine, pod_scene_t scene, uint32_t now) { return has_pet_on(32, 104, 104, engine, scene, now, 0, 0xf6f6f0); }
+static const ht_run_t *find_in(const ht_pro_font_t *font, const char *prefix) {
+    for (int i = 0; i < S.count; i++)
+        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == font && !strncmp(S.runs[i].text, prefix, strlen(prefix))) return &S.runs[i];
+    return NULL;
+}
+static int count_in(const ht_pro_font_t *font, int y0, int y1) {
     int n = 0;
-    for (int i = 0; i < S.count && n < max; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ht_pro_24 && S.runs[i].y >= 290 && S.runs[i].y < POD_TRANSPORT_Y &&
-            S.runs[i].fg == ink) out[n++] = &S.runs[i];
+    for (int i = 0; i < S.count; i++)
+        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == font && S.runs[i].y >= y0 && S.runs[i].y < y1) n++;
     return n;
 }
-// A working agent shows the sentence in ink, then its previous steps in grey, newest first, one line each, above the transport.
-static void agent_test_steps(void) {
-    build();
-    pod_model_turn(&M, "c", "started", NULL, 0, 10);
-    pod_model_turn(&M, "c", "activity", "Reading pod_view_agent.c to find the pill", 3, 20);
-    open_view("c", POD_V_AGENT);
-    render(3000);
-    const ht_run_t *ink[8], *grey[8];
-    CHECK(body_texts(ht_rgb(0x111111), ink, 8) == 1 && body_texts(ht_rgb(0x7b7d84), grey, 8) == 0);
-    pod_model_turn(&M, "c", "activity", "Running npm test to see which specs fail", 9, 30);
-    pod_model_turn(&M, "c", "activity", "Fixing the failing spec in the model feed", 12, 40);
-    render(3000);
-    int ni = body_texts(ht_rgb(0x111111), ink, 8), ng = body_texts(ht_rgb(0x7b7d84), grey, 8);
-    CHECK(ni == 1 && !strncmp(ink[0]->text, "Fixing the failing", 18) && ink[0]->y == 84 + 196 + 14);
-    CHECK(ng == 2 && !strncmp(grey[0]->text, "Running npm test", 16) && !strncmp(grey[1]->text, "Reading pod_view_agent.c", 24));
-    CHECK(grey[0]->y >= ink[0]->y + ht_pro_24.height && grey[1]->y > grey[0]->y && grey[1]->y + ht_pro_24.height <= POD_TRANSPORT_Y);
-    CHECK(grey[0]->x == 28 && grey[0]->pro_font == &ht_pro_24);
-    // an empty read never blanks a line
-    pod_model_turn(&M, "c", "activity", "", 13, 50);
-    render(3000);
-    CHECK(body_texts(ht_rgb(0x111111), ink, 8) == 1 && body_texts(ht_rgb(0x7b7d84), grey, 8) == 2);
-    // the run count is the same whatever the clock says; a long sentence leaves room for the steps and stays above the transport
-    pod_model_turn(&M, "c", "activity", "Doing a long thing that goes on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on", 14, 60);
-    render(3000);
-    int last_y = 0;
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].y >= 290 && S.runs[i].y < POD_TRANSPORT_Y && S.runs[i].y > last_y) last_y = S.runs[i].y;
-    CHECK(body_texts(ht_rgb(0x7b7d84), grey, 8) >= 1 && last_y + ht_pro_24.height <= POD_TRANSPORT_Y);
-    int want = S.count;
-    for (uint32_t t = 3000; t < 9000; t += 211) { render(t); CHECK(S.count == want); }
-    // the pill's word changes neither the sentence nor the steps
-    int rows_before = body_texts(ht_rgb(0x111111), ink, 8);
-    pod_model_turn(&M, "c", "verb", "Infusing\xe2\x80\xa6", 15, 70);
-    render(3000);
-    CHECK(find_working_chip() && !strncmp(find_working_chip()->text, "Infusing...", 11));
-    CHECK(body_texts(ht_rgb(0x111111), ink, 8) == rows_before && body_texts(ht_rgb(0x7b7d84), grey, 8) >= 1);
+static bool ends_with(const char *t, const char *tail) { size_t a = strlen(t), b = strlen(tail); return a >= b && !strcmp(t + a - b, tail); }
+static void push_steps(const char *id, int n, uint32_t t) {
+    for (int i = 0; i < n; i++) { char st[40]; snprintf(st, sizeof st, "Step %d \xc2\xb7 file%d.c", i + 1, i + 1); pod_model_turn(&M, id, "step", st, 134, t + (uint32_t)i); }
+}
+// A Vietnamese sentence, cut by the model at a codepoint.
+static void viet(char *out, size_t n) {
+    out[0] = 0;
+    while (strlen(out) < n - 160) strcat(out, "Đang kiểm tra những nguyên nhân khiến thiết bị không kết nối được ");
 }
 
-// The daemon's real cadence for one agent: every ~3 s a turn.activity arrives as the footer word, then (ms later) the
-// progress sentence, with empty reads of either in between. Neither source may blank or replace the other: every beat
-// renders the same body and pill (the clock is held still, so the frames must be byte-identical).
-static void agent_test_cadence_replay(void) {
+static void test_agent_working_body(void) {
     build();
-    pod_model_turn(&M, "c", "started", NULL, 0, 10);
+    push_steps("c", 3, 20);
     open_view("c", POD_V_AGENT);
-    static ht_run_t ref[HT_RUNS];
-    int ref_count = 0;
-    const char *verbs[] = {"Infusing...", "", "Infusing\xe2\x80\xa6", "", "Infusing..."};
-    for (int beat = 0; beat < 40; beat++) {
-        uint32_t t = 100 + (uint32_t)beat * 3000;
-        pod_model_turn(&M, "c", "verb", verbs[beat % 5], 5 + beat * 3, t);
-        pod_model_turn(&M, "c", "activity", beat % 3 == 1 ? "" : "Editing pod_view_agent.c to show the steps", 5 + beat * 3, t + 20);
-        pod_model_turn(&M, "c", "verb", "", 5 + beat * 3, t + 30);
-        pod_model_turn(&M, "c", "activity", "", 5 + beat * 3, t + 40);
-        if (beat == 0) { pod_model_turn(&M, "c", "activity", "Editing pod_view_agent.c to show the steps", 5, t + 50); }
-        // a fixed instant: the rotating gerund and the clock move with the elapsed seconds, so fix those too
-        pod_model_turn(&M, "c", "activity", "", 5, t + 60);
-        render(7000);
-        if (!ref_count) {
-            ref_count = S.count;
-            memcpy(ref, S.runs, sizeof(ht_run_t) * (size_t)S.count);
-            CHECK(find_working_chip() && !strncmp(find_working_chip()->text, "Infusing...", 11) && find_text("Editing pod_view_agent.c"));
-            continue;
+    render(3000);
+    CHECK(find_in(&ci_bd_30, "Task") && find_in(&ci_rg_26, "Desktop") && find_hit(POD_A_BACK));   // the back label is the origin tab
+    CHECK(find_in(&ci_rg_41, "agent-c") && find_in(&ci_rg_41, "agent-c")->x == 152);
+    CHECK(find_in(&ci_rg_23, "Desktop \xc2\xb7 Mac Studio"));
+    CHECK(has_pet104("claude", POD_SCENE_WORK, 3000));
+    CHECK(find_in(&ci_rg_25, "Working") && find_in(&ci_rg_22, "2:") && find_in(&ci_rg_26, "Claude"));   // the band: elapsed 2:14, Engine (no tokens)
+    const ht_run_t *label = find_in(&ci_bd_20, "RIGHT NOW");
+    CHECK(label && label->fg == CI_MUTED && label->x == 32);
+    const ht_run_t *act = find_in(&ci_rg_32, "Editing touch");
+    CHECK(act && act->x == 32 && act->fg == CI_INK && act->y > label->y);
+    CHECK(count_in(&ci_rg_32, 300, CI_TRANS_Y) <= 3);
+    int steps = 0;
+    for (int i = 0; i < S.count; i++)
+        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ci_rg_22 && S.runs[i].fg == CI_MUTED && S.runs[i].y > act->y) { steps++; CHECK(S.runs[i].x == 32); }
+    CHECK(steps == 2 && find_in(&ci_rg_22, "Step 3") && find_in(&ci_rg_22, "Step 2") && !find_in(&ci_rg_22, "Step 1"));   // the two newest
+    const ht_run_t *up = find_in(&ci_rg_20, "Updated just now");
+    CHECK(up && up->fg == ht_rgb(0x7b827c) && up->y > find_in(&ci_rg_22, "Step 2")->y);
+    const pod_hit_t *talk = find_hit(POD_A_TALK);
+    CHECK(talk && talk->x == 32 && talk->w == 656 && talk->h == 88);
+    CHECK(!find_hit(POD_A_PREV) && !find_hit(POD_A_NEXT) && !find_hit(POD_A_TABS) && !find_hit(POD_A_PANES));   // the old transport is gone
+    // A long activity: three lines, the last cut with the ellipsis (the model's own cut also ends with one).
+    char big[600] = "";
+    for (int i = 1; i <= 60; i++) { char w[24]; snprintf(w, sizeof w, "word%d ", i); strcat(big, w); }
+    pod_model_turn(&M, "c", "activity", big, 134, 30);
+    render(3000);
+    CHECK(count_in(&ci_rg_32, 300, CI_TRANS_Y) == 3);
+    const ht_run_t *last = NULL;
+    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ci_rg_32 && S.runs[i].y > 300) last = &S.runs[i];
+    CHECK(last && ends_with(last->text, "\xe2\x80\xa6") && last->w <= 656);
+    // No activity text: the rotating gerund, not an empty body.
+    pod_model_turn(&M, "c", "started", NULL, 0, 40);
+    pod_model_turn(&M, "c", "activity", "", 0, 40);
+    render(3000);
+    CHECK(find_in(&ci_rg_32, "Working\xe2\x80\xa6"));
+}
+
+static void test_agent_updated_minutes(void) {
+    build();
+    open_view("c", POD_V_AGENT);
+    render(59000);   // event at 10 ms: 58.99 s
+    CHECK(find_in(&ci_rg_20, "Updated just now"));
+    render(60010);
+    CHECK(find_in(&ci_rg_20, "Updated 1m ago"));
+    render(180010);
+    CHECK(find_in(&ci_rg_20, "Updated 3m ago") && !find_in(&ci_rg_20, "Updated just"));
+    render(3600010 - 1);
+    CHECK(find_in(&ci_rg_20, "Updated 59m ago"));
+    render(3600010);
+    CHECK(find_in(&ci_rg_20, "Updated 1h ago"));
+    render(2u * 3600000u + 10 + 59 * 60000u);
+    CHECK(find_in(&ci_rg_20, "Updated 2h ago"));
+    render(1000);   // the clock behind the event: still "just now"
+    CHECK(find_in(&ci_rg_20, "Updated just now"));
+    pod_agent_t *a = (pod_agent_t *)pod_model_find(&M, "c");   // no event time: no line, never "0"
+    a->has_event = false;
+    render(3000);
+    CHECK(!find_in(&ci_rg_20, "Updated"));
+    a->has_event = true; a->event_ms = 0;
+    render(3000);
+    CHECK(!find_in(&ci_rg_20, "Updated"));
+}
+
+static void test_agent_asking(void) {
+    build();
+    open_view("x", POD_V_AGENT);
+    render(3000);
+    CHECK(has_pet104("codex", POD_SCENE_ASK, 3000));
+    CHECK(find_in(&ci_rg_25, "Needs you")->fg == CI_AMBER && find_in(&ci_rg_22, "\xe2\x80\x94"));   // elapsed unknown: a dash
+    bool box = false, bar = false;
+    for (int i = 0; i < S.count; i++) {
+        const ht_run_t *r = &S.runs[i];
+        if (r->pro_kind == K_RECT && r->fg == CI_ASK_FILL && r->x == 32 && r->w == 656) box = true;
+        if (r->pro_kind == K_RECT && r->fg == CI_ASK_BAR && r->x == 32 && r->w == 4) bar = true;
+    }
+    CHECK(box && bar);
+    const ht_run_t *q = find_in(&ci_rg_32, "Run the migration");
+    CHECK(q && q->x == 32 + 23 && q->fg == CI_INK);
+    const ht_run_t *hint = find_in(&ci_rg_23, "Answer it in the Harness app.");
+    CHECK(hint && hint->fg == CI_MUTED && hint->y > q->y && hint->x == 32);
+    CHECK(!find_in(&ci_bd_20, "RIGHT NOW") && !find_hit(POD_A_TALK));
+    // The transport is drawn disabled (one run fewer than none: the button still exists, at 45%).
+    CHECK(find_in(&ci_rg_28, "Talk"));
+    // A three line question stays above the hint and the transport.
+    char big[600] = "";
+    for (int i = 1; i <= 40; i++) { char w[24]; snprintf(w, sizeof w, "question%d ", i); strcat(big, w); }
+    pod_model_question(&M, "x", big);
+    render(3000);
+    CHECK(count_in(&ci_rg_32, 300, CI_TRANS_Y) <= 3 && find_in(&ci_rg_23, "Answer it")->y + ci_rg_23.height <= CI_TRANS_Y);
+}
+
+static void offline_setup(void) {
+    build();
+    cable_swarm_t sw1[1];
+    memset(sw1, 0, sizeof sw1);
+    snprintf(sw1[0].id, SWARM_ID_MAX, "s0"); snprintf(sw1[0].name, CABLE_NAME_MAX, "Desktop");
+    sw1[0].panes = 6; sw1[0].agents = 6;
+    static const char *ids6[] = {"c", "x", "m", "u", "d", "off"};
+    const char *const *idl6[1] = {ids6};
+    uint8_t cnt6[1] = {6};
+    static pod_member_meta_t meta[1][POD_PANES_MAX];
+    memset(meta, 0, sizeof meta);
+    meta[0][5] = (pod_member_meta_t){"Stylist", "codex", "Diego's Mac", true, false};
+    pod_model_swarms_meta(&M, sw1, idl6, cnt6, 1, "s0", NULL, 0, meta);
+    CHECK(pod_model_find(&M, "off") && pod_model_find(&M, "off")->state == POD_OFFLINE);
+    pod_nav_init(&N);
+    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
+    pod_out_t o = pod_nav_act(&N, &M, POD_A_OPEN_AGENT, 5, 0);
+    CHECK(o.fx == POD_FX_AGENT_OPEN && N.stack[N.depth - 1].view == POD_V_AGENT);
+}
+static void test_agent_offline(void) {
+    offline_setup();
+    render(3000);
+    CHECK(find_in(&ci_rg_41, "Stylist") && find_in(&ci_rg_25, "Offline")->fg == CI_MUTED);
+    CHECK(find_in(&ci_rg_32, "That machine is offline.") && find_in(&ci_rg_23, "Reconnect Diego's Mac in Harness to continue."));
+    CHECK(!find_in(&ci_bd_20, "RIGHT NOW") && !find_hit(POD_A_TALK) && find_in(&ci_rg_28, "Talk"));
+    // The pet cannot fade (cells and arcs): the head is the pale cover with the logo at 50%, and no pet run at all.
+    CHECK(!has_pet104("codex", POD_SCENE_REST, 3000) && count_cells() == 0);
+    int faded = 0;
+    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_IMAGE && S.runs[i].radius == 128 && S.runs[i].x >= 32 && S.runs[i].x < 136 && S.runs[i].y >= 104 && S.runs[i].y < 208) faded++;
+    CHECK(faded == 1);
+    pod_out_t o = pod_nav_act(&N, &M, POD_A_TALK, 0, 1000);   // and the nav ignores a Talk tap on it
+    CHECK(o.fx == POD_FX_NONE && N.stack[N.depth - 1].view == POD_V_AGENT);
+    // No machine name: the copy still reads.
+    snprintf(((pod_agent_t *)pod_model_find(&M, "off"))->machine, CABLE_NAME_MAX, "%s", "");
+    render(3000);
+    CHECK(find_in(&ci_rg_23, "Reconnect it in Harness to continue."));
+}
+
+static void test_agent_idle_copy(void) {
+    build();
+    open_view("m", POD_V_AGENT);
+    render(3000);
+    CHECK(has_pet104("muse", POD_SCENE_REST, 3000));
+    CHECK(find_in(&ci_rg_25, "Ready") && find_in(&ci_rg_22, "\xe2\x80\x94"));
+    const ht_run_t *a = find_in(&ci_rg_32, "Ready when you are."), *b = find_in(&ci_rg_23, "Send a new voice instruction to this agent.");
+    CHECK(a && a->fg == CI_INK && b && b->fg == CI_MUTED && b->y > a->y && a->x == 32);
+    CHECK(find_hit(POD_A_TALK) && !find_in(&ci_bd_20, "RIGHT NOW") && !find_in(&ci_rg_20, "Updated"));
+    open_view("u", POD_V_AGENT);   // cursor: no pet, the engine's cover
+    render(3000);
+    CHECK(find_in(&ci_rg_32, "Ready when you are.") && find_hit(POD_A_TALK));
+}
+
+static void test_agent_vietnamese_activity_wraps(void) {
+    build();
+    char big[800];
+    viet(big, sizeof big);
+    pod_model_turn(&M, "c", "activity", big, 134, 10);
+    open_view("c", POD_V_AGENT);
+    render(3000);
+    int rows = 0;
+    const ht_run_t *last = NULL;
+    for (int i = 0; i < S.count; i++) {
+        const ht_run_t *r = &S.runs[i];
+        if (r->pro_kind == K_TEXT && r->pro_font == &ci_rg_32 && r->y > 300 && r->y < CI_TRANS_Y) {
+            rows++; last = r;
+            CHECK(utf8_valid(r->text) && r->w <= 656 && r->x == 32 && r->x + r->w <= 688);
         }
-        CHECK(S.count == ref_count);
-        // elapsed advances the time run only; every other run is identical, byte for byte
-        for (int i = 0; i < S.count; i++) {
-            if (S.runs[i].pro_kind == K_TEXT && S.runs[i].fg == ht_rgb(0x1f9d4c)) continue;
-            CHECK(!memcmp(&S.runs[i], &ref[i], sizeof S.runs[0]));
-        }
+    }
+    CHECK(rows == 3 && last && ends_with(last->text, "\xe2\x80\xa6"));
+    // A long Vietnamese name, tab and back label end with the ellipsis inside their boxes: never over the time, the bell or each other.
+    char name[CABLE_NAME_MAX];
+    snprintf(name, sizeof name, "%s", "Đang kiểm tra những nguyên nhân khiến thiết bị không kết nối được nữa");
+    pod_model_agent(&M, "c", name, "claude", "Máy tính của Diệp ở văn phòng phía sau nhà");
+    snprintf(sw[0].name, CABLE_NAME_MAX, "%s", "Thư mục dự án chung của cả nhóm phát triển phần mềm");
+    pod_model_swarms(&M, sw, (const char *const **)idl, idn, 1, "s0", NULL, 0);
+    open_view("c", POD_V_AGENT);
+    render(3000);
+    const ht_run_t *nm = NULL, *who = NULL, *back = NULL;
+    for (int i = 0; i < S.count; i++) {
+        const ht_run_t *r = &S.runs[i];
+        if (r->pro_kind != K_TEXT) continue;
+        if (r->pro_font == &ci_rg_41) nm = r;
+        if (r->pro_font == &ci_rg_23 && r->y < 200) who = r;
+        if (r->pro_font == &ci_rg_26 && r->y < 88) back = r;
+    }
+    CHECK(nm && nm->x == 152 && nm->x + nm->w <= 688 && ends_with(nm->text, "\xe2\x80\xa6") && utf8_valid(nm->text));
+    CHECK(who && who->x == 152 && who->x + who->w <= 688 && ends_with(who->text, "\xe2\x80\xa6") && utf8_valid(who->text));
+    CHECK(back && back->w <= 115 && ends_with(back->text, "\xe2\x80\xa6") && utf8_valid(back->text));
+    CHECK(!strstr(nm->text, "\n") && who->y > nm->y + 40);
+}
+
+static void test_agent_unknown_engine_mark(void) {
+    build();
+    pod_model_agent(&M, "c", "agent-c", "zzz", "Mac Studio");   // an engine with no logo and no pet
+    open_view("c", POD_V_AGENT);
+    render(3000);
+    int images = 0;
+    bool cover = false;
+    for (int i = 0; i < S.count; i++) {
+        const ht_run_t *r = &S.runs[i];
+        if (r->pro_kind == K_IMAGE) images++;
+        if (r->pro_kind == K_RECT && r->x == 32 && r->y == 104 && r->w == 104 && r->pro_height == 104) cover = true;
+    }
+    CHECK(images == 0 && cover && count_cells() == 0);   // the default mark box, no logo, no pet sprite
+    CHECK(find_in(&ci_rg_26, "Zzz") || find_in(&ci_rg_26, "\xe2\x80\x94"));   // the band names the engine or shows a dash
+    for (int i = 0; i < S.count; i++) CHECK(!(S.runs[i].pro_kind == K_TEXT && S.runs[i].text[0] == 0));
+    // The same on Recap, and with no tokens and no elapsed time the band says so with dashes only.
+    open_view("d", POD_V_RECAP);
+    pod_model_agent(&M, "d", "agent-d", "zzz", "Mac Studio");
+    render(3000);
+    CHECK(find_in(&ci_rg_20, "Engine") && !find_in(&ci_rg_20, "Tokens"));
+    for (int i = 0; i < S.count; i++) {
+        if (S.runs[i].pro_kind != K_TEXT) continue;
+        CHECK(strcmp(S.runs[i].text, "0") != 0 && strcmp(S.runs[i].text, "\xc2\xb7") != 0 && strncmp(S.runs[i].text, "\xc2\xb7 ", 3) != 0);
+        CHECK(!ends_with(S.runs[i].text, " \xc2\xb7"));
     }
 }
 
+static void test_recap_tokens_or_engine(void) {
+    build();
+    open_view("d", POD_V_RECAP);
+    render(3000);
+    CHECK(find_in(&ci_bd_30, "Recap") && find_in(&ci_rg_26, "Desktop") && find_hit(POD_A_BACK));
+    CHECK(find_in(&ci_rg_20, "Engine") && find_in(&ci_rg_26, "Claude") && !find_in(&ci_rg_20, "Tokens"));
+    CHECK(has_pet104("claude", POD_SCENE_REST, 3000));
+    CHECK(find_in(&ci_rg_25, "Finished") && find_in(&ci_bd_20, "SAVED RESULT"));
+    CHECK(find_in(&ci_rg_22, "\xe2\x80\x94"));   // no elapsed time was sent
+    pod_model_turn_stats(&M, "d", -1, -1, -1, 10100, 2300);
+    pod_model_turn(&M, "d", "activity", "Wrapping up", 48, 25);
+    pod_model_turn(&M, "d", "done", NULL, 0, 30);
+    render(3000);
+    CHECK(find_in(&ci_rg_20, "Tokens") && find_in(&ci_rg_26, "10.1k in \xc2\xb7 2.3k out") && !find_in(&ci_rg_20, "Engine"));
+    CHECK(find_in(&ci_rg_22, "0:48"));
+    const ht_run_t *body = find_in(&ci_rg_32, "First line.");
+    CHECK(body && body->fg == CI_INK && body->x == 32 && strstr(body->text, "Second line.") && strstr(body->text, "Third line."));   // joined, one row
+    CHECK(find_hit(POD_A_TALK) && pod_recap_max_row(&N, &M) == 0);
+    // A recap with no text: the Talk button stays, the body says so.
+    open_view("m", POD_V_RECAP);
+    render(3000);
+    CHECK(find_in(&ci_rg_32, "No recap yet.") || N.stack[N.depth - 1].view == POD_V_AGENT);
+}
+
+static void test_recap_scrolls_by_line(void) {
+    build();
+    char big[900] = "";
+    for (int i = 1; i <= 30; i++) { char w[40]; snprintf(w, sizeof w, "Sentence-%02d-wide-token ", i); strcat(big, w); }   // one per row
+    pod_model_recap(&M, "d", big, false);
+    open_view("d", POD_V_RECAP);
+    render(3000);
+    const int shown = count_in(&ci_rg_32, 300, CI_TRANS_Y), max = pod_recap_max_row(&N, &M);
+    CHECK(shown == 6 && max == 30 - 6 && pod_scroll_max(&N, &M) == max);
+    const ht_run_t *first = find_in(&ci_rg_32, "Sentence-01-"), *second = find_in(&ci_rg_32, "Sentence-02-");
+    CHECK(first && second && second->y - first->y == 42 && first->y > find_in(&ci_bd_20, "SAVED RESULT")->y);
+    for (int i = 0; i < S.count; i++)
+        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ci_rg_32 && S.runs[i].y > 300) CHECK(S.runs[i].y + ci_rg_32.height <= CI_TRANS_Y && S.runs[i].w <= 656);
+    const ht_run_t *lastrow = NULL;   // more below: the last visible row ends with the ellipsis
+    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ci_rg_32 && S.runs[i].y > 300) lastrow = &S.runs[i];
+    CHECK(lastrow && ends_with(lastrow->text, "\xe2\x80\xa6") && strstr(lastrow->text, "Sentence-06"));
+    int y0 = first->y;
+    pod_nav_act(&N, &M, POD_A_SCROLL, 1, 0);   // one line
+    render(3000);
+    const ht_run_t *now2 = find_in(&ci_rg_32, "Sentence-02-");
+    CHECK(!find_in(&ci_rg_32, "Sentence-01-") && now2 && now2->y == y0 && find_in(&ci_rg_32, "Sentence-07-"));
+    pod_nav_act(&N, &M, POD_A_SCROLL, 1000, 0);   // past the end: the draw clamps; the whole text, no dots
+    render(3000);
+    CHECK(find_in(&ci_rg_32, "Sentence-30-") && !find_in(&ci_rg_32, "Sentence-24-") && find_in(&ci_rg_32, "Sentence-25-")->y == y0);
+    for (int i = 0; i < S.count; i++) CHECK(!(S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ci_rg_32 && ends_with(S.runs[i].text, "\xe2\x80\xa6")));
+    pod_nav_act(&N, &M, POD_A_SCROLL, -3000, 0);
+    render(3000);
+    CHECK(find_in(&ci_rg_32, "Sentence-01-")->y == y0);
+    // The 50 word cut still ends "...", the source's own cut ends with the ellipsis.
+    char fifty[1800] = "";
+    for (int i = 1; i <= 120; i++) { char w[40]; snprintf(w, sizeof w, "%sTiếng%d", i > 1 ? " " : "", i); strcat(fifty, w); }
+    pod_model_recap(&M, "d", fifty, false);
+    pod_nav_act(&N, &M, POD_A_SCROLL, -3000, 0);
+    pod_nav_act(&N, &M, POD_A_SCROLL, 1000, 0);
+    render(3000);
+    bool end50 = false;
+    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && strstr(S.runs[i].text, "Tiếng50") && utf8_valid(S.runs[i].text)) end50 = true;
+    CHECK(end50 && !any_text_has("Tiếng51"));
+    pod_model_recap(&M, "d", "Fixed the parser and then +", false);
+    render(3000);
+    CHECK(find_in(&ci_rg_32, "Fixed the parser and then") && !any_text_has("+") && ends_with(find_in(&ci_rg_32, "Fixed")->text, "\xe2\x80\xa6"));
+    pod_model_recap(&M, "d", "First line. Second line.", false);
+    render(3000);
+    CHECK(!ends_with(find_in(&ci_rg_32, "First")->text, "\xe2\x80\xa6"));
+}
+
+static void budget_model(void) {   // the worst bodies, and an unread entry of an agent we never open: the bell and its pill
+    build();
+    char big[800];
+    viet(big, sizeof big);
+    pod_model_turn(&M, "c", "activity", big, 134, 10);
+    push_steps("c", 3, 20);
+    char q[600] = "";
+    for (int i = 1; i <= 40; i++) { char w[24]; snprintf(w, sizeof w, "question%d ", i); strcat(q, w); }
+    pod_model_question(&M, "x", q);
+    pod_model_turn_stats(&M, "d", -1, -1, -1, 10100, 2300);
+    char rec[900] = "";
+    for (int i = 1; i <= 30; i++) { char w[40]; snprintf(w, sizeof w, "Sentence-%02d-wide-token ", i); strcat(rec, w); }
+    pod_model_recap(&M, "d", rec, false);
+    pod_model_unread_add(&M, "ghost", "ghost", "Done", 48, 100);
+}
+static void test_agent_budget(void) {
+    static const struct { const char *id; pod_view_t v; } cases[] = {
+        {"c", POD_V_AGENT}, {"x", POD_V_AGENT}, {"m", POD_V_AGENT}, {"u", POD_V_AGENT}, {"d", POD_V_RECAP}, {"c", POD_V_RECAP},
+    };
+    int worst = 0;
+    for (int banner = 0; banner < 2; banner++) {
+        with_banner = banner;
+        budget_model();
+        for (unsigned k = 0; k < sizeof cases / sizeof cases[0]; k++) {
+            open_view(cases[k].id, cases[k].v);
+            pod_nav_act(&N, &M, POD_A_SCROLL, 2, 0);
+            for (uint32_t t = 3000; t < 3300; t += 66) {
+                render(t);
+                CHECK(F.unread > 0 && S.count <= POD_CLASSIC_RUNS - pod_spare_runs(&F) - 4);
+                if (S.count > worst) worst = S.count;
+            }
+        }
+        offline_setup();   // an offline agent over the same bell
+        pod_model_unread_add(&M, "ghost", "ghost", "Done", 48, 100);
+        render(3000);
+        CHECK(F.unread > 0 && S.count <= POD_CLASSIC_RUNS - pod_spare_runs(&F) - 4);
+        if (S.count > worst) worst = S.count;
+    }
+    with_banner = false;
+    printf("test_pod_views_agent: classic Agent/Recap worst case %d runs of %d\n", worst, POD_CLASSIC_RUNS);
+}
+
+// Low1: the Agent band shows Engine whatever the agent's tokens; only Recap shows Tokens.
+static void test_agent_band_engine_not_tokens(void) {
+    build();
+    pod_model_turn_stats(&M, "c", -1, -1, -1, 10100, 2300);   // working, with tokens
+    pod_model_turn_stats(&M, "u", -1, -1, -1, 980, 40);        // idle, with tokens
+    for (int k = 0; k < 2; k++) {
+        open_view(k ? "u" : "c", POD_V_AGENT);
+        render(3000);
+        CHECK(find_in(&ci_rg_20, "Engine") && !find_in(&ci_rg_20, "Tokens") && !find_in(&ci_rg_26, "10.1k"));
+    }
+    pod_model_turn(&M, "d", "done", NULL, 0, 30);
+    pod_model_turn_stats(&M, "d", -1, -1, -1, 980, 40);
+    open_view("d", POD_V_RECAP);
+    render(3000);
+    CHECK(find_in(&ci_rg_20, "Tokens") && !find_in(&ci_rg_20, "Engine"));
+}
+
+// Low4: a word wider than the line (a URL) is hard-broken at a character boundary; the text goes on and the last row ends with U+2026.
+static bool valid_utf8(const char *t) {
+    for (const unsigned char *p = (const unsigned char *)t; *p;) {
+        int n = *p < 0x80 ? 1 : (*p & 0xe0) == 0xc0 ? 2 : (*p & 0xf0) == 0xe0 ? 3 : (*p & 0xf8) == 0xf0 ? 4 : 0;
+        if (!n) return false;
+        for (int i = 1; i < n; i++) if ((p[i] & 0xc0) != 0x80) return false;
+        p += n;
+    }
+    return true;
+}
+static void test_wrap_long_word(void) {
+    char url[400] = "https://example.com/";
+    while (strlen(url) < 200) strcat(url, "aa/bbbb?cc=dd&");
+    char text[512];
+    snprintf(text, sizeof text, "%s and then the sentence goes on for a while", url);
+    char rows[3][POD_ROW_MAX];
+    int n = pod_wrap_hard(text, &ci_rg_32, 656, 3, rows);
+    CHECK(n == 3 && !strncmp(rows[0], "https://", 8) && ht_pro_width(&ci_rg_32, rows[0]) <= 656 && strlen(rows[0]) > 20);
+    CHECK(!strncmp(url + strlen(rows[0]), rows[1], 5) || strlen(rows[0]) + strlen(rows[1]) >= strlen(url));   // the word continues on row 2
+    char cut[3][POD_ROW_MAX];
+    n = ci_wrap(text, &ci_rg_32, 656, 3, cut);
+    CHECK(n == 3);
+    for (int i = 0; i < n; i++) CHECK(valid_utf8(cut[i]) && ht_pro_width(&ci_rg_32, cut[i]) <= 656);
+    CHECK(!strcmp(cut[n - 1] + strlen(cut[n - 1]) - 3, "\xe2\x80\xa6"));   // text remains: the last row ends with the ellipsis
+    // A word of two-byte letters longer than the row buffer: never cut inside a sequence.
+    char wide[400] = "";
+    while (strlen(wide) < 300) strcat(wide, "\xc3\xa9");
+    n = pod_wrap_hard(wide, &ci_rg_32, 656, 3, rows);
+    CHECK(n > 0);
+    for (int i = 0; i < n; i++) CHECK(valid_utf8(rows[i]) && rows[i][0]);
+    n = ci_wrap(wide, &ci_rg_32, 656, 1, cut);
+    CHECK(n == 1 && valid_utf8(cut[0]) && cut[0][0]);
+    // On Recap: the screen shows the URL's start, not nothing.
+    build();
+    pod_model_recap(&M, "d", text, false);
+    open_view("d", POD_V_RECAP);
+    render(3000);
+    CHECK(find_in(&ci_rg_32, "https://"));
+}
+
 int main(void) {
-    agent_test_scene_by_state();
-    agent_test_option_a_layout();
-    agent_test_status_title();
-    offline_test_views();
-    agent_test_verb_and_empty_body();
+    test_agent_working_body();
+    test_agent_updated_minutes();
+    test_agent_asking();
+    test_agent_offline();
+    test_agent_idle_copy();
+    test_agent_vietnamese_activity_wraps();
+    test_agent_unknown_engine_mark();
+    test_agent_band_engine_not_tokens();
+    test_wrap_long_word();
+    test_recap_tokens_or_engine();
+    test_recap_scrolls_by_line();
+    test_agent_budget();
     agent_test_spinner_verb();
     agent_test_position();
-    agent_test_activity_cap();
-    agent_test_activity_vietnamese();
     agent_test_one_pet();
     agent_test_runs_constant();
-    recap_test_rest_pet();
-    recap_test_plain_text();
-    recap_test_fifty_words();
-    recap_test_scrolls_when_long();
-    recap_test_ellipsis();
     talk_test_word_without_pet();
     talk_test_listen_with_pet();
     transport_test_hit_sizes();
@@ -1027,11 +805,7 @@ int main(void) {
     send_test_word_without_pet();
     icon_test_triangles();
     icon_test_chevron_solid();
-    who_test_line_and_names();
-    lcd_test_agent_and_recap();
     lcd_test_content_only();
-    agent_test_steps();
-    agent_test_cadence_replay();
     printf("test_pod_views_agent: %d checks passed\n", checks);
     return 0;
 }

@@ -1,13 +1,14 @@
 // Dev tool (not run by run.sh): renders one Pod screen of a fixed demo model to a 720 x 720 PPM.
 // Usage: pod_render <screen> <out.ppm> [now_ms]      pod_render.py builds it and converts the PPMs to PNG.
-//   screens: tabs[:<rows scrolled>[+<more tabs>][@<px offset: mid-drag>] | :mock] (the album grid; mock = the mockup's six covers, one empty), default[:tab|:talk] (default marks), recent, chrome[:talk] (the status bar and transport alone), tab:<n>, agent:<id>, recap:<id>, talk:<id>   (ids: fw ota be cli web desk docs vault
-//   site cur notes2 kilo). ota:<pct>|ota:restart (the update screen), notice:updated|notice:failed (the Tabs screen with that pill). inbox; and ":bell" (unread entries: the bell in the status bar) or ":banner" (the notification banner too) on any
+//   screens: tabs[:<rows scrolled>[+<more tabs>][@<px offset: mid-drag>] | :mock] (the album grid; mock = the mockup's six covers, one empty), default[:tab|:talk] (default marks), recent, chrome[:talk] (the bar and the Talk transport alone: Classic's, where chrome:talk is the disabled button; or the Console's bar and hints), tab:<n>, agent:<id>, recap:<id>, talk:<id>   (ids: fw ota be cli web desk docs vault
+//   site cur notes2 kilo). ota:<pct>|ota:restart (the update screen), notice:updated|notice:failed (the Tabs screen with that pill). inbox[:ask] (Classic: entries only, or the asking agent's row first), banner:done|failed[@<ms after shown>] (Classic banner over Tabs; --now is ignored), tab:empty, tabs:9 (nine tabs: two pages), talk:listen|send, tabs:linkdown (Connection lost); and ":bell" (unread entries: the bell in the status bar) or ":banner" (the notification banner too) on any
 //   other screen, e.g. tabs:bell, tab:1:bell, agent:fw:banner, recap:desk:banner. The demo is the HTML mockup's (the Pod mockup): the same agents, tabs and times.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
+#include "pod/classic/ci.h"
 #include "pod/console/cs.h"
 #include "pod/pod_view.h"
 #include "pro_canvas.h"
@@ -295,9 +296,13 @@ int main(int argc, char **argv)
     int ota_pct = -1;   // ota:<pct> | ota:restart (the update screen, the mockup's 0.1.2 -> 0.1.3); restart is -2
     if (argc < 3) { fprintf(stderr, "usage: pod_render [--spec out.json] [--skin console|classic] <screen> <out.ppm> [now_ms]\n"); return 2; }
     const char *screen = argv[1];
+    if (!strcmp(screen, "talk:listen")) screen = "talk:fw";          // Classic Talk, listening / sending (talk:<id>[:send] for any agent)
+    else if (!strcmp(screen, "talk:send")) screen = "talk:fw:send";
     bool timing = !strncmp(screen, "time:", 5);   // time:<screen>: rasterise the screen 50 times, print the mean us per full frame
     if (timing) screen += 5;
     uint32_t now = argc > 3 ? (uint32_t)strtoul(argv[3], NULL, 10) : T0;
+    const bool ban_screen = !strncmp(screen, "banner:", 7);   // banner:done|failed[@ms]: the banner ms after it showed (shown at T0), over Tabs
+    if (ban_screen && strchr(screen, '@')) now = T0 + (uint32_t)atoi(strchr(screen, '@') + 1);
     demo();
     classic_fixture(screen);
     N.skin = skin;
@@ -310,7 +315,11 @@ int main(int argc, char **argv)
         pod_model_unread_add(&M, "ota", "dial-ota", "Built and flashed the dial with the new face. The OTA channel is untouched.", 301, T0 - 180000u);
         pod_model_unread_add(&M, "be", "backend", "Fixed the cable resync. Tests pass on the host and the device, and the frame time is back under 45 ms.", 134, T0 - 2000u);
     }
+    if (ban_screen && !strncmp(screen + 7, "failed", 6)) ((pod_unread_t *)pod_model_unread_find(&M, "be"))->kind = POD_UNREAD_FAILED;
+    if (inbox && skin == POD_SKIN_CLASSIC && !strstr(screen, ":ask")) pod_model_question_close(&M, "cli");   // inbox: entries only; inbox:ask: the asking agent's amber row first
     if (inbox) pod_nav_act(&N, &M, POD_A_INBOX, 0, T0);
+    else if (ban_screen) {   // the Tabs screen under the banner
+    } else if (!strcmp(screen, "tabs:9")) more_tabs(3);   // nine tabs: more than one page
     else if (!strncmp(screen, "tabs", 4)) {   // tabs, or tabs:<n>: the Cover Flow with cover n (0 = Recent) chosen
         if (screen[4] == ':' && !strcmp(screen + 5, "mock")) mock_tabs();
         else if (screen[4] == ':') {
@@ -359,6 +368,14 @@ int main(int argc, char **argv)
         uint8_t cnt[1] = {(uint8_t)n};
         pod_model_swarms(&M, sw, &ids, cnt, 1, "p", tl, n);
         pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, T0);
+    } else if (!strcmp(screen, "tab:empty")) {   // a tab with no panes
+        static const uint8_t none[1] = {0};
+        cable_swarm_t sw[1];
+        memset(sw, 0, sizeof sw);
+        snprintf(sw[0].id, SWARM_ID_MAX, "n0");
+        snprintf(sw[0].name, CABLE_NAME_MAX, "New Swarm");
+        pod_model_swarms(&M, sw, NULL, none, 1, "n0", NULL, 0);
+        pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, T0);
     } else if (!strncmp(screen, "tab:", 4)) {
         pod_nav_act(&N, &M, POD_A_OPEN_TAB, atoi(screen + 4), T0);
     } else if (!strncmp(screen, "agent:", 6) || !strncmp(screen, "recap:", 6) || !strncmp(screen, "talk:", 5)) {
@@ -390,8 +407,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "unknown screen: %s\n", screen);
         return 2;
     }
-    ht_scene_clear(&S, ht_rgb(0xffffff));
+    ht_scene_clear(&S, ht_rgb(skin == POD_SKIN_CONSOLE ? 0xffffffu : 0xf6f6f0u));   // Classic ground (CI_GROUND)
     F.scene = &S;
+    if (strstr(screen, "linkdown")) pod_model_link(&M, false);   // e.g. tabs:linkdown
     F.banner = banner;
     F.mic_level = strstr(screen, "quiet") ? 0 : 3;
     if (ota_pct != -1) {
@@ -414,22 +432,28 @@ int main(int argc, char **argv)
         cs_badge(&S, 520, 96, "cursor"); cs_badge(&S, 560, 96, "kilo");
         cs_working_mark(&S, 28, 140, now);
         cs_logo(&S, 100, 130, 36, "claude"); cs_logo(&S, 150, 130, 44, "codex");
-    } else if (!strncmp(screen, "chrome", 6)) {   // the status bar and the transport alone: chrome or chrome:talk
-        pod_status(&F, "Firmware", true, 0);
-        pod_transport(&F, strstr(screen, "talk") != NULL);
+    } else if (!strncmp(screen, "chrome", 6)) {   // Classic's bar (back label, title, bell) and the Talk transport alone: chrome or chrome:talk
+        ci_bar(&F, "Firmware", "Tabs", 3, true);
+        ci_talk(&F, strstr(screen, "talk") == NULL);
     } else {
         pod_render(&F, &N, &M, now);
     }
     if (banner) {   // the glue draws it after pod_render, and only while the entry is unread (pod_glue.c)
         const pod_unread_t *ban = pod_model_unread_find(&M, "be");
         if (ban && skin == POD_SKIN_CONSOLE) cs_toast(&F, &M, ban, now);
-        else if (ban) pod_banner(&F, &M, ban, now);
+        else if (ban) pod_banner(&F, &M, ban, T0, now);   // shown at T0: --now T0+3000 is the half-way frame
     }
     if (notice) {   // the glue's pill (pod_glue.c pod_ui_render), repeated here: this tool does not link the glue
         const char *text = notice_text;
-        int w = ht_pro_width(&ht_pro_24, text), pw = w + 40, ny = POD_TRANSPORT_Y - 8 - 40;
-        ht_pro_rect(&S, (POD_W - pw) / 2, ny, pw, 40, 20, ht_rgb(notice_bad ? 0xb3261e : 0x111111));
-        ht_pro_text(&S, (POD_W - w) / 2, ny + 7, w, &ht_pro_24, ht_rgb(0xffffff), text);
+        const bool classic = skin != POD_SKIN_CONSOLE;
+        const ht_pro_font_t *font = classic ? &ci_rg_24 : &ht_pro_24;
+        int w = ht_pro_width(font, text);
+        if (w > (classic ? 580 : 600)) w = classic ? 580 : 600;
+        int pw = w + (classic ? 24 : 40), ny = (classic ? POD_CLASSIC_TRANSPORT_Y : POD_TRANSPORT_Y) - 8 - 40;
+        const uint16_t bg = ht_rgb(notice_bad ? 0xb3261e : classic ? 0x25372f : 0x111111);
+        if (classic) ht_pro_rect_aa(&S, (POD_W - pw) / 2, ny, pw, 40, 7, bg);
+        else ht_pro_rect(&S, (POD_W - pw) / 2, ny, pw, 40, 20, bg);
+        ht_pro_text(&S, (POD_W - w) / 2, ny + (classic ? (40 - font->height) / 2 : 7), w, font, ht_rgb(0xffffff), text);
     }
     if (spec) write_spec(spec, screen);
     static uint16_t px[720 * 720];
@@ -440,12 +464,12 @@ int main(int argc, char **argv)
         double build = 0, raster = 0;
         for (int i = 0; i < REPS; i++) {
             clock_gettime(CLOCK_MONOTONIC, &a);
-            ht_scene_clear(&S, ht_rgb(0xffffff));
+            ht_scene_clear(&S, ht_rgb(skin == POD_SKIN_CONSOLE ? 0xffffffu : 0xf6f6f0u));   // Classic ground (CI_GROUND)
             pod_render(&F, &N, &M, now);
             if (banner) {   // the glue draws the toast after pod_render (and only while the entry is unread): time it too
                 const pod_unread_t *bn = pod_model_unread_find(&M, "be");
                 if (bn && skin == POD_SKIN_CONSOLE) cs_toast(&F, &M, bn, now);
-                else if (bn) pod_banner(&F, &M, bn, now);
+                else if (bn) pod_banner(&F, &M, bn, T0, now);
             }
             clock_gettime(CLOCK_MONOTONIC, &b);
             build += (double)(b.tv_sec - a.tv_sec) * 1e6 + (double)(b.tv_nsec - a.tv_nsec) / 1e3;

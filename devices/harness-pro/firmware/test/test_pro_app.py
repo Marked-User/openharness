@@ -44,6 +44,7 @@ code = r'''
 #include "sys/ram_telemetry.h"
 #include "pro_display.h"
 #include "pro_frame.h"
+#include "pod/classic/ci.h"
 
 #include "esp_heap_caps.h"
 #include "esp_task_wdt.h"
@@ -184,6 +185,7 @@ static pod_out_t ucontact(bool down, int x, int y, bool *changed) {
     return contact(down, pod_turn_coord(x), pod_turn_coord(y), changed);
 }
 // A tap on the rendered hit: DOWN and UP at its centre, as the GT911 reports it, then the redraw a change causes.
+enum { RECAP_LINE = 42, PAGE_PX = 510 };   // PAGE_PX: the Tabs grid's page pitch (two 255 px rows)   // the Classic Recap body line pitch (pod_scroll_pitch)
 static pod_out_t tap_at(int x, int y) {
     bool c1 = false, c2 = false;
     pod_out_t d = ucontact(true, x, y, &c1);
@@ -197,6 +199,31 @@ static pod_out_t tap(pod_action_t a, int arg) {
     CHECK(h);
     CHECK(h->w >= 1 && h->h >= 1);
     return tap_at(h->x + h->w / 2, h->y + h->h / 2);
+}
+// The nav actions with no drawn hit in Classic (TABS, PANES, PREV, NEXT): the side button's path, or a stale hit or host effect.
+static pod_out_t nav_act(pod_action_t a) {
+    pod_out_t o = pod_nav_act(&U.nav, &U.model, a, 0, now);
+    render();
+    return o;
+}
+// A drag from (x0,y0) to (x1,y1) in n MOVEs of 16 ms each, then the lift. Returns the effect of the lift.
+static pod_out_t drag(int x0, int y0, int x1, int y1, int n) {
+    bool c = false;
+    ucontact(true, x0, y0, &c);
+    for (int i = 1; i <= n; i++) ucontact(true, x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n, &c);
+    pod_out_t o = ucontact(false, x1, y1, &c);
+    render();
+    return o;
+}
+// PREV and NEXT are drawn nowhere in Classic any more: the horizontal swipe (finger left = next) is the touch way.
+static pod_out_t swipe_next(void) { return drag(500, 300, 300, 305, 8); }
+static pod_out_t swipe_prev(void) { return drag(200, 300, 520, 295, 8); }
+// Classic dims Talk (no hit) when the agent cannot be talked to; a stale TALK hit, drawn before that, still reaches the glue and
+// the app's gates, which is what these replays check.
+static pod_out_t tap_stale_talk(void) {
+    CHECK(U.frame.hit_count < 32);
+    U.frame.hits[U.frame.hit_count++] = (pod_hit_t){CI_TALK_X, CI_TALK_Y, CI_TALK_W, CI_TALK_H, POD_A_TALK, 0, {0}};
+    return tap(POD_A_TALK, 0);
 }
 static void expect(pod_out_t o, pod_effect_t fx, const char *agent) {
     CHECK(o.fx == fx);
@@ -255,7 +282,7 @@ static void journey(void) {
     pod_nav_sync(&U.nav, &U.model);
     CHECK(top() == POD_V_AGENT && !pod_ui_talking(&U));
     // NEXT steps to a2, which is done and opens on its Recap.
-    expect(tap(POD_A_NEXT, 0), POD_FX_AGENT_OPEN, "a2");
+    expect(swipe_next(), POD_FX_AGENT_OPEN, "a2");
     CHECK(top() == POD_V_RECAP);
     // Back out: Tab, then Tabs.
     expect(tap(POD_A_BACK, 0), POD_FX_NONE, NULL);
@@ -289,20 +316,20 @@ static void orphan_recording_is_discarded(void) {
 
 static void tabs_button_from_everywhere(void) {
     to_talk();
-    expect(tap(POD_A_TABS, 0), POD_FX_VOICE_ABORT, "a1");     // from Talking: abort, then the root
+    expect(nav_act(POD_A_TABS), POD_FX_VOICE_ABORT, "a1");     // from Talking (the side button's path; Voice draws no TABS button): abort, then the root
     CHECK(top() == POD_V_TABS && U.nav.depth == 1 && !pod_ui_talking(&U));
     tap(POD_A_OPEN_TAB, 0);
     tap(POD_A_OPEN_AGENT, 1);                                   // a2: done, opens on its Recap
     CHECK(top() == POD_V_RECAP);
-    expect(tap(POD_A_PANES, 0), POD_FX_NONE, NULL);           // PANES: the tab's list
+    expect(nav_act(POD_A_PANES), POD_FX_NONE, NULL);          // PANES: the tab's list (no button: the side button's path)
     CHECK(top() == POD_V_TAB && U.nav.depth == 2);
     tap(POD_A_OPEN_AGENT, 0);
-    expect(tap(POD_A_TABS, 0), POD_FX_NONE, NULL);            // TABS from an Agent screen
+    expect(nav_act(POD_A_TABS), POD_FX_NONE, NULL);           // TABS from an Agent screen (no button: the side button)
     CHECK(top() == POD_V_TABS && U.nav.depth == 1);
     CHECK(hit(POD_A_RECAP, 0) == NULL);
     // PANES from Talking aborts and lands on the tab's list
     tap(POD_A_OPEN_TAB, 0); tap(POD_A_OPEN_AGENT, 0); tap(POD_A_TALK, 0);
-    expect(tap(POD_A_PANES, 0), POD_FX_VOICE_ABORT, "a1");
+    expect(nav_act(POD_A_PANES), POD_FX_VOICE_ABORT, "a1");
     CHECK(top() == POD_V_TAB && U.nav.depth == 2);
 }
 
@@ -315,29 +342,20 @@ static void recap_drag_scrolls(void) {
     tap(POD_A_OPEN_TAB, 0);
     tap(POD_A_OPEN_AGENT, 1);
     CHECK(top() == POD_V_RECAP);
-    CHECK(pod_scroll_max(&U.nav, &U.model) > 0 && pod_scroll_pitch(&U.nav) == ht_pro_32.height);
+    CHECK(pod_scroll_max(&U.nav, &U.model) > 0 && pod_scroll_pitch(&U.nav) == RECAP_LINE);
     CHECK(U.nav.stack[U.nav.depth - 1].scroll == 0);
     bool c = false;
     ucontact(true, 360, 450, &c);
-    ucontact(true, 360, 450 - 2 * ht_pro_32.height, &c);
+    ucontact(true, 360, 450 - 2 * RECAP_LINE, &c);
     CHECK(c && U.nav.stack[U.nav.depth - 1].scroll == 2);
-    ucontact(false, 360, 450 - 2 * ht_pro_32.height, &c);
+    ucontact(false, 360, 450 - 2 * RECAP_LINE, &c);
     CHECK(U.nav.stack[U.nav.depth - 1].scroll == 2 && top() == POD_V_RECAP);   // a drag is not a tap
-    ucontact(true, 360, 100, &c); ucontact(true, 360, 100 + 10 * ht_pro_32.height, &c); ucontact(false, 360, 100, &c);
+    ucontact(true, 360, 100, &c); ucontact(true, 360, 100 + 10 * RECAP_LINE, &c); ucontact(false, 360, 100, &c);
     CHECK(U.nav.stack[U.nav.depth - 1].scroll == 0);
 }
 
 
 // ---- the horizontal swipe steps panes (swipe left = next, right = previous, as the round dial) -------------------------
-// A drag from (x0,y0) to (x1,y1) in n MOVEs of 16 ms each, then the lift. Returns the effect of the lift.
-static pod_out_t drag(int x0, int y0, int x1, int y1, int n) {
-    bool c = false;
-    ucontact(true, x0, y0, &c);
-    for (int i = 1; i <= n; i++) ucontact(true, x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n, &c);
-    pod_out_t o = ucontact(false, x1, y1, &c);
-    render();
-    return o;
-}
 static const char *cur(void) { return U.nav.stack[U.nav.depth - 1].agent; }
 static void to_agent(int row) {
     setup();
@@ -352,7 +370,7 @@ static void swipe_steps_panes(void) {
     expect(drag(200, 300, 520, 290, 8), POD_FX_AGENT_OPEN, "a1");      // left-to-right: previous
     CHECK(!strcmp(cur(), "a1") && top() == POD_V_AGENT);
     // a Recap steps too, and a quick flick shorter in time counts
-    tap(POD_A_NEXT, 0);
+    swipe_next();
     CHECK(top() == POD_V_RECAP);
     expect(drag(520, 400, 300, 400, 3), POD_FX_AGENT_OPEN, "a1");
 }
@@ -360,8 +378,8 @@ static void swipe_slow_does_nothing(void) {
     to_agent(0);
     expect(drag(520, 300, 300, 300, 60), POD_FX_NONE, NULL);           // ~1 s and slow all along
     CHECK(!strcmp(cur(), "a1"));
-    // a tap still works
-    expect(tap(POD_A_NEXT, 0), POD_FX_AGENT_OPEN, "a2");
+    // a quick swipe still works
+    expect(swipe_next(), POD_FX_AGENT_OPEN, "a2");
 }
 static void swipe_short_and_diagonal(void) {
     to_agent(0);
@@ -379,9 +397,13 @@ static void swipe_in_talking_aborts_first(void) {
 }
 static void swipe_from_the_transport_is_ignored(void) {
     to_agent(0);
-    int y = POD_TRANSPORT_Y + 60;
+    int y = CI_TRANS_Y + 60;
     expect(drag(560, y, 160, y, 8), POD_FX_NONE, NULL);
     CHECK(!strcmp(cur(), "a1"));
+    expect(drag(560, CI_TRANS_Y, 160, CI_TRANS_Y, 8), POD_FX_NONE, NULL);   // the line itself is the transport
+    CHECK(!strcmp(cur(), "a1"));
+    expect(drag(560, CI_TRANS_Y - 1, 160, CI_TRANS_Y - 1, 8), POD_FX_AGENT_OPEN, "a2");   // one px above it still swipes
+    to_agent(0);
     to_talk();
     expect(drag(560, y, 160, y, 8), POD_FX_NONE, NULL);
     CHECK(pod_ui_talking(&U));
@@ -405,20 +427,20 @@ static void swipe_does_not_scroll_the_recap(void) {
     // a wide swipe with some vertical wobble: no rows scrolled, a swipe not a scroll
     expect(drag(520, 300, 300, 340, 8), POD_FX_AGENT_OPEN, "a1");
     CHECK(U.nav.stack[U.nav.depth - 1].scroll == 0);
-    tap(POD_A_NEXT, 0);
+    swipe_next();
     CHECK(U.nav.stack[U.nav.depth - 1].scroll == 0);
     // the vertical drag still scrolls
     bool c = false;
     ucontact(true, 360, 450, &c);
-    ucontact(true, 360, 450 - 2 * ht_pro_32.height, &c);
+    ucontact(true, 360, 450 - 2 * RECAP_LINE, &c);
     CHECK(c && U.nav.stack[U.nav.depth - 1].scroll == 2);
-    pod_out_t o = ucontact(false, 360, 450 - 2 * ht_pro_32.height, &c);
+    pod_out_t o = ucontact(false, 360, 450 - 2 * RECAP_LINE, &c);
     CHECK(o.fx == POD_FX_NONE && U.nav.stack[U.nav.depth - 1].scroll == 2 && top() == POD_V_RECAP);
 }
 
 static void next_from_talking_aborts(void) {
     to_talk();
-    pod_out_t o = tap(POD_A_NEXT, 0);
+    pod_out_t o = nav_act(POD_A_NEXT);
     expect(o, POD_FX_VOICE_ABORT, "a1");          // never VOICE_END, and not AGENT_OPEN
     CHECK(top() == POD_V_AGENT || top() == POD_V_RECAP);
     CHECK(!strcmp(U.nav.stack[U.nav.depth - 1].agent, "a2"));
@@ -429,7 +451,7 @@ static void next_from_talking_aborts(void) {
 
 static void prev_and_back_from_talking_abort(void) {
     to_talk();
-    expect(tap(POD_A_PREV, 0), POD_FX_VOICE_ABORT, "a1");
+    expect(nav_act(POD_A_PREV), POD_FX_VOICE_ABORT, "a1");
     CHECK(!pod_ui_talking(&U));
     to_talk();
     expect(tap(POD_A_BACK, 0), POD_FX_VOICE_ABORT, "a1");
@@ -605,15 +627,15 @@ static void drag_scrolls_tab_and_is_not_a_tap(void) {
         pod_ui_swarms(&U, one, 1, &mem, "t0", NULL, 0);
         render();
         tap(POD_A_OPEN_TAB, 0);
-        CHECK(top() == POD_V_TAB && pod_scroll_pitch(&U.nav) == 84 && pod_scroll_max(&U.nav, &U.model) == 1);   // seven rows fit under the status bar
+        CHECK(top() == POD_V_TAB && pod_scroll_pitch(&U.nav) == 112 && pod_scroll_max(&U.nav, &U.model) == 4);   // four whole rows fit (a fifth peeks)
         ucontact(true, 360, 600, &c);
         ucontact(true, 360, 500, &c);                   // 100 px: one row
         CHECK(c && U.nav.stack[U.nav.depth - 1].scroll == 1);
-        ucontact(true, 360, 0, &c);                     // clamped at 8 - 7
-        CHECK(U.nav.stack[U.nav.depth - 1].scroll == 1);
+        ucontact(true, 360, 0, &c);                     // clamped at 8 - 4
+        CHECK(U.nav.stack[U.nav.depth - 1].scroll == 4);
         ucontact(false, 360, 0, &c);
         render();
-        CHECK(hit(POD_A_OPEN_AGENT, 1) != NULL && hit(POD_A_OPEN_AGENT, 7) != NULL && hit(POD_A_OPEN_AGENT, 0) == NULL);
+        CHECK(hit(POD_A_OPEN_AGENT, 4) != NULL && hit(POD_A_OPEN_AGENT, 7) != NULL && hit(POD_A_OPEN_AGENT, 3) == NULL);
     }
 }
 
@@ -648,8 +670,8 @@ static void grid_drag(int dy, int holds) {   // DOWN at y 600, the move in four 
 
 static void drag_follows_and_snaps(void) {
     many_tabs();                                        // nine covers: two pages
-    CHECK(pod_scroll_pitch(&U.nav) == 560 && pod_scroll_max(&U.nav, &U.model) == 2);
-    CHECK(U.frame.hit_count == 6 && hit(POD_A_OPEN_TAB, 4) != NULL && hit(POD_A_OPEN_TAB, 5) == NULL && !U.frame.tabs_moving);
+    CHECK(pod_scroll_pitch(&U.nav) == PAGE_PX && pod_scroll_max(&U.nav, &U.model) == 2);
+    CHECK(U.frame.hit_count == 6 + 1 && hit(POD_A_OPEN_TAB, 4) != NULL && hit(POD_A_OPEN_TAB, 5) == NULL && !U.frame.tabs_moving);
     bool c;
     ucontact(true, 360, 600, &c);
     ucontact(true, 360, 590, &c);                       // 10 px: still a tap
@@ -660,23 +682,24 @@ static void drag_follows_and_snaps(void) {
     render(); CHECK(U.frame.tabs_off == 300);
     CHECK(U.nav.stack[0].scroll == 0);                  // the resting page changes at the release
     CHECK(hit(POD_A_OPEN_TAB, 5) != NULL && hit(POD_A_OPEN_TAB, 2) != NULL && U.frame.hit_count <= 32);   // both pages, tappable
-    for (int i = 0; i < U.frame.hit_count; i++) CHECK(U.frame.hits[i].y >= 54 && U.frame.hits[i].y + U.frame.hits[i].h <= 720);
+    for (int i = 0; i < U.frame.hit_count; i++)   // the covers stay between the bar (88) and the footer (628); the bell is the bar's
+        if (U.frame.hits[i].action != POD_A_INBOX) CHECK(U.frame.hits[i].y >= 88 && U.frame.hits[i].y + U.frame.hits[i].h <= 628);
     CHECK(S.count <= HT_RUNS);
     ucontact(true, 360, 280, &c); render(); CHECK(U.frame.tabs_off == 320);   // follows on, dy = -320
     for (int k = 0; k < 8; k++) ucontact(true, 360, 280, &c);   // the finger rests: no flick
     ucontact(false, 360, 280, &c);
     CHECK(c && U.nav.stack[0].scroll == 2 && top() == POD_V_TABS && U.nav.depth == 1);   // past the middle: page 1, a drag is not a tap
     render();
-    int steps = settle(+1, 560);
+    int steps = settle(+1, PAGE_PX);
     CHECK(steps >= 5);
     render();
-    CHECK(hit(POD_A_OPEN_TAB, 0) == NULL && hit(POD_A_OPEN_TAB, 5) != NULL && hit(POD_A_OPEN_TAB, 5)->y == 104 && hit(POD_A_OPEN_TAB, 7) != NULL);
+    CHECK(hit(POD_A_OPEN_TAB, 0) == NULL && hit(POD_A_OPEN_TAB, 5) != NULL && hit(POD_A_OPEN_TAB, 5)->y == 113 && hit(POD_A_OPEN_TAB, 7) != NULL);
     // Back down, slowly, less than half a page: it returns to page 1.
     grid_drag(200, 8);                                  // the finger down 200 px: offset 360
-    render(); CHECK(U.frame.tabs_off == 560 - 200);
+    render(); CHECK(U.frame.tabs_off == PAGE_PX - 200);
     ucontact(false, 360, 800, &c);
     CHECK(U.nav.stack[0].scroll == 2);
-    render(); settle(+1, 560);
+    render(); settle(+1, PAGE_PX);
     // More than half down: page 0.
     grid_drag(300, 8);
     ucontact(false, 360, 900, &c);
@@ -695,7 +718,7 @@ static void flick_turns_the_page(void) {
     grid_drag(-40, 0);                                  // 40 px in 64 ms, finger still moving: 0.6 px/ms, well over 0.3
     ucontact(false, 360, 560, &c);
     CHECK(U.nav.stack[0].scroll == 2);                  // the next page though it is only 40 px away
-    render(); settle(+1, 560);
+    render(); settle(+1, PAGE_PX);
     grid_drag(60, 0);                                   // a flick down: back to page 0
     ucontact(false, 360, 660, &c);
     CHECK(U.nav.stack[0].scroll == 0);
@@ -759,11 +782,11 @@ static void grid_ends_rubber_band(void) {
     render(); settle(+1, 0);                       // back up to 0, exactly
     pod_nav_act(&U.nav, &U.model, POD_A_SCROLL, 2, now);   // the last page
     render();
-    grid_drag(-300, 8);                                 // pulled up past the last page: 560 + 300 / 3
-    render(); CHECK(U.frame.tabs_off == 660);
+    grid_drag(-300, 8);                                 // pulled up past the last page: a page + 300 / 3
+    render(); CHECK(U.frame.tabs_off == PAGE_PX + 100);
     ucontact(false, 360, 300, &c);
     CHECK(U.nav.stack[0].scroll == 2);
-    render(); settle(-1, 560);
+    render(); settle(-1, PAGE_PX);
 }
 
 static void grid_caught_while_settling(void) {
@@ -774,25 +797,25 @@ static void grid_caught_while_settling(void) {
     render();
     now += 48; render();
     int mid = shown_off();
-    CHECK(mid > 40 && mid < 560 && U.pg_mode == POD_PG_ANIM);
+    CHECK(mid > 40 && mid < PAGE_PX && U.pg_mode == POD_PG_ANIM);
     const pod_hit_t *h = hit(POD_A_OPEN_TAB, 1);
     int x = h ? h->x + 10 : 100, y = h ? h->y + 10 : 200;
     ucontact(true, x, y, &c);                           // a touch on the moving grid stops it where it is
     render();
     int held = shown_off();
-    CHECK(U.pg_mode == POD_PG_DRAG && held >= mid && held < 560);
+    CHECK(U.pg_mode == POD_PG_DRAG && held >= mid && held < PAGE_PX);
     now += 100; render();
     CHECK(shown_off() == held);
     ucontact(false, x, y, &c);                          // and lifting it again settles, without opening what is under it
-    CHECK(top() == POD_V_TABS && U.nav.depth == 1 && U.nav.stack[0].scroll == (held > 280 ? 2 : 0));
+    CHECK(top() == POD_V_TABS && U.nav.depth == 1 && U.nav.stack[0].scroll == (held > PAGE_PX / 2 ? 2 : 0));
     render();
-    settle(held > 280 ? +1 : -1, held > 280 ? 560 : 0);
+    settle(held > PAGE_PX / 2 ? +1 : -1, held > PAGE_PX / 2 ? PAGE_PX : 0);
     // A cancelled contact (the touch driver lost it) settles too.
     pod_nav_act(&U.nav, &U.model, POD_A_SCROLL, -2, now); render();   // page 0
     grid_drag(-400, 8);
     pro_app_touch_cancel();
     CHECK(U.nav.stack[0].scroll == 2 && U.pg_mode == POD_PG_ANIM);
-    render(); settle(+1, 560);
+    render(); settle(+1, PAGE_PX);
     // The screen changes under a settling grid: it ends, nothing keeps waking.
     grid_drag(60, 0);   // from page 1
     ucontact(false, 360, 660, &c);
@@ -965,7 +988,7 @@ static void ribbon_wakes(void) {
     CHECK(U.nav.stack[0].scroll == 2);
     CHECK(U.pg_mode == POD_PG_ANIM && pod_ui_wake_ms(&U, now) <= 16);   // the snap's 16 ms steps win over the bars
     render();
-    settle(+1, 560);
+    settle(+1, PAGE_PX);
     CHECK(U.nav.stack[0].scroll == 2 && U.pg_mode == POD_PG_IDLE);
     CHECK(pod_ui_wake_ms(&U, now) == 1000 - now % 1000);  // page 1: no ribbon, once a second
     CHECK(pod_ui_clock_tick(&U, now + 1000) && !pod_ui_clock_tick(&U, now + 1001));
@@ -1195,7 +1218,7 @@ static void sweep_schedule(void) {
     CHECK(pod_ui_library_page(&U, r, 1, 0, 50, 910002, &fx) == -1 && !pod_ui_sweeping(&U));
 }
 
-enum { K_TEXT = 1, K_RECT = 2 };
+enum { K_TEXT = 1, K_RECT = 2, K_RECT_AA = 4 };
 static void notice_shows_three_seconds(void) {
     setup();
     int base;
@@ -1205,13 +1228,16 @@ static void notice_shows_three_seconds(void) {
     CHECK(pod_ui_take_changed(&U));
     render();
     CHECK(S.count == base + 2);                           // the pill and its line
-    // The pill sits just above the transport bar, centred: it never covers the agent's name or the art above y = 300.
+    // The pill sits just above the transport bar, centred: it never covers the agent's name or the art above y = 300. Classic's is
+    // the toast (Regular 24, anti-aliased corners, its own transport line at 616).
+    const bool classic = U.nav.skin != POD_SKIN_CONSOLE;
+    const int ty = classic ? POD_CLASSIC_TRANSPORT_Y : POD_TRANSPORT_Y;
     for (int i = base; i < S.count; i++) {
         const ht_run_t *r = &S.runs[i];
-        int h = r->pro_kind == K_TEXT ? ht_pro_24.height : 40;
-        CHECK(r->y >= 300 && r->y + h <= POD_TRANSPORT_Y);
+        int h = r->pro_kind == K_TEXT ? (classic ? ci_rg_24.height : ht_pro_24.height) : 40;
+        CHECK(r->y >= 300 && r->y + h <= ty);
     }
-    CHECK(S.runs[base].pro_kind == K_RECT && S.runs[base].y + 40 < POD_TRANSPORT_Y && abs(S.runs[base].x * 2 + S.runs[base].w - 720) <= 1);
+    CHECK(S.runs[base].pro_kind == (classic ? K_RECT_AA : K_RECT) && S.runs[base].y + 40 == ty - 8 && abs(S.runs[base].x * 2 + S.runs[base].w - 720) <= 1);
     now += 2900; render();
     CHECK(S.count == base + 2);
     now += 200; render();
@@ -1322,7 +1348,7 @@ static void follow_from_tabs(void) {
     render();
     CHECK(top() == POD_V_RECAP && U.nav.depth == 3);
     // Back goes to the tab's list, then Tabs.
-    tap(POD_A_PANES, 0);
+    tap(POD_A_BACK, 0);
     CHECK(top() == POD_V_TAB);
     // The working agent opens on its Agent screen, in the other tab's list.
     now += 10000;
@@ -1484,7 +1510,7 @@ static void library_all(void) {
     pod_ui_library_page(&U, rows, 3, 0, 3, now, NULL);
 }
 
-// The user got to the Tabs screen with a tap (the transport's Tabs button) and went to the desktop app: the focus that
+// The user got to the Tabs screen with a tap (two Backs) and went to the desktop app: the focus that
 // follows a few seconds later is not "the user driving the device".
 static void follow_first_focus_after_opening_tabs_by_tap(void) {
     setup();
@@ -1492,7 +1518,7 @@ static void follow_first_focus_after_opening_tabs_by_tap(void) {
     tap(POD_A_OPEN_TAB, 0);
     tap(POD_A_OPEN_AGENT, 0);
     CHECK(U.nav.depth == 3);
-    tap(POD_A_TABS, 0);
+    tap(POD_A_BACK, 0); tap(POD_A_BACK, 0);        // Agent, the tab's list, Tabs
     CHECK(top() == POD_V_TABS && U.nav.depth == 1);
     now += 1500;                                  // the hand moved to the mouse
     pod_ui_focus(&U, "a2", now);
@@ -1657,9 +1683,13 @@ static void offline_member_through_the_glue(void) {
     pod_out_t o = tap(POD_A_OPEN_AGENT, 2);
     expect(o, POD_FX_AGENT_OPEN, "far");
     CHECK(top() == POD_V_AGENT && !strcmp(frame_at(2)->agent, "far"));
-    // The play button: no recording, a notice instead.
-    o = tap(POD_A_TALK, 0);
-    CHECK(o.fx == POD_FX_NONE && top() == POD_V_AGENT && !pod_ui_talking(&U));
+    // The Talk button is dimmed with no hit (the screen says why): a tap there records nothing.
+    CHECK(hit(POD_A_TALK, 0) == NULL);
+    o = tap_at(360, 668);
+    CHECK(o.fx == POD_FX_NONE && top() == POD_V_AGENT && !pod_ui_talking(&U) && R.begins == 0);
+    // A stale TALK hit (drawn before the machine went away) still meets the glue's guard: no recording, a notice instead.
+    o = tap_stale_talk();
+    CHECK(o.fx == POD_FX_NONE && top() == POD_V_AGENT && !pod_ui_talking(&U) && R.begins == 0);
     CHECK(U.notice_on && !strcmp(U.notice, "That machine is offline"));
     // The daemon stops describing it: the screen falls back to the tab's list.
     memset(mem.meta, 0, sizeof mem.meta);
@@ -1919,10 +1949,13 @@ static void pro_app_test_voice_paths(void) {
     // A gate refusal never reaches the recorder
     V.refuse = false;
     pro_app_question("a1", "Which?");
-    tap(POD_A_TALK, 0);
+    render();
+    CHECK(hit(POD_A_TALK, 0) == NULL);                         // Classic dims Talk while it asks
+    tap_stale_talk();
     CHECK(R.begins == 0 && !pod_ui_talking(&U) && !strcmp(U.notice, "Answer its question first."));
     // The tick: Talk with no recording behind it ends; a sent one (waiting) ends too
     pro_app_question_close("a1");
+    render();
     tap(POD_A_TALK, 0);
     CHECK(pod_ui_talking(&U));
     V.waiting = true;                                          // the 600 s cap stopped and sent it
@@ -2110,11 +2143,11 @@ static void notify_banner_beep_and_expiry(void) {
     CHECK(pod_ui_take_changed(&U));
     render();
     const pod_hit_t *b = banner();
-    CHECK(b && !strcmp(b->id, "a3") && b->x == 16 && b->y == POD_STATUS_H + 12 && hit(POD_A_INBOX, 0));
-    CHECK(U.frame.hits[U.frame.hit_count - 1].action == POD_A_BANNER && S.count <= HT_RUNS);
-    // Visible 6 s: the clock wakes for the expiry (200 ms left at 11100, though the second ticks at 900), then it is gone.
+    CHECK(b && !strcmp(b->id, "a3") && b->x == 16 && b->y == POD_BANNER_Y && hit(POD_A_INBOX, 0));
+    CHECK(U.frame.hits[U.frame.hit_count - 1].action == POD_A_BANNER_CLOSE && U.frame.hits[U.frame.hit_count - 2].action == POD_A_BANNER && S.count <= HT_RUNS);   // the x is on top
+    // Visible 6 s: the clock wakes for the expiry (200 ms left at 11100, though the second ticks at 900; Classic's banner timer caps the wake at 66 ms), then it is gone.
     now = 11100; render();
-    CHECK(banner() && pod_ui_wake_ms(&U, now) == 200);
+    CHECK(banner() && pod_ui_wake_ms(&U, now) == 66);
     uint32_t stamp_before = U.clock_stamp;
     CHECK(pod_ui_clock_tick(&U, now) || stamp_before != U.clock_stamp);
     now = 11299; render();
@@ -2143,7 +2176,7 @@ static void notify_banner_beep_and_expiry(void) {
     pro_app_summary("a3", "t", "restored", NULL, true, false);
     CHECK(BEEPS == 0 && U.model.unread_count == 0);
     render();
-    CHECK(banner() == NULL && hit(POD_A_INBOX, 0) == NULL);
+    CHECK(banner() == NULL && U.frame.unread == 0);   // the bell stays, its count pill does not
     // A restore that claims to notify still does not (the cable never sends that; the app does not trust it).
     pro_app_summary("a3", "t", "restored", NULL, true, true);
     CHECK(BEEPS == 0 && U.model.unread_count == 0);
@@ -2264,7 +2297,7 @@ static void notify_replace_seen_and_read(void) {
     expect(tap(POD_A_INBOX, 0), POD_FX_NONE, NULL);
     CHECK(top() == POD_V_INBOX);
     const pod_hit_t *r = hit(POD_A_OPEN_NOTIF, 0);
-    CHECK(r && r->y == POD_STATUS_H && !strcmp(r->id, "a1"));
+    CHECK(r && r->y >= 234 && r->y < 628 && !strcmp(r->id, "a1"));   // the first entry row, under any asking rows
     pod_out_t o = tap(POD_A_OPEN_NOTIF, 0);
     expect(o, POD_FX_AGENT_OPEN, "a1");
     CHECK(READS == 1 && !strcmp(READ_AGENT, "a1") && !strcmp(READ_TOKEN, "tok_a1") && U.model.unread_count == 2 && top() == POD_V_AGENT);

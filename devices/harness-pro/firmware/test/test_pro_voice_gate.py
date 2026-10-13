@@ -208,6 +208,13 @@ static void to_agent(int n) {
 static void press(void) {
     tap(POD_A_TALK, 0);
 }
+// Classic dims Talk (no hit) while an agent asks. A stale TALK hit, drawn before that, still
+// reaches the app's voice gate, which is what these replays check.
+static void press_stale(void) {
+    CHECK(U.frame.hit_count < 32);
+    U.frame.hits[U.frame.hit_count++] = (pod_hit_t){32, 624, 656, 88, POD_A_TALK, 0, {0}};
+    tap(POD_A_TALK, 0);
+}
 static_assert(A_VOICE == 9, "A_VOICE value 9 is Pod's plain voice");
 static bool recording_for(const char *id) { return REC.active && REC.recording && !strcmp(REC.agent, id); }
 
@@ -246,7 +253,8 @@ static void question_agent_says_why(void) {
     situation(); to_agent(1);
     pro_app_question("a2", "Which one?");
     render();
-    press();
+    CHECK(!hit(POD_A_TALK, 0));
+    press_stale();
     CHECK(!REC.active && REC.starts == 0 && top() == POD_V_AGENT);
     CHECK(U.notice_on && !strcmp(U.notice, "Answer its question first."));
 }
@@ -263,10 +271,11 @@ static void busy_cable_says_why(void) {   // the cable is still carrying the las
     mic_opens();
     tap(POD_A_TALK, 0);                   // Done: the clip goes; its reply is awaited
     CHECK(pro_voice_waiting() && top() == POD_V_TALK && U.nav.sending);
-    press();                              // the voice screen is sending: a tap on it starts nothing
+    tap_at_(360, 400);                    // the voice screen is sending: a tap on it starts nothing (Classic draws no TALK hit then)
     CHECK(REC.starts == 1 && top() == POD_V_TALK && !U.notice_on);
     pro_app_turn("a1", "started", "", 0); // the turn begins before the reply: back on the Agent screen
     CHECK(top() == POD_V_AGENT);
+    render();
     press();                              // a new press while the last one is on the wire
     CHECK(REC.starts == 1 && top() == POD_V_AGENT);
     CHECK(U.notice_on && !strcmp(U.notice, "Still sending the last message"));
@@ -313,6 +322,7 @@ static void send_and_reply(void) {
     CHECK(top() == POD_V_TALK);
     pro_app_turn("a1", "started", "", 0);                    // the daemon's real turn: the Agent screen, working
     CHECK(top() == POD_V_AGENT && !U.nav.sending);
+    render();
     press();                               // the next recording starts
     CHECK(REC.starts == 2 && recording_for("a1"));
 }
@@ -398,6 +408,7 @@ static void voice_link_drop_ends_talk(void) {
     pro_app_link(true, "mac");
     pro_app_agents(ROWS, 3);
     machines("online", "online");
+    render();
     press();
     CHECK(recording_for("a1"));
 }

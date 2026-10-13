@@ -67,6 +67,7 @@ typedef struct {
     int bx, by, side;      // the square
     int ox, oy;            // where the scene's top-left sits
     unsigned z;            // zoom in eighths
+    uint32_t ground;       // 0xRRGGBB the listening waves fade toward
 } ctx_t;
 
 static void rect_in(const ctx_t *c, int *x, int *y, int w, int h)
@@ -111,7 +112,10 @@ static void put_wave(const ctx_t *c, const ht_pet_scene_t *e, int side, int k, u
     if (a < 0.12f) { pod_arc(c->s, cx16, cy16, 0, 0, 0, 0, 0); return; }
     int r16 = round_pos((float)w->r_far16 - (float)(w->r_far16 - w->r_near16) * u);
     unsigned rgb[3];
-    for (int i = 0; i < 3; i++) rgb[i] = (unsigned)round_pos(255.0f - (255.0f - (float)w->rgb[i]) * a);   // fades to the white glass
+    for (int i = 0; i < 3; i++) {   // fades to the ground (white glass by default)
+        float g = (float)((c->ground >> (16 - 8 * i)) & 255);
+        rgb[i] = (unsigned)round_pos(g - (g - (float)w->rgb[i]) * a);
+    }
     pod_arc(c->s, cx16, cy16, sc(r16, c->z), imax(1, sc(w->w16, c->z)), side ? 180 : 0, w->half_deg,
             ht_rgb(rgb[0] << 16 | rgb[1] << 8 | rgb[2]));
 }
@@ -152,7 +156,7 @@ static extent_t scene_extent(const ht_pet_scene_t *e, unsigned level)
     extent_t u = {0x7fff, 0x7fff, -0x7fff, -0x7fff};
     for (unsigned n = 0; n < 24 + 128; n++) {
         uint32_t clock_ms = n < 24 ? n * e->step_ms : (n - 24) * 41u;
-        ctx_t c = {&scratch, -4000, -4000, 8000, 0, 0, 8};
+        ctx_t c = {&scratch, -4000, -4000, 8000, 0, 0, 8, 0xffffff};
         scratch.count = 0;
         play_scene(&c, e, level, scene_clock_step(e, clock_ms), clock_ms);
         for (int i = 0; i < scratch.count; i++) {
@@ -319,13 +323,18 @@ bool pod_pet_draw_loop(ht_scene_t *s, int x, int y, int side, const char *engine
 {
     const ht_pet_t *pet = pod_pet_for(engine);
     if (!pet || state >= HT_PET_STATES) return false;
-    ctx_t c = {s, x, y, side, x, y, 8};
+    ctx_t c = {s, x, y, side, x, y, 8, 0xffffff};
     play_rest(&c, pet, state, clock_ms);
     return true;
 }
 
 void pod_pet_draw(ht_scene_t *s, int x, int y, int side, const char *engine, pod_scene_t scene,
                   uint32_t clock_ms, uint32_t started_ms)
+{
+    pod_pet_draw_on(s, x, y, side, engine, scene, clock_ms, started_ms, 0xffffff);
+}
+void pod_pet_draw_on(ht_scene_t *s, int x, int y, int side, const char *engine, pod_scene_t scene,
+                     uint32_t clock_ms, uint32_t started_ms, uint32_t ground_rgb)
 {
     const ht_pet_t *pet = pod_pet_for(engine);
     if (!pet) {   // the logo, big, on a pale box; a light mark (Cursor's) on a dark one, else it would vanish
@@ -336,7 +345,7 @@ void pod_pet_draw(ht_scene_t *s, int x, int y, int side, const char *engine, pod
         if (!pod_logo_draw(s, mx, my, size, engine)) pod_mark_default_big(s, mx, my, size, ht_rgb(0xf0f4f0));
         return;
     }
-    ctx_t c = {s, x, y, side, x, y, 8};
+    ctx_t c = {s, x, y, side, x, y, 8, ground_rgb};
     const ht_pet_scene_t *e = scene_of(pet, scene);
     if (!e) {
         ht_pet_state_t state = HT_PET_IDLE;

@@ -53,6 +53,9 @@ for t in "$here"/test_pod_*.c; do
     "$out/$name"
 done
 
+cc "${cflags[@]}" -o "$out/test_ci_chrome" "$here/test_ci_chrome.c" "${objs[@]}"
+"$out/test_ci_chrome"
+
 cc "${cflags[@]}" -o "$out/test_cs_views" "$here/test_cs_views.c" "${objs[@]}"
 "$out/test_cs_views"
 cc "${cflags[@]}" -o "$out/test_cs_glue" "$here/test_cs_glue.c" "${objs[@]}"

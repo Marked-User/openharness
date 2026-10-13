@@ -13,6 +13,10 @@ bool pod_cell(ht_scene_t *s, int x, int y, const ht_cell_frame_t *f, unsigned zo
 bool pod_arc(ht_scene_t *s, int cx16, int cy16, int r16, int w16, int mid_deg, int half_deg, uint16_t ink);
 // A top-to-bottom gradient in a rect rounded like ht_pro_rect.
 bool pod_grad(ht_scene_t *s, int x, int y, int w, int h, int radius, uint16_t top, uint16_t bottom);
+// The same with anti-aliased corners (the coverage of ht_pro_rect_aa), blended onto what is under them. One run.
+void pod_grad_aa(ht_scene_t *s, int x, int y, int w, int h, int radius, uint16_t top, uint16_t bottom);
+// Classic only: a square gradient whose every row is a neutral grey (r = b, g = 2r + 1), dithered between the two nearest levels, so RGB565 rounding shows neither a tint nor a step.
+void pod_grad_gray(ht_scene_t *s, int x, int y, int w, int h, uint16_t top, uint16_t bottom);
 // A filled triangle, vertices in sixteenths of a px (either winding), anti-aliased across a 1 px ramp centred on each
 // edge. ink is native RGB565. False (nothing added) for a degenerate triangle or a coordinate beyond +-1023 px.
 bool pod_tri(ht_scene_t *s, int x0, int y0, int x1, int y1, int x2, int y2, uint16_t ink);

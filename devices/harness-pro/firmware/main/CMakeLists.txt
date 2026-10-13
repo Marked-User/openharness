@@ -33,6 +33,8 @@ idf_component_register(
         "display/pro_canvas.c"
         "display/terminal.c"
         "display/scroll.c"
+        "pod/classic/ci_chrome.c"
+        "pod/classic/ci_connection.c"
         "pod/classic/pod_chrome.c"
         "pod/classic/pod_view_agent.c"
         "pod/classic/pod_view_inbox.c"

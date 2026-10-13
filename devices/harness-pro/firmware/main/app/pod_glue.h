@@ -172,6 +172,8 @@ bool pod_ui_updating(const pod_ui_t *);
 #define POD_BANNER_MS 6000
 #define POD_BANNER_SWIPE_PX 40
 // `awake`: the glass is lit. A dark one is not looking, even when it rests on that agent's screen.
+// When the current banner started (it shows for POD_BANNER_MS); the banner draw reads it for its timer line.
+uint32_t pod_ui_banner_shown_ms(const pod_ui_t *);
 bool pod_ui_notify(pod_ui_t *, const char *agent_id, bool awake, uint32_t now_ms);
 // notif.replace: begin (clears the list), one row per item, end. The banner is not shown for these.
 void pod_ui_notif_begin(pod_ui_t *);

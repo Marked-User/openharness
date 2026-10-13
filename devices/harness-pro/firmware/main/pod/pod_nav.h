@@ -49,7 +49,8 @@ typedef enum {
     POD_A_OPEN_NOTIF,   // arg: index into model->unread, from the Inbox: open that agent (an Agent/Recap frame over the Inbox) and mark it read
     POD_A_ATTENTION,    // Console chip: follow to the next asking agent after the current one, in Recent order (wraps; none: nothing)
     POD_A_FOLLOW,       // arg: index into model->agents: open that agent from anywhere (Inbox rows with no unread entry); the glue resolves the id
-    POD_A_SCROLL        // arg: signed delta added to the top frame's scroll (clamped to >= 0): rows, whatever the screen draws as one.
+    POD_A_SCROLL,       // arg: signed delta added to the top frame's scroll (clamped to >= 0): rows, whatever the screen draws as one.
+    POD_A_BANNER_CLOSE  // hit only: the banner's x. The glue ends the banner and keeps its unread entry; the nav ignores it. Wins over POD_A_BANNER.
 } pod_action_t;
 
 typedef enum { POD_FX_NONE, POD_FX_VOICE_BEGIN, POD_FX_VOICE_END, POD_FX_VOICE_ABORT, POD_FX_AGENT_OPEN } pod_effect_t;
@@ -80,4 +81,7 @@ int pod_nav_list(const pod_nav_t *, const pod_model_t *, const pod_agent_t *out[
 // Recent; the TAB frame's scroll shows the agent's row. Not a task: Recent does not change. Emits no AGENT_OPEN: the
 // host already is there. Does nothing for an unknown agent, while TALK is on top, or when the agent is already open.
 // Returns true when the stack changed.
+// The label of the top frame's Back, from the frame below it: "Recent" (came from the Recent list), the tab's name
+// (a tab list), "Tabs" (the root), "Inbox", else "Back". The pointer is into the model (or a literal): valid until the next model change.
+const char *pod_nav_origin(const pod_nav_t *, const pod_model_t *);
 bool pod_nav_follow(pod_nav_t *, pod_model_t *, const char *agent_id, uint32_t now_ms);

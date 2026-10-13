@@ -1103,7 +1103,138 @@ static void tab_cards_page(void) {
     CHECK(U.nav.depth == depth && top()->scroll > 0);
 }
 
+// ---- Classic index (Task 4) ----------------------------------------------------------------------------------
+
+// The Classic Talk view will register one full-screen TALK hit while listening; until it does, the tests add it.
+static void add_hit_front(int x, int y, int w, int h, pod_action_t a) {   // first in the list: the worst order for priority
+    CHECK(U.frame.hit_count < sizeof U.frame.hits / sizeof U.frame.hits[0]);
+    memmove(&U.frame.hits[1], &U.frame.hits[0], U.frame.hit_count * sizeof U.frame.hits[0]);
+    memset(&U.frame.hits[0], 0, sizeof U.frame.hits[0]);
+    U.frame.hits[0].x = (int16_t)x; U.frame.hits[0].y = (int16_t)y; U.frame.hits[0].w = (int16_t)w; U.frame.hits[0].h = (int16_t)h;
+    U.frame.hits[0].action = a;
+    U.frame.hit_count++;
+}
+static void classic_listen(void) {   // Classic, a1 open and recording; the frame carries the full-screen send hit
+    fresh(POD_SKIN_CLASSIC);
+    to_agent(0, 0);
+    render(1000);
+    const pod_hit_t *talk = find(POD_A_TALK);
+    CHECK(talk);
+    CHECK(tap_(talk->x + talk->w / 2, talk->y + talk->h / 2, 1000).fx == POD_FX_VOICE_BEGIN && top()->view == POD_V_TALK);
+    render(1200);
+    U.frame.hit_count = 0;   // the Talk view registers this one hit alone while listening
+    add_hit_front(0, 88, 720, 632, POD_A_TALK);
+}
+
+static void test_classic_listen_tap_anywhere_sends(void) {
+    classic_listen();
+    pod_out_t o = tap_(360, 400, 2000);
+    CHECK(o.fx == POD_FX_VOICE_END && !strcmp(o.agent, "a1") && U.nav.sending);
+    classic_listen();   // a tap in a corner of the area too, and a drag out is not a tap
+    CHECK(t_(true, 20, 700, 2000).fx == POD_FX_NONE);
+    CHECK(t_(false, 20, 700, 2050).fx == POD_FX_VOICE_END);
+    classic_listen();
+    t_(true, 360, 300, 2000); t_(true, 360, 400, 2030);
+    CHECK(t_(false, 360, 500, 2060).fx != POD_FX_VOICE_END);
+}
+
+static void test_classic_side_button_discards(void) {
+    // pro_app.c's side button calls the nav's abort path: POD_A_TABS from TALK, and a contact cancel.
+    classic_listen();
+    pod_out_t o = pod_nav_act(&U.nav, &U.model, POD_A_TABS, 0, 1500);
+    CHECK(o.fx == POD_FX_VOICE_ABORT && !strcmp(o.agent, "a1") && top()->view == POD_V_TABS && !U.nav.sending);
+    classic_listen();   // a contact cancelled mid-listen never sends
+    t_(true, 360, 400, 2000);
+    CHECK(pod_ui_touch_cancel(&U).fx != POD_FX_VOICE_END);
+    CHECK(t_(false, 360, 400, 2050).fx == POD_FX_NONE);
+}
+
+static void test_classic_listen_tap_offline_discards(void) {
+    classic_listen();
+    ((pod_agent_t *)pod_model_find(&U.model, "a1"))->state = POD_OFFLINE;
+    pod_out_t o = tap_(360, 400, 2000);
+    CHECK(o.fx == POD_FX_VOICE_ABORT && !strcmp(o.agent, "a1") && !pod_ui_talking(&U));
+    CHECK(U.notice_on && !strcmp(U.notice, "That machine is offline"));
+}
+
+static void test_banner_close_keeps_unread(void) {
+    fresh(POD_SKIN_CLASSIC);
+    to_agent(0, 0);
+    CHECK(pod_ui_notify(&U, "a3", true, 1000));
+    render(1000);
+    pod_hit_t card0 = *find(POD_A_BANNER);
+    const pod_hit_t *ban = &card0;
+    CHECK(U.ban_on);
+    int cx = ban->x + ban->w - 40, cy = ban->y + 30;   // inside the card
+    add_hit_front(cx - 22, cy - 22, 44, 44, POD_A_BANNER_CLOSE);
+    int unread = U.model.unread_count, depth = U.nav.depth;
+    CHECK(unread > 0);
+    pod_out_t o = tap_(cx, cy, 1100);
+    CHECK(o.fx == POD_FX_NONE && !U.ban_on && U.model.unread_count == unread && U.nav.depth == depth && !strcmp(top()->agent, "a1"));
+    // Elsewhere on the card still opens the agent.
+    fresh(POD_SKIN_CLASSIC);
+    to_agent(0, 0);
+    CHECK(pod_ui_notify(&U, "a3", true, 1000));
+    render(1000);
+    pod_hit_t card = *find(POD_A_BANNER);   // a copy: add_hit_front shifts the list
+    add_hit_front(card.x + card.w - 62, card.y + 8, 44, 44, POD_A_BANNER_CLOSE);
+    o = tap_(card.x + 60, card.y + card.h / 2, 1100);
+    CHECK(o.fx == POD_FX_AGENT_OPEN && !strcmp(o.agent, "a3"));
+}
+
+// The banner over a moving Tabs grid (Classic): the page flick is still settling, the x is on the frame (the glue picks it before
+// the card), and a tap on it closes the banner with the entry still unread, opens nothing and leaves the page where it was going.
+static void test_banner_over_tabs_drag(void) {
+    fresh(POD_SKIN_CLASSIC);
+    static const char *ids3[] = {"a1", "a2", "a3"};
+    const char *const *ids[8] = {ids3, ids3, ids3, ids3, ids3, ids3, ids3, ids3};
+    uint8_t cnt[8] = {3, 3, 3, 3, 3, 3, 3, 3};
+    cable_swarm_t it[8] = {{"s1", "T1", 3, 3}, {"s2", "T2", 3, 3}, {"s3", "T3", 3, 3}, {"s4", "T4", 3, 3},
+                           {"s5", "T5", 3, 3}, {"s6", "T6", 3, 3}, {"s7", "T7", 3, 3}, {"s8", "T8", 3, 3}};
+    pod_model_swarms(&U.model, it, ids, cnt, 8, "s1", NULL, 0);
+    pod_ui_set_skin(&U, POD_SKIN_CLASSIC);
+    CHECK(top()->view == POD_V_TABS && pod_tabs_pages_of(&U.nav, &U.model) == 2);
+    CHECK(pod_ui_notify(&U, "a3", true, 1000));
+    render(1000);
+    CHECK(U.ban_on && find(POD_A_BANNER_CLOSE));
+    swipe(360, 500, 360, 200, 1100);   // a flick up to page 1: the grid settles
+    CHECK(U.pg_mode == POD_PG_ANIM);
+    render(1200);
+    CHECK(U.frame.tabs_moving && U.frame.banner);
+    const pod_hit_t *x = find(POD_A_BANNER_CLOSE);
+    CHECK(x && &U.frame.hits[U.frame.hit_count - 1] == x);
+    pod_hit_t cl = *x;
+    const int page = top()->scroll, unread = U.model.unread_count, depth = U.nav.depth;
+    CHECK(page > 0 && unread > 0);
+    pod_out_t o = tap_(cl.x + cl.w / 2, cl.y + cl.h / 2, 1250);
+    CHECK(o.fx == POD_FX_NONE && !U.ban_on && U.model.unread_count == unread && U.nav.depth == depth && top()->view == POD_V_TABS);
+    CHECK(top()->scroll == page);   // the page did not move
+    render(1400);
+    CHECK(!U.frame.banner && !find(POD_A_BANNER_CLOSE) && top()->scroll == page);
+}
+
+static void test_banner_timer_wakes_66ms(void) {
+    fresh(POD_SKIN_CLASSIC);
+    to_agent(0, 0);
+    calm();
+    render(1000);
+    uint32_t before = pod_ui_wake_ms(&U, 1000);
+    CHECK(pod_ui_notify(&U, "a3", true, 1000));
+    CHECK(pod_ui_banner_shown_ms(&U) == 1000);
+    render(1000);
+    CHECK(U.ban_on && pod_ui_wake_ms(&U, 1000) <= 66);
+    CHECK(pod_ui_wake_ms(&U, 1010) <= 66);
+    U.ban_on = false;
+    CHECK(pod_ui_wake_ms(&U, 1000) == before);
+}
+
 int main(void) {
+    test_classic_listen_tap_anywhere_sends();
+    test_classic_side_button_discards();
+    test_classic_listen_tap_offline_discards();
+    test_banner_close_keeps_unread();
+    test_banner_timer_wakes_66ms();
+    test_banner_over_tabs_drag();
     overview_pages();
     bottom_up_goes_back();
     bottom_start_sideways_is_a_pane_swipe();

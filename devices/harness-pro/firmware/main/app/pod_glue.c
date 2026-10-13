@@ -46,17 +46,22 @@ void pod_ui_render(pod_ui_t *u, ht_scene_t *scene, uint32_t now_ms)
     pod_render(&u->frame, &u->nav, &u->model, now_ms);
     if (u->frame.banner) {   // over everything, with the hit on top
         if (u->nav.skin == POD_SKIN_CONSOLE) cs_toast(&u->frame, &u->model, ban, now_ms);
-        else pod_banner(&u->frame, &u->model, ban, now_ms);
+        else pod_banner(&u->frame, &u->model, ban, pod_ui_banner_shown_ms(u), now_ms);
     }
     if (u->notice_on && (int32_t)(now_ms - u->notice_until) >= 0) u->notice_on = false;
     if (u->notice_on && u->model.linked) {
-        // Two runs: the dark pill and its white line. Present or absent is a different state, each constant.
-        int w = ht_pro_width(&ht_pro_24, u->notice);
-        if (w > 600) w = 600;
-        int pw = w + 40;
-        const int ny = POD_TRANSPORT_Y - 8 - 40;   // just above the transport bar; the agent's name is up top
-        ht_pro_rect(scene, (POD_W - pw) / 2, ny, pw, 40, 20, ht_rgb(u->notice_bad ? 0xb3261e : 0x111111));
-        ht_pro_text(scene, (POD_W - w) / 2, ny + 7, w, &ht_pro_24, ht_rgb(0xffffff), u->notice);
+        // Two runs: the pill and its line. Present or absent is a different state, each constant.
+        const bool classic = u->nav.skin != POD_SKIN_CONSOLE;
+        // Classic: the mockup's toast (Regular 24, 12 px padding, radius 7, at most 604 wide) just above its transport bar.
+        const ht_pro_font_t *font = classic ? &ci_rg_24 : &ht_pro_24;
+        int w = ht_pro_width(font, u->notice);
+        if (w > (classic ? 580 : 600)) w = classic ? 580 : 600;
+        int pw = w + (classic ? 24 : 40);
+        const int ny = (classic ? POD_CLASSIC_TRANSPORT_Y : POD_TRANSPORT_Y) - 8 - 40;   // just above the transport bar; the agent's name is up top
+        const uint16_t bg = ht_rgb(u->notice_bad ? 0xb3261e : classic ? 0x25372f : 0x111111);
+        if (classic) ht_pro_rect_aa(scene, (POD_W - pw) / 2, ny, pw, 40, 7, bg);
+        else ht_pro_rect(scene, (POD_W - pw) / 2, ny, pw, 40, 20, bg);
+        ht_pro_text(scene, (POD_W - w) / 2, ny + (classic ? (40 - font->height) / 2 : 7), w, font, ht_rgb(0xffffff), u->notice);
     }
     u->seen_revision = u->model.revision;
     u->dirty = false;
@@ -416,10 +421,10 @@ pod_out_t pod_ui_touch(pod_ui_t *u, bool down, int x, int y, uint32_t now_ms, bo
         u->anchor_y = y;
         u->scroll_px = 0;
         u->pg_dy = u->pg_vel = 0;
-        // Console has no transport line: a contact from anywhere may swipe sideways. One that starts in the bottom zone is a
+        // Console has no transport line (Classic's starts at POD_CLASSIC_TRANSPORT_Y): a contact from anywhere may swipe sideways. One that starts in the bottom zone is a
         // swipe up (BACK) or sideways (panes), decided on the lift by which direction dominates.
         const bool console = u->nav.skin == POD_SKIN_CONSOLE;
-        u->sw_ok = !u->hands_free && swipes(u) && (console || y < POD_TRANSPORT_Y);
+        u->sw_ok = !u->hands_free && swipes(u) && (console || y < POD_CLASSIC_TRANSPORT_Y);
         const pod_view_t tv = top(u)->view;
         u->edge = !u->hands_free && console && u->nav.depth > 1 && tv != POD_V_TALK &&
                   y >= (tv == POD_V_TAB || tv == POD_V_INBOX ? POD_LIST_BOTTOM_Y : POD_BOTTOM_Y);
@@ -437,12 +442,19 @@ pod_out_t pod_ui_touch(pod_ui_t *u, bool down, int x, int y, uint32_t now_ms, bo
             u->pg_mode = POD_PG_IDLE;
         }
         // The later hit is drawn on top of the earlier ones.
-        for (int i = (int)u->frame.hit_count - 1; i >= 0; i--)
-            if (inside(&u->frame.hits[i], x, y)) {
-                u->hit = u->frame.hits[i];
-                u->hit_valid = true;
-                break;
-            }
+        // Priority: the banner's x sits inside the card's POD_A_BANNER hit, so it is looked for first, whatever the order
+        // the views added them in. Every other hit: the last added wins.
+        int pick = -1;
+        if (u->frame.banner)
+            for (int i = (int)u->frame.hit_count - 1; i >= 0 && pick < 0; i--)
+                if (u->frame.hits[i].action == POD_A_BANNER_CLOSE && inside(&u->frame.hits[i], x, y)) pick = i;
+        if (pick < 0)
+            for (int i = (int)u->frame.hit_count - 1; i >= 0; i--)
+                if (inside(&u->frame.hits[i], x, y)) { pick = i; break; }
+        if (pick >= 0) {
+            u->hit = u->frame.hits[pick];
+            u->hit_valid = true;
+        }
         if (u->hands_free && pod_ui_talking(u)) {   // the send tap is the whole screen's, even before Talk is drawn (u->frame is the old screen's)
             memset(&u->hit, 0, sizeof u->hit);
             u->hit.w = POD_W;
@@ -450,7 +462,7 @@ pod_out_t pod_ui_touch(pod_ui_t *u, bool down, int x, int y, uint32_t now_ms, bo
             u->hit.action = POD_A_TALK;
             u->hit_valid = true;
         }
-        if (u->hit_valid && u->hit.action == POD_A_BANNER) {   // the banner takes the whole contact: no scroll, no swipe, no tap through it
+        if (u->hit_valid && (u->hit.action == POD_A_BANNER || u->hit.action == POD_A_BANNER_CLOSE)) {   // the banner takes the whole contact: no scroll, no swipe, no tap through it
             u->ban_touch = true;
             u->sw_ok = false;
             if (u->pg_mode == POD_PG_DRAG && pg_on(u)) pg_release(u, now_ms, false);   // a grid caught mid-settle lets go
@@ -532,7 +544,10 @@ pod_out_t pod_ui_touch(pod_ui_t *u, bool down, int x, int y, uint32_t now_ms, bo
         int dx = x - u->start_x, dy = y - u->start_y;
         *changed = true;
         if (dy <= -POD_BANNER_SWIPE_PX && iabs(dx) < -dy) { u->ban_on = false; return none; }
-        if (u->ban_on && iabs(dx) <= POD_TAP_SLOP && iabs(dy) <= POD_TAP_SLOP && inside(&u->hit, x, y)) return banner_open(u, now_ms);
+        if (u->ban_on && iabs(dx) <= POD_TAP_SLOP && iabs(dy) <= POD_TAP_SLOP && inside(&u->hit, x, y)) {
+            if (u->hit.action == POD_A_BANNER_CLOSE) { u->ban_on = false; return none; }   // the x: end it, keep the unread entry, open nothing
+            return banner_open(u, now_ms);
+        }
         return none;
     }
     if (was && u->bar) {   // Console: a swipe down from the command bar opens the Inbox (and is not a crumb tap); on the Inbox, nothing
@@ -666,6 +681,8 @@ pod_out_t pod_ui_tick(pod_ui_t *u, uint32_t now_ms)
 
 // ---- voice and clock ---------------------------------------------------------------------------------------
 
+uint32_t pod_ui_banner_shown_ms(const pod_ui_t *u) { return u->ban_until - POD_BANNER_MS; }
+
 bool pod_ui_talking(const pod_ui_t *u)
 {
     const pod_frame_t *f = top(u);
@@ -749,7 +766,10 @@ static uint32_t edge_ms(const pod_ui_t *u, uint32_t now_ms)
         int32_t left = (int32_t)(u->ban_until - now_ms);
         if (left < 1) left = 1;
         if ((uint32_t)left < edge) edge = (uint32_t)left;
-        if (u->nav.skin == POD_SKIN_CONSOLE && edge > 33 && u->model.linked && !pod_ui_talking(u) && !u->ota) edge = 33;   // the toast's timer line shrinks (only while it is drawn)
+        if (u->model.linked && !pod_ui_talking(u) && !u->ota) {   // the timer line shrinks (only while the banner is drawn): Console 33 ms, Classic 66
+            uint32_t cap = u->nav.skin == POD_SKIN_CONSOLE ? 33 : 66;
+            if (edge > cap) edge = cap;
+        }
     }
     if (bar_mark(u)) {   // the bar's working mark: a new height every POD_CS_ANIM_MS on every Console screen, only while someone runs
         uint32_t beat = POD_CS_ANIM_MS - now_ms % POD_CS_ANIM_MS;

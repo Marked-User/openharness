@@ -212,6 +212,7 @@ pod_out_t pod_nav_act(pod_nav_t *n, pod_model_t *m, pod_action_t a, int arg, uin
     }
     case POD_A_NONE:
     case POD_A_BANNER:
+    case POD_A_BANNER_CLOSE:
         break;
     }
     return out_none();
@@ -339,4 +340,17 @@ bool pod_nav_follow(pod_nav_t *n, pod_model_t *m, const char *agent_id, uint32_t
     opened(m, a->id);
     pod_nav_flip_recaps(n, m);
     return true;
+}
+
+const char *pod_nav_origin(const pod_nav_t *n, const pod_model_t *m) {
+    if (n->depth < 2) return "Back";
+    const pod_frame_t *p = &n->stack[n->depth - 2];
+    if (p->view == POD_V_TABS) return "Tabs";
+    if (p->view == POD_V_INBOX) return "Inbox";
+    if (p->view != POD_V_TAB) return "Back";
+    if (p->tab == POD_TAB_RECENT) return "Recent";
+    if (p->tab_id[0])   // the id names the tab; the index is only a cache
+        for (int i = 0; i < m->tab_count; i++) if (!strcmp(m->tabs[i].id, p->tab_id)) return m->tabs[i].name[0] ? m->tabs[i].name : "Back";
+    if (p->tab >= 0 && p->tab < m->tab_count && m->tabs[p->tab].name[0]) return m->tabs[p->tab].name;
+    return "Back";
 }
