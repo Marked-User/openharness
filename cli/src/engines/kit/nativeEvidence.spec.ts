@@ -60,11 +60,11 @@ it('reads bounded EOF and refuses an oversized, missing or nonregular process re
 it('permits an explicit bounded physical Stop probe count without renewing its deadline', () => {
   let now = 0
   vi.spyOn(performance, 'now').mockImplementation(() => now)
-  const budget = new NativeEvidenceBudget(3000, 256)
-  for (let index = 0; index < 256; index++) expect(budget.probe()).toBe(3000)
+  const budget = new NativeEvidenceBudget(3000, 320)
+  for (let index = 0; index < 320; index++) expect(budget.probe()).toBe(3000)
   expect(() => budget.probe()).toThrow('probe limit')
-  const expired = new NativeEvidenceBudget(3000, 256)
+  const expired = new NativeEvidenceBudget(3000, 320)
   now = 3001
   expect(() => expired.probe()).toThrow('deadline')
-  for (const limit of [0, -1, 257, Infinity, 1.5]) expect(() => new NativeEvidenceBudget(3000, limit)).toThrow('budget is invalid')
+  for (const limit of [0, -1, 321, Infinity, 1.5]) expect(() => new NativeEvidenceBudget(3000, limit)).toThrow('budget is invalid')
 })

@@ -226,6 +226,7 @@ for (const mode of ['active', 'released', 'lost-close-reply', 'detached-survivor
     const file = join(p.directory, 'registry.json'), image = JSON.stringify([row])
     writeFileSync(file, image, { mode: 0o600 })
     const owner: NativePhysicalStopOwner = {
+      budget: new NativeEvidenceBudget(3000, 320),
       source: { target: nativeTurnTarget(row), controlFingerprint: creationFingerprint(row.nativeControl) },
       engines: [{ ...witness, namespace: witness.namespace! }],
       allocations: [witness.allocation!],

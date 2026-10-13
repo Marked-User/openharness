@@ -28,7 +28,7 @@ function fixture() {
   })
   const dead = vi.fn(async () => true), readPane = vi.fn(async () => 'absent' as const)
   const closePane = vi.fn(async (_pane, _budget, verify: () => void) => { verify() })
-  const owner: NativePhysicalStopOwner = { source: { target: 'b'.repeat(64), controlFingerprint: 'c'.repeat(64) },
+  const owner: NativePhysicalStopOwner = { budget: new NativeEvidenceBudget(3000, 320), source: { target: 'b'.repeat(64), controlFingerprint: 'c'.repeat(64) },
     engines: [engine], allocations: [allocation], verify: vi.fn(), verifyAllocations: vi.fn(), current: vi.fn() }
   const stop = createNativePhysicalStop({ roots: ['/fixture/registry', '/fixture/receipts'], helpers, scope, dead, readPane, closePane })
   const consume = vi.fn((proof: NativeArchiveStopProof) => { proof.verifyStopped(); proof.current(); return 'retired' })
@@ -93,8 +93,8 @@ it('proves every original engine and never substitutes the new allocation for th
 })
 
 it.each([
-  { engines: [] }, { engines: Array(5).fill(engine) }, { engines: [{ ...engine, namespace: 'foreign' }] },
-  { allocations: Array(5).fill(allocation) }, { allocations: [allocation, allocation] },
+  { engines: [] }, { engines: Array(7).fill(engine) }, { engines: [{ ...engine, namespace: 'foreign' }] },
+  { allocations: Array(6).fill(allocation) }, { allocations: [allocation, allocation] },
   { allocations: [{ ...allocation, pane: 'invalid' }] }, { source: { target: 'invalid', controlFingerprint: 'c'.repeat(64) } },
 ])('rejects incomplete or ambiguous ownership before effects %#', async fields => {
   const f = fixture()
@@ -333,7 +333,7 @@ it('contains a rejected async retirement continuation after revoking its proof',
     expect(unhandled).not.toHaveBeenCalled()
   } finally { process.off('unhandledRejection', unhandled) }
 })
-it('covers four active-to-released allocations and four engines within one bounded Darwin probe budget', async () => {
+it('covers confirmed and pending allocations with all six engines within one bounded Darwin probe budget', async () => {
   let charged = 0
   const charge = (budget: NativeEvidenceBudget, count: number) => { for (let i = 0; i < count; i++) { budget.probe(); charged++ } }
   const calls = new Map<string, number>()
@@ -348,10 +348,23 @@ it('covers four active-to-released allocations and four engines within one bound
     },
     closePane: async (_pane, budget, verify) => { verify(); charge(budget, 1) },
   })
-  const f = fixture(), owner = { ...f.owner, engines: Array.from({ length: 4 }, (_, i) => ({ ...engine, pid: 42 + i })),
-    allocations: Array.from({ length: 4 }, (_, i) => ({ ...allocation, pane: `%${i}` })) }
+  const f = fixture(), owner = { ...f.owner, engines: Array.from({ length: 6 }, (_, i) => ({ ...engine, pid: 42 + i })),
+    allocations: Array.from({ length: 5 }, (_, i) => ({ ...allocation, pane: `%${i}` })) }
   await expect(stop(owner, f.consume)).resolves.toBe('retired')
-  expect(charged).toBe(228); expect(f.consume).toHaveBeenCalledOnce()
+  expect(charged).toBe(289); expect(f.consume).toHaveBeenCalledOnce()
+})
+
+it('accounts identical pane numbers separately on different original server incarnations', async () => {
+  const f = fixture(), another = { ...allocation, endpoint: { ...allocation.endpoint,
+    server: { ...allocation.endpoint.server, birth: '1300' } } }
+  await expect(f.stop({ ...f.owner, allocations: [allocation, another] }, f.consume)).resolves.toBe('retired')
+  expect(f.readPane.mock.calls.map(call => (call as unknown[])[0])).toEqual([allocation, another])
+})
+
+it('refuses aliases of the same server and pane before any physical work', async () => {
+  const f = fixture(), alias = { ...allocation, endpoint: { ...allocation.endpoint, socket: '/fixture/socket-alias' } }
+  await expect(f.stop({ ...f.owner, allocations: [allocation, alias] }, f.consume)).rejects.toThrow('pane ownership is ambiguous')
+  expect(f.scope).not.toHaveBeenCalled(); expect(f.closePane).not.toHaveBeenCalled(); expect(f.consume).not.toHaveBeenCalled()
 })
 
 it('refuses an already resolved async consumer instead of silently accepting its result', async () => {

@@ -22,7 +22,7 @@ export class NativeEvidenceBudget {
   private bytes = 16 * 1024 * 1024
   private probes: number
   constructor(timeoutMs = NATIVE_EVIDENCE_MS, probeLimit = 64) {
-    if (!Number.isSafeInteger(probeLimit) || probeLimit < 1 || probeLimit > 256) nativeUnavailable('the native process probe budget is invalid')
+    if (!Number.isSafeInteger(probeLimit) || probeLimit < 1 || probeLimit > 320) nativeUnavailable('the native process probe budget is invalid')
     this.probes = probeLimit
     this.deadline = performance.now() + timeoutMs
   }

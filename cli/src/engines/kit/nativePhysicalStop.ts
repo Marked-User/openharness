@@ -5,8 +5,9 @@ import type { NativeArchiveStopProof } from '../../lib/nativeArchive.js'
 import { nativePaneAllocationArgs, type NativePaneAllocation, NATIVE_PANE_ALLOCATION_OPTION } from '../../lib/nativePaneAllocation.js'
 import { HARNESS_OWNER_OPTION } from '../../lib/harnessSessionLabel.js'
 import { NATIVE_LAUNCH_MARKER } from '../../lib/nativePaneHold.js'
+import { NATIVE_ALLOCATION_LIMIT } from '../../lib/nativeAllocation.js'
 import { probeNativeProcessControl, type NativeControlHelpers } from '../../lib/nativeProcessControlProbe.js'
-import { NativeEvidenceBudget, NATIVE_EVIDENCE_MS, nativeText, nativeUnavailable } from './nativeEvidence.js'
+import { NativeEvidenceBudget, nativeText, nativeUnavailable } from './nativeEvidence.js'
 import { nativeHookScope, type NativeHookScope } from './nativeHookScope.js'
 import { nativeHookWriterDead, validNativeHookWriter, type NativeHookWriter } from './nativeHookWriter.js'
 
@@ -16,6 +17,10 @@ export interface NativeStopAllocation extends NativePaneAllocation {
   readonly endpoint: { readonly binary: string; readonly socket: string; readonly server: NativeHookWriter }
 }
 export interface NativePhysicalStopOwner {
+  /** Created before allocation selection; neither physical work nor its reply
+   * timer may renew the original deadline or replenish consumed work. A later
+   * attempt needs fresh selection, not another use of an expired owner. */
+  readonly budget: NativeEvidenceBudget
   readonly source: NativeArchiveStopProof['source']
   /** Complete original engine obligations, selected by durable allocation
    * references. An unknown engine cannot be omitted from this list. */
@@ -129,10 +134,7 @@ export function createNativePhysicalStop({ roots, helpers, scope = nativeHookSco
     const result = async (): Promise<T> => {
       let occupied = false, active = true, expired = false, timer: ReturnType<typeof setTimeout> | undefined
       const retained: NativeHookScope[] = []
-      // Four allocations can each race from active to released during close.
-      // Darwin's scope-bracketed server/engine checks then need up to 228
-      // subprocess probes. Keep the same absolute three-second deadline.
-      const budget = new NativeEvidenceBudget(NATIVE_EVIDENCE_MS, 256)
+      const budget = input.budget
       const source = Object.freeze({ ...input.source }), engines = structuredClone(input.engines), allocations = structuredClone(input.allocations)
       const { verify: verifyOwner, verifyAllocations, current: ownerCurrent } = input
       const current = () => {
@@ -149,11 +151,12 @@ export function createNativePhysicalStop({ roots, helpers, scope = nativeHookSco
       const work = async (): Promise<T> => {
         try {
           if (!/^[a-f0-9]{64}$/.test(source.target) || !/^[a-f0-9]{64}$/.test(source.controlFingerprint)
-            || !engines.length || engines.length > 4 || engines.some(engine => !validNativeHookWriter(engine))
-            || allocations.length > 4 || !locations.length || locations.length > 2
+            || !engines.length || engines.length > NATIVE_ALLOCATION_LIMIT + 2 || engines.some(engine => !validNativeHookWriter(engine))
+            || allocations.length > NATIVE_ALLOCATION_LIMIT + 1 || !locations.length || locations.length > 2
             || locations.some(root => !isAbsolute(root)) || new Set(locations).size !== locations.length) return held('original ownership is incomplete')
           allocations.forEach(validAllocation)
-          if (new Set(allocations.map(allocation => allocation.pane)).size !== allocations.length) return held('pane ownership is ambiguous')
+          if (new Set(allocations.map(({ endpoint, pane }) => JSON.stringify([endpoint.server.boot, endpoint.server.namespace,
+            endpoint.server.pid, endpoint.server.birth, pane]))).size !== allocations.length) return held('pane ownership is ambiguous')
           current()
           if (running >= 4) return held('physical evidence slots are occupied')
           running++; occupied = true

@@ -24,7 +24,7 @@ mutations = [
     ('cleanup can outlive original deadline', "budget.step(); ownerCurrent(); budget.step()\n          if (expired || closed)", "ownerCurrent();\n          if (expired || closed)", 'deadline again after retained descriptor cleanup'),
     ('final scope can change storage', 'before.boot !== final.boot || before.namespace !== final.namespace || before.storage !== final.storage', 'before.boot !== final.boot || before.namespace !== final.namespace', 'changed final local storage'),
     ('async consumer becomes accepted retirement', "if (answer && (typeof answer === 'object' || typeof answer === 'function') && typeof (answer as { then?: unknown }).then === 'function')", 'if (false)', 'already resolved async consumer'),
-    ('old probe count permanently holds admitted workload', 'new NativeEvidenceBudget(NATIVE_EVIDENCE_MS, 256)', 'new NativeEvidenceBudget(NATIVE_EVIDENCE_MS)', 'four active-to-released allocations'),
+    ('old probe count permanently holds admitted workload', 'const budget = input.budget', 'const budget = new NativeEvidenceBudget()', 'all six engines within one bounded Darwin probe budget'),
 ]
 environment = {**os.environ, 'TZ': 'UTC', 'TMPDIR': '/tmp'}
 for key in list(environment):

@@ -865,6 +865,44 @@ compaction and activation remain excluded. Implementation/review ran about
 22:29–22:43 UTC October 13, with overlapping validation through 22:44. Merge,
 publication and external waiting remain zero.
 
+Physical Stop now selects the complete retained ownership set before any effect:
+every admitted original receipt, a separate revoked pending R, their original
+source and witnessed engine incarnations, and the latest non-null Cancel owner.
+Unknown original scope or pane provenance holds; neither null Cancel nor a missing
+witness discharges an older obligation. Only an exact known-not-dispatched receipt
+can account for a pending launch without a witness. Admitted launches require their
+witness. Deduplication uses the whole process incarnation and server/pane identity,
+so endpoint aliases cannot conceal a conflicting pane lifetime.
+
+Four confirmed receipts and a separate pending request can retain six engines and
+five panes. The bounded complete Darwin path consumes at most 289 subprocess
+probes, within an explicit 320-probe allowance; other readers retain their default
+64. The selector creates the budget before cloning or receipt reads and passes
+that exact object through physical I/O, the reply timer and descriptor cleanup.
+A slow selection cannot grant physical work another three seconds. Expired replies
+retain actual I/O slots. Independent receipt verification survives intentional
+source retirement and is separate from the Registry/Store fence.
+
+Types and all 211 cases in seven complete files pass, including installed-writer
+and private-tmux cases, former receipt compatibility and architecture
+(`20261013T225848.047138Z-26241`, 25.1/47.4 seconds). The initial aggregate remains
+failed: its typecheck passed but the evidence constructor still capped explicit
+probe counts at 256, rejecting the new 320-probe producer. Independent review also
+caught a refreshed reply deadline and duplicate receipt verification; both are
+corrected with composed cold-receipt/physical retirement and stalled-I/O tests.
+
+Healthy mutation baselines pass. Twenty-one of twenty-two selector/composition
+faults fail assertions in `20261013T230156.845383Z-44269` (22.4 seconds); the remaining
+positive case initially raised a plain hold. Its explicit success assertion now
+catches that fault. Corrected healthy/fault evidence, the affected former physical
+budget fault, types and the complete final selector file pass in
+`20261013T230246.991035Z-47771` (11.8 seconds). Runtime and compatibility goldens are
+unchanged between these gates. Review approved the corrected source conditional
+on these completed gates. Initial creation, same-pane lifetime transfer,
+proof-backed compaction and public activation remain excluded. Implementation and
+review ran approximately 22:44–23:04 UTC October 13 with validation overlapping;
+merge, publication and external waiting remain zero.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R
