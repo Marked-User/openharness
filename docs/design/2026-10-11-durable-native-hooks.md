@@ -672,6 +672,42 @@ completed gates. Implementation/review ran approximately 20:44–20:57 UTC Octob
 13; validation overlapped through 20:59. Merge, publication and external waiting
 remain zero. Physical Stop and activation remain outside this scoped approval.
 
+The former completion and Resume cleanup golden was recorded before sharing
+their five-part receipt validation, in its own commit `1034bfdcc`. It pins Linux
+and Darwin, prohibits host binaries and uses disposable private files. Its
+unchanged verification and types pass (`20261013T210502.204684Z-2606`, 5.6/9.4
+seconds). The shared reader retains the primary, claim, result, confirmation and
+process records, including exact absences, confirms durability and performs later
+verification without repeated fsync. Contradictory in-memory outcomes still
+revoke the proof.
+
+The physical adapter can now account for a cancelled request or a durable
+`NATIVE_REARM_NOT_DISPATCHED` result through that same reader. A bare cancelled-ID
+tombstone covers Cancel between R and receipt publication, but supplies only an
+ID dispatch veto: it exposes no invented request data and requires the caller's
+separately retained exact R. None of these outcomes proves the old engine dead.
+A claimed allocation with no witness remains unknown.
+
+The first affected run passed 335 cases and failed ten new fixture calls that
+passed functions instead of plain request data
+(`20261013T210850.255853Z-15382`, types 28.1 seconds, tests 93.5 seconds). All
+positive and negative calls were corrected. The complete three receipt/golden
+files pass 200 cases with passing types
+(`20261013T211041.741025Z-20640`, 4.8/56.5 seconds); the other three full files
+in the earlier run passed 145 lifecycle/recovery/architecture cases. Complete
+mutation baselines and ten assertion-failing variants passed in
+`20261013T211155.150851Z-25082` (70.5 seconds). One positive fixture needed an
+explicit assertion before dereferencing its proof; its corrected healthy case
+and mutant pass (`20261013T211354.108942Z-32521`, 1.7 seconds). All eleven faults
+are caught by assertions against unchanged production source. Failed receipts
+remain failed evidence, and the golden is unchanged.
+
+Independent review approved this extraction and reader over `1034bfdcc`,
+conditional on those completed gates. Implementation/review ran approximately
+21:04–21:12 UTC October 13; validation overlapped through 21:14. Merge,
+publication and external waiting remain zero. Physical production wiring and
+activation are still excluded. Current main remains `ce68e2fac`.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R

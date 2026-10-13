@@ -60,6 +60,14 @@ export interface NativeResumeCleanupProof {
   verify(): void
 }
 
+/** Accounts only for the new allocation. A cancelled-ID tombstone does not
+ * store a request: the caller must separately retain the exact original R.
+ * Neither kind proves that R's old engine has exited. */
+export interface NativeRelaunchNotDispatchedProof {
+  readonly kind: 'cancelled-id' | 'cancelled-request' | 'not-dispatched'
+  verify(): void
+}
+
 /** An undispatched request can be recovered. A claimed request cannot: even a
  * dead owner may have left a live child, or changed a project before it died. */
 type IntentReceipt = {
@@ -433,34 +441,30 @@ export class AgentCreationReceipts {
       || receipt.fingerprint !== expected.fingerprint || creationFingerprint(receipt.request) !== creationFingerprint(expected.request)) {
       throw new AgentCreationReceiptError('CREATION_CONFLICT')
     }
-    const files = [this.file(id), ...(['claim', 'result', 'confirmation', 'process'] as const).map(part => this.intentFile(id, part))]
-    const retained = files.map(file => inspectHookFile(file, 0o600))
-    if (creationFingerprint(JSON.parse(retained[0].content!)) !== creationFingerprint(receipt)) {
-      throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
-    }
-    const claim: IntentClaim | null = JSON.parse(retained[1].content ?? 'null')
-    const verify = () => {
-      for (const part of retained) part.verify()
-      // A late contradictory effect whose result could not be saved remains
-      // authoritative in memory too. Compatible uncertainty cannot undo success.
-      const known = this.intentResults.get(id)
-      if (known && (known.fingerprint !== receipt.fingerprint || known.token !== claim?.token
-        || known.outcome.state !== 'unconfirmed' && creationFingerprint(known.outcome) !== creationFingerprint(status))) {
-        throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
-      }
-    }
-    // Validate one coherent image, then retain every original file and absence.
-    // Recursively reading status inside each durability callback repeated fsyncs
-    // hundreds of times and exhausted recovery's deadline on healthy receipts.
-    const status = this.intentStatus(id, receipt, false)
-    verify()
+    const proof = this.retainNativeRelaunchReceipt(id, receipt), { status, verify } = proof
     if (status.state !== 'created' || status.agentId !== expected.request.agentId || status.resumed !== true
-      || retained[3].content === null || retained[4].content === null) throw new AgentCreationReceiptError('CREATION_CONFLICT')
-    for (let index = 0; index < files.length; index++) if (retained[index].content !== null) {
-      inspectNativeControlFile(files[index], this.directory).confirm(verify)
-    }
-    verify()
+      || !proof.confirmation || !proof.process) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    proof.confirm()
     return Object.freeze({ outcome: Object.freeze({ ...status }), verify })
+  }
+
+  /** Cancel before receipt publication leaves an immutable ID tombstone. A
+   * claimed launch without a witness is still uncertain, never undispatched. */
+  readNativeRelaunchNotDispatched(id: string, input: NativeRelaunchRequest): NativeRelaunchNotDispatchedProof {
+    const expected = structuredClone(input), receipt = this.read(id)
+    if (!nativeRelaunchRequest(id, expected.request) || !/^[a-f0-9]{64}$/.test(expected.fingerprint)
+      || receipt?.version !== 2 || !('cancelled' in receipt)
+        && (receipt.fingerprint !== expected.fingerprint || creationFingerprint(receipt.request) !== creationFingerprint(expected.request))) {
+      throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    }
+    const proof = this.retainNativeRelaunchReceipt(id, receipt)
+    const kind = 'cancelled' in receipt && proof.status.state === 'cancelled' ? 'cancelled-id'
+      : proof.claim?.kind === 'cancel' && proof.status.state === 'cancelled' ? 'cancelled-request'
+      : proof.claim?.kind === 'dispatch' && proof.result?.outcome.state === 'failed'
+        && proof.result.outcome.error === 'NATIVE_REARM_NOT_DISPATCHED' && proof.status.state === 'failed' ? 'not-dispatched' : null
+    if (!kind || proof.confirmation || proof.process) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    proof.confirm()
+    return Object.freeze({ kind, verify: proof.verify })
   }
 
   /** A completed Resume can finish metadata after its engine exits. An early
@@ -489,39 +493,52 @@ export class AgentCreationReceipts {
     if (receipt.fingerprint !== fingerprint || creationFingerprint(receipt.request) !== creationFingerprint(request)) {
       throw new AgentCreationReceiptError('CREATION_CONFLICT')
     }
-    const status = this.intentStatus(id, receipt, false), claim = this.claim(id)
-    const result = this.readIntentPart<IntentResult>(this.intentFile(id, 'result'))
-    const confirmation = this.readIntentPart<IntentConfirmation>(this.intentFile(id, 'confirmation'))
-    const process = this.readIntentPart<IntentProcess>(this.intentFile(id, 'process'))
+    const proof = this.retainNativeRelaunchReceipt(id, receipt), { status, claim, result, confirmation, process, verify } = proof
     const created = status.state === 'created' && status.agentId === link.agentId && status.resumed === true
       && !!confirmation && !!process
     const undispatched = !confirmation && !process && (claim?.kind === 'cancel' && status.state === 'cancelled'
       || claim?.kind === 'dispatch' && result?.outcome.state === 'failed'
         && result.outcome.error === 'NATIVE_REARM_NOT_DISPATCHED' && status.state === 'failed')
     if (!created && !undispatched) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    proof.confirm()
+    return Object.freeze({ link, request, kind: created ? 'created' : 'not-dispatched', outcome: Object.freeze({ ...status }), verify })
+  }
+
+  private retainNativeRelaunchReceipt(id: string, receipt: IntentReceipt) {
     const files = [this.file(id), ...(['claim', 'result', 'confirmation', 'process'] as const).map(part => this.intentFile(id, part))]
-    const values = [receipt, claim, result, confirmation, process]
-    const retained = files.map((file, index) => {
-      const proof = inspectHookFile(file, 0o600)
-      if (creationFingerprint(proof.content === null ? null : JSON.parse(proof.content)) !== creationFingerprint(values[index])) {
-        throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
-      }
-      return proof
-    })
+    const retained = files.map(file => inspectHookFile(file, 0o600))
+    if (creationFingerprint(JSON.parse(retained[0].content ?? 'null')) !== creationFingerprint(receipt)) {
+      throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
+    }
+    const claim: IntentClaim | null = JSON.parse(retained[1].content ?? 'null')
+    const result: IntentResult | null = JSON.parse(retained[2].content ?? 'null')
+    const confirmation: IntentConfirmation | null = JSON.parse(retained[3].content ?? 'null')
+    const process: IntentProcess | null = JSON.parse(retained[4].content ?? 'null')
+    // Validate one coherent image, then retain every original file and absence.
+    // Recursively reading status inside durability callbacks exhausted recovery's
+    // deadline on healthy receipts. Later verification performs no fsync.
+    const status = this.intentStatus(id, receipt, false)
     const verify = () => {
       for (const part of retained) part.verify()
-      if (creationFingerprint(this.intentStatus(id, receipt, false)) !== creationFingerprint(status)) {
+      // A late effect whose result could not be saved remains authoritative in
+      // memory. Compatible uncertainty cannot undo an already confirmed success.
+      const known = this.intentResults.get(id)
+      if (known && ('cancelled' in receipt || claim?.kind !== 'dispatch' || known.fingerprint !== receipt.fingerprint
+        || known.token !== claim.token || creationFingerprint(known.outcome) !== creationFingerprint(status)
+          && !(status.state === 'created' && known.outcome.state === 'unconfirmed'))) {
         throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
       }
-      for (const part of retained) part.verify()
-    }
-    // Observing a peer's rename is not durability. Confirm each present part
-    // while retaining the original claim/result and every recorded absence.
-    for (let index = 0; index < files.length; index++) if (retained[index].content !== null) {
-      inspectNativeControlFile(files[index], this.directory).confirm(verify)
     }
     verify()
-    return Object.freeze({ link, request, kind: created ? 'created' : 'not-dispatched', outcome: Object.freeze({ ...status }), verify })
+    const confirm = () => {
+      // Observing a peer's rename is not durability. Confirm each present part
+      // while retaining the original claim/result and every recorded absence.
+      for (let index = 0; index < files.length; index++) if (retained[index].content !== null) {
+        inspectNativeControlFile(files[index], this.directory).confirm(verify)
+      }
+      verify()
+    }
+    return { status, claim, result, confirmation, process, verify, confirm }
   }
 
   /** Only the original successful publisher may continue to exec. A matching

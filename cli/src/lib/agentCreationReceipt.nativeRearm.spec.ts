@@ -164,6 +164,96 @@ it('confirms the exact receipt files and parent before granting metadata cleanup
   expect(() => p.receipts.readNativeResumeCleanup(p.link)).toThrow('sync unavailable')
 })
 
+it.each(['cancelled', 'not-dispatched'] as const)('accounts for an exact %s allocation without another dispatch', async kind => {
+  const p = await savedCompletion(kind, 'full'), cold = new AgentCreationReceipts(p.directory)
+  const proof = cold.readNativeRelaunchNotDispatched(id, { fingerprint: p.fingerprint, request: p.request })
+  expect(proof.kind).toBe(kind === 'cancelled' ? 'cancelled-request' : 'not-dispatched')
+  const sync = vi.spyOn(fs, 'fsyncSync')
+  for (let n = 0; n < 3; n++) proof.verify()
+  expect(sync).not.toHaveBeenCalled()
+  for (const request of [{ ...p.request, launchToken: 'other-launch-token' }, { ...p.request, source: 'live' }]) {
+    expect(() => cold.readNativeRelaunchNotDispatched(id, { fingerprint: p.fingerprint, request })).toThrow('CREATION_CONFLICT')
+  }
+  expect(() => cold.readNativeRelaunchNotDispatched(id, { fingerprint: 'b'.repeat(64), request: p.request })).toThrow('CREATION_CONFLICT')
+})
+
+it('accounts for a live Restart cancellation with its exact retained request', async () => {
+  const p = fixture(), input = { fingerprint, request: { ...request, operation: 'restart', source: 'live', target: 'a'.repeat(64) } }
+  await p.receipts.runIntent(id, fingerprint, input.request, held, async () => null)
+  p.receipts.cancelIntent(id)
+  expect(new AgentCreationReceipts(p.directory).readNativeRelaunchNotDispatched(id, input).kind).toBe('cancelled-request')
+})
+
+it('a pre-receipt tombstone vetoes an allocation ID without inventing stored request data', () => {
+  const p = fixture(); p.receipts.cancelIntent(id)
+  const cold = new AgentCreationReceipts(p.directory)
+  expect(() => cold.readNativeRelaunchNotDispatched(id, { fingerprint, request })).not.toThrow()
+  const proof = cold.readNativeRelaunchNotDispatched(id, { fingerprint, request })
+  expect(proof.kind).toBe('cancelled-id'); expect(proof).not.toHaveProperty('request')
+  expect(readFileSync(p.file(), 'utf8')).toBe('{"version":2,"cancelled":true}')
+  expect(() => proof.verify()).not.toThrow()
+  expect(() => cold.readNativeRelaunchNotDispatched(id, { fingerprint, request: { ...request, creationId: 'other-request-id' } })).toThrow()
+})
+
+it.each(['pending', 'uncertain', 'generic-failure', 'direct-success', 'no-witness', 'created'] as const)(
+  'never treats %s as an undispatched allocation', async kind => {
+    const p = await savedCompletion(kind)
+    expect(() => p.receipts.readNativeRelaunchNotDispatched(id, { fingerprint: p.fingerprint, request: p.request })).toThrow()
+  })
+
+it('requires a durable not-dispatched result even when memory retained it', async () => {
+  const p = await savedCompletion('not-dispatched'); rmSync(p.file('result'))
+  expect(() => p.receipts.readNativeRelaunchNotDispatched(id, { fingerprint: p.fingerprint, request: p.request })).toThrow()
+})
+
+it.each(['', 'claim', 'result', 'confirmation', 'process'])(
+  'retains the original %s presence or absence for allocation accounting', async part => {
+    for (const mode of ['tombstone', 'cancelled', 'not-dispatched'] as const) {
+      const p = mode === 'tombstone' ? { ...fixture(), fingerprint, request } : await savedCompletion(mode)
+      if (mode === 'tombstone') p.receipts.cancelIntent(id)
+      const proof = p.receipts.readNativeRelaunchNotDispatched(id, { fingerprint: p.fingerprint, request: p.request }), path = p.file(part)
+      const bytes = fs.existsSync(path) ? readFileSync(path) : Buffer.from('{}')
+      writeFileSync(path + '.new', bytes, { mode: 0o600 }); renameSync(path + '.new', path)
+      expect(() => proof.verify(), mode + ':' + part).toThrow()
+    }
+  })
+
+it.each(['claim', 'result', 'confirmation', 'process'])('refuses an orphan %s beside a bare tombstone', part => {
+  const p = fixture(); p.receipts.cancelIntent(id)
+  writeFileSync(p.file(part), '{}', { mode: 0o600 })
+  expect(() => p.receipts.readNativeRelaunchNotDispatched(id, { fingerprint, request })).toThrow()
+})
+
+it.each(['tombstone', 'cancelled', 'not-dispatched'] as const)('confirms %s durability before allocation accounting', async kind => {
+  const p = kind === 'tombstone' ? { ...fixture(), fingerprint, request } : await savedCompletion(kind)
+  if (kind === 'tombstone') p.receipts.cancelIntent(id)
+  faults.linked = true; faults.failDirectory = true
+  expect(() => p.receipts.readNativeRelaunchNotDispatched(id, { fingerprint: p.fingerprint, request: p.request })).toThrow('sync unavailable')
+})
+
+it.each(['created', 'cancelled', 'not-dispatched'] as const)('verifies retained %s cleanup without fsync', async kind => {
+  const p = await savedCompletion(kind), proof = p.receipts.readNativeResumeCleanup(p.link), sync = vi.spyOn(fs, 'fsyncSync')
+  for (let n = 0; n < 3; n++) proof.verify()
+  expect(sync).not.toHaveBeenCalled()
+})
+
+it('revokes an undispatched proof when a late contradictory outcome exists only in memory', async () => {
+  const p = fixture()
+  let finish!: (value: AgentCreationOutcome) => void
+  const running = p.receipts.runIntent(id, fingerprint, request, held, async () => () => new Promise(resolve => { finish = resolve }))
+  const rejected = expect(running).rejects.toThrow('CREATION_STORAGE_FAILED')
+  await vi.waitFor(() => expect(finish).toBeDefined())
+  const claim = JSON.parse(readFileSync(p.file('claim'), 'utf8'))
+  writeFileSync(p.file('result'), JSON.stringify({ fingerprint, token: claim.token,
+    outcome: { state: 'failed', error: 'NATIVE_REARM_NOT_DISPATCHED' } }), { mode: 0o600 })
+  const proof = p.receipts.readNativeRelaunchNotDispatched(id, { fingerprint, request })
+  expect(proof.kind).toBe('not-dispatched'); expect(() => proof.verify()).not.toThrow()
+  finish(outcome)
+  await rejected
+  expect(JSON.parse(readFileSync(p.file('result'), 'utf8')).outcome.state).toBe('failed')
+  expect(() => proof.verify()).toThrow('CREATION_STORAGE_FAILED')
+})
+
 it('reads only the exact confirmed relaunch as successful without inspecting the engine', async () => {
   const p = await savedCompletion('created', 'full'), cold = new AgentCreationReceipts(p.directory)
   const proof = cold.readNativeRelaunchCompletion(id, { fingerprint: p.fingerprint, request: p.request })
