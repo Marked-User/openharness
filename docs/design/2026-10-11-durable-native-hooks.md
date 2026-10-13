@@ -217,6 +217,38 @@ checks; it does not approve controller recovery or activation. Implementation an
 review ran approximately 13:18–13:36 UTC on October 13, with validation overlapping;
 merge, publication and external waiting remain zero.
 
+The rearm controller now reserves complete control before its creation receipt,
+with immutable receipt compatibility checked before the store write. Recovery of
+a revoked reservation creates the missing cancellation tombstone instead of
+dispatching. Dependency preparation occupies at most four actual work slots;
+the five-second reply cannot release preparation or a running physical callback.
+Only the exclusive receipt claimant receives a one-use physical begin guard.
+Both that guard and continuing checks retain the exact original control, process,
+pane, conversation and permissions. Callback completion revokes its guard before
+recording the outcome. An effect cannot declare success; original-allocation
+reconciliation remains separate. The known-not-dispatched receipt marker is an
+internal outcome that the still-unwritten public adapter must present as held,
+never as a service-caused launch failure.
+
+Types and all 66 cases across the controller, unchanged launch golden and
+architecture pass (`20261013T140633.744336Z-37565`, 4.8 and 25.9 seconds), with
+100% statements, branches, functions and lines in the new controller. All 14
+deliberate dispatch faults fail assertions after a passing baseline
+(`20261013T140947.111713Z-56352`, 22.7 seconds). Earlier runs remain failed: they
+exposed missing coverage, a fixture's incorrect expectation for an in-flight
+receipt, and an attempted mutation of frozen test control. The first mutation run
+timed out on an unsafe capacity release; the final oracle directly asserts that
+the original physical guards remain live instead of awaiting the broken retry.
+
+Independent review approved this reservation/dispatch slice over `156b498dc`,
+conditional on those completed gates. Review corrected authority after a changed
+target, retained guards after callback return, a mutable committed-row alias and
+the ordering of the final receipt proof before the last local revocation check.
+Implementation and review ran approximately 13:37–14:11 UTC on October 13;
+validation overlapped, and merge, publication and external waiting remain zero.
+Reconciliation, both-store recovery, public held-state mapping, physical adapters
+and production activation remain required before this draft can land.
+
 October 13 recap checkpoint: the recaps port now derives a bounded summary from
 the exact answer retained for an owner and generation. Core copies the input
 before a service wait and checks the reply's generation identity, input digest
