@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { AgentCreationReceipts, creationFingerprint, type CreationAuthority } from '../../lib/agentCreationReceipt.js'
 import { nativeRearmRequest, nativeTurnTarget, nativeTurnTransition, type NativeTurnIntent } from '../../lib/nativeTurnIntent.js'
 import type { RegisteredSession } from '../../lib/registry.js'
+import { terminalRouteKey } from '../../lib/terminalRuntime.js'
 import { createNativeRearm, type NativeRearmDeps, type NativeRearmDispatch, type NativeRearmOptions } from './nativeRearm.js'
 
 const roots: string[] = []
@@ -13,7 +14,7 @@ const request = (source: 'live' | 'saved' = 'live', n = 0): NativeRearmOptions =
   creationId: `original-rearm-request-${n}`, operation: source === 'live' ? 'restart' : 'resume' })
 function session(agentId: string, active: boolean): RegisteredSession {
   const row = { schemaVersion: 3, agentId, engine: 'cursor', sessionId: `session-${agentId}`, registeredAt: 1, boundAt: 2,
-    active, cwd: '/fixture/project', transcriptPath: null, tmuxPane: '%1', primaryRuntimeKey: 'tmux:%1',
+    active, cwd: '/fixture/project', transcriptPath: null, tmuxPane: '%1', primaryRuntimeKey: terminalRouteKey({ backend: 'tmux', paneId: '%1' }),
     runtimes: [{ backend: 'tmux', paneId: '%1' }], permissionMode: 'ask',
     processIdentity: { pid: 42, executable: '<cursor>', startMarker: 'original-birth' } } as RegisteredSession
   row.nativeControl = { version: 1, cancel: { processKey: null, target: nativeTurnTarget(row), request: {

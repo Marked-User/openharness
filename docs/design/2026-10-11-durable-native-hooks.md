@@ -249,6 +249,53 @@ validation overlapped, and merge, publication and external waiting remain zero.
 Reconciliation, both-store recovery, public held-state mapping, physical adapters
 and production activation remain required before this draft can land.
 
+Original-allocation recovery now reads the recorded witness while the source
+still has its former PID and permissions. It does not publish a provisional
+binding to make the native proof fit. The proof retains the full original
+Cancel/rearm image, target and complete request together with its receipt
+fingerprint. Actual Registry composition exposed a route-key mismatch hidden by
+earlier synthetic fixtures: the primary key is `terminalRouteKey`, including its
+NUL separator, rather than the display label. Both production and fixtures now
+use that canonical key.
+
+Live replacement publication writes the proven process, requested permissions
+and admission in one image. Its full authority check runs immediately before
+rename; the exact writer descriptor, intended bytes, original parent route,
+receipt and final native deadline remain checked through directory confirmation,
+before live memory changes. A close that consumes its descriptor and then reports
+failure cannot lose the uncertain image through a second close. Equal bytes in a
+substituted inode and an in-place rewrite before stamp capture both hold.
+
+An uncertain replacement has a separate read-only recovery proof. It retains
+this Registry's exact unpublished record, written inode/image, original owner
+and original parent route; it grants no admission. A retry requires a fresh
+native observation and can confirm only that image. Reload, peer Cancel,
+substitution or changed ownership revokes the proof. The original route proof
+stays flat: eight consecutive failed-sync retries keep the same verification
+work and then recover without another dispatch.
+
+Types and 331 cases across ten files pass in
+`20261013T145537.143014Z-68744` (5.4 and 87.3 seconds), including real retained
+receipts, Registry recovery, the shipped standalone writer on private processes
+and tmux, unchanged launch/admission goldens and architecture. All twelve
+publication/recovery mutations fail assertions after their passing baselines
+(`20261013T150303.128922Z-95634`, 53.6 seconds). Earlier receipts remain failed:
+they exposed the route-key mismatch, fixture/compile errors, an expectation for
+a later peer-Cancel error, and two mutation oracles that needed explicit
+recovery assertions. The final oracle edits change no production code; their
+complete reader/storage baselines pass in the mutation receipt, and final types
+pass in `20261013T150521.438585Z-5139` (4.9 seconds).
+
+Independent review approved this proof/live-publication checkpoint over
+`1a5a46f39`, conditional on those completed checks. Review corrected pre-rename
+fencing, complete source binding, recovery from an uncertain image, final inode
+and byte confirmation, descriptor-close failure and growing retry-proof chains.
+Implementation and review ran approximately 14:13–15:05 UTC on October 13, with
+validation overlapping. Merge, publication and external waiting remain zero.
+Saved-to-live handoff, reconciliation orchestration, physical adapters, public
+held-state mapping and production activation are still required; this is not
+whole-PR approval.
+
 October 13 recap checkpoint: the recaps port now derives a bounded summary from
 the exact answer retained for an owner and generation. Core copies the input
 before a service wait and checks the reply's generation identity, input digest

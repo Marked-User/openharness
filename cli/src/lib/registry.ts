@@ -14,7 +14,7 @@
  */
 
 import { DSH_ID_RE } from '../dsh/id.js'
-import { AGENT_NAME_RE } from './engineLaunch.js'
+import { AGENT_NAME_RE, permissionModeApproves } from './engineLaunch.js'
 import { resumesConversation } from './resumeCapability.js'
 import { namingTitle } from './sessionTitle.js'
 import { transcriptProject } from '../engines/discoveries.js'
@@ -24,6 +24,7 @@ import {
   constants,
   existsSync,
   fchmodSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -58,8 +59,10 @@ import { mergeTerminalRuntimes, processIdentityKey, sameProcessIdentity, termina
 import type { HookTerminalHint, ProcessIdentity, TerminalRuntimeRef } from './terminalTypes.js'
 import { externalReservations, externalResumePending, externalResumeIds, parseExternalResume, type ExternalResumeIntent } from './externalResume.js'
 import type { StartedBy } from './agentAttribution.js'
-import { nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
+import { nativeRearmRequest, nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
 import { inspectNativeControlFile } from './nativeControlFile.js'
+import type { NativeRearmReplacementProof } from '../engines/kit/nativeRearmProof.js'
+import { creationFingerprint } from './agentCreationReceipt.js'
 
 export type { ProcessIdentity } from './terminalTypes.js'
 
@@ -500,28 +503,44 @@ const BINDING_RECOVERY_HOLD = 'Waiting for native evidence after a concurrent bi
 class RegistryOwnershipChanged extends IdentityReadUnavailable {}
 
 class AtomicWriteUnconfirmed extends Error {
-  constructor(cause: unknown) { super(cause instanceof Error ? cause.message : String(cause), { cause }) }
+  constructor(cause: unknown, readonly verifyPublished?: () => void) { super(cause instanceof Error ? cause.message : String(cause), { cause }) }
 }
 
-export function atomicWriteJson(file: string, value: unknown, exclusive = false, beforeCommit?: () => void): void {
+export function atomicWriteJson(file: string, value: unknown, exclusive = false, beforeCommit?: () => void,
+  confirm?: (verifyPublished: () => void, contents: string) => void): void {
   const exists = hardenPrivateStateFileIfPresent(file)
   if (exclusive && exists) return
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
-  let renamed = false
+  const contents = JSON.stringify(value, null, 2)
+  let renamed = false, fd: number | undefined, verifyPublished: (() => void) | undefined
+  const closeFile = () => { const opened = fd; fd = undefined; if (opened !== undefined) closeSync(opened) }
   try {
-    const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
-    try {
-      writeFileSync(fd, JSON.stringify(value, null, 2))
-      fchmodSync(fd, 0o600)
-      fsyncSync(fd)
-    } finally { closeSync(fd) }
+    fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+    writeFileSync(fd, contents)
+    fchmodSync(fd, 0o600)
+    fsyncSync(fd)
+    if (!confirm) closeFile()
     beforeCommit?.()
     renameSync(temporary, file)
     renamed = true
+    if (confirm) {
+      // Keep the actual writer descriptor through rename. Equal bytes at a
+      // substituted pathname cannot stand in for the file we just published.
+      const version = (s: import('node:fs').BigIntStats) => `${s.dev}:${s.ino}:${s.uid}:${s.mode}:${s.size}:${s.mtimeNs}:${s.ctimeNs}`
+      const published = version(fstatSync(fd!, { bigint: true }))
+      verifyPublished = () => {
+        if (version(lstatSync(file, { bigint: true })) !== published) throw new IdentityReadUnavailable('the published registry image changed')
+      }
+      closeFile()
+    }
     const directoryFd = openSync(dirname(file), 'r')
     try { fsyncSync(directoryFd) } finally { closeSync(directoryFd) }
+    confirm?.(verifyPublished!, contents)
   } catch (error) {
-    if (renamed) throw new AtomicWriteUnconfirmed(error)
+    // close(2) may have consumed the descriptor even when it reports failure.
+    // Never close that number again or replace an uncertain publication error.
+    try { closeFile() } catch { /* preserve the operation's original failure */ }
+    if (renamed) throw new AtomicWriteUnconfirmed(error, verifyPublished)
     throw error
   } finally {
     if (!renamed) rmSync(temporary, { force: true })
@@ -1089,7 +1108,9 @@ class Registry {
   // A post-rename failure is not absence. Only the same immutable binding intent,
   // unchanged local owners and these exact affected rows can confirm that write.
   private unconfirmedBinding: { image: ReturnType<typeof persistedRow>[]; prior: unknown[]; before: Map<string, string>;
-    agentId: string; intent: string | null; affected: Set<string>; sticky?: boolean } | null = null
+    agentId: string; intent: string | null; affected: Set<string>; sticky?: boolean;
+    replacement?: { target: string; controlFingerprint: string; verifyDirectory(): void; verifyPublished?: () => void } } | null = null
+  private usedNativeReplacements = new WeakSet<NativeRearmReplacementProof>()
   /**
    * Fields a caller set on purpose since the last save, by agent: written as they are now, whatever the
    * file says. The merge alone keeps the file's value wherever this view matches what it last saved, so
@@ -2398,6 +2419,44 @@ class Registry {
     return { intent, verify }
   }
 
+  /** Read-only authority to reprove an original replacement. Our unpublished
+   * image is not admission: retain its original owner, inode and parent route,
+   * then require a fresh native observation before retrying the same commit. */
+  readNativeReplacementSource(input: RegisteredSession): { verify(): void; verifyDirectory(): void } {
+    const original = structuredClone(input), target = nativeTurnTarget(original)
+    const controlFingerprint = creationFingerprint(original.nativeControl)
+    const pending = this.unconfirmedBinding, retained = inspectNativeControlFile(FILE, env.ADAPTER_DATA_DIR)
+    if (!pending?.affected.has(original.agentId)) {
+      const source = this.readNativeControl(original)
+      return { verify: () => { retained.verify(); source.verify() }, verifyDirectory: retained.verifyDirectory }
+    }
+    const replacement = pending.replacement
+    if (!pending.sticky || pending.agentId !== original.agentId || !replacement?.verifyPublished
+      || replacement.target !== target || replacement.controlFingerprint !== controlFingerprint) {
+      throw new IdentityReadUnavailable('the original replacement publication cannot be re-proven')
+    }
+    const values: unknown = retained.content === null ? null : JSON.parse(retained.content)
+    const rows = Array.isArray(values) ? validatedRows(values) : null
+    if (!rows || [...pending.affected].some(id => rowFingerprint(rows.find(row => row.agentId === id))
+      !== rowFingerprint(pending.image.find(row => row.agentId === id)))) {
+      throw new IdentityReadUnavailable('the unconfirmed replacement image changed')
+    }
+    // Keep the first parent proof flat across any number of uncertain retries.
+    // The fresh leaf proof below checks its own directory too; retaining that
+    // composition would grow a recursive verifier chain after every failed sync.
+    const verifyDirectory = replacement.verifyDirectory
+    const verify = () => {
+      verifyDirectory(); replacement.verifyPublished!(); retained.verify()
+      const current = this.byAgent(original.agentId)
+      if (this.writeBlocked || this.unconfirmedBinding !== pending || !current || nativeTurnTarget(current) !== target
+        || creationFingerprint(current.nativeControl) !== controlFingerprint) {
+        throw new IdentityReadUnavailable('the original unconfirmed replacement owner changed')
+      }
+    }
+    verify()
+    return { verify, verifyDirectory }
+  }
+
   /** This commit bypasses deferred observations and never publishes live state
    * before file and directory sync. An uncertain control image cannot roll back
    * to an earlier permission: only this exact request can confirm it. */
@@ -2419,6 +2478,66 @@ class Registry {
     const committed = this.byAgent(original.agentId)!
     this.readNativeControl(committed).verify()
     return committed
+  }
+
+  /** Replace the original live reservation in one durable image. A preliminary
+   * process/permission write would lose its exact source after a daemon crash.
+   * Saved-to-live admission needs its separate two-store ownership handoff. */
+  commitNativeReplacement(input: RegisteredSession, replacement: NativeRearmReplacementProof, fence: () => void): RegisteredSession {
+    const original = structuredClone(input), control = parseNativeTurnIntent(original.nativeControl), rearm = control?.rearm
+    const processIdentity = structuredClone(replacement.processIdentity), key = replacement.key, pane = replacement.pane
+    const { verify: verifyReplacement, verifyExecution, current: replacementCurrent } = replacement
+    const binding = { ...replacement.source }
+    const target = nativeTurnTarget(original), before = rowFingerprint(original.nativeControl)
+    const parts = key.split('\0')
+    if (original.engine !== 'cursor' || !original.sessionId || !rearm || rearm.source !== 'live' || rearm.revoked || rearm.replacement
+      || rearm.target !== target || rearm.agentId !== original.agentId || !validProcessIdentity(processIdentity)
+      || parts.length !== 4 || !parts[0] || parts[1] !== 'cursor' || parts[2] !== String(processIdentity.pid) || !parts[3]
+      || pane !== original.tmuxPane || !/^%\d+$/.test(pane) || original.runtimes.length !== 1
+      || original.runtimes[0].backend !== 'tmux' || original.runtimes[0].paneId !== pane
+      || original.primaryRuntimeKey !== terminalRouteKey(original.runtimes[0])) {
+      throw new IdentityReadUnavailable('the original live replacement reservation is unavailable')
+    }
+    const request = nativeRearmRequest(control!), fingerprint = creationFingerprint({ kind: 'native-rearm',
+      agentId: rearm.agentId, operation: rearm.operation, source: rearm.source,
+      ...(rearm.permissionMode === undefined ? {} : { permissionMode: rearm.permissionMode }),
+    })
+    if (binding.target !== target || binding.controlFingerprint !== creationFingerprint(control)
+      || binding.requestFingerprint !== creationFingerprint({ fingerprint, request })) {
+      throw new IdentityReadUnavailable('the native proof belongs to a different replacement reservation')
+    }
+    if (this.usedNativeReplacements.has(replacement)) throw new IdentityReadUnavailable('a replacement retry needs fresh native evidence')
+    this.usedNativeReplacements.add(replacement)
+    const source = this.readNativeReplacementSource(original)
+    const next = parseNativeTurnIntent({ ...control, rearm: { ...rearm,
+      replacement: { processKey: key, sessionId: original.sessionId } } })
+    if (!next || !nativeTurnTransition(original, next)) throw new IdentityReadUnavailable('the proposed native replacement is invalid')
+    const unchanged = () => {
+      const current = this.byAgent(original.agentId)
+      if (!current || nativeTurnTarget(current) !== target || rowFingerprint(current.nativeControl) !== before) {
+        throw new IdentityReadUnavailable('the original native replacement owner changed before publication')
+      }
+    }
+    const current = () => { unchanged(); fence(); replacementCurrent(); unchanged() }
+    const verify = () => { source.verify(); verifyReplacement(); current() }
+    verify()
+    const owner = this.byAgent(original.agentId)!
+    const candidate: RegisteredSession = { ...structuredClone(owner), schemaVersion: 3, nativeControl: next,
+      processIdentity, active: true, launch: { state: 'ready' },
+      ...(rearm.permissionMode === undefined ? {} : { permissionMode: rearm.permissionMode,
+        bypassPermission: permissionModeApproves(rearm.permissionMode) }),
+    }
+    this.save(true, false, undefined, { agentId: original.agentId, candidate, verify, sticky: true, replaceLive: true,
+      replacement: { target, controlFingerprint: binding.controlFingerprint, verifyDirectory: source.verifyDirectory },
+      confirm: (verifyPublished, contents) => {
+        const written = inspectNativeControlFile(FILE, env.ADAPTER_DATA_DIR)
+        if (written.content !== contents) throw new IdentityReadUnavailable('the published replacement bytes changed')
+        written.confirm(() => { verifyPublished(); source.verifyDirectory(); verifyExecution(); current() })
+      },
+    })
+    // save confirmed the actual writer inode and final authority before memory
+    // publication. The former source-file proof is intentionally invalid now.
+    return this.byAgent(original.agentId)!
   }
 
   /** Mark whether at least one backend placement was verified by this daemon process. */
@@ -2757,7 +2876,9 @@ class Registry {
 
   private save(strict = false, exiting = false, externalAgentId?: string,
     bindingCommit?: { agentId: string; candidate: RegisteredSession; verify: () => void; replaceLive?: boolean;
-      displaced?: { agentId: string; candidate: RegisteredSession | null }; sticky?: boolean },
+      displaced?: { agentId: string; candidate: RegisteredSession | null }; sticky?: boolean;
+      replacement?: { target: string; controlFingerprint: string; verifyDirectory(): void };
+      confirm?: (verifyPublished: () => void, contents: string) => void },
     mutationAgentId = externalAgentId ?? bindingCommit?.agentId): void {
     // Discovery batches observations, but a recovered binding must be durable before interpretation
     // resumes. Commit a complete batch now; an incomplete batch remains held and retries next pass.
@@ -2946,7 +3067,7 @@ class Registry {
         const rows = validatedRows(merged)
         if (!rows) throw new Error('registry transaction would violate global identity invariants')
         const serialized = rows.map(persistedRow)
-        try { atomicWriteJson(FILE, serialized) }
+        try { atomicWriteJson(FILE, serialized, false, bindingCommit?.verify, bindingCommit?.confirm) }
         catch (error) {
           if ((bindingCommit || unconfirmed) && error instanceof AtomicWriteUnconfirmed) {
             const prior = new Map(latest)
@@ -2965,6 +3086,7 @@ class Registry {
               image: JSON.parse(JSON.stringify(serialized)), prior: JSON.parse(JSON.stringify([...prior.values()])),
               agentId: bindingCommit?.agentId ?? unconfirmed!.agentId, intent: intent ?? null,
               before: beforeCommit, affected, ...((bindingCommit?.sticky || unconfirmed?.sticky) ? { sticky: true } : {}),
+              ...(bindingCommit?.replacement ? { replacement: { ...bindingCommit.replacement, verifyPublished: error.verifyPublished } } : {}),
             }
           }
           throw error

@@ -2,9 +2,12 @@ import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { AgentCreationReceipts } from '../../lib/agentCreationReceipt.js'
+import { creationFingerprint } from '../../lib/agentCreationReceipt.js'
 import { controlIdentity, type NativeControlRow } from '../../lib/nativeProcessControl.js'
 import type { ProcessEvidence } from '../../lib/processEvidence.js'
 import type { RegisteredSession } from '../../lib/registry.js'
+import { nativeTurnTarget } from '../../lib/nativeTurnIntent.js'
+import { terminalRouteKey } from '../../lib/terminalRuntime.js'
 import type { ProcessRow } from '../../lib/tmux.js'
 import { NativeEvidenceBudget } from './nativeEvidence.js'
 import { createNativeRearmProof, inspectNativeRearmPane, nativeRearmEngine, readNativeRearmPane } from './nativeRearmProof.js'
@@ -24,7 +27,7 @@ function fixture() {
     frontier: { index: -1, digest: null },
   } }, rearm: { requestId: id, agentId: 'fixture-agent', operation: 'restart', launchToken: token, target } }
   const row = { schemaVersion: 3, agentId: 'fixture-agent', engine: 'cursor', active: true, sessionId: 'fixture-session', nativeControl: control,
-    tmuxPane: '%1', primaryRuntimeKey: 'tmux:%1', runtimes: [{ backend: 'tmux', paneId: '%1' }],
+    tmuxPane: '%1', primaryRuntimeKey: terminalRouteKey({ backend: 'tmux', paneId: '%1' }), runtimes: [{ backend: 'tmux', paneId: '%1' }],
     processIdentity: { pid: 42, executable: 'cursor-agent', startMarker: 'fixture-birth' } } as RegisteredSession
   const request = { fingerprint: 'b'.repeat(64), request: { kind: 'native-rearm', creationId: id, agentId: row.agentId,
     operation: 'restart', launchToken: token, target } }
@@ -60,6 +63,62 @@ it('proves only the recorded Cursor incarnation and original direct pane placeme
   proof.verify(); expect(p.receiptProof).toHaveBeenCalledTimes(2)
   p.receiptProof.mockImplementation(() => { throw Error('witness replaced') })
   expect(proof.verify).toThrow('witness replaced')
+})
+
+function reserveRecovery(p: ReturnType<typeof fixture>, source: 'live' | 'saved') {
+  p.row.processIdentity = { pid: 41, executable: '<original-cursor>', startMarker: 'old-birth' }
+  p.row.active = source === 'live'
+  const target = nativeTurnTarget(p.row)
+  p.row.nativeControl = { ...p.row.nativeControl!, rearm: { ...p.row.nativeControl!.rearm!, source, target } }
+  Object.assign(p.request.request, { source, target })
+  return structuredClone(p.row)
+}
+
+it.each(['live', 'saved'] as const)('recovers the original %s witness without first publishing a process or permission change', async source => {
+  const p = fixture(), original = reserveRecovery(p, source), pane = source === 'live' ? '%1' : '%2'
+  const recovered = p.read.recover(p.row, p.request, p.fence, pane)
+  await expect(recovered).resolves.toMatchObject({ pane, processIdentity: { pid: 42, executable: 'cursor-agent', startMarker: 'fixture-birth' } })
+  const proof = await recovered
+  expect(p.inspect).toHaveBeenCalledWith(42, expect.any(NativeEvidenceBudget), undefined, undefined)
+  expect(p.pane).toHaveBeenCalledWith(pane, token, expect.any(NativeEvidenceBudget), owner)
+  expect(p.row).toEqual(original)
+  expect(Object.isFrozen(proof.processIdentity)).toBe(true)
+  expect(Object.isFrozen(proof.source)).toBe(true)
+  expect(proof.source).toEqual({ target: nativeTurnTarget(original), controlFingerprint: creationFingerprint(original.nativeControl),
+    requestFingerprint: creationFingerprint(p.request) })
+  expect(proof.key).toContain('\0cursor\u000042\u00004200')
+})
+
+it.each(['target', 'source', 'pane', 'route', 'display-key', 'request', 'revoked'])('refuses %s drift before recovering an original reservation', async change => {
+  const p = fixture(); reserveRecovery(p, 'live')
+  let pane = '%1'
+  if (change === 'target') p.row.permissionMode = 'full'
+  if (change === 'source') {
+    const { source: _, ...incomplete } = p.row.nativeControl!.rearm!
+    p.row.nativeControl = { ...p.row.nativeControl!, rearm: incomplete }
+    delete (p.request.request as Record<string, unknown>).source
+  }
+  if (change === 'pane') pane = '%2'
+  if (change === 'route') p.row.primaryRuntimeKey = 'tmux:%2'
+  if (change === 'display-key') p.row.primaryRuntimeKey = 'tmux:%1'
+  if (change === 'request') p.request.request.launchToken = 'different-original-token'
+  if (change === 'revoked') p.row.nativeControl = { ...p.row.nativeControl!, rearm: { ...p.row.nativeControl!.rearm!, revoked: true } }
+  await expect(p.read.recover(p.row, p.request, p.fence, pane)).rejects.toThrow('reservation or current binding')
+  expect(p.receipts.readNativeRelaunchProcess).not.toHaveBeenCalled(); expect(p.probe).not.toHaveBeenCalled()
+})
+
+it('separates the consumed source leaf from retained execution authority without extending its deadline', async () => {
+  const p = fixture(); reserveRecovery(p, 'live')
+  const proof = await p.read.recover(p.row, p.request, p.fence, '%1')
+  p.retained.mockImplementation(() => { throw Error('source leaf intentionally replaced') })
+  expect(proof.verify).toThrow('source leaf intentionally replaced')
+  expect(proof.verifyExecution).not.toThrow()
+  p.receiptProof.mockImplementation(() => { throw Error('original receipt changed') })
+  expect(proof.verifyExecution).toThrow('original receipt changed')
+  p.receiptProof.mockImplementation(() => {})
+  clock.now = 4000
+  expect(proof.current).toThrow('deadline was reached')
+  expect(proof.verifyExecution).toThrow('deadline was reached')
 })
 
 it.each(['same', 'source', 'permission', 'omitted'] as const)('proves replacement only for %s reserved launch options', async change => {

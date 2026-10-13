@@ -3,19 +3,31 @@ import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { basename } from 'node:path'
 import type { AgentCreationReceipts, CreationConfirmationFence, NativeRelaunchRequest } from '../../lib/agentCreationReceipt.js'
-import { validCreationId } from '../../lib/agentCreationReceipt.js'
+import { creationFingerprint, validCreationId } from '../../lib/agentCreationReceipt.js'
 import { enginePathOverride } from '../../lib/engineBin.js'
 import { NATIVE_LAUNCH_MARKER } from '../../lib/nativePaneHold.js'
 import { controlIdentity, nativeProcessControl, type NativeControlRow } from '../../lib/nativeProcessControl.js'
-import { parseNativeTurnIntent } from '../../lib/nativeTurnIntent.js'
+import { nativeTurnTarget, parseNativeTurnIntent } from '../../lib/nativeTurnIntent.js'
 import { readProcessEvidence } from '../../lib/processEvidence.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { argvTokens, type ProcessRow } from '../../lib/tmux.js'
 import { NativeEvidenceBudget, nativeText, nativeUnavailable } from './nativeEvidence.js'
 import { kernelBootId } from './nativeHookBoot.js'
 import type { NativeHookOwnerProof } from './nativeHookOwner.js'
+import type { ProcessIdentity } from '../../lib/terminalTypes.js'
+import { terminalRouteKey } from '../../lib/terminalRuntime.js'
 
 export interface NativeRearmPane { readonly rootPid: number; readonly command: string }
+export interface NativeRearmReplacementProof extends NativeHookOwnerProof {
+  readonly processIdentity: Readonly<ProcessIdentity>
+  readonly pane: string
+  readonly source: Readonly<{ target: string; controlFingerprint: string; requestFingerprint: string }>
+  /** Only beside the Registry's exact published-image proof. Its own rename
+   * intentionally invalidates the former source leaf, never the receipt. */
+  verifyExecution(): void
+  /** Disk-free original owner, shutdown and native-observation deadline. */
+  current(): void
+}
 const held = (reason: string): never => nativeUnavailable(`the original native replacement ${reason}`)
 
 /** Display tokens are only candidates. On an interpreter, only the digest of
@@ -89,7 +101,8 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
   probe?: typeof nativeProcessControl
 }) {
   let running = 0
-  return async (input: RegisteredSession, request: NativeRelaunchRequest, fence: CreationConfirmationFence): Promise<NativeHookOwnerProof> => {
+  const read = async (input: RegisteredSession, request: NativeRelaunchRequest, fence: CreationConfirmationFence,
+    recoveryPane?: string): Promise<NativeRearmReplacementProof> => {
     if (running >= 8) return held('evidence slots are occupied')
     if (!/^[a-f0-9]{16}$/.test(owner)) return held('daemon pane owner is invalid')
     const row = structuredClone(input), expected = structuredClone(request), budget = new NativeEvidenceBudget()
@@ -100,9 +113,13 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
     const observe = async () => {
       try {
         const control = parseNativeTurnIntent(row.nativeControl), rearm = control?.rearm, intent = expected.request
-        if (row.engine !== 'cursor' || !row.active || !row.sessionId || !row.processIdentity || !rearm || rearm.revoked
-          || row.runtimes.length !== 1 || row.runtimes[0].backend !== 'tmux' || row.runtimes[0].paneId !== row.tmuxPane
-          || row.primaryRuntimeKey !== `tmux:${row.tmuxPane}` || !/^%\d+$/.test(row.tmuxPane ?? '')
+        const recovering = recoveryPane !== undefined, selectedPane = recoveryPane ?? row.tmuxPane
+        if (row.engine !== 'cursor' || !row.sessionId || !rearm || rearm.revoked
+          || !/^%\d+$/.test(selectedPane ?? '')
+          || (recovering ? !rearm.source || nativeTurnTarget(row) !== rearm.target
+            || rearm.source === 'live' && selectedPane !== row.tmuxPane : !row.active || !row.processIdentity)
+          || (!recovering || rearm.source === 'live') && (row.runtimes.length !== 1 || row.runtimes[0].backend !== 'tmux'
+            || row.runtimes[0].paneId !== row.tmuxPane || row.primaryRuntimeKey !== terminalRouteKey(row.runtimes[0]))
           || rearm.agentId !== row.agentId || intent.kind !== 'native-rearm' || intent.creationId !== rearm.requestId
           || intent.agentId !== rearm.agentId || intent.operation !== rearm.operation || intent.target !== rearm.target
           || intent.source !== rearm.source || intent.permissionMode !== rearm.permissionMode
@@ -115,11 +132,11 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
         }
         verifyFence(); current()
         const receipt = receipts.readNativeRelaunchProcess(rearm.requestId, expected), witness = receipt.process
-        if (row.processIdentity.pid !== witness.pid) return held('process differs from the recorded exec')
+        if (!recovering && row.processIdentity!.pid !== witness.pid) return held('process differs from the recorded exec')
         const bootId = await boot(budget)
         if (bootId !== witness.boot) return held('kernel boot changed')
         current()
-        const placement = await pane(row.tmuxPane!, rearm.launchToken, budget, owner)
+        const placement = await pane(selectedPane!, rearm.launchToken, budget, owner)
         current()
         const before = await probe([placement.rootPid, witness.pid], 0, budget, false)
         current()
@@ -128,15 +145,15 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
           return held('engine is not the recorded pane child')
         }
         const rootIdentity = controlIdentity(root), evidence = controlIdentity(engine)
-        const observed = (await inspect(witness.pid, budget, undefined, row.processIdentity)).parent
+        const observed = (await inspect(witness.pid, budget, undefined, recovering ? undefined : row.processIdentity!)).parent
         current()
-        if (!observed || observed.nativeBirth !== witness.birth || observed.controlIdentity !== evidence
+        if (!observed || observed.pid !== witness.pid || observed.nativeBirth !== witness.birth || observed.controlIdentity !== evidence
           || !nativeRearmEngine(engine, observed, declared)) return held('current Cursor image could not be proven')
         const key = `${bootId}\u0000cursor\u0000${witness.pid}\u0000${witness.birth}`
         if (rearm.replacement && (rearm.replacement.processKey !== key || rearm.replacement.sessionId !== row.sessionId)) {
           return held('confirmed replacement changed')
         }
-        const placed = await pane(row.tmuxPane!, rearm.launchToken, budget, owner)
+        const placed = await pane(selectedPane!, rearm.launchToken, budget, owner)
         current()
         if (placed.rootPid !== placement.rootPid || placed.command !== placement.command) return held('pane changed during recovery')
         // One paired query is the last asynchronous observation. Never adopt a
@@ -147,9 +164,14 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
           || final.rows.get(engine.pid)!.directEntryDigest !== engine.directEntryDigest) {
           return held('pane or engine incarnation changed during recovery')
         }
+        const verifyExecution = () => { receipt.verify(); current() }
         const verify = () => { receipt.verify(); verifyFence(); current() }
         verify()
-        return Object.freeze({ key, evidence, verify })
+        const processIdentity = Object.freeze({ pid: observed.pid, executable: observed.executable,
+          startMarker: observed.startMarker, ...(observed.startTicks === undefined ? {} : { startTicks: observed.startTicks }) })
+        const source = Object.freeze({ target: nativeTurnTarget(row), controlFingerprint: creationFingerprint(control),
+          requestFingerprint: creationFingerprint(expected) })
+        return Object.freeze({ key, evidence, verify, verifyExecution, current, source, processIdentity, pane: selectedPane! })
       } finally { running--; clearTimeout(timer) }
     }
     return new Promise((resolve, reject) => {
@@ -161,4 +183,11 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
       void observe().then(resolve, reject)
     })
   }
+  return Object.assign(read, {
+    /** The source still has its old PID and permissions. Read only the receipt's
+     * original incarnation; never publish a provisional process to make it fit.
+     * A saved source's supplied pane is a candidate, proven by token and witness. */
+    recover: (source: RegisteredSession, request: NativeRelaunchRequest, fence: CreationConfirmationFence, pane: string) =>
+      read(source, request, fence, pane),
+  })
 }

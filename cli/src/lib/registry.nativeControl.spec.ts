@@ -2,35 +2,47 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { nativeTurnAdmitted, nativeTurnTarget, type NativeTurnIntent } from './nativeTurnIntent.js'
+import { nativeRearmRequest, nativeTurnAdmitted, nativeTurnTarget, type NativeTurnIntent } from './nativeTurnIntent.js'
+import { creationFingerprint } from './agentCreationReceipt.js'
 import { StoppedAgentStore } from './stoppedAgents.js'
 import { createKeepAbandonedConversation } from './keepAbandonedConversation.js'
 import type { RegisteredSession } from './registry.js'
+import type { NativeRearmReplacementProof } from '../engines/kit/nativeRearmProof.js'
 
 const fault = vi.hoisted(() => ({ file: '', rename: false, directory: false, renamed: false, inspect: undefined as (() => void) | undefined,
-  opening: undefined as ((path: string) => void) | undefined, opened: undefined as ((path: string) => void) | undefined }))
+  opening: undefined as ((path: string) => void) | undefined, opened: undefined as ((path: string) => void) | undefined,
+  synced: undefined as ((directory: boolean) => void) | undefined, closed: undefined as ((path: string) => void) | undefined,
+  published: undefined as (() => void) | undefined, now: 0, stats: 0 }))
 vi.mock('fs', async original => {
   const actual = await original<typeof import('node:fs')>()
+  const paths = new Map<number, string>()
   return { ...actual, openSync: (...args: Parameters<typeof actual.openSync>) => {
     fault.opening?.(String(args[0]))
     const fd = actual.openSync(...args)
+    paths.set(fd, String(args[0]))
     fault.opened?.(String(args[0]))
     return fd
+  }, closeSync: (fd: number) => {
+    const path = paths.get(fd) ?? ''
+    actual.closeSync(fd); paths.delete(fd)
+    fault.closed?.(path)
   }, lstatSync: (...args: Parameters<typeof actual.lstatSync>) => {
+    fault.stats++
     const result = actual.lstatSync(...args)
     if (String(args[0]) === fault.file) fault.inspect?.()
     return result
   }, renameSync: (...args: Parameters<typeof actual.renameSync>) => {
     if (String(args[1]) === fault.file && fault.rename) throw Error('fixture rename failed')
     const result = actual.renameSync(...args)
-    if (String(args[1]) === fault.file) fault.renamed = true
+    if (String(args[1]) === fault.file) { fault.renamed = true; fault.published?.() }
     return result
   }, fsyncSync: (fd: number) => {
     if (fault.directory && fault.renamed && actual.fstatSync(fd).isDirectory()) throw Error('fixture directory sync failed')
     actual.fsyncSync(fd)
+    fault.synced?.(actual.fstatSync(fd).isDirectory())
   } }
 })
-vi.mock('node:perf_hooks', async original => ({ ...await original<object>(), performance: { now: () => 0 } }))
+vi.mock('node:perf_hooks', async original => ({ ...await original<object>(), performance: { now: () => fault.now } }))
 vi.mock('./bootId.js', async original => ({ ...await original<object>(), currentBootId: () => 'fixture-boot', bootChanged: () => false }))
 vi.mock('./processLiveness.js', async original => ({ ...await original<object>(),
   processLockIdentity: () => ({ startMarker: 'fixture-start', generationMarker: 'fixture-generation' }), lockOwnerAlive: () => true,
@@ -45,7 +57,7 @@ const cancellation = (): NativeTurnIntent => ({ version: 1, cancel: { processKey
 const commit = () => registry.commitNativeControl(row, cancellation(), () => {})
 beforeEach(async () => {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'registry-native-control-'))); data = join(root, 'data'); file = join(data, 'registry.json')
-  fault.file = file; fault.rename = false; fault.directory = false; fault.renamed = false
+  fault.file = file; fault.rename = false; fault.directory = false; fault.renamed = false; fault.now = 0
   mkdirSync(data, { mode: 0o700 }); writeFileSync(join(data, 'engine-homes.json'), '{}', { mode: 0o600 })
   for (const [key, value] of Object.entries({ HOME: root, ADAPTER_DATA_DIR: data, ADAPTER_RUNTIME_DIR: join(root, 'runtime'),
     CURSOR_HOME: join(root, 'cursor'), CODEX_HOME: join(root, 'codex'), CLAUDE_CONFIG_DIR: join(root, 'claude') })) vi.stubEnv(key, value)
@@ -54,7 +66,8 @@ beforeEach(async () => {
   registry.openProcessAgent(input())
   row = registry.register({ ...input(), sessionId: 'original-session' })!.entry
 })
-afterEach(() => { fault.rename = false; fault.directory = false; fault.inspect = undefined; fault.opening = fault.opened = undefined
+afterEach(() => { fault.rename = false; fault.directory = false; fault.inspect = undefined; fault.opening = fault.opened = undefined; fault.synced = undefined
+  fault.closed = fault.published = undefined
   vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.resetModules(); rmSync(root, { recursive: true, force: true }) })
 
 it('commits the original cancellation inside a discovery batch before granting any durable proof', async () => {
@@ -208,6 +221,286 @@ it('refuses a direct confirmed replacement without its original durable reservat
   const before = readFileSync(file, 'utf8')
   expect(() => registry.commitNativeControl(row, next, () => {})).toThrow('transition is invalid')
   expect(readFileSync(file, 'utf8')).toBe(before)
+})
+
+function liveReservation(mode?: 'full') {
+  const cancelled = commit()
+  return registry.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: {
+    requestId: 'original-rearm-request', agentId: row.agentId, operation: mode ? 'resume' : 'restart', source: 'live',
+    target: nativeTurnTarget(cancelled), launchToken: 'original-launch-token', ...(mode ? { permissionMode: mode } : {}),
+  } }, () => {})
+}
+function replacementRequest(reserved: RegisteredSession) {
+  const rearm = reserved.nativeControl!.rearm!
+  const request = nativeRearmRequest(reserved.nativeControl!)!
+  const fingerprint = creationFingerprint({ kind: 'native-rearm', agentId: rearm.agentId, operation: rearm.operation,
+    source: rearm.source, ...(rearm.permissionMode === undefined ? {} : { permissionMode: rearm.permissionMode }) })
+  return { fingerprint, request }
+}
+function replacementProof(reserved = registry.byAgent(row.agentId)!): NativeRearmReplacementProof {
+  return { key: `fixture-boot\0cursor\0${43}\0precise-birth`, evidence: 'original-exec', pane: '%1',
+    processIdentity: { pid: 43, executable: '<cursor>', startMarker: 'replacement-start', startTicks: 43 }, verify: vi.fn(),
+    verifyExecution: vi.fn(), current: vi.fn(), source: { target: nativeTurnTarget(reserved),
+      controlFingerprint: creationFingerprint(reserved.nativeControl), requestFingerprint: creationFingerprint(replacementRequest(reserved)) } }
+}
+
+async function recoveryFixture(reserved: RegisteredSession) {
+  const { AgentCreationReceipts } = await import('./agentCreationReceipt.js')
+  const { createNativeRearmProof } = await import('../engines/kit/nativeRearmProof.js')
+  const { controlIdentity } = await import('./nativeProcessControl.js')
+  const receipts = new AgentCreationReceipts(join(data, 'agent-creations')), request = replacementRequest(reserved)
+  const id = reserved.nativeControl!.rearm!.requestId
+  const dispatch = vi.fn(async () => ({ state: 'unconfirmed' as const }))
+  await receipts.runIntent(id, request.fingerprint, request.request, { service: 'native', detail: 'fixture' }, async () => dispatch)
+  const boot = 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', birth = '4300'
+  receipts.recordNativeRelaunchProcess(id, request, { boot, pid: 43, birth }, { verify: () => {}, current: () => {} })
+  const engine = { pid: 43, parentPid: 10, birth, command: 'cursor-agent', imagePath: '/fixture/cursor-agent', fds: [] }
+  const shell = { pid: 10, parentPid: 2, birth: '1000', command: 'bash', imagePath: '/bin/bash', fds: [] }
+  const probe = vi.fn(async () => ({ parent: 0, children: [], rows: new Map([[10, shell], [43, engine]]) }))
+  const reader = createNativeRearmProof({ receipts, owner: 'a'.repeat(16), boot: async () => boot,
+    pane: async () => ({ rootPid: 10, command: 'original-command' }), probe,
+    inspect: async () => ({ parent: { pid: 43, parentPid: 10, nativeBirth: birth, executable: 'cursor-agent',
+      startMarker: 'replacement-start', imagePath: engine.imagePath, args: 'cursor-agent',
+      evidence: controlIdentity(engine), controlIdentity: controlIdentity(engine) },
+    children: [], verify: async () => {}, verifyDescriptors: async () => {} }),
+  })
+  let revoked = false
+  const target = nativeTurnTarget(reserved), control = creationFingerprint(reserved.nativeControl)
+  const current = () => {
+    const value = registry.byAgent(reserved.agentId)
+    if (revoked || !value || nativeTurnTarget(value) !== target || creationFingerprint(value.nativeControl) !== control) {
+      throw Error('original recovery owner revoked')
+    }
+  }
+  const fresh = () => reader.recover(reserved, request, { verify: registry.readNativeReplacementSource(reserved).verify, current }, '%1')
+  return { fresh, dispatch, probe, revoke: () => { revoked = true }, receipts, request }
+}
+
+it('reproves the original real receipt after uncertain sync without redispatch or provisional binding', async () => {
+  const reserved = liveReservation('full'), original = structuredClone(reserved), p = await recoveryFixture(reserved)
+  const proof = await p.fresh()
+  fault.directory = true; fault.renamed = false
+  expect(() => registry.commitNativeReplacement(reserved, proof, () => {})).toThrow('directory sync')
+  const written = readFileSync(file, 'utf8')
+  expect(registry.byAgent(row.agentId)).toEqual(original)
+  expect(() => registry.readNativeControl(reserved)).toThrow('durable registry confirmation')
+  fault.directory = false
+  expect(proof.verify).toThrow()
+  expect(() => registry.readNativeReplacementSource(reserved)).not.toThrow()
+  const retrySource = registry.readNativeReplacementSource(reserved), retry = await p.fresh()
+  expect(p.probe).toHaveBeenCalledTimes(4)
+  const committed = registry.commitNativeReplacement(reserved, retry, () => {})
+  expect(committed.processIdentity).toEqual(retry.processIdentity)
+  expect(committed.permissionMode).toBe('full')
+  expect(readFileSync(file, 'utf8')).toBe(written)
+  expect(retrySource.verify).toThrow()
+  expect(p.dispatch).toHaveBeenCalledOnce()
+  expect(registry.readNativeControl(committed).intent?.rearm?.replacement?.processKey).toBe(proof.key)
+})
+
+it('keeps retry proof work constant through repeated uncertain writes and then recovers', async () => {
+  const reserved = liveReservation(), p = await recoveryFixture(reserved)
+  let cost: number | undefined
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const proof = await p.fresh()
+    fault.directory = true; fault.renamed = false
+    expect(() => registry.commitNativeReplacement(reserved, proof, () => {})).toThrow('directory sync')
+    fault.directory = false
+    const source = registry.readNativeReplacementSource(reserved), before = fault.stats
+    source.verifyDirectory()
+    const reads = fault.stats - before
+    expect(reads).toBeGreaterThan(0)
+    cost ??= reads
+    expect(reads).toBe(cost)
+    expect(registry.byAgent(row.agentId)?.processIdentity?.pid).toBe(42)
+  }
+  const proof = await p.fresh()
+  expect(registry.commitNativeReplacement(reserved, proof, () => {}).processIdentity?.pid).toBe(43)
+  expect(p.dispatch).toHaveBeenCalledOnce()
+})
+
+it.each(['target', 'controlFingerprint', 'requestFingerprint'] as const)('requires the proof to retain its exact %s binding', field => {
+  const reserved = liveReservation(), proof = replacementProof(reserved), before = readFileSync(file, 'utf8')
+  const mismatched = { ...proof, source: { ...proof.source, [field]: '0'.repeat(64) } }
+  expect(() => registry.commitNativeReplacement(reserved, mismatched, () => {})).toThrow('different replacement reservation')
+  expect(readFileSync(file, 'utf8')).toBe(before)
+  expect(proof.verify).not.toHaveBeenCalled()
+})
+
+it.each(['staging', 'staging-deadline', 'confirmation', 'confirmation-deadline', 'substitute', 'receipt'] as const)(
+  'holds a real replacement revoked during %s before publishing live admission', async change => {
+    const reserved = liveReservation(), original = structuredClone(reserved), p = await recoveryFixture(reserved)
+    const proof = await p.fresh(), before = readFileSync(file, 'utf8')
+    let staging = false, changed = false
+    fault.renamed = false
+    fault.opened = path => { if (path.startsWith(file + '.') && path.endsWith('.tmp')) staging = true }
+    fault.synced = directory => {
+      if (changed || (change.startsWith('staging') ? !staging || directory : !fault.renamed || !directory)) return
+      changed = true
+      if (change.endsWith('deadline')) fault.now = 4000
+      else if (change === 'substitute') {
+        const substitute = file + '.fixture-substitute'
+        writeFileSync(substitute, readFileSync(file), { mode: 0o600 }); renameSync(substitute, file)
+      } else if (change === 'receipt') {
+        const witness = join(data, 'agent-creations', `${reserved.nativeControl!.rearm!.requestId}.json.process`)
+        writeFileSync(witness, '{}', { mode: 0o600 })
+      } else p.revoke()
+    }
+    expect(() => registry.commitNativeReplacement(reserved, proof, () => {})).toThrow()
+    expect(changed).toBe(true)
+    expect(registry.byAgent(row.agentId)).toEqual(original)
+    if (change.startsWith('staging')) expect(readFileSync(file, 'utf8')).toBe(before)
+    else expect(() => registry.readNativeControl(reserved)).toThrow('durable registry confirmation')
+    expect(p.dispatch).toHaveBeenCalledOnce()
+  },
+)
+
+it('refuses a real proof for another reservation on the same pane before consulting its callbacks', async () => {
+  const first = liveReservation(), p = await recoveryFixture(first), oldProof = await p.fresh()
+  const second = structuredClone(first)
+  second.nativeControl = { ...second.nativeControl!, rearm: { ...second.nativeControl!.rearm!,
+    requestId: 'second-rearm-request', launchToken: 'second-launch-token' } }
+  writeFileSync(file, JSON.stringify([second]), { mode: 0o600 }); registry.load()
+  const next = registry.byAgent(row.agentId)!, q = await recoveryFixture(next), newProof = await q.fresh()
+  const before = readFileSync(file, 'utf8')
+  expect(() => registry.commitNativeReplacement(next, oldProof, () => {})).toThrow('different replacement reservation')
+  expect(readFileSync(file, 'utf8')).toBe(before)
+  expect(registry.commitNativeReplacement(next, newProof, () => {}).processIdentity?.pid).toBe(43)
+})
+
+it('retains the uncertain image when closing the renamed writer reports failure after consuming its descriptor', async () => {
+  const reserved = liveReservation(), original = structuredClone(reserved), p = await recoveryFixture(reserved), proof = await p.fresh()
+  fault.renamed = false
+  fault.closed = path => { if (fault.renamed && path.startsWith(file + '.') && path.endsWith('.tmp')) throw Error('writer close failed') }
+  expect(() => registry.commitNativeReplacement(reserved, proof, () => {})).toThrow('writer close failed')
+  expect(registry.byAgent(row.agentId)).toEqual(original)
+  expect(() => registry.readNativeControl(reserved)).toThrow('durable registry confirmation')
+  fault.closed = undefined
+  const retry = await p.fresh()
+  expect(registry.commitNativeReplacement(reserved, retry, () => {}).processIdentity?.pid).toBe(43)
+  expect(p.dispatch).toHaveBeenCalledOnce()
+})
+
+it('refuses rewritten bytes in the actual writer inode before its published stamp is captured', async () => {
+  const reserved = liveReservation(), original = structuredClone(reserved), p = await recoveryFixture(reserved), proof = await p.fresh()
+  fault.published = () => {
+    fault.published = undefined
+    const changed = rows(); changed[0].processIdentity!.pid = 44
+    writeFileSync(file, JSON.stringify(changed, null, 2), { mode: 0o600 })
+  }
+  expect(() => registry.commitNativeReplacement(reserved, proof, () => {})).toThrow('replacement bytes changed')
+  expect(registry.byAgent(row.agentId)).toEqual(original)
+  expect(() => registry.readNativeControl(reserved)).toThrow('durable registry confirmation')
+  expect(() => registry.readNativeReplacementSource(reserved)).toThrow('unconfirmed replacement image changed')
+})
+
+it.each(['reload', 'peer-cancel', 'equal-bytes', 'parent', 'different-image'] as const)(
+  'revokes original uncertain recovery on %s', async change => {
+    const reserved = liveReservation(), p = await recoveryFixture(reserved), proof = await p.fresh()
+    fault.directory = true; fault.renamed = false
+    expect(() => registry.commitNativeReplacement(reserved, proof, () => {})).toThrow()
+    fault.directory = false
+    const source = registry.readNativeReplacementSource(reserved)
+    if (change === 'reload') registry.load()
+    if (change === 'peer-cancel') {
+      const peer = new (registry.constructor as new () => typeof registry)(); peer.load()
+      const current = peer.byAgent(row.agentId)!
+      peer.commitNativeControl(current, { version: 1, cancel: { ...current.nativeControl!.cancel,
+        processKey: proof.key, target: nativeTurnTarget(current),
+        request: { ...current.nativeControl!.cancel.request, requestId: 'later-cancel-request' } } }, () => {})
+    }
+    if (change === 'equal-bytes' || change === 'different-image') {
+      const image = readFileSync(file, 'utf8'), substitute = file + '.fixture-substitute'
+      writeFileSync(substitute, change === 'equal-bytes' ? image : image.replace('original-agent', 'other-agent'), { mode: 0o600 })
+      renameSync(substitute, file)
+    }
+    if (change === 'parent') { renameSync(data, data + '-original'); mkdirSync(data, { mode: 0o700 })
+      writeFileSync(file, readFileSync(join(data + '-original', 'registry.json')), { mode: 0o600 }) }
+    expect(source.verify).toThrow()
+    expect(() => registry.readNativeReplacementSource(reserved)).toThrow()
+  },
+)
+
+it.each([undefined, 'full'] as const)('publishes the proven live process and %s permissions with admission in one image', mode => {
+  const reserved = liveReservation(mode), old = structuredClone(reserved), proof = replacementProof()
+  let locked = false
+  const changed = registry.commitNativeReplacement(reserved, proof, () => { locked ||= existsSync(`${file}.lock`) })
+  expect(locked).toBe(true); expect(proof.verify).toHaveBeenCalled()
+  expect(changed).toMatchObject({ processIdentity: proof.processIdentity, active: true, launch: { state: 'ready' },
+    nativeControl: { ...reserved.nativeControl, rearm: { ...reserved.nativeControl!.rearm,
+      replacement: { processKey: proof.key, sessionId: old.sessionId } } } })
+  expect(changed.permissionMode).toBe(mode ?? old.permissionMode)
+  expect(changed.bypassPermission === true).toBe(mode === 'full' || old.bypassPermission === true)
+  expect(reserved).toEqual(old)
+  expect(rows()[0]).toMatchObject({ processIdentity: proof.processIdentity, nativeControl: changed.nativeControl })
+  expect(nativeTurnAdmitted(registry.readNativeControl(changed).intent,
+    { agentId: row.agentId, sessionId: row.sessionId, processKey: proof.key })).toBe(true)
+})
+
+it('keeps an uncertain replacement as one indivisible image and confirms only that original image', () => {
+  const reserved = liveReservation('full'), original = structuredClone(reserved), proof = replacementProof()
+  fault.directory = true; fault.renamed = false
+  expect(() => registry.commitNativeReplacement(reserved, proof, () => {})).toThrow('directory sync')
+  expect(registry.byAgent(row.agentId)).toEqual(original)
+  expect(rows()[0]).toMatchObject({ processIdentity: proof.processIdentity, permissionMode: 'full',
+    nativeControl: { rearm: { replacement: { processKey: proof.key, sessionId: row.sessionId } } } })
+  const written = readFileSync(file, 'utf8')
+  fault.directory = false
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  registry.flush()
+  expect(readFileSync(file, 'utf8')).toBe(written)
+  const different = { ...proof, processIdentity: { ...proof.processIdentity, pid: 44 }, key: `fixture-boot\0cursor\0${44}\0precise-birth` }
+  expect(() => registry.commitNativeReplacement(reserved, different, () => {})).toThrow('still needs durable confirmation')
+  expect(() => registry.commitNativeReplacement(reserved, proof, () => {})).toThrow('fresh native evidence')
+  const confirmed = registry.commitNativeReplacement(reserved, replacementProof(reserved), () => {})
+  expect(confirmed.processIdentity).toEqual(proof.processIdentity)
+  expect(readFileSync(file, 'utf8')).toBe(written)
+})
+
+it('does not overwrite a peer Cancel while publishing the replacement', () => {
+  const reserved = liveReservation(), peer = new (registry.constructor as new () => typeof registry)()
+  peer.load()
+  const current = peer.byAgent(row.agentId)!, control = current.nativeControl!
+  const cancelled = peer.commitNativeControl(current, { ...control,
+    cancel: { ...control.cancel, processKey: null, target: nativeTurnTarget(current),
+      request: { ...control.cancel.request, requestId: 'later-cancel-request' } },
+    rearm: { ...control.rearm!, revoked: true },
+  }, () => {})
+  const before = readFileSync(file, 'utf8')
+  expect(() => registry.commitNativeReplacement(reserved, replacementProof(), () => {})).toThrow('original durable native control owner changed')
+  expect(readFileSync(file, 'utf8')).toBe(before)
+  expect(rows()[0].nativeControl).toEqual(cancelled.nativeControl)
+})
+
+it.each(['local', 'native', 'rename'])('refuses %s revocation before any replacement publication', kind => {
+  const reserved = liveReservation(), proof = replacementProof(), before = readFileSync(file, 'utf8')
+  if (kind === 'native') proof.verify = () => { throw Error('replacement changed') }
+  if (kind === 'rename') fault.rename = true
+  expect(() => registry.commitNativeReplacement(reserved, proof, () => {
+    // The retained proof cannot be replaced by a callback during publication.
+    proof.verify = () => {}
+    if (kind === 'local' && existsSync(`${file}.lock`)) reserved.sessionId = 'successor-session'
+  })).toThrow()
+  expect(readFileSync(file, 'utf8')).toBe(before)
+})
+
+it.each(['missing', 'saved', 'revoked', 'target', 'pane', 'pid', 'key', 'mode', 'confirmed'])('refuses %s replacement metadata without changing the original row', kind => {
+  const reserved = liveReservation(), original = structuredClone(reserved)
+  let proof = replacementProof()
+  if (kind === 'missing') delete reserved.nativeControl
+  if (kind === 'saved') reserved.nativeControl = { ...reserved.nativeControl!, rearm: { ...reserved.nativeControl!.rearm!, source: 'saved' } }
+  if (kind === 'revoked') reserved.nativeControl = { ...reserved.nativeControl!, rearm: { ...reserved.nativeControl!.rearm!, revoked: true } }
+  if (kind === 'target') reserved.permissionMode = 'full'
+  if (kind === 'pane') proof = { ...proof, pane: '%2' }
+  if (kind === 'pid') proof = { ...proof, processIdentity: { ...proof.processIdentity, pid: 44 } }
+  if (kind === 'key') proof.key = 'unproven-process'
+  if (kind === 'mode') reserved.nativeControl = { ...reserved.nativeControl!, rearm: { ...reserved.nativeControl!.rearm!, permissionMode: 'full' } }
+  if (kind === 'confirmed') reserved.nativeControl = { ...reserved.nativeControl!, rearm: { ...reserved.nativeControl!.rearm!,
+    replacement: { processKey: proof.key, sessionId: row.sessionId } } }
+  const before = readFileSync(file, 'utf8')
+  expect(() => registry.commitNativeReplacement(reserved, proof, () => {})).toThrow('reservation is unavailable')
+  expect(readFileSync(file, 'utf8')).toBe(before)
+  expect(rows()[0].nativeControl).toEqual(original.nativeControl)
 })
 
 it('requires a recovered enabling image to confirm file and directory durability before admission', () => {

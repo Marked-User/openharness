@@ -24,6 +24,7 @@ import { kernelBootId } from './nativeHookBoot.js'
 import type { HookPreparationProof } from './nativeHookFiles.js'
 import { nativeRearmExecCommand, prepareNativeRearmWitness, type NativeRearmWitnessCommand } from './nativeRearmWitness.js'
 import { createNativeRearmProof } from './nativeRearmProof.js'
+import { terminalRouteKey } from '../../lib/terminalRuntime.js'
 import { executableSnapshot, nativeVersionProbe } from './nativeVersion.js'
 import { shellSingleQuote } from '../../lib/shellQuote.js'
 
@@ -73,12 +74,12 @@ function start(script: string, directory: string, args: string[] = []) {
   children.push({ child, closed })
   return { child, closed, output: () => ({ stdout, stderr, code, signal }) }
 }
-async function fixture(hold = false, spaced = false) {
+async function fixture(hold = false, spaced = false, originalPane = '%1') {
   const directory = join(root, `case-${++sequence}${spaced ? ' with spaces' : ''}`); mkdirSync(directory, { mode: 0o700 })
   const id = `private-rearm-request-${sequence}`, agentId = `fixture-agent-${sequence}`, token = `private-launch-token-${sequence}`
   const saved = { schemaVersion: 3, agentId, registeredAt: 1, engine: 'cursor', sessionId: 'fixture-session', boundAt: 2, active: true,
-    processIdentity: { pid: 41, executable: '/fixture/cursor', startMarker: 'fixture-birth' }, runtimes: [{ backend: 'tmux', paneId: '%1' }],
-    primaryRuntimeKey: 'tmux:%1', tmuxPane: '%1', cwd: directory, transcriptPath: null } as RegisteredSession
+    processIdentity: { pid: 41, executable: '/fixture/cursor', startMarker: 'fixture-birth' }, runtimes: [{ backend: 'tmux', paneId: originalPane }],
+    primaryRuntimeKey: terminalRouteKey({ backend: 'tmux', paneId: originalPane }), tmuxPane: originalPane, cwd: directory, transcriptPath: null } as RegisteredSession
   const target = nativeTurnTarget(saved)
   const control: NativeTurnIntent = { version: 1, cancel: { processKey: null, target, request: {
     requestId: 'original-cancel-request', nonce: 'original-cancel-nonce', agentId, conversationId: saved.sessionId, frontier: { index: -1, digest: null },
@@ -124,7 +125,7 @@ async function paneLaunch(p: Awaited<ReturnType<typeof fixture>>, shell = '/bin/
 
 async function replacement(p: Awaited<ReturnType<typeof fixture>>, pane: string, pid: number) {
   const observed = (await readProcessEvidence(pid, new NativeEvidenceBudget())).parent!
-  const row: RegisteredSession = { ...p.saved, nativeControl: p.control, tmuxPane: pane, primaryRuntimeKey: `tmux:${pane}`,
+  const row: RegisteredSession = { ...p.saved, nativeControl: p.control, tmuxPane: pane, primaryRuntimeKey: terminalRouteKey({ backend: 'tmux', paneId: pane }),
     runtimes: [{ backend: 'tmux', paneId: pane }], processIdentity: { pid, executable: observed.executable,
       startMarker: observed.startMarker, ...(observed.startTicks !== undefined ? { startTicks: observed.startTicks } : {}) } }
   const path = join(p.directory, 'registry.json'), image = JSON.stringify([row])
@@ -164,6 +165,23 @@ it.skipIf(!supported)('the existing top-level wrapper resumes the witnessed engi
   await vi.waitFor(() => expect(existsSync(p.resumed)).toBe(true), { timeout: 8000 })
   expect(JSON.parse(readFileSync(p.marker, 'utf8')).pid).toBe(pid)
   expect((await candidate.prove()).key).toContain(`\0${pid}\0`)
+}, 20000)
+
+it.skipIf(!supported)('recovers the witnessed engine while its source still records the old process', async () => {
+  const p = await fixture(false, false, '%0'), pane = await paneLaunch(p)
+  expect(pane).toBe(p.saved.tmuxPane)
+  await vi.waitFor(() => expect(existsSync(p.marker)).toBe(true), { timeout: 8000 })
+  const pid = JSON.parse(readFileSync(p.marker, 'utf8')).pid
+  const file = join(p.directory, 'registry.json'), before = readFileSync(file, 'utf8')
+  const source = { ...p.saved, nativeControl: p.control }
+  const verify = () => { if (readFileSync(file, 'utf8') !== before) throw Error('original source changed') }
+  const read = createNativeRearmProof({ receipts: p.receipts, owner: harnessPaneOwner(p.directory) })
+  const proof = await read.recover(source, p.input, { verify, current: verify }, pane)
+  expect(proof.processIdentity.pid).toBe(pid)
+  expect(proof.key).toContain(`\0${pid}\0`)
+  expect(source.processIdentity?.pid).toBe(41)
+  expect(readFileSync(file, 'utf8')).toBe(before)
+  proof.verify()
 }, 20000)
 
 it.skipIf(!supported)('a witnessed pre-exec shell in a spaced path holds until that same process executes the engine', async () => {
