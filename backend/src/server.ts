@@ -25,7 +25,7 @@ import { experimentalSettingsRoutes } from './routes/experimentalSettings.js'
 import { describeDaemonsSwitch } from './lib/daemonsSwitch.js'
 import { handleObserverUpgrade } from './lib/observerWs.js'
 import { deviceAuthRoutes } from './routes/deviceAuth.js'
-import { healthRoutes, authRoutes, userRoutes, machineRoutes, planRoutes, gridRoutes, deviceRoutes, mobileRoutes, appRoutes, analyticsRoutes, agentRouteRoutes, jevRouteRoutes, storeRoutes } from './routes/index.js'
+import { healthRoutes, authRoutes, userRoutes, machineRoutes, planRoutes, gridRoutes, deviceRoutes, mobileRoutes, appRoutes, analyticsRoutes, productUsageRoutes, agentRouteRoutes, jevRouteRoutes, storeRoutes } from './routes/index.js'
 import { startSubdomainProxy, startMeshProxy } from './lib/subdomainProxy.js'
 import { handleDeviceUpgrade } from './lib/deviceWs.js'
 import { handleWebUpgrade } from './lib/webWs.js'
@@ -168,6 +168,7 @@ async function start(): Promise<void> {
   await app.register(mobileRoutes)
   await app.register(appRoutes)
   await app.register(analyticsRoutes)
+  await app.register(productUsageRoutes)
   await app.register(agentRouteRoutes) // which agent a task belongs to — the prompt lives here, not in the CLI
   await app.register(jevRouteRoutes, { count: redisCount }) // ⌘B's Jev decisions on Harness's key, for people with none of their own
   await app.register(cursorRoutes)   // standalone STT + LLM for the Cursor desktop app (self-contained)

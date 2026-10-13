@@ -23,6 +23,22 @@ const MACHINE = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
 
 afterEach(() => vi.restoreAllMocks())
 
+it('passes only lifecycle scalars to product reporting and keeps relaying if reporting fails', async () => {
+  const socket = relaySocket(MACHINE)
+  const gateway = gatewayOf(socket)
+  const observe = vi.fn()
+  gateway.productUsage = { observe, opened: vi.fn(), presence: vi.fn() }
+  gateway.broadcast({ type: 'turn_ended', agentId: 'fixture-agent', payload: { aborted: true, content: 'PRIVATE_CANARY' } })
+  expect(observe).toHaveBeenCalledWith('turn_ended', 'fixture-agent', false, true)
+  expect(JSON.stringify(observe.mock.calls)).not.toContain('PRIVATE_CANARY')
+  const fail = () => { throw new Error('Reporting unavailable') }
+  gateway.productUsage = { observe: fail, opened: fail, presence: fail }
+  expect(() => gateway.broadcast({ type: 'turn_started', agentId: 'fixture-agent' })).not.toThrow()
+  expect(() => gateway.windowOpened('desktop')).not.toThrow()
+  expect(() => gateway.localClients({ desktop: 1, tui: 0 })).not.toThrow()
+  await socket.stop()
+})
+
 type Frame = Record<string, unknown>
 
 /** What the gateway queued for the relay, addressed to one connection. */

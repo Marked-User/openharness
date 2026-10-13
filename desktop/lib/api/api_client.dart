@@ -107,6 +107,14 @@ class ApiClient {
   }
 
   // -- auth (proxied by the local CLI — no credential on this leg) --
+  Future<Map<String, dynamic>> productUsageSettings({bool? enabled}) async {
+    final response = enabled == null
+        ? await _dio.get('/api/product-usage/settings')
+        : await _dio.post('/api/product-usage/settings', data: {'enabled': enabled},
+            options: Options(headers: {'x-adapter-local': '1'}));
+    return Map<String, dynamic>.from(unwrapApiResponse(response) as Map);
+  }
+
   Future<Map<String, dynamic>?> me() async {
     final res = await _dio.get('/api/auth/me');
     return unwrapApiResponse(res) as Map<String, dynamic>?;

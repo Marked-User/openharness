@@ -30,6 +30,7 @@ void main() {
       SettingsSection.account,
       SettingsSection.customize,
       SettingsSection.notifications,
+      SettingsSection.privacy,
       SettingsSection.shortcuts,
       // What agents may do is the account's, under Experimental (owner, 2026-10-12).
       if (!kIsWeb) SettingsSection.connectors,
@@ -56,6 +57,7 @@ void main() {
       [
         SettingsSection.customize,
         SettingsSection.notifications,
+        SettingsSection.privacy,
         SettingsSection.shortcuts,
       ],
       [if (!kIsWeb) SettingsSection.connectors, SettingsSection.usage],

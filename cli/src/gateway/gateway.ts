@@ -49,6 +49,12 @@ export interface RelayGatewayOptions {
 }
 
 export class RelayGateway implements GatewayPort {
+  /** Optional scalar-only measurement hooks. Never hand a frame or user payload to the collector. */
+  productUsage?: {
+    presence(active: boolean): void
+    opened(surface: WindowSurface): void
+    observe(type: 'turn_started' | 'turn_ended', agent: string, replay: boolean, interrupted?: boolean): void
+  }
   /** Web↔adapter E2EE: group-encrypts user events, runs the CPace pairing, holds per-conn sessions. */
   readonly e2ee: E2eeManager
   readonly machineId: string
@@ -209,10 +215,14 @@ export class RelayGateway implements GatewayPort {
     this.openRequestGate()
   }
 
-  windowOpened(surface: WindowSurface): void { this.link.sendAppPresence('open', surface) }
+  windowOpened(surface: WindowSurface): void {
+    try { this.productUsage?.opened(surface) } catch { /* Reporting must not affect the relay. */ }
+    this.link.sendAppPresence('open', surface)
+  }
 
   localClients(windows: LocalWindows): void {
     this.localWindows = windows
+    try { this.productUsage?.presence(windows.desktop + windows.tui > 0) } catch { /* Reporting is optional. */ }
     for (const surface of WINDOW_SURFACES) if (windows[surface] === 0) this.link.noLocalClients(surface)
   }
 
@@ -220,6 +230,10 @@ export class RelayGateway implements GatewayPort {
 
   /** User-content events are group-encrypted (E2EE) here; system frames pass through as plaintext. */
   broadcast(frame: Frame): void {
+    if ((frame.type === 'turn_started' || frame.type === 'turn_ended') && typeof frame.agentId === 'string') {
+      const interrupted = frame.type === 'turn_ended' && (frame.payload as { aborted?: unknown } | undefined)?.aborted === true
+      try { this.productUsage?.observe(frame.type, frame.agentId, frame.replay === true, interrupted) } catch { /* Work continues without metrics. */ }
+    }
     if (this.link.servesThisComputerOnly()) return
     this.link.enqueue({ t: 'up', frame: this.e2ee.wrapUp(frame) })
   }

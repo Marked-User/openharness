@@ -13,6 +13,7 @@ import {
 } from './lib/db/migrate.js'
 import { ensurePlans } from './lib/db/seed.js'
 import { prisma } from './lib/prisma.js'
+import { ensureProductUsageExpiry } from './lib/productUsage.js'
 import { machineBillingWorkerService } from './services/MachineBillingWorkerService.js'
 import { logger } from './utils/logger.js'
 
@@ -26,6 +27,7 @@ async function start(): Promise<void> {
   // Same reason: the old (user, day) unique must be gone before the push installs its replacement.
   await migrateUserPresencePerMachine()
   ensureSchema()
+  await ensureProductUsageExpiry()
   // AFTER the push: it creates the new collections + their unique indexes, and the copy uses $merge
   // so those indexes survive. Copying first would leave the unique index build to fail silently.
   await migrateMachineRename()

@@ -106,7 +106,8 @@ export function registerAuthMiddleware(
       // Except the Grid profile route: its caller is the Grid control plane asking on the person's
       // behalf, from a datacenter, and stamping that would relabel them (routes/grid.ts).
       const countryCode = countryCodeFromHeaders(request.headers)
-      if (countryCode && !isGridProfileRequest(request)) void stampUserCountry(auth.user.sub, countryCode)
+      if (countryCode && !isGridProfileRequest(request)
+          && !request.url.split('?')[0].startsWith('/api/product-usage/')) void stampUserCountry(auth.user.sub, countryCode)
       return
     }
     return reply.code(auth.status).send({

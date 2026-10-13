@@ -17,6 +17,8 @@
 import { renameSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { createProductUsage } from './productUsage.js'
 import { env } from '../config/env.js'
 import type { GatewayAccount, GatewayEvents, GatewayOps, HttpAnswer, WindowRelay } from '../core/api.js'
 import { AutonomousDeviceDirect } from '../lib/autonomous-device/direct.js'
@@ -134,6 +136,12 @@ export function startGateway(host: GatewayHost): StartedGateway {
   const gateway = new RelayGateway({
     machineId: host.machineId, auth: host.tokens, computerId: host.computerId, autonomousEnv: host.autonomousEnv, core: host.events,
   })
+  // Account separation is local only. Neither this filename nor the machine identity is uploaded.
+  const usage = host.signedIn ? createProductUsage({
+    file: join(env.ADAPTER_DATA_DIR, 'product-usage', createHash('sha256').update(host.autonomousEnv + ':' + host.machineId).digest('hex') + '.json'),
+    request: (method, path, body) => accountHttp.backend(method, path, body),
+  }) : null
+  if (usage) { gateway.productUsage = usage; void usage.sync() }
 
   /** The identity this machine was removed under is never used again: the next start mints a new one. */
   const spendIdentity = (): void => {
@@ -487,6 +495,10 @@ export function startGateway(host: GatewayHost): StartedGateway {
     },
     revokeIdentity: (identity) => { gateway.e2ee.revoke(fingerprint(b64d(identity))) },
     account: (next) => {
+      // Tokens may change before this process restarts. Never send the previous account's queue
+      // under a new sign-in, even when both accounts happen to have the same preference revision.
+      if (next.machineId !== account.machineId || next.autonomousEnv !== account.autonomousEnv
+          || next.signIn?.epoch !== account.signIn?.epoch || next.signIn?.acct !== account.signIn?.acct) usage?.stop(true)
       account = next
       startGroup()
       registerAndSweep()
@@ -518,6 +530,7 @@ export function startGateway(host: GatewayHost): StartedGateway {
     ops,
     windowRelay,
     stop: async () => {
+      usage?.stop()
       clearInterval(devlogTimer)
       syncer.stop()
       direct?.stop()

@@ -138,6 +138,67 @@ Prisma over the **same MongoDB** as the agent-manager (no migration files — `p
 startup). The backend owns the `users` + `agent_bindings` collections; it never manages the
 manager-owned `agent_nodes`/`managers` (read those via raw queries when status enrichment is needed).
 
+### Product usage with an account-wide privacy control
+
+**Settings → Privacy → Share product usage data** on desktop and phone, or
+`harness privacy status|on|off [--json]`, controls the signed-in account. New accounts default on;
+an existing legacy opt-out stays off until the person explicitly enables sharing. Guest computers
+send no product reports. This control does not disable operational records needed to run the service.
+
+The gateway reduces lifecycle signals locally to an exact allowlist: active/working installation
+days, first measured work, repeat work, consecutive-week work, desktop/terminal opens, turn starts,
+matched ends/interruption, and four duration buckets. No prompt, response, transcript, code, file or
+project name, path, tool argument, error text, engine name, or stable user/device/agent identifier
+is a report field. A temporary in-memory agent map matches starts to ends and is bounded to 1,000
+entries. The server authenticates requests to check the preference; this is **not anonymous network
+traffic**. No analytics SDK, session replay, fingerprinting, or third-party destination is added.
+
+The three new collections have distinct purposes:
+
+| Collection | Fields retained | Lifetime |
+| --- | --- | --- |
+| `product_usage_preferences` | Account ID, enabled flag, revision | Saved account preference; no usage history |
+| `product_usage_totals` | UTC day, allowlisted metric, sum (plus DB primary key) | 396 days, approximately 13 months |
+| `product_usage_receipts` | Random report UUID and expiration date | At most 36 days from the report day |
+
+No individual report body or arrival timestamp is stored. Receipt insertion and increments share a
+Mongo transaction so ambiguous retries cannot count twice. Saving a preference advances its revision;
+an old queued report is refused even after an off/on cycle. The client checks the choice before each
+upload, polls at most once a minute, and stops collecting if it cannot confirm the choice. The server
+checks every ingestion without caching an enabled answer. Already admitted in-flight operations can
+finish; previously combined totals cannot be selectively removed for one person. Turning off clears
+the local queue on its next successful preference check. Queued counters older than 35 days are
+discarded when the app next runs; no task content is read to reconstruct missing metrics.
+
+The worker installs Mongo TTL indexes after schema setup. It also expires the eight legacy daily
+history collections after 35 days. The old collector endpoint accepts no new rows, relay tracking
+writes only global event totals, and the existing account deletion control covers the six former
+presence collections as well as the old collector tables. These database lifetimes do not assert
+anything about infrastructure access logs or backup retention; verify those separately before rollout.
+
+Read daily totals with a read-only database identity, supplying `DATABASE_URL` through the environment:
+
+```bash
+cd backend
+npm run usage:daily -- 14
+```
+
+The JSON includes daily headlines and the last complete week's return rate. Missing client data is
+unknown, and today is explicitly incomplete. Population is participating signed-in **computers**,
+including staff and both service environments, not unique people or an external-user cohort.
+Relay connection/turn totals from old clients stay separate from new client counters. Background
+windows can count as active, and human/automated work is combined. First measured work is not signup
+activation; a turn ending is not task success. The report deliberately makes no signup-to-value
+activation claim. Weekly return compares locally counted consecutive-week working computers with
+the preceding complete week's working computers; opt-outs, reinstallations, preference changes,
+offline gaps and client upgrades affect coverage. Do not compare this estimate directly with the
+legacy account-cohort retention percentage or an industry benchmark.
+
+Ship the backend and its worker together, verify the unique and TTL indexes using synthetic reports,
+then ship the CLI and settings surfaces with a visible release note explaining the default and switch.
+Mixed-version coverage remains explicit until clients update. The existing `usage:report` command
+below reads the bounded **historical** tables; its current-day counts cease when new history writes stop.
+
 ### Client country (Cloudflare)
 
 Production DNS is proxied through Cloudflare, so every request and WebSocket upgrade arrives with a
@@ -147,7 +208,7 @@ Production DNS is proxied through Cloudflare, so every request and WebSocket upg
   (`middlewares/authMiddleware.ts`), rate-floored to one write per user per hour unless the country
   changes. This is the "where is the user" answer.
 - `machines.countryCode` — the computer's country on its last `/api/adapter-ws` connect.
-- `machine_daily_presence.countryCode` / `user_daily_device_presence.countryCode` — same header on the
+- Legacy `machine_daily_presence.countryCode` / `user_daily_device_presence.countryCode` — same header on the
   daily presence rows. `user_daily_presence` deliberately has none: it is keyed by
   (user, machine, day) and its socket is the daemon's, so the machine's country is the one on
   `machine_daily_presence` for that `machineId`.
@@ -156,3 +217,53 @@ Off Cloudflare (local dev, direct origin hits) the header is absent and nothing 
 is only ever set, never cleared.
 
 Historical architecture notes still live in `autonomous-code/docs`.
+
+## Product usage report
+
+`npm run usage:report` reads the existing relay presence and turn counters and prints an
+aggregate JSON report. It covers observed app users, owners doing agent work, surfaces,
+complete UTC day/week/month windows, weekly return, exact-day return after first observed
+work, seven-day signup activation, and workload concentration. It also shows collection
+coverage and reconciles machine and agent turn counters, which must never be added together.
+
+Use a database account with **read-only** privileges. In Bash, from `backend/`:
+
+```bash
+read -r -s -p 'Read-only MongoDB URL: ' READ_ONLY_DATABASE_URL
+export READ_ONLY_DATABASE_URL
+mkdir -p ../.harness/usage
+npm run usage:report -- --days 30 --out ../.harness/usage/report.json
+unset READ_ONLY_DATABASE_URL
+```
+
+The command deliberately requires `READ_ONLY_DATABASE_URL`, does not load `.env`, and does
+not import server startup, migrations, or the application database singleton. It issues
+read-only aggregates with a 15-second server limit, bounded connection timeouts, and a
+100,000-row result ceiling; exceeding the ceiling fails instead of returning partial figures.
+It exports no emails, account IDs, machine IDs, agent IDs, hostnames, or credentials. Keep
+production reports under ignored `.harness/usage/`, not in source control. Output files use
+mode `0600` and are never overwritten.
+
+Options:
+
+- `--as-of YYYY-MM-DD`: exclusive UTC cutoff, default today; the current partial day is excluded.
+- `--days N`: reported daily range, 1–365 days. The loader reads at least 90 days for historical
+  context; `range.historyFrom` records the exact boundary.
+- `--exclude-email-domain example.com`: repeatable, case-insensitive exact account-domain filter.
+  Exclusions apply before all metrics and denominators. This is an account-domain segment,
+  not a verified employee/customer classification; unmatched historical owners stay in the report
+  and are counted under `observedUsersWithoutAccountRow`.
+
+Interpretation limits are part of the output. App presence can mean an idle window, connected
+computers can run without an open app, and turns include automation. Surface user counts overlap.
+P2P offers measure attempts, not confirmed sessions or all remote usage. A cohort's first
+observed turn is not necessarily its first-ever use. Retention excludes the initial observation
+day and only includes accounts old enough for the requested return day; signup activation also
+requires a full seven-day follow-up and signup after the observation boundary.
+
+Coverage describes earliest/latest stored rows across all accounts, including accounts removed
+by a segment filter; it does not certify uninterrupted collection. A missing row means no observed
+activity, not proven inactivity. In particular, do not compare new surface instrumentation with
+older desktop history as if both had equal coverage. The collector-based account dashboard
+(`src/lib/analyticsQuery.ts`) is separate: stale collector rows cannot establish current engine
+mix, completion rate, runtime, or token cost.

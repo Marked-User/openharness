@@ -1,0 +1,51 @@
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { afterEach, expect, it, onTestFailed } from 'vitest'
+import { LocalClient } from './harness/client.js'
+import { IsolatedDaemon, until } from './harness/daemon.js'
+import { FakeBackend } from './harness/fakeBackend.js'
+
+let daemon: IsolatedDaemon | undefined, backend: FakeBackend | undefined, client: LocalClient | undefined
+afterEach(async () => { client?.close(); await daemon?.close(); await backend?.close() })
+
+it('reports only local counters from a real turn, and the account switch stops them while work continues', async () => {
+  backend = await FakeBackend.start()
+  backend.productUsage = { enabled: true, revision: 0, reports: [] }
+  const machine = { machineId: 'c3'.repeat(16), computerId: 'e2e-product-usage', name: 'fixture', token: 'e2e-product-token' }
+  backend.addMachine(machine)
+  const d = await IsolatedDaemon.create({ env: { BACKEND_WS_URL: backend.wsUrl, WEB_URL: backend.httpUrl, ADAPTER_COMPUTER_ID: machine.computerId } })
+  daemon = d
+  writeFileSync(join(d.root, 'auth', 'session.json'), JSON.stringify({ version: 1, accessToken: machine.token,
+    autonomousEnv: 'prod', computerId: machine.computerId, machineId: machine.machineId,
+    expiresAt: Date.now() + 86400000, updatedAt: Date.now(), signInEpoch: 'e2e' }), { mode: 0o600 })
+  onTestFailed(() => console.log(d.log().split('\n').slice(-70).join('\n')))
+  await d.start()
+  await until('sharing preference read', () => backend!.seen.includes('GET /api/product-usage/settings') || null, 45000)
+  const settings = `http://127.0.0.1:${d.port}/api/product-usage/settings`
+  expect((await (await fetch(settings)).json())).toMatchObject({ data: { enabled: true } })
+  client = await LocalClient.connect(d, { machineId: machine.machineId })
+  const cwd = join(d.projectsDir, 'PRIVATE_PROJECT_CANARY'); mkdirSync(cwd, { recursive: true })
+  const created = await client.request('agent_create', { engine: 'claude', cwd, bypassPermission: true }, 90000)
+  expect(created.error).toBeUndefined()
+  const agentId = created.agent.id
+  const turn = async () => {
+    const ended = client!.next(frame => frame.type === 'turn_ended' && frame.agentId === agentId, 45000)
+    client!.send('message', { agentId, content: 'PRIVATE_PROMPT_CANARY: say hello' })
+    await ended
+  }
+  await until('agent ready', async () => {
+    const rows = await client!.request('agents_list', { includeStopped: true })
+    return rows.agents.some((a: Record<string, unknown>) => a.id === agentId && a.sessionId) || null
+  }, 45000)
+  await turn()
+  await until('a reduced completed turn report', () => backend!.productUsage!.reports.some(r => ((r.counters as Record<string, number>).turns_ended ?? 0) > 0) || null, 75000)
+  const wire = JSON.stringify(backend.productUsage.reports)
+  for (const privateValue of ['PRIVATE_', machine.machineId, machine.computerId, machine.token, agentId, cwd, 'userMessage', 'payload']) expect(wire).not.toContain(privateValue)
+  expect((await fetch(settings, { method: 'POST', headers: { 'content-type': 'application/json', 'x-adapter-local': '1' }, body: '{"enabled":false}' })).status).toBe(200)
+  const reportsBefore = backend.productUsage.reports.length
+  const checksBefore = backend.seen.filter(x => x === 'GET /api/product-usage/settings').length
+  await turn()
+  await until('collector observes the off choice', () => backend!.seen.filter(x => x === 'GET /api/product-usage/settings').length > checksBefore || null, 75000)
+  expect(backend.productUsage.reports).toHaveLength(reportsBefore)
+  expect(d.coresStarted()).toBe(1)
+}, 240000)
