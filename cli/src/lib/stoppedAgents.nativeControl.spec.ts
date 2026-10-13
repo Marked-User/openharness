@@ -66,6 +66,72 @@ it('reserves under the saved-store lock and grants only a fresh exact durable pr
   expect(store.get(row.agentId)!.nativeControl).toEqual(next)
 })
 
+function transferredArchive() {
+  const reserved = store.commitNativeControl(row, { ...reservation(row), rearm: { ...reservation(row).rearm!, source: 'saved' } }, fence())
+  const token = store.beginResume(row.agentId)!
+  const link = { version: 1 as const, agentId: row.agentId, requestId: reserved.nativeControl!.rearm!.requestId,
+    launchToken: reserved.nativeControl!.rearm!.launchToken, target: nativeTurnTarget(reserved) }
+  const transfer = { version: 1, link, pendingTarget: 'a'.repeat(64), processKey: 'boot\0cursor\0replacement\0birth', pane: '%2' }
+  writeFileSync(file, JSON.stringify({ version: 2, session: reserved, nativeTransfer: transfer }), { mode: 0o600 })
+  return { reserved, transfer, token }
+}
+
+it('keeps transferred history readable without restoring saved control after Registry absence', async () => {
+  const { reserved, transfer } = transferredArchive()
+  const { StoppedAgentStore } = await import('./stoppedAgents.js'), recovered = new StoppedAgentStore(directory)
+  for (const saved of [store, recovered]) {
+    expect(saved.get(row.agentId)).toEqual(reserved)
+    expect(saved.list()).toEqual([reserved])
+    expect(saved.nativeTransfer(row.agentId)).toEqual(transfer)
+    expect(Object.isFrozen(saved.nativeTransfer(row.agentId)?.link)).toBe(true)
+    expect(() => saved.readNativeControl(reserved)).toThrow('live handoff')
+  }
+  expect(store.nativeTransfer('missing')).toBeNull()
+})
+
+it.each(['save', 'patch', 'control', 'begin', 'finish', 'remove', 'supersede'])('a generic %s cannot erase a transferred archive role', operation => {
+  const { reserved, token } = transferredArchive(), before = bytes()
+  const run = () => {
+    if (operation === 'save') return store.save(reserved)
+    if (operation === 'patch') return store.patch(row.agentId, { cwd: '/fixture/changed' })
+    if (operation === 'control') return store.commitNativeControl(reserved, { ...reserved.nativeControl!,
+      rearm: { ...reserved.nativeControl!.rearm!, revoked: true }, cancel: { ...reserved.nativeControl!.cancel,
+        request: { ...reserved.nativeControl!.cancel.request, requestId: 'later-cancel-request' } } }, fence())
+    if (operation === 'begin') return store.beginResume(row.agentId)
+    if (operation === 'finish') return store.finishResume(row.agentId, token, fence())
+    if (operation === 'supersede') return store.supersede(row.agentId)
+    return store.remove(row.agentId)
+  }
+  expect(run).toThrow(); expect(bytes()).toBe(before)
+  expect(existsSync(join(directory, `${row.agentId}.resume`))).toBe(true)
+})
+
+it.each(['legacy-version', 'future-version', 'unknown-field', 'missing-role', 'agent', 'target', 'request', 'token', 'active', 'link', 'revoked', 'replacement'])('holds a transferred archive with %s corruption', kind => {
+  const { transfer } = transferredArchive(), raw = JSON.parse(bytes())
+  if (kind === 'legacy-version') raw.version = 1
+  if (kind === 'future-version') raw.version = 3
+  if (kind === 'unknown-field') raw.extra = true
+  if (kind === 'missing-role') delete raw.nativeTransfer
+  if (kind === 'agent') raw.nativeTransfer.link.agentId = 'another-agent'
+  if (kind === 'target') raw.nativeTransfer.link.target = 'b'.repeat(64)
+  if (kind === 'request') raw.nativeTransfer.link.requestId = 'different-resume-request'
+  if (kind === 'token') raw.nativeTransfer.link.launchToken = 'different-launch-token'
+  if (kind === 'active') raw.session.active = true
+  if (kind === 'link') raw.session.nativeArchive = transfer.link
+  if (kind === 'revoked') raw.session.nativeControl.rearm.revoked = true
+  if (kind === 'replacement') raw.session.nativeControl.rearm.replacement = { processKey: transfer.processKey, sessionId: row.sessionId }
+  writeFileSync(file, JSON.stringify(raw), { mode: 0o600 })
+  const before = bytes()
+  expect(() => store.get(row.agentId)).toThrow('Could not read')
+  expect(() => store.nativeTransfer(row.agentId)).toThrow('Could not read')
+  expect(() => store.save(row)).toThrow()
+  expect(() => store.readNativeControl(raw.session)).toThrow()
+  expect(() => store.commitNativeControl(raw.session, { ...raw.session.nativeControl,
+    rearm: { ...raw.session.nativeControl.rearm, revoked: true }, cancel: { ...raw.session.nativeControl.cancel,
+      request: { ...raw.session.nativeControl.cancel.request, requestId: 'another-cancel-request' } } }, fence())).toThrow()
+  expect(bytes()).toBe(before)
+})
+
 it('preserves a pending launch when a later archive snapshot or repair is stale', () => {
   const next = reservation(row), saved = commit(row, next, () => {})
   const before = bytes()
@@ -73,6 +139,18 @@ it('preserves a pending launch when a later archive snapshot or repair is stale'
   expect(bytes()).toBe(before)
   store.save({ ...saved, title: 'Updated title' })
   expect(store.get(row.agentId)).toMatchObject({ title: 'Updated title', nativeControl: next })
+})
+
+it('a legacy envelope cannot grant saved authority to a live archive-linked session', () => {
+  const { reserved, transfer } = transferredArchive()
+  const linked = { ...reserved, nativeArchive: transfer.link }
+  writeFileSync(file, JSON.stringify({ version: 1, session: linked }), { mode: 0o600 })
+  const before = bytes()
+  expect(() => store.get(row.agentId)).toThrow('Could not read')
+  expect(() => store.readNativeControl(linked)).toThrow('Invalid saved state')
+  expect(() => store.commitNativeControl(linked, linked.nativeControl!, fence())).toThrow('Invalid saved state')
+  expect(() => store.save(reserved)).toThrow('Could not read')
+  expect(bytes()).toBe(before)
 })
 
 it('a stale independent store cannot replace a newer reservation', async () => {

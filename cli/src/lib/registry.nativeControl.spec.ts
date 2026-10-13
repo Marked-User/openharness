@@ -8,6 +8,7 @@ import { StoppedAgentStore } from './stoppedAgents.js'
 import { createKeepAbandonedConversation } from './keepAbandonedConversation.js'
 import type { RegisteredSession } from './registry.js'
 import type { NativeRearmReplacementProof } from '../engines/kit/nativeRearmProof.js'
+import type { NativeArchiveLink } from './nativeArchive.js'
 
 const fault = vi.hoisted(() => ({ file: '', rename: false, directory: false, renamed: false, inspect: undefined as (() => void) | undefined,
   opening: undefined as ((path: string) => void) | undefined, opened: undefined as ((path: string) => void) | undefined,
@@ -69,6 +70,73 @@ beforeEach(async () => {
 afterEach(() => { fault.rename = false; fault.directory = false; fault.inspect = undefined; fault.opening = fault.opened = undefined; fault.synced = undefined
   fault.closed = fault.published = undefined
   vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.resetModules(); rmSync(root, { recursive: true, force: true }) })
+
+function archivedVisit() {
+  const saved = commit()
+  const link: NativeArchiveLink = { version: 1, agentId: saved.agentId, requestId: 'original-resume-request',
+    launchToken: 'original-launch-token', target: 'a'.repeat(64) }
+  writeFileSync(file, JSON.stringify([{ ...saved, nativeArchive: link }]), { mode: 0o600 })
+  registry.load()
+  return { saved: registry.byAgent(saved.agentId)!, link }
+}
+
+it('retains the original archive epoch through load, registration and a later native reservation', () => {
+  const { saved, link } = archivedVisit(), without = { ...saved }; delete without.nativeArchive
+  expect(nativeTurnTarget(saved)).not.toBe(nativeTurnTarget(without))
+  const registered = registry.register({ ...input(), sessionId: saved.sessionId })!.entry
+  expect(registered.nativeArchive).toEqual(link)
+  const reserved = registry.commitNativeControl(registered, { ...registered.nativeControl!, rearm: {
+    requestId: 'later-live-restart-request', launchToken: 'later-live-restart-token', source: 'live', operation: 'restart',
+    agentId: saved.agentId, target: nativeTurnTarget(registered),
+  } }, () => {})
+  expect(reserved.nativeArchive).toEqual(link)
+  expect(rows()[0].nativeArchive).toEqual(link)
+  registry.load()
+  expect(registry.byAgent(saved.agentId)?.nativeArchive).toEqual(link)
+})
+
+it.each(['remove', 'remove-agent', 'unbind', 'shell', 'separate-shell'])('ordinary %s cannot retire an archive-owned visit', operation => {
+  const { saved } = archivedVisit(), before = readFileSync(file, 'utf8')
+  const run = () => {
+    if (operation === 'remove') return registry.remove(saved.sessionId)
+    if (operation === 'remove-agent') return registry.removeAgent(saved.agentId)
+    if (operation === 'unbind') return registry.unbindSession(saved.sessionId)
+    return registry.releaseEngine(saved.agentId, operation === 'separate-shell')
+  }
+  expect(run).toThrow('native archive')
+  expect(registry.byAgent(saved.agentId)).toEqual(saved)
+  expect(readFileSync(file, 'utf8')).toBe(before)
+  expect(registry.resumePendingAgent(saved, [{ backend: 'tmux', paneId: '%2' }])).toBeNull()
+})
+
+it.each(['add', 'remove', 'replace'])('ordinary writes cannot %s archive lineage', change => {
+  const { saved, link } = archivedVisit()
+  if (change === 'add') {
+    const plain = { ...saved }; delete plain.nativeArchive
+    writeFileSync(file, JSON.stringify([plain]), { mode: 0o600 }); registry.load()
+  }
+  const before = readFileSync(file, 'utf8'), current = registry.byAgent(saved.agentId)!
+  if (change === 'remove') delete current.nativeArchive
+  else current.nativeArchive = { ...link, ...(change === 'replace' ? { launchToken: 'different-visit-token' } : {}) }
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+  registry.flush()
+  expect(error).toHaveBeenCalled()
+  expect(readFileSync(file, 'utf8')).toBe(before)
+})
+
+it.each(['malformed', 'agent', 'engine', 'no-control'])('holds malformed %s archive ownership after load', change => {
+  const { saved, link } = archivedVisit(), candidate = { ...saved, nativeArchive: { ...link } }
+  if (change === 'malformed') candidate.nativeArchive.launchToken = 'short'
+  if (change === 'agent') candidate.nativeArchive.agentId = 'another-agent'
+  if (change === 'engine') candidate.engine = 'codex'
+  if (change === 'no-control') { delete candidate.nativeControl; candidate.schemaVersion = 2 }
+  writeFileSync(file, JSON.stringify([candidate]), { mode: 0o600 })
+  const before = readFileSync(file, 'utf8')
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  registry.load(); registry.flush()
+  expect(registry.byAgent(saved.agentId)).toBeUndefined()
+  expect(readFileSync(file, 'utf8')).toBe(before)
+})
 
 it('commits the original cancellation inside a discovery batch before granting any durable proof', async () => {
   const proposed = cancellation()

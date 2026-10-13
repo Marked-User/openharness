@@ -358,6 +358,55 @@ snapshot. Ordinary archive save, generic Registry removal and an old marker's
 age cannot substitute for this protocol. This handoff and production
 activation are not implemented by the live recovery checkpoint.
 
+October 13 saved Resume checkpoint: Registry now coordinates the forward
+handoff through the saved Store, always taking Registry then archive locks.
+It first persists an inadmissible held route carrying the original reservation
+and a stable archive link. The archive then publishes a strict version-two
+transfer role before Registry publishes process, permissions and admission
+together. No callback can launch a process here. A recovered transferred
+archive never regains saved control because Registry is missing. Later Cancel
+and Restart preserve the visit's original link even when they replace R.
+
+Each phase retains its actual publisher inode and original parent, including
+the inspection immediately after publication and uncertain same-core retries.
+The archive decoder is shared by catalog and control paths: changing an
+envelope version or putting a live link in a legacy saved envelope cannot
+restore saved authority. A known uncertain transfer also blocks ordinary
+saved reads and writes if older valid bytes reappear. Registry compares
+archive lineage after its three-way merge, so an unrelated stale writer can
+import a peer's new live visit without dropping it or blocking forever.
+Final guards recheck local ownership after external callbacks.
+
+Receipt `20261013T171101.603948Z-95474` passes types (4.7 seconds) and
+274 cases across seven files (63.4 seconds), including the unchanged admission
+golden and architecture. Receipt `20261013T171407.917316Z-6247` passes both
+complete mutation baselines and all eleven new archive and twelve existing
+live-replacement assertion mutations (106.2 seconds). The earlier expanded
+run remains failed evidence: one assertion expected the former hold wording
+after the new uncertain-transfer guard correctly refused control. Independent
+review approved this forward scope over `1e3b1b4ff`, conditional on the now
+completed malformed-envelope regression and mutation gates. Review found
+the decoder, stale-peer merge, post-publication proof retention and final
+callback ownership gaps fixed above.
+
+This continuation began at approximately 16:46 UTC October 13; implementation
+and independent review ran through 17:11 UTC, with validation overlapping
+16:50–17:16 UTC. Merge, publication and external waiting remain zero for this
+checkpoint. Reverse Stop, physical adapters, original receipt confirmation
+and marker cleanup for saved Resume, production activation and final full-PR
+acceptance remain required. Forward storage approval does not approve those
+unfinished paths.
+
+The reverse protocol now explicitly retains a retirement record. First write
+the latest live checkpoint as archive `returning`, then persist a Registry
+retirement bound to that exact checkpoint. Only fresh retained proofs of both
+may publish archive `saved` ownership. Remove the matching Registry retirement
+last, retaining the closed epoch in the archive through cleanup. Missing
+Registry while the archive remains live-owned or returning is a hold. Before
+retirement, a concurrent live Cancel invalidates the checkpoint; afterward,
+finish the metadata handoff before routing new control to saved state. No
+third journal or inference from row absence is part of this protocol.
+
 October 13 recap checkpoint: the recaps port now derives a bounded summary from
 the exact answer retained for an owner and generation. Core copies the input
 before a service wait and checks the reply's generation identity, input digest

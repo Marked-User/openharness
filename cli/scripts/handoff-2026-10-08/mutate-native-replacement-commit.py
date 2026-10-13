@@ -17,8 +17,8 @@ mutations = [
         'nativeTurnTarget(row) !== rearm.target', 'false')], reader_spec, 'refuses target drift'),
     ('proof binding is skipped', registry, [(
         'binding.target !== target || binding.controlFingerprint !== creationFingerprint(control)\n'
-        '      || binding.requestFingerprint !== creationFingerprint({ fingerprint, request })',
-        'false')], storage_spec, 'requires the proof to retain'),
+        "      || binding.requestFingerprint !== creationFingerprint({ fingerprint, request })) {\n      throw new IdentityReadUnavailable('the native proof belongs to a different replacement reservation')",
+        "false) {\n      throw new IdentityReadUnavailable('the native proof belongs to a different replacement reservation')")], storage_spec, 'requires the proof to retain'),
     ('staging can outlive the final fence', registry, [(
         'atomicWriteJson(FILE, serialized, false, bindingCommit?.verify, bindingCommit?.confirm)',
         'atomicWriteJson(FILE, serialized, false, undefined, bindingCommit?.confirm)')], storage_spec, 'revoked during staging'),
@@ -31,7 +31,8 @@ mutations = [
     ('a substituted inode can confirm equal bytes', registry, [(
         "if (version(lstatSync(file, { bigint: true })) !== published)", 'if (false)')], storage_spec, 'revoked during substitute'),
     ('in-place post-rename changes become the intended image', registry, [(
-        'if (written.content !== contents)', 'if (false)')], storage_spec, 'rewritten bytes in the actual writer inode'),
+        "if (written.content !== contents) throw new IdentityReadUnavailable('the published replacement bytes changed')",
+        "if (false) throw new IdentityReadUnavailable('the published replacement bytes changed')")], storage_spec, 'rewritten bytes in the actual writer inode'),
     ('retry forgets the original published inode', registry, [(
         'verifyDirectory(); replacement.verifyPublished!(); retained.verify()',
         'verifyDirectory(); retained.verify()')], storage_spec, 'uncertain recovery on equal-bytes'),

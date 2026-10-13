@@ -73,11 +73,16 @@ export function parseNativeTurnIntent(value: unknown): NativeTurnIntent | null {
 /** Persistent fields only: transient holds and observation counters cannot
  * change the identity of the original durable launch/cancellation target. */
 export function nativeTurnTarget(row: RegisteredSession): string {
-  return createHash('sha256').update(JSON.stringify([row.agentId, row.registeredAt, row.engine, row.sessionId, row.boundAt,
+  const identity: unknown[] = [row.agentId, row.registeredAt, row.engine, row.sessionId, row.boundAt,
     row.active, row.processIdentity && [row.processIdentity.pid, row.processIdentity.executable, row.processIdentity.startMarker, row.processIdentity.startTicks ?? null],
     row.runtimes.map(route => [route.backend, route.paneId]), row.primaryRuntimeKey, row.tmuxPane ?? null, row.cwd,
     row.transcriptPath, row.codexHome ?? null, row.hermesHome ?? null,
-    row.permissionMode ?? null, row.bypassPermission === true])).digest('hex')
+    row.permissionMode ?? null, row.bypassPermission === true]
+  // Older cancellations keep their existing digest. A transferred visit also
+  // pins its original archive link, which later Cancel and Restart preserve.
+  if (row.nativeArchive) identity.push(['native-archive', row.nativeArchive.version, row.nativeArchive.agentId,
+    row.nativeArchive.requestId, row.nativeArchive.launchToken, row.nativeArchive.target])
+  return createHash('sha256').update(JSON.stringify(identity)).digest('hex')
 }
 
 /** Recovery reconstructs only the immutable reserved request, including whether
