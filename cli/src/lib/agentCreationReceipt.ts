@@ -413,6 +413,46 @@ export class AgentCreationReceipts {
     return answer
   }
 
+  /** A confirmed launch remains successful after its engine exits. This reads
+   * the complete original durable receipt; it grants no execution authority. */
+  readNativeRelaunchCompletion(id: string, input: NativeRelaunchRequest): {
+    outcome: Extract<AgentCreationStatus, { state: 'created' }>; verify(): void
+  } {
+    const expected = structuredClone(input), receipt = this.read(id)
+    if (!nativeRelaunchRequest(id, expected.request) || receipt?.version !== 2 || 'cancelled' in receipt
+      || receipt.fingerprint !== expected.fingerprint || creationFingerprint(receipt.request) !== creationFingerprint(expected.request)) {
+      throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    }
+    const files = [this.file(id), ...(['claim', 'result', 'confirmation', 'process'] as const).map(part => this.intentFile(id, part))]
+    const retained = files.map(file => inspectHookFile(file, 0o600))
+    if (creationFingerprint(JSON.parse(retained[0].content!)) !== creationFingerprint(receipt)) {
+      throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
+    }
+    const claim: IntentClaim | null = JSON.parse(retained[1].content ?? 'null')
+    const verify = () => {
+      for (const part of retained) part.verify()
+      // A late contradictory effect whose result could not be saved remains
+      // authoritative in memory too. Compatible uncertainty cannot undo success.
+      const known = this.intentResults.get(id)
+      if (known && (known.fingerprint !== receipt.fingerprint || known.token !== claim?.token
+        || known.outcome.state !== 'unconfirmed' && creationFingerprint(known.outcome) !== creationFingerprint(status))) {
+        throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
+      }
+    }
+    // Validate one coherent image, then retain every original file and absence.
+    // Recursively reading status inside each durability callback repeated fsyncs
+    // hundreds of times and exhausted recovery's deadline on healthy receipts.
+    const status = this.intentStatus(id, receipt, false)
+    verify()
+    if (status.state !== 'created' || status.agentId !== expected.request.agentId || status.resumed !== true
+      || retained[3].content === null || retained[4].content === null) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    for (let index = 0; index < files.length; index++) if (retained[index].content !== null) {
+      inspectNativeControlFile(files[index], this.directory).confirm(verify)
+    }
+    verify()
+    return Object.freeze({ outcome: Object.freeze({ ...status }), verify })
+  }
+
   /** A completed Resume can finish metadata after its engine exits. An early
    * Cancel needs an exclusive cancel claim or a durable known-not-dispatched
    * result; a missing witness alone cannot account for a claimed allocation. */

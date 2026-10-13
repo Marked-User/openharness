@@ -9,6 +9,7 @@ import type { StoppedAgentStore } from './stoppedAgents.js'
 import type { NativeArchiveStopProof } from './nativeArchive.js'
 import type { NativeRearmReplacementProof } from '../engines/kit/nativeRearmProof.js'
 import { createNativeRearm, type NativeRearmDeps } from '../core/agents/nativeRearm.js'
+import { createNativeRearmRecovery, type NativeRearmRecoveryDeps } from '../core/agents/nativeRearmRecovery.js'
 
 const fault = vi.hoisted(() => ({ registry: '', archive: '', phase: '', fail: '',
   published: undefined as ((phase: string) => void) | undefined, opening: undefined as ((path: string) => void) | undefined, phases: [] as string[], closed: undefined as ((path: string) => void) | undefined }))
@@ -122,6 +123,32 @@ async function reserveMarker(dispatch = true, permissionMode: 'full' | 'ask' | u
   return { receipts, marker, confirm: () => receipts.confirmNativeRelaunch(marker.link.requestId, { fingerprint, request,
     outcome: { state: 'created', agentId: saved.agentId, resumed: true } }, fence) }
 }
+
+it.each(['pending', 'transfer', 'admission'])('the recovery controller cold-confirms the original saved Resume after uncertain %s', async phase => {
+  const p = await reserveMarker(), original = structuredClone(saved), reads = vi.fn()
+  const observe = ((_row, _request, fence) => {
+    reads()
+    const native = proof()
+    const value = { ...native, verify() { native.verify(); fence.verify() },
+      verifyExecution() { fence.current() }, verifyConfirmation() { fence.current() }, current() { fence.current() } }
+    return Object.assign(Promise.resolve(value), { settled: Promise.resolve() })
+  }) as NativeRearmRecoveryDeps['proof']
+  Object.assign(observe, { recover: observe, recoverSaved: observe })
+  const recovering = (receipts = p.receipts) => createNativeRearmRecovery({ registry, saved: store, receipts, proof: observe, held: () => {} })
+  fault.fail = phase
+  expect(await recovering().recover(original)).toMatchObject({ state: 'pending' })
+  expect(p.receipts.status(original.nativeControl!.rearm!.requestId).state).toBe('unconfirmed')
+  fault.fail = ''
+  await restart()
+  const receipts = new AgentCreationReceipts(join(root, 'receipts'))
+  expect(await recovering(receipts).recover(original)).toMatchObject({ state: 'created', agentId: original.agentId, resumed: true })
+  expect(registry.byAgent(original.agentId)).toMatchObject({ active: true, nativeArchive: p.marker.link,
+    nativeControl: { rearm: { replacement: { sessionId: original.sessionId } } } })
+  expect(store.nativeTransfer(original.agentId)?.link).toEqual(p.marker.link)
+  const readCount = reads.mock.calls.length
+  expect(await recovering(receipts).recover(original)).toMatchObject({ state: 'created' })
+  expect(reads).toHaveBeenCalledTimes(readCount)
+})
 
 it('finishes the original confirmed Resume marker after later live Cancel without probing or launching again', async () => {
   const p = await reserveMarker(), live = commit(); p.confirm()

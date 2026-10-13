@@ -59,7 +59,7 @@ async function savedCompletion(kind: 'created' | 'cancelled' | 'not-dispatched' 
   const fingerprint = creationFingerprint({ kind: 'native-rearm', agentId: link.agentId, operation: 'resume', source: 'saved',
     ...(permissionMode ? { permissionMode } : {}) })
   await p.receipts.runIntent(id, fingerprint, value, held, async () => kind === 'pending' || kind === 'cancelled' ? null : async () => {
-    if (kind === 'created') p.receipts.recordNativeRelaunchProcess(id, { fingerprint, request: value }, processOwner, fence())
+    if (kind === 'created' || kind === 'direct-success') p.receipts.recordNativeRelaunchProcess(id, { fingerprint, request: value }, processOwner, fence())
     if (kind === 'not-dispatched') return { state: 'failed', error: 'NATIVE_REARM_NOT_DISPATCHED' }
     if (kind === 'generic-failure') return { state: 'failed', error: 'OTHER_FAILURE' }
     if (kind === 'direct-success') return outcome
@@ -133,6 +133,71 @@ it('confirms the exact receipt files and parent before granting metadata cleanup
   const p = await savedCompletion('cancelled')
   faults.linked = true; faults.failDirectory = true
   expect(() => p.receipts.readNativeResumeCleanup(p.link)).toThrow('sync unavailable')
+})
+
+it('reads only the exact confirmed relaunch as successful without inspecting the engine', async () => {
+  const p = await savedCompletion('created', 'full'), cold = new AgentCreationReceipts(p.directory)
+  const proof = cold.readNativeRelaunchCompletion(id, { fingerprint: p.fingerprint, request: p.request })
+  expect(proof.outcome).toEqual(outcome); expect(Object.isFrozen(proof.outcome)).toBe(true)
+  expect(() => proof.verify()).not.toThrow()
+  expect(() => cold.readNativeRelaunchCompletion(id, { fingerprint: p.fingerprint,
+    request: { ...p.request, permissionMode: 'ask' } })).toThrow()
+})
+
+it.each(['uncertain', 'direct-success', 'no-witness'] as const)('does not use %s as durable relaunch completion', async kind => {
+  const p = await savedCompletion(kind)
+  expect(() => p.receipts.readNativeRelaunchCompletion(id, { fingerprint: p.fingerprint, request: p.request })).toThrow()
+})
+
+it.each(['', 'claim', 'result', 'confirmation', 'process'])('retains the original %s part of confirmed relaunch completion', async part => {
+  const p = await savedCompletion(), proof = p.receipts.readNativeRelaunchCompletion(id, { fingerprint: p.fingerprint, request: p.request }), file = p.file(part)
+  writeFileSync(`${file}.new`, readFileSync(file), { mode: 0o600 }); renameSync(`${file}.new`, file)
+  expect(() => proof.verify()).toThrow()
+})
+
+it('confirms relaunch completion durability before answering created', async () => {
+  const p = await savedCompletion()
+  faults.linked = true; faults.failDirectory = true
+  expect(() => p.receipts.readNativeRelaunchCompletion(id, { fingerprint: p.fingerprint, request: p.request })).toThrow('sync unavailable')
+})
+
+it('checks retained completion without recursively reconfirming durability', async () => {
+  const p = await savedCompletion(), sync = vi.spyOn(fs, 'fsyncSync')
+  const proof = p.receipts.readNativeRelaunchCompletion(id, { fingerprint: p.fingerprint, request: p.request })
+  expect(sync).toHaveBeenCalled()
+  sync.mockClear()
+  for (let n = 0; n < 10; n++) proof.verify()
+  expect(sync).not.toHaveBeenCalled()
+})
+
+it('rejects a receipt part replaced during completion durability confirmation', async () => {
+  const p = await savedCompletion()
+  faults.directorySync = () => {
+    faults.directorySync = undefined
+    const file = p.file('claim')
+    writeFileSync(`${file}.new`, readFileSync(file), { mode: 0o600 }); renameSync(`${file}.new`, file)
+  }
+  expect(() => p.receipts.readNativeRelaunchCompletion(id, { fingerprint: p.fingerprint, request: p.request })).toThrow()
+})
+
+it.each(['failed', 'different-success'] as const)('revokes completion after a contradictory late %s cannot be persisted', async kind => {
+  const p = fixture()
+  let finish!: (value: AgentCreationOutcome) => void
+  const running = p.receipts.runIntent(id, fingerprint, request, held, async () => () => {
+    p.receipts.recordNativeRelaunchProcess(id, { fingerprint, request }, processOwner, fence())
+    return new Promise(resolve => { finish = resolve })
+  })
+  const rejected = expect(running).rejects.toThrow('CREATION_STORAGE_FAILED')
+  await vi.waitFor(() => expect(finish).toBeDefined())
+  p.confirm()
+  const proof = p.receipts.readNativeRelaunchCompletion(id, { fingerprint, request })
+  expect(proof.outcome).toEqual(outcome); expect(() => proof.verify()).not.toThrow()
+  vi.spyOn(fs, 'linkSync').mockImplementationOnce(() => { throw Error('Result storage unavailable') })
+  finish(kind === 'failed' ? { state: 'failed', error: 'KNOWN_NOT_DISPATCHED' } : { ...outcome, agentId: 'different-agent' })
+  await rejected
+  expect(fs.existsSync(p.file('result'))).toBe(false)
+  expect(() => p.receipts.status(id)).toThrow('CREATION_STORAGE_FAILED')
+  expect(() => proof.verify()).toThrow('CREATION_STORAGE_FAILED')
 })
 
 it('durably refines only the original native allocation and never hands recovery a dispatch callback', async () => {

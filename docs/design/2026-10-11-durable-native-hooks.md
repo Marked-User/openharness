@@ -542,12 +542,63 @@ Implementation/review ran approximately 19:00–19:27 UTC October 13, with
 validation overlapping 19:06–19:27. Merge, release and external waiting remain
 zero. Saved recovery, physical adapters and integrated acceptance remain open.
 
-Before activation, native marker cleanup also needs an explicit early-Cancel
-path: an exact durable cancel claim or on-disk known-not-dispatched result,
+Saved Resume recovery now crosses the original archive-to-live handoff without
+re-reading the archive leaf that the Store intentionally consumes. It verifies
+the exact committed target, cancellation and replacement before adopting that
+returned owner, then retains the full original request and transferred archive
+through receipt confirmation. Cold Registry/Store recovery covers interrupted
+pending-route, archive-transfer and live-admission publications. Recovery never
+receives a launch callback.
+
+An already confirmed receipt is independently readable after its engine exits,
+even while all four actual native-read slots remain occupied. The reader requires
+the full original request, explicit confirmation and process witness. It validates
+one coherent image and retains every original file and absence; later proof checks
+do not recursively fsync it. A contradictory late effect whose result publication
+fails still invalidates the proof through its retained in-memory result.
+
+Independent review found and corrected three races: a saved hold must recheck its
+original leaf and current target/control after Registry absence verification;
+the five-second deadline starts before receipt preflight; and completed receipt
+proofs must retain contradictory memory-only outcomes as well as disk evidence.
+Actual native reads keep their slots after bounded replies. Final confirmation
+tests call the original bound publisher, avoiding an unbound or recursive mock
+that could accidentally pass by throwing before publication.
+
+Types and all 449 cases in six affected files pass, including architecture and
+100% statements, branches, functions and lines for the recovery controller
+(`20261013T195146.225073Z-46072`, 5.3/145.8 seconds). Complete mutation baselines
+and all 28 deliberate recovery wiring faults pass by assertion
+(`20261013T195432.467497Z-55983`, 116.7 seconds). No golden changed. The earlier
+`20261013T193527.857125Z-86260` remains failed: repeated durability checks caused
+13 test timeouts, and an unbound fixture publisher caused another failure. The
+447-case run `20261013T194617.502407Z-27662` is not reusable evidence: a readonly
+fixture assignment failed types and generated coverage output changed the source
+fingerprint. The fixture is corrected and coverage now goes to an ignored folder.
+
+Independent review approved this recovery slice over `2803d6f2d`, conditional on
+the now-completed gates. Implementation/review ran approximately 19:28–19:57 UTC
+October 13; validation overlapped 19:35–19:57. Merge, publication and external
+waiting remain zero. Physical adapters, orchestration, activation and full-PR
+acceptance remain open and are excluded from this scoped approval.
+
+Before activation, compose the implemented native marker cleanup with early
+Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R
 and confirmed Registry absence. Publish the full native intent before its marker,
 finish cleanup before clearing R, and keep delayed preparation revoked. Missing
 markers and request-less tombstones cannot supply that full-request proof.
+
+The physical Stop adapter must independently account for the original engine and
+reserved pane. Legacy process-table absence, executable mismatch and rounded birth
+timestamps are not sufficient signal or retirement authority. Use precise native
+boot/PID/birth and fresh image evidence at each signal boundary, and a token-bound
+predicate inside tmux at pane close. Death observations need the existing writer
+scope rules: proven local storage, a matching PID namespace/view, stable kernel
+boot and canonical birth values. An unavailable observation holds. Keep the
+consumed Registry source leaf inside Registry's own compare-and-publish operation;
+the stopped-allocation proof retains its receipt and scope separately. These are
+requirements for the remaining adapter, not claims of implemented behavior.
 
 October 13 recap checkpoint: the recaps port now derives a bounded summary from
 the exact answer retained for an owner and generation. Core copies the input
