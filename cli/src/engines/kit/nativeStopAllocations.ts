@@ -3,6 +3,7 @@
 import { creationFingerprint, type AgentCreationReceipts, type NativeRelaunchRequest } from '../../lib/agentCreationReceipt.js'
 import { NATIVE_ALLOCATION_LIMIT, parseNativeAllocation } from '../../lib/nativeAllocation.js'
 import { parseNativeLaunchAllocation } from '../../lib/nativeLaunchAllocation.js'
+import { parseNativeCreateRequest } from '../../lib/nativeCreateRequest.js'
 import { nativeRearmRequest, nativeTurnProcess, nativeTurnTarget, parseNativeTurnIntent } from '../../lib/nativeTurnIntent.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { NativeEvidenceBudget, NATIVE_EVIDENCE_MS, nativeUnavailable } from './nativeEvidence.js'
@@ -15,7 +16,7 @@ const identity = (owner: NativeHookWriter) => JSON.stringify([owner.boot, owner.
 /** `verify` retains the exact source row; `current` is a disk-free lifetime
  * check that survives its intentional retirement. Receipt proofs are separate. */
 export function readNativeStopAllocations(input: RegisteredSession,
-  receipts: Pick<AgentCreationReceipts, 'readNativeRelaunchProcess' | 'readNativeRelaunchNotDispatched'>,
+  receipts: Pick<AgentCreationReceipts, 'readNativeRelaunchProcess' | 'readNativeRelaunchNotDispatched' | 'readNativeCreationProcess'>,
   fence: Pick<NativePhysicalStopOwner, 'verify' | 'current'>,
 ): NativePhysicalStopOwner {
   // Five active-to-released panes, six engines and two roots require at most
@@ -58,11 +59,15 @@ export function readNativeStopAllocations(input: RegisteredSession,
   if (control.cancel.processKey !== null) addEngine(nativeTurnProcess(control.cancel))
   for (const { receipt, admitted } of requests) {
     current()
-    const original = receipt.request.sourceProcess
-    addEngine(original && typeof original === 'object' ? nativeTurnProcess(original as { processKey: unknown; namespace?: unknown }) : null)
+    const initial = receipt.request.kind === 'native-create-v2' ? parseNativeCreateRequest(receipt.request) : null
+    if (!initial) {
+      const original = receipt.request.sourceProcess
+      addEngine(original && typeof original === 'object' ? nativeTurnProcess(original as { processKey: unknown; namespace?: unknown }) : null)
+    }
     const id = receipt.request.creationId as string
     let proof: ReturnType<AgentCreationReceipts['readNativeRelaunchProcess']>
-    try { proof = receipts.readNativeRelaunchProcess(id, receipt) }
+    try { proof = initial ? receipts.readNativeCreationProcess(id, { fingerprint: receipt.fingerprint, request: initial })
+      : receipts.readNativeRelaunchProcess(id, receipt) }
     catch {
       if (admitted) return held('cannot read an admitted original witness')
       // A missing witness is not absence. Only the complete exact cancellation

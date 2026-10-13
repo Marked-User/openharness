@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { nativeRearmRequest, nativeTurnAdmitted, nativeTurnProcess, nativeTurnTarget, type NativeTurnIntent } from './nativeTurnIntent.js'
 import { creationFingerprint } from './agentCreationReceipt.js'
+import { appendNativeAllocation } from './nativeAllocation.js'
+import { nativeCreateFingerprint, parseNativeCreateRequest } from './nativeCreateRequest.js'
 import { StoppedAgentStore } from './stoppedAgents.js'
 import { createKeepAbandonedConversation } from './keepAbandonedConversation.js'
 import type { RegisteredSession } from './registry.js'
@@ -383,6 +385,113 @@ function allocationVisit() {
   const reserved = liveReservation()
   return { reserved, admitted: registry.commitNativeReplacement(reserved, replacementProof(reserved), () => {}) }
 }
+
+function initialAllocationVisit() {
+  const request = parseNativeCreateRequest({ kind: 'native-create-v2', creationId: 'initial-creation-request', agentId: row.agentId,
+    launchToken: 'initial-launch-token', label: 'harness-cursor-first', local: true,
+    input: { engine: 'cursor', cwd: root }, selection: null })!
+  const receipt = { request, fingerprint: nativeCreateFingerprint(request) }
+  const admitted: RegisteredSession = { ...row, schemaVersion: 5, nativeAllocation: appendNativeAllocation(undefined, receipt) }
+  writeFileSync(file, JSON.stringify([admitted]), { mode: 0o600 })
+  registry.load()
+  expect(registry.byAgent(row.agentId)).toBeDefined()
+  return { admitted: registry.byAgent(row.agentId)!, receipt }
+}
+
+it('continues migrating cold legacy rows to schema two beside initial allocation support', () => {
+  const legacy: Partial<RegisteredSession> = { ...row }
+  delete legacy.schemaVersion
+  writeFileSync(file, JSON.stringify([legacy]), { mode: 0o600 })
+  registry.load()
+  expect(registry.byAgent(row.agentId)).toBeDefined()
+  expect(registry.byAgent(row.agentId)?.schemaVersion).toBe(2)
+  expect(registry.byAgent(row.agentId)?.sessionId).toBe(row.sessionId)
+  expect(rows()[0].schemaVersion).toBe(2)
+})
+
+it('retains initial schema five through observation, binding and its first durable Cancel', () => {
+  const { admitted, receipt } = initialAllocationVisit()
+  expect(admitted.schemaVersion).toBe(5)
+  expect(admitted.nativeAllocation).toEqual({ version: 2, receipts: [receipt] })
+  expect(admitted.nativeControl).toBeUndefined()
+  const opened = registry.openProcessAgent(input())
+  expect(opened?.entry.schemaVersion).toBe(5)
+  expect(() => registry.register({ ...input(), sessionId: admitted.sessionId })).not.toThrow()
+  expect(registry.byAgent(admitted.agentId)?.schemaVersion).toBe(5)
+  expect(registry.byAgent(admitted.agentId)?.nativeAllocation).toEqual(admitted.nativeAllocation)
+  const owner = registry.byAgent(admitted.agentId)!
+  const cancelled = registry.commitNativeControl(owner, { version: 1, cancel: { ...cancellation().cancel,
+    processKey: null, target: nativeTurnTarget(owner) } }, () => {})
+  expect(cancelled.schemaVersion).toBe(4)
+  expect(cancelled.nativeAllocation).toEqual(admitted.nativeAllocation)
+  expect(cancelled.nativeControl?.cancel.processKey).toBeNull()
+  registry.load()
+  const cold = registry.byAgent(admitted.agentId)
+  expect(cold).toBeDefined(); expect(cold?.schemaVersion).toBe(4)
+  expect(cold?.nativeControl).toEqual(cancelled.nativeControl)
+  expect(cold?.nativeAllocation).toEqual(admitted.nativeAllocation)
+})
+
+it('never reinterprets a lost Cancel as initial admission', () => {
+  const { admitted } = initialAllocationVisit()
+  const cancelled = registry.commitNativeControl(admitted, { version: 1, cancel: { ...cancellation().cancel,
+    processKey: null, target: nativeTurnTarget(admitted) } }, () => {})
+  delete cancelled.nativeControl
+  writeFileSync(file, JSON.stringify([cancelled]), { mode: 0o600 })
+  const before = readFileSync(file, 'utf8')
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  registry.load(); registry.flush()
+  expect(registry.list()).toEqual([]); expect(readFileSync(file, 'utf8')).toBe(before)
+})
+
+it('stale initial-schema edits preserve a peer Cancel and the original creation', async () => {
+  const { admitted } = initialAllocationVisit(), previous = structuredClone(admitted)
+  const cancelled = registry.commitNativeControl(admitted, { version: 1, cancel: { ...cancellation().cancel,
+    processKey: null, target: nativeTurnTarget(admitted) } }, () => {})
+  const { mergedForSave } = await import('./registry.js')
+  const value = (input: object) => input as Record<string, unknown>
+  const merged = mergedForSave(new Map([[row.agentId, value(cancelled)]]),
+    new Map([[row.agentId, value({ ...previous, title: 'Renamed' })]]),
+    new Map([[row.agentId, JSON.stringify(previous)]]), new Map()).get(row.agentId)
+  expect(merged?.schemaVersion).toBe(4); expect(merged?.nativeControl).toEqual(cancelled.nativeControl)
+  expect(merged?.nativeAllocation).toEqual(previous.nativeAllocation); expect(merged?.title).toBe('Renamed')
+})
+
+it('keeps initial allocation ownership across saved edits and first saved Cancel', () => {
+  const { admitted } = initialAllocationVisit(), directory = join(root, 'first-saved')
+  mkdirSync(directory, { mode: 0o700 })
+  writeFileSync(join(directory, `${admitted.agentId}.json`), JSON.stringify({ version: 1, session: { ...admitted, active: false } }), { mode: 0o600 })
+  const store = new StoppedAgentStore(directory), saved = store.get(admitted.agentId)!
+  expect(saved?.schemaVersion).toBe(5)
+  expect(() => store.save({ ...saved, title: 'Renamed' })).not.toThrow()
+  const edited = store.get(admitted.agentId)!
+  expect(edited?.schemaVersion).toBe(5); expect(edited?.nativeAllocation).toEqual(admitted.nativeAllocation)
+  const cancelled = store.commitNativeControl(edited, { version: 1, cancel: { ...cancellation().cancel,
+    processKey: null, target: nativeTurnTarget(edited) } }, { verify: () => {}, current: () => {} })
+  expect(cancelled.schemaVersion).toBe(4); expect(cancelled.nativeAllocation).toEqual(admitted.nativeAllocation)
+  expect(new StoppedAgentStore(directory).get(admitted.agentId)?.nativeControl).toEqual(cancelled.nativeControl)
+})
+
+it.each(['control', 'missing', 'legacy', 'later-rearm', 'foreign-agent', 'other-engine', 'retired-runtime'])
+  ('refuses initial schema five with %s corruption without changing any saved bytes', change => {
+    const { admitted } = initialAllocationVisit(), candidate = structuredClone(admitted)
+    if (change === 'control') candidate.nativeControl = cancellation()
+    if (change === 'missing') delete candidate.nativeAllocation
+    if (change === 'legacy') candidate.nativeAllocation = { ...candidate.nativeAllocation!, version: 1 }
+    if (change === 'foreign-agent') candidate.agentId = 'foreign-agent'
+    if (change === 'other-engine') candidate.engine = 'codex'
+    if (change === 'retired-runtime') Object.assign(candidate, { runtimes: [{ backend: 'herdr', paneId: 'old' }], primaryRuntimeKey: 'herdr\0old', tmuxPane: undefined })
+    if (change === 'later-rearm') {
+      const choice = { kind: 'native-rearm', agentId: candidate.agentId, operation: 'restart', source: 'live' }
+      candidate.nativeAllocation = appendNativeAllocation(candidate.nativeAllocation, { fingerprint: creationFingerprint(choice),
+        request: { ...choice, creationId: 'second-creation-request', launchToken: 'second-launch-token', target: 'b'.repeat(64), sourceProcess: { processKey: null } } })
+    }
+    writeFileSync(file, JSON.stringify([candidate]), { mode: 0o600 })
+    const before = readFileSync(file, 'utf8')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    registry.load(); registry.flush()
+    expect(registry.list()).toEqual([]); expect(readFileSync(file, 'utf8')).toBe(before)
+  })
 
 it('generic control cannot admit a replacement without retaining its proven allocation', () => {
   const reserved = liveReservation(), before = readFileSync(file, 'utf8')

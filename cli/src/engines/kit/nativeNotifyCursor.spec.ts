@@ -12,6 +12,7 @@ import { probeNativeProcessControl } from '../../lib/nativeProcessControlProbe.j
 import { prepareProcessImageHelper } from '../../lib/nativeProcessImageArtifact.js'
 import { creationFingerprint } from '../../lib/agentCreationReceipt.js'
 import { appendNativeAllocation } from '../../lib/nativeAllocation.js'
+import { nativeCreateFingerprint, parseNativeCreateRequest } from '../../lib/nativeCreateRequest.js'
 
 vi.mock('./nativeHookClient.js', () => ({ deliverNativeHookClient: vi.fn() }))
 vi.mock('./nativeHookOrigin.js', () => ({ captureNativeHookClientOrigin: vi.fn() }))
@@ -173,6 +174,30 @@ it('keeps delivering native evidence for a cancelled row while refusing malforme
     { ...row, schemaVersion: 4, nativeControl }, { ...row, schemaVersion: 4, nativeAllocation },
     { ...row, schemaVersion: 4, nativeControl, nativeAllocation, agentId: 'foreign-agent' },
     { ...row, schemaVersion: 4, nativeControl, nativeAllocation: { version: 1, receipts: [] } }]) {
+    writeFileSync(path, JSON.stringify([candidate]))
+    expect(nativeNotifyRuntime(root, '%1')).toBeUndefined()
+  }
+})
+
+it('reads the distinct initial allocation schema without treating lost Cancel as first admission', () => {
+  const path = join(root, 'registry.json'), row = runtime()
+  const request = parseNativeCreateRequest({ kind: 'native-create-v2', creationId: 'initial-creation-request', agentId: row.agentId,
+    launchToken: 'initial-launch-token', label: 'harness-cursor-first', local: true,
+    input: { engine: 'cursor', cwd: '/fixture/project' }, selection: null })!
+  const nativeAllocation = appendNativeAllocation(undefined, { request, fingerprint: nativeCreateFingerprint(request) })
+  writeFileSync(path, JSON.stringify([{ ...row, schemaVersion: 5, nativeAllocation }]), { mode: 0o600 })
+  expect(nativeNotifyRuntime(root, '%1')?.agentId).toBe(row.agentId)
+  const choice = { kind: 'native-rearm', agentId: row.agentId, operation: 'restart', source: 'live' }
+  const later = appendNativeAllocation(nativeAllocation, { fingerprint: creationFingerprint(choice), request: {
+    ...choice, creationId: 'second-creation-request', launchToken: 'second-launch-token', target: 'b'.repeat(64), sourceProcess: { processKey: null },
+  } })
+  for (const candidate of [
+    { ...row, schemaVersion: 4, nativeAllocation }, { ...row, schemaVersion: 5 },
+    { ...row, schemaVersion: 5, nativeAllocation, nativeControl: {} },
+    { ...row, schemaVersion: 5, nativeAllocation, agentId: 'foreign-agent' },
+    { ...row, schemaVersion: 5, nativeAllocation: later },
+    { ...row, schemaVersion: 5, nativeAllocation: { ...nativeAllocation, version: 1 } },
+  ]) {
     writeFileSync(path, JSON.stringify([candidate]))
     expect(nativeNotifyRuntime(root, '%1')).toBeUndefined()
   }

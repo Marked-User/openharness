@@ -67,7 +67,7 @@ import type { NativeArchiveTransaction, NativeArchiveReturnTransaction, StoppedA
 import type { NativeRearmReplacementProof } from '../engines/kit/nativeRearmProof.js'
 import { creationFingerprint } from './agentCreationReceipt.js'
 import { hookPreparationRoutes } from '../engines/kit/nativeHookFiles.js'
-import { appendNativeAllocation, parseNativeAllocation, type NativeAllocation } from './nativeAllocation.js'
+import { appendNativeAllocation, nativeAllocationIsInitial, parseNativeAllocation, type NativeAllocation } from './nativeAllocation.js'
 
 export type { ProcessIdentity } from './terminalTypes.js'
 
@@ -96,12 +96,13 @@ export interface RegisteredSession {
   /** An explicit Close-after-task intent. Never inferred from visibility or CPU use. */
   closePlan?: import('./closeAgentService.js').AgentClosePlan
   /** Per-row marker; the top-level array is retained for backward-reader safety. */
-  schemaVersion: 2 | 3 | 4
+  schemaVersion: 2 | 3 | 4 | 5
   /** Schema 3 makes older writers refuse this row instead of dropping Cancel.
    * This survives process changes, registration and stopped-history storage. */
   nativeControl?: NativeTurnIntent
-  /** Schema 4 prevents older writers from erasing the original allocation
-   * receipts. These survive every Cancel, even when its temporary R is cleared. */
+  /** Schemas 4/5 prevent older writers from erasing original allocation receipts.
+   * Schema 5 is only the admitted first creation, before its first Cancel;
+   * Cancel changes it to 4, which always requires its durable control. */
   nativeAllocation?: NativeAllocation
   /** An archive-to-live ownership epoch. Only an explicit two-store handoff
    * creates or retires it; later live cancellation and restart retain it. */
@@ -584,7 +585,7 @@ function withoutRetiredRuntimes(value: unknown): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value
   const row = value as Record<string, unknown>
   // New authority is never normalized away by a retired-terminal migration.
-  if (Object.hasOwn(row, 'nativeAllocation') || row.schemaVersion === 4) return value
+  if (Object.hasOwn(row, 'nativeAllocation') || row.schemaVersion === 4 || row.schemaVersion === 5) return value
   if (!Array.isArray(row.runtimes) || !row.runtimes.some(retiredRuntime)) return value
   const runtimes = row.runtimes.filter((runtime) => !retiredRuntime(runtime))
   const hasLegacyPane = typeof row.tmuxPane === 'string' && PANE_RE.test(row.tmuxPane)
@@ -645,9 +646,10 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
   const nativeAllocation = Object.hasOwn(row, 'nativeAllocation') ? parseNativeAllocation(row.nativeAllocation) : undefined
   const nativeArchive = row.nativeArchive === undefined ? undefined : parseNativeArchiveLink(row.nativeArchive)
   const nativeRetirement = row.nativeRetirement === undefined ? undefined : parseNativeArchiveRetirement(row.nativeRetirement)
-  if ((row.schemaVersion !== 2 && row.schemaVersion !== 3 && row.schemaVersion !== 4)
-    || (row.schemaVersion !== 2) !== (nativeControl !== undefined) || nativeControl === null
-    || (row.schemaVersion === 4) !== (nativeAllocation !== undefined) || nativeAllocation === null
+  if ((row.schemaVersion !== 2 && row.schemaVersion !== 3 && row.schemaVersion !== 4 && row.schemaVersion !== 5)
+    || (row.schemaVersion === 3 || row.schemaVersion === 4) !== (nativeControl !== undefined) || nativeControl === null
+    || (row.schemaVersion === 4 || row.schemaVersion === 5) !== (nativeAllocation !== undefined) || nativeAllocation === null
+    || row.schemaVersion === 5 && (!nativeAllocation || !nativeAllocationIsInitial(nativeAllocation))
     || nativeAllocation && (row.engine !== 'cursor' || nativeAllocation.receipts.some(value => value.request.agentId !== row.agentId))
     || nativeArchive === null || nativeArchive && (!nativeControl || row.engine !== 'cursor' || nativeArchive.agentId !== row.agentId)
     || nativeRetirement === null || nativeRetirement && (nativeRetirement.phase !== 'returning' || !nativeArchive
@@ -843,7 +845,7 @@ function validatedRows(values: readonly unknown[]): RegisteredSession[] | null {
 function hasUnknownRowSchema(value: unknown): boolean {
   return !!value && typeof value === 'object'
     && Object.hasOwn(value, 'schemaVersion')
-    && ![2, 3, 4].includes((value as { schemaVersion?: unknown }).schemaVersion as number)
+    && ![2, 3, 4, 5].includes((value as { schemaVersion?: unknown }).schemaVersion as number)
 }
 
 function validLegacyRegistryRow(value: unknown): boolean {
@@ -1250,7 +1252,7 @@ class Registry {
       if (dropped) console.log(`[registry] dropped ${dropped} agent(s) that lived only in a retired Herdr terminal`)
       if (parsed.some(hasUnknownRowSchema) || parsed.some(value => !!value && typeof value === 'object'
         && (Object.hasOwn(value, 'externalResume') || Object.hasOwn(value, 'nativeControl') || Object.hasOwn(value, 'nativeAllocation')
-          || [3, 4].includes((value as { schemaVersion?: unknown }).schemaVersion as number)) && !strictPersistedRow(value))) {
+          || [3, 4, 5].includes((value as { schemaVersion?: unknown }).schemaVersion as number)) && !strictPersistedRow(value))) {
         this.writeBlocked = true
         console.error('[registry] registry contains an unknown row schema; refusing to overwrite it')
         return
@@ -1261,7 +1263,7 @@ class Registry {
         return
       }
       const v2Rows = parsed.filter((row) => !!row && typeof row === 'object'
-        && [2, 3, 4].includes((row as { schemaVersion?: unknown }).schemaVersion as number))
+        && [2, 3, 4, 5].includes((row as { schemaVersion?: unknown }).schemaVersion as number))
       if (v2Rows.length && !validatedRows(v2Rows)) {
         this.quarantine('contains a malformed v2 row')
         return
@@ -1272,7 +1274,7 @@ class Registry {
         if (id) this.persistedBaseline.set(id, rowFingerprint(row))
       }
       // The rollback copy is the file as found, retired runtimes and all — not the cleaned rows.
-      if (arr.some((row) => row.schemaVersion !== 2 && row.schemaVersion !== 3 && row.schemaVersion !== 4)) {
+      if (arr.some((row) => row.schemaVersion !== 2 && row.schemaVersion !== 3 && row.schemaVersion !== 4 && row.schemaVersion !== 5)) {
         atomicWriteJson(PRE_V2_BACKUP_FILE, stored, true)
       }
       let changed = strippedRetired
@@ -1383,7 +1385,7 @@ class Registry {
         const active = !rebooted && raw.active !== false
         const launch = normalizedLaunch(raw.launch)
         const s: RegisteredSession = {
-          schemaVersion: raw.schemaVersion === 4 ? 4 : raw.schemaVersion === 3 ? 3 : 2,
+          schemaVersion: raw.schemaVersion === 5 ? 5 : raw.schemaVersion === 4 ? 4 : raw.schemaVersion === 3 ? 3 : 2,
           ...(raw.nativeAllocation ? { nativeAllocation: parseNativeAllocation(raw.nativeAllocation)! } : {}),
           ...(raw.nativeControl ? { nativeControl: parseNativeTurnIntent(raw.nativeControl)! } : {}),
           ...(raw.nativeArchive ? { nativeArchive: parseNativeArchiveLink(raw.nativeArchive)! } : {}),
@@ -2078,7 +2080,7 @@ class Registry {
       : baseCwd
     const retainEvidence = sameSession && existing.engine === engine && existing.transcriptPath === effectiveTranscriptPath
     const entry: RegisteredSession = {
-      schemaVersion: existing?.nativeAllocation ? 4 : existing?.nativeControl ? 3 : 2,
+      schemaVersion: existing?.schemaVersion === 5 ? 5 : existing?.nativeAllocation ? 4 : existing?.nativeControl ? 3 : 2,
       ...(existing?.nativeAllocation ? { nativeAllocation: existing.nativeAllocation } : {}),
       ...(existing?.nativeControl ? { nativeControl: existing.nativeControl } : {}),
       ...(existing?.nativeArchive ? { nativeArchive: existing.nativeArchive } : {}),
@@ -3350,7 +3352,7 @@ class Registry {
           const parsed = withoutRetiredRows(stored).rows
           if (parsed.some(hasUnknownRowSchema) || parsed.some(value => !!value && typeof value === 'object'
         && (Object.hasOwn(value, 'externalResume') || Object.hasOwn(value, 'nativeControl') || Object.hasOwn(value, 'nativeAllocation')
-          || [3, 4].includes((value as { schemaVersion?: unknown }).schemaVersion as number)) && !strictPersistedRow(value))) {
+          || [3, 4, 5].includes((value as { schemaVersion?: unknown }).schemaVersion as number)) && !strictPersistedRow(value))) {
             throw new Error('registry contains an unknown row schema')
           }
           const legacyRows = parsed.filter((row) => !row || typeof row !== 'object' || !Object.hasOwn(row, 'schemaVersion'))
@@ -3358,7 +3360,7 @@ class Registry {
             throw new Error('registry contains a malformed legacy row')
           }
           const v2Rows = parsed.filter((row) => !!row && typeof row === 'object'
-            && [2, 3, 4].includes((row as { schemaVersion?: unknown }).schemaVersion as number))
+            && [2, 3, 4, 5].includes((row as { schemaVersion?: unknown }).schemaVersion as number))
           if (v2Rows.length && !validatedRows(v2Rows)) throw new Error('registry contains a malformed v2 row')
           return parsed
         })()

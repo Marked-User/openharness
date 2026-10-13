@@ -954,6 +954,43 @@ about 23:05 and finished about 23:32 UTC October 13, with implementation, review
 and validation overlapping;
 no merge or publication occurred.
 
+Initial admitted allocations now retain that exact first receipt in version 2
+of the ledger, uniquely first and followed only by rearm receipts. Schema 5 is
+the admitted first launch before any Cancel; its first Cancel becomes schema 4,
+which still requires native control. Losing Cancel therefore cannot reinterpret
+a cancelled row as a fresh admission. Cold reads, generic registration, stale
+merges and saved edits preserve this distinction and the original metadata.
+
+Stop reads the initial witness through its dedicated reader and does not invent
+a predecessor. It includes that original engine and pane alongside later rearm
+obligations. A missing admitted initial witness holds, even if a not-dispatched
+record exists. Real cold receipt tests cover initial-only and mixed initial,
+admitted rearm and cancelled pending rearm histories, including replacement of
+the initial process record after selection.
+
+The former admitted-allocation golden was recorded alone in `1a3ff8c92`, before
+the move, with pinned Linux/Darwin, time and placeholder binaries/paths. Unchanged
+playback and types pass (`20261013T233613.500492Z-97781`, 2.0/4.8 seconds).
+Recording receipts `20261013T233520.073451Z-94590` and
+`20261013T233559.808386Z-97176` remain failed/source-changed. The first implementation
+aggregate (`20261013T234102.500350Z-18498`) passed 553 cases but failed four legacy
+row migrations and types: retaining the raw schema also retained an absent legacy
+schema. Explicit 5/4/3/2 normalization restores legacy behavior. Corrected types
+and all 296 cases in the three complete Registry/control/Stop files pass
+(`20261013T234612.701772Z-42654`, 5.8/85.1 seconds); ten unchanged complete files
+from the earlier run retain their passing evidence. No golden changed.
+
+Healthy mutation baselines, all 17 new assertion faults, two affected prior
+schema faults and restored types pass (`20261013T234938.041422Z-59633`, 38.3 seconds).
+That gate also bundles the actual former Registry and allocation parser from
+`9605c4906`: both mixed schema-2/schema-5 and schema-2/schema-4/version-2 tables
+are refused without changing their original bytes. Independent review approved
+the corrected decoding, preservation and Stop scope conditional on these now
+completed gates. Trusted initial admission, its writer, pending ownership and
+public activation remain required. Implementation/review ran about 23:33–23:54
+UTC October 13, with overlapping validation; merge, publication and external
+waiting remain zero.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R

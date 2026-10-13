@@ -1,6 +1,7 @@
 import { expect, it } from 'vitest'
 import { creationFingerprint } from './agentCreationReceipt.js'
 import { appendNativeAllocation, nativeAllocationCanReserve, parseNativeAllocation } from './nativeAllocation.js'
+import { nativeCreateFingerprint, parseNativeCreateRequest } from './nativeCreateRequest.js'
 
 function allocationReceipt(n = 0, agentId = 'agent') {
   const choice = { kind: 'native-rearm', agentId, operation: 'resume', source: 'live', permissionMode: 'full' }
@@ -77,4 +78,42 @@ it('refuses same-ID conflicts, reused pane tokens and malformed prior authority'
   expect(() => appendNativeAllocation(saved, { ...allocationReceipt(1), request: { ...allocationReceipt(1).request, launchToken: allocationReceipt().request.launchToken } })).toThrow()
   expect(() => appendNativeAllocation({ version: 1, receipts: [] }, allocationReceipt())).toThrow()
   expect(() => appendNativeAllocation(undefined, { ...allocationReceipt(), fingerprint: 'f'.repeat(64) })).toThrow()
+})
+
+function initialReceipt(agentId = 'agent') {
+  const request = parseNativeCreateRequest({ kind: 'native-create-v2', creationId: 'initial-creation-request', agentId,
+    launchToken: 'initial-launch-token', label: 'harness-cursor-original', local: true,
+    input: { engine: 'cursor', cwd: '/fixture/project', prompt: 'Fixture prompt' }, selection: null })!
+  return { request, fingerprint: nativeCreateFingerprint(request) }
+}
+
+it('retains first creation without a predecessor and appends later rearm in order', () => {
+  const initial = initialReceipt(), saved = appendNativeAllocation(undefined, initial)
+  expect(saved).toEqual({ version: 2, receipts: [initial] })
+  expect(saved.receipts[0].request).not.toHaveProperty('sourceProcess')
+  expect(Object.isFrozen(saved.receipts[0].request.input)).toBe(true)
+  expect(appendNativeAllocation(saved, initial)).toEqual(saved)
+  let later = saved
+  for (let n = 0; n < 3; n++) later = appendNativeAllocation(later, allocationReceipt(n))
+  expect(later).toEqual({ version: 2, receipts: [initial, allocationReceipt(0), allocationReceipt(1), allocationReceipt(2)] })
+  expect(nativeAllocationCanReserve(later, 'fifth-launch-request')).toBe(false)
+  expect(() => appendNativeAllocation(later, allocationReceipt(3))).toThrow()
+  expect(later.receipts[0]).toEqual(initial)
+})
+
+it('refuses initial admission in older or reordered allocation history', () => {
+  const initial = initialReceipt()
+  for (const value of [
+    { version: 1, receipts: [initial] }, { version: 2, receipts: [allocationReceipt()] },
+    { version: 2, receipts: [allocationReceipt(), initial] }, { version: 2, receipts: [initial, initial] },
+    { version: 2, receipts: [initial, initialReceipt('foreign-agent')] },
+    { version: 2, receipts: [{ ...initial, fingerprint: 'f'.repeat(64) }] },
+    { version: 2, receipts: [{ ...initial, request: { ...initial.request, sourceProcess: { processKey: null } } }] },
+    { version: 2, receipts: new Array(1) }, { version: 1, receipts: new Array(1) },
+  ]) expect(parseNativeAllocation(value)).toBeNull()
+  expect(() => appendNativeAllocation(appendNativeAllocation(undefined, allocationReceipt()), initial)).toThrow()
+  const saved = appendNativeAllocation(undefined, initial)
+  expect(() => appendNativeAllocation(saved, { ...initial, request: { ...initial.request, label: 'harness-cursor-replacement' } })).toThrow()
+  expect(() => appendNativeAllocation(saved, { ...allocationReceipt(), request: { ...allocationReceipt().request,
+    launchToken: initial.request.launchToken } })).toThrow()
 })

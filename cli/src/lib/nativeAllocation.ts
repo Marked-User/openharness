@@ -3,10 +3,13 @@
 import { IdentityReadUnavailable } from '../engines/kit/identityScan.js'
 import { creationFingerprint, validCreationId, type NativeRelaunchRequest } from './agentCreationReceipt.js'
 import { parseNativeTurnProcessReference } from './nativeTurnIntent.js'
+import { nativeCreateFingerprint, parseNativeCreateRequest } from './nativeCreateRequest.js'
 
 export const NATIVE_ALLOCATION_LIMIT = 4
 export interface NativeAllocation {
-  readonly version: 1
+  /** Version 1 keeps rearm-only history unchanged. Version 2 begins with the
+   * exact first creation, which has no predecessor process to account for. */
+  readonly version: 1 | 2
   readonly receipts: readonly Readonly<NativeRelaunchRequest>[]
 }
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
@@ -18,6 +21,11 @@ const digest = (value: unknown): value is string => typeof value === 'string' &&
 function receipt(value: unknown): Readonly<NativeRelaunchRequest> | null {
   if (!object(value) || !exact(value, ['fingerprint', 'request']) || !digest(value.fingerprint) || !object(value.request)) return null
   const request = value.request
+  if (request.kind === 'native-create-v2') {
+    const initial = parseNativeCreateRequest(request)
+    return initial && nativeCreateFingerprint(initial) === value.fingerprint
+      ? Object.freeze({ fingerprint: value.fingerprint, request: initial }) : null
+  }
   if (!exact(request, ['kind', 'creationId', 'agentId', 'operation', 'source', 'target', 'launchToken',
     ...(Object.hasOwn(request, 'permissionMode') ? ['permissionMode'] : []),
     ...(Object.hasOwn(request, 'sourceProcess') ? ['sourceProcess'] : [])])
@@ -40,16 +48,24 @@ function receipt(value: unknown): Readonly<NativeRelaunchRequest> | null {
 }
 
 export function parseNativeAllocation(value: unknown): NativeAllocation | null {
-  if (!object(value) || !exact(value, ['version', 'receipts']) || value.version !== 1
+  if (!object(value) || !exact(value, ['version', 'receipts']) || value.version !== 1 && value.version !== 2
     || !Array.isArray(value.receipts) || !value.receipts.length || value.receipts.length > NATIVE_ALLOCATION_LIMIT) return null
-  const receipts = value.receipts.map(receipt)
+  const receipts = Array.from(value.receipts, receipt)
   if (receipts.some(value => !value)) return null
   const original = receipts as Readonly<NativeRelaunchRequest>[]
-  if (new Set(original.map(value => value.request.creationId)).size !== original.length
+  const initial = original.filter(value => value.request.kind === 'native-create-v2')
+  if ((value.version === 1 ? initial.length !== 0 : initial.length !== 1 || original[0] !== initial[0])
+    || new Set(original.map(value => value.request.creationId)).size !== original.length
     || new Set(original.map(value => value.request.launchToken)).size !== original.length
     || new Set(original.map(value => value.request.agentId)).size !== 1
     || Buffer.byteLength(JSON.stringify(original)) > 32 * 1024) return null
-  return Object.freeze({ version: 1, receipts: Object.freeze(original) })
+  return Object.freeze({ version: value.version, receipts: Object.freeze(original) })
+}
+
+/** Only this distinct state can lack Cancel. Later schema-4 rows must retain
+ * their control even when the first creation is still in their history. */
+export function nativeAllocationIsInitial(value: NativeAllocation): boolean {
+  return value.version === 2 && value.receipts.length === 1 && value.receipts[0].request.kind === 'native-create-v2'
 }
 
 /** Only the proven admission transaction calls this. Existing entries retain
@@ -60,7 +76,8 @@ export function appendNativeAllocation(previous: NativeAllocation | undefined, i
   if (previous !== undefined && !saved || !next) return held()
   const existing = saved?.receipts.find(value => value.request.creationId === next.request.creationId)
   if (existing) return creationFingerprint(existing) === creationFingerprint(next) ? saved! : held()
-  const proposed = parseNativeAllocation({ version: 1, receipts: [...(saved?.receipts ?? []), next] })
+  const proposed = parseNativeAllocation({ version: saved?.version ?? (next.request.kind === 'native-create-v2' ? 2 : 1),
+    receipts: [...(saved?.receipts ?? []), next] })
   return proposed ?? held()
 }
 

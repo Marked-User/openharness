@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentCreationReceipts, creationFingerprint, type NativeRelaunchProcess, type NativeRelaunchRequest } from '../../lib/agentCreationReceipt.js'
 import { appendNativeAllocation } from '../../lib/nativeAllocation.js'
+import { nativeCreateFingerprint, parseNativeCreateRequest } from '../../lib/nativeCreateRequest.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import type { NativeTurnIntent } from '../../lib/nativeTurnIntent.js'
 import { readNativeStopAllocations } from './nativeStopAllocations.js'
@@ -48,10 +49,82 @@ function fixture(count = 1, pending = false) {
     return { process: structuredClone(entry.process), verify: entry.verify, verifyConfirmation: entry.verify }
   })
   const notDispatched = vi.fn<AgentCreationReceipts['readNativeRelaunchNotDispatched']>(() => { throw Error('original outcome is unknown') })
+  const initialRead = vi.fn<AgentCreationReceipts['readNativeCreationProcess']>(() => { throw Error('not an initial launch') })
   const fence = { verify: vi.fn(), current: vi.fn() }
-  const select = () => readNativeStopAllocations(row, { readNativeRelaunchProcess: read, readNativeRelaunchNotDispatched: notDispatched }, fence)
-  return { entries, row, read, notDispatched, fence, select }
+  const select = () => readNativeStopAllocations(row, { readNativeRelaunchProcess: read, readNativeRelaunchNotDispatched: notDispatched,
+    readNativeCreationProcess: initialRead }, fence)
+  return { entries, row, read, initialRead, notDispatched, fence, select }
 }
+
+it('accounts for the first creation without inventing an earlier engine', async () => {
+  const p = fixture(), root = realpathSync(mkdtempSync(join(tmpdir(), 'native-first-stop-')))
+  try {
+    const request = parseNativeCreateRequest({ kind: 'native-create-v2', creationId: 'initial-creation-request', agentId,
+      launchToken: p.entries[0].process.allocation!.token, label: 'harness-cursor-first', local: true,
+      input: { engine: 'cursor', cwd: '/fixture/project' }, selection: null })!
+    const initial = { request, fingerprint: nativeCreateFingerprint(request) }, receipts = new AgentCreationReceipts(root)
+    await receipts.runIntent(request.creationId, initial.fingerprint, request, { service: 'native', detail: 'fixture' }, async () => async () => {
+      receipts.recordNativeCreationProcess(request.creationId, initial, p.entries[0].process, p.fence)
+      return { state: 'unconfirmed' }
+    })
+    receipts.confirmNativeCreation(request.creationId, { ...initial, outcome: { state: 'created', agentId } }, p.fence)
+    p.row.nativeAllocation = appendNativeAllocation(undefined, initial)
+    p.row.nativeControl = { ...p.row.nativeControl!, cancel: { ...p.row.nativeControl!.cancel, processKey: null } }
+    delete (p.row.nativeControl.cancel as { namespace?: string }).namespace
+    const cold = new AgentCreationReceipts(root), read = vi.spyOn(cold, 'readNativeCreationProcess')
+    const rearmRead = vi.spyOn(cold, 'readNativeRelaunchProcess'), absence = vi.spyOn(cold, 'readNativeRelaunchNotDispatched')
+    let owner!: ReturnType<typeof readNativeStopAllocations>
+    expect(() => { owner = readNativeStopAllocations(p.row, cold, p.fence) }).not.toThrow()
+    expect(owner.engines).toEqual([engine(100)])
+    expect(owner.allocations).toEqual([p.entries[0].process.allocation])
+    expect(read).toHaveBeenCalledWith(request.creationId, initial)
+    expect(rearmRead).not.toHaveBeenCalled(); expect(absence).not.toHaveBeenCalled()
+    owner.verifyAllocations()
+    rmSync(join(root, `${request.creationId}.json.process`))
+    expect(() => owner.verifyAllocations()).toThrow()
+    expect(() => readNativeStopAllocations(p.row, cold, p.fence)).toThrow('admitted original witness')
+    expect(absence).not.toHaveBeenCalled()
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+it('cold Stop retains initial creation together with later admitted and pending rearm', async () => {
+  const p = fixture(3, true), root = realpathSync(mkdtempSync(join(tmpdir(), 'native-mixed-stop-')))
+  try {
+    const request = parseNativeCreateRequest({ kind: 'native-create-v2', creationId: 'initial-creation-request', agentId,
+      launchToken: p.entries[0].process.allocation!.token, label: 'harness-cursor-first', local: true,
+      input: { engine: 'cursor', cwd: '/fixture/project' }, selection: null })!
+    const first = { request, fingerprint: nativeCreateFingerprint(request) }, receipts = new AgentCreationReceipts(root)
+    const create = async (entry: typeof first | NativeRelaunchRequest, process: NativeRelaunchProcess, initial: boolean) => {
+      const id = entry.request.creationId as string
+      await receipts.runIntent(id, entry.fingerprint, entry.request, { service: 'native', detail: 'fixture' }, async () => async () => {
+        if (initial) receipts.recordNativeCreationProcess(request.creationId, first, process, p.fence)
+        else receipts.recordNativeRelaunchProcess(id, entry, process, p.fence)
+        return { state: 'unconfirmed' }
+      })
+    }
+    await create(first, p.entries[0].process, true)
+    receipts.confirmNativeCreation(request.creationId, { ...first, outcome: { state: 'created', agentId } }, p.fence)
+    p.row.nativeAllocation = appendNativeAllocation(undefined, first)
+    for (const entry of p.entries.slice(1, 3)) {
+      await create(entry.receipt, entry.process, false)
+      receipts.confirmNativeRelaunch(entry.receipt.request.creationId, { ...entry.receipt, outcome: { state: 'created', agentId, resumed: true } }, p.fence)
+      p.row.nativeAllocation = appendNativeAllocation(p.row.nativeAllocation, entry.receipt)
+    }
+    const pending = p.entries[3]
+    receipts.cancelIntent(pending.receipt.request.creationId)
+    const cold = new AgentCreationReceipts(root)
+    let owner!: ReturnType<typeof readNativeStopAllocations>
+    expect(() => { owner = readNativeStopAllocations(p.row, cold, p.fence) }).not.toThrow()
+    expect(owner.engines).toEqual([engine(102), engine(100), engine(101)])
+    expect(owner.allocations.map(value => value.token)).toEqual(p.entries.slice(0, 3).map(value => value.process.allocation!.token))
+    expect(owner.engines.some(value => value.pid === 99 || value.pid === 103)).toBe(false)
+    owner.verifyAllocations()
+    const originalFile = join(root, `${request.creationId}.json.process`)
+    const replacement = `${originalFile}.replacement`
+    writeFileSync(replacement, readFileSync(originalFile), { mode: 0o600 }); renameSync(replacement, originalFile)
+    expect(() => owner.verifyAllocations()).toThrow()
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
 
 async function coldReceipts(root: string, p: ReturnType<typeof fixture>) {
   const receipts = new AgentCreationReceipts(root), first = p.entries[0], second = p.entries[1]
