@@ -19,6 +19,9 @@ export type NativeGenerationFact = {
 )
 export interface NativeGenerationSource {
   readonly owner: NativeGenerationOwner
+  /** Historical PID view captured with this exact engine, not a live signal or
+   * death permit. Cancel may retain it even after this source proof expires. */
+  readonly namespace?: string
   /** A complete, durably confirmed view. A truncated prefix is not a source. */
   readonly facts: readonly NativeGenerationFact[]
   readonly frontier?: NativeGenerationFrontier

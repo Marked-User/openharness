@@ -607,6 +607,43 @@ deadline checks. Implementation/review ran approximately 20:00–20:13 UTC Octob
 remain zero. Ordinary Cancel scope capture, physical Stop and activation remain
 outside this scoped approval.
 
+Confirmed generation sources now retain the original engine's PID namespace.
+The dedicated owner reader proves the actual Registry directory, stable local
+storage and kernel boot around two precise native observations, under one
+original deadline. Ordinary hook admission and caller ancestry retain their
+existing probe cost. Journal owner bytes remain unchanged. A later source cannot
+replace the first confirmed namespace, and cold recovery restores that pin from
+the saved Cancel. Cancel copies the association before revoking input; retries
+cannot enrich legacy or unknown owners with later scope evidence.
+
+All 448 cases in twelve files passed, including private HTTP recovery,
+persistence, unchanged owner/journal/launch goldens and architecture
+(`20261013T202953.480629Z-82853`, types 24.1 seconds, tests 269.0 seconds). That
+receipt remains failed because three older retirement branches lacked coverage.
+Focused complete intent/Cancel/projection files now pass all 167 cases at 100%
+statements, branches, functions and lines; types also pass
+(`20261013T203754.416927Z-9934`, 4.8/1.4 seconds). An intermediate focused run
+missed the archive-link branch and remains failed. The earlier superseded run
+was cancelled after a typed mock failure; it is not passing evidence.
+
+Complete mutation baselines passed and nineteen of twenty-one variants failed
+assertions in `20261013T203810.348276Z-10621` (237.3 seconds). Two test weaknesses
+were corrected: require an explicit source notification before dereferencing it,
+and use a different canonical birth so malformed-input rejection cannot mask
+the process-key check. All six affected private HTTP cases and types then passed
+(`20261013T204254.821167Z-26088`, 5.1/19.5 seconds); both corrected healthy cases
+and their assertion-failing mutants passed
+(`20261013T204328.116940Z-29069`, 16.1 seconds). Runtime source did not change
+between these receipts. No golden changed.
+
+Independent review approved this slice over `5590686ee`, conditional on these
+completed checks. Review found the original namespace-substitution gap and a
+missing pre-split input bound; both are corrected. Implementation/review ran
+approximately 20:16–20:43 UTC October 13, with overlapping validation through
+20:44. Merge, publication and external waiting remain zero. Pending-R original
+engine provenance, physical Stop, activation and actual configured-client cost
+remain outside this scoped approval.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R

@@ -2,9 +2,13 @@
 import type { RegisteredSession } from '../../lib/registry.js'
 import { readProcessEvidence } from '../../lib/processEvidence.js'
 import { controlIdentity, nativeProcessControl, type NativeControlRow } from '../../lib/nativeProcessControl.js'
+import { bundledProcessImageHelper, invalidateProcessImageHelper } from '../../lib/nativeProcessImages.js'
+import type { NativeControlHelpers } from '../../lib/nativeProcessControlProbe.js'
 import { NativeEvidenceBudget, nativeUnavailable } from './nativeEvidence.js'
 import { kernelBootId } from './nativeHookBoot.js'
 import { nativeHookIdentityV1, type NativeHookOriginOwner } from './nativeHookOrigin.js'
+import { nativeHookScope, type NativeHookScope } from './nativeHookScope.js'
+import { validNativeHookWriter } from './nativeHookWriter.js'
 
 export interface NativeHookOwner {
   /** Kernel boot, engine, PID and precise kernel birth; never an agent ID. */
@@ -12,13 +16,17 @@ export interface NativeHookOwner {
   /** Original image and command evidence, retained with the intake. */
   evidence: string
 }
-export type NativeHookOwnerProof = NativeHookOwner & { verify(): void }
-export type NativeHookExpectedOwner = NativeHookOwner | NativeHookOriginOwner
+export type NativeHookOwnerProof = NativeHookOwner & { readonly namespace?: string; verify(): void }
+export type NativeHookExpectedOwner = (NativeHookOwner | NativeHookOriginOwner) & { readonly namespace?: string }
 export type NativeHookOwnerReader = (row: RegisteredSession, expected?: NativeHookExpectedOwner) => Promise<NativeHookOwnerProof>
 export type NativeHookCaller = { owner(row: RegisteredSession): NativeHookExpectedOwner & { source?: 'caller' | 'runtime' } }
 export type NativeHookCallerReader = (callerPid: number, runtimeOwners: readonly RegisteredSession[]) => Promise<NativeHookCaller>
 
-export function createNativeHookOwnerReader(): NativeHookOwnerReader & { captureCaller: NativeHookCallerReader } {
+export function createNativeHookOwnerReader({ root, scope = nativeHookScope, helpers = {
+  prepare: () => bundledProcessImageHelper({ retryUnavailable: true }), invalidate: invalidateProcessImageHelper,
+} }: { root?: string; scope?: typeof nativeHookScope; helpers?: NativeControlHelpers } = {}): NativeHookOwnerReader & {
+  captureCaller: NativeHookCallerReader; generation: NativeHookOwnerReader
+} {
   let boot: string | undefined, active = 0
   const slot = async <T>(read: (budget: NativeEvidenceBudget, boot: string) => Promise<T>): Promise<T> => {
     if (active >= 8) return nativeUnavailable('the native hook process evidence slots are occupied')
@@ -34,10 +42,8 @@ export function createNativeHookOwnerReader(): NativeHookOwnerReader & { capture
   const identity = (row: RegisteredSession, birth: string, evidence: string, boot: string): NativeHookOwner => ({
     key: `${boot}\u0000${row.engine}\u0000${row.processIdentity!.pid}\u0000${birth}`, evidence,
   })
-  const read: NativeHookOwnerReader = async (input, expected) => {
-    const row = structuredClone(input), original = expected && { ...expected }
-    if (!row.active || !row.processIdentity) return nativeUnavailable('the native hook process owner is unavailable')
-    return slot(async (budget, boot) => {
+  const observe = async (row: RegisteredSession, original: NativeHookExpectedOwner | undefined,
+    budget: NativeEvidenceBudget, boot: string): Promise<NativeHookOwnerProof> => {
       // Membership of the captured caller tree proves origin, not the Registry's
       // declared executable. Preserve both checks after an exec-in-place or PID reuse.
       const process = (await readProcessEvidence(row.processIdentity!.pid, budget, undefined, row.processIdentity!)).parent
@@ -54,6 +60,44 @@ export function createNativeHookOwnerReader(): NativeHookOwnerReader & { capture
       const verify = () => budget.step()
       verify()
       return { ...owner, verify }
+  }
+  const read: NativeHookOwnerReader = async (input, expected) => {
+    const row = structuredClone(input), original = expected && { ...expected }
+    if (!row.active || !row.processIdentity) return nativeUnavailable('the native hook process owner is unavailable')
+    return slot((budget, boot) => observe(row, original, budget, boot))
+  }
+  /** Only confirmed Cursor generation reads need this historical association.
+   * Ordinary admission and caller ancestry retain their existing probe cost. */
+  const generation: NativeHookOwnerReader = async (input, expected) => {
+    const row = structuredClone(input), original = expected && { ...expected }
+    if (!root || row.engine !== 'cursor' || !row.active || !row.processIdentity) {
+      return nativeUnavailable('the native generation process scope is unavailable')
+    }
+    return slot(async (budget, boot) => {
+      const before = await scope(root, budget, helpers), { namespace, storage } = before
+      let after: NativeHookScope | undefined, result: NativeHookOwnerProof
+      try {
+        if (before.boot !== boot || original && 'namespace' in original && original.namespace !== namespace) {
+          return nativeUnavailable('the native generation process scope changed')
+        }
+        const first = await observe(row, original, budget, boot)
+        after = await scope(root, budget, helpers)
+        before.verify(root); after.verify(root); budget.step()
+        if (after.boot !== boot || after.namespace !== namespace || after.storage !== storage) {
+          return nativeUnavailable('the native generation process scope changed')
+        }
+        // The final observation retains the exact original image/incarnation
+        // across both scope reads. No later async preparation can replace it.
+        const final = await observe(row, first, budget, boot)
+        before.verify(root); after.verify(root); final.verify()
+        const parts = final.key.split('\0')
+        if (!validNativeHookWriter({ boot, namespace, pid: row.processIdentity!.pid, birth: parts[3] })) {
+          return nativeUnavailable('the native generation process scope is incomplete')
+        }
+        result = Object.freeze({ ...final, namespace })
+      } finally { try { after?.close() } finally { before.close() } }
+      budget.step()
+      return result
     })
   }
   const captureCaller: NativeHookCallerReader = async (callerPid, runtimeOwners) => {
@@ -94,5 +138,5 @@ export function createNativeHookOwnerReader(): NativeHookOwnerReader & { capture
       return nativeUnavailable('the selected engine was not proved in the original native hook caller ancestry or runtime')
     } }
   }
-  return Object.assign(read, { captureCaller })
+  return Object.assign(read, { captureCaller, generation })
 }

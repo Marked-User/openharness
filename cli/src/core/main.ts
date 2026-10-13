@@ -1826,7 +1826,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // Agent Messages is told when its switch changes, wherever it runs: off, it reads it again only when told or its
     // file changes (messages/service.ts).
     onNotice: (listener) => experimentHooks.onNotice(listener), messagesChanged: () => ports.messages?.settingsChanged() })
-  const nativeHookOwners = createNativeHookOwnerReader()
+  const nativeHookOwners = createNativeHookOwnerReader({ root: env.ADAPTER_DATA_DIR })
   const { server: hookServer, port: hookPort, localSocket, startRecovery: recoverNativeHooks,
     stopRecovery: stopNativeHooks, recoveryReady } = await startHookServer(daemonPort(), {
     onAutonomousDeviceRequest: async (method, target, body) => {
@@ -1859,6 +1859,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     hookAdmissionBlocked: id => launchCancelled(id),
     onAdmissionHeld: engineHooks.onAdmissionHeld,
     readNativeHookOwner: nativeHookOwners,
+    readNativeGenerationOwner: nativeHookOwners.generation,
     captureNativeHookCaller: nativeHookOwners.captureCaller,
     onNativeRecoveryReady: entry => { void attachSession(entry, true).catch(error => console.warn('[hooks] recovered attach held', error)) },
     onAdmissionStop: attach.holdAdmissionStop,

@@ -211,6 +211,74 @@ it('reads fresh native authority without replaying notifications or changing rea
   expect(f.started.recoveryReady(registry.byAgent(agentId)!)).toBe(true)
 }, 20_000)
 
+it('pins the original generation namespace after source confirmation without changing journal owner bytes', async () => {
+  const raw = JSON.stringify(cursorBody()), observed = vi.fn()
+  let namespace = 'linux:4:5'
+  const reader = vi.fn<NonNullable<HookServerHandlers['readNativeGenerationOwner']>>(async () => {
+    const original = namespace
+    return { key, evidence: nativeEvidence, namespace: original,
+      verify() { if (namespace !== original) throw Error('fixture original PID view changed') } }
+  })
+  const f = await fixture({ onNativeGenerations: observed, readNativeGenerationOwner: reader })
+  await f.settle(raw)
+  expect(observed).toHaveBeenCalled()
+  const source = observed.mock.calls.at(-1)![1] as NativeGenerationSource
+  expect(source.namespace).toBe('linux:4:5')
+  const bytes = JSON.stringify(records()), intakes = records().filter(record => record.event.kind === 'intake')
+  expect(intakes.length).toBeGreaterThan(0)
+  for (const record of intakes) expect(record.event.intake.owner).toEqual({ key, evidence: nativeEvidence })
+  reader.mockClear(); observed.mockClear()
+  fault.afterSourceConfirmation = () => { namespace = 'linux:4:6' }
+  await expect(f.started.readNativeGenerations(source.owner)).rejects.toThrow('original native generation PID view changed')
+  expect(reader).toHaveBeenCalledOnce(); expect(observed).not.toHaveBeenCalled()
+  expect(reader.mock.calls[0][1]).toMatchObject({ key, evidence: nativeEvidence, namespace: 'linux:4:5' })
+  expect(JSON.stringify(records())).toBe(bytes)
+  fault.afterSourceConfirmation = undefined; namespace = 'linux:4:5'
+  const fresh = await f.started.readNativeGenerations(source.owner)
+  expect(fresh.namespace).toBe('linux:4:5'); fresh.verify()
+  namespace = 'linux:4:7'
+  expect(() => fresh.verify()).toThrow('original PID view changed')
+  expect(fresh.namespace).toBe('linux:4:5')
+}, 20_000)
+
+it.each(['key', 'image', 'missing', 'invalid'])('holds %s final generation scope before publishing a source', async change => {
+  const raw = JSON.stringify(cursorBody()), observed = vi.fn()
+  let invalid = false
+  const reader = vi.fn(async () => ({ key: invalid && change === 'key' ? key.replace(/\d+$/, '987654') : key,
+    evidence: invalid && change === 'image' ? 'another-image' : nativeEvidence,
+    namespace: invalid && change === 'missing' ? undefined : invalid && change === 'invalid' ? 'linux:04:5' : 'linux:4:5', verify() {} }))
+  const f = await fixture({ onNativeGenerations: observed, readNativeGenerationOwner: reader })
+  await f.settle(raw)
+  const source = observed.mock.calls.at(-1)![1] as NativeGenerationSource
+  observed.mockClear(); invalid = true
+  await expect(f.started.readNativeGenerations(source.owner)).rejects.toThrow('scope belongs to another owner')
+  expect(observed).not.toHaveBeenCalled()
+}, 20_000)
+
+it('recovers the original PID view from a saved Cancel before accepting a generation owner', async () => {
+  const raw = JSON.stringify(cursorBody()), observed = vi.fn()
+  let namespace = 'linux:4:5'
+  const reader = vi.fn<NonNullable<HookServerHandlers['readNativeGenerationOwner']>>(async () => ({ key,
+    evidence: nativeEvidence, namespace, verify() {} }))
+  const first = await fixture({ onNativeGenerations: observed, readNativeGenerationOwner: reader })
+  await first.settle(raw)
+  const source = observed.mock.calls.at(-1)![1] as NativeGenerationSource
+  const row = registry.byAgent(agentId)!, { nativeTurnTarget } = await import('./lib/nativeTurnIntent.js')
+  registry.commitNativeControl(row, { version: 1, cancel: { processKey: key, namespace: 'linux:4:5',
+    target: nativeTurnTarget(row), request: { requestId: 'original-scoped-cancel', nonce: 'original-scoped-nonce', agentId,
+      conversationId: sessionId, frontier: source.frontier! } } }, () => {})
+  await close(); registry.load(); observed.mockClear(); reader.mockClear(); namespace = 'linux:4:6'
+  const held = vi.fn(), restarted = await fixture({ onNativeGenerations: observed, readNativeGenerationOwner: reader, onAdmissionHeld: held })
+  restarted.started.startRecovery()
+  await vi.waitFor(() => expect(held.mock.calls.some(([, reason]) => String(reason).includes('PID view changed'))).toBe(true), { timeout: 5000 })
+  expect(reader.mock.calls.every(([, expected]) => expected?.namespace === 'linux:4:5')).toBe(true)
+  expect(observed).not.toHaveBeenCalled()
+  expect(restarted.started.recoveryReady(registry.byAgent(agentId)!)).toBe(false)
+  namespace = 'linux:4:5'
+  const restored = await restarted.started.readNativeGenerations(source.owner)
+  expect(restored.namespace).toBe('linux:4:5'); restored.verify()
+}, 20_000)
+
 async function cancelRequest(f: Awaited<ReturnType<typeof fixture>>) {
   const owner = { agentId, sessionId, processKey: key }
   const source = await f.started.readNativeGenerations(owner)

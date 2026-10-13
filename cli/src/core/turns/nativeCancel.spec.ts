@@ -70,6 +70,34 @@ it('saves the immutable original cancellation before a single fresh physical int
   await expect(f.controller.cancel(row())).resolves.toBe(false)
 })
 
+it('copies the previously confirmed PID view before revocation and never renews it on retry', async () => {
+  const f = fixture(), known = { owner: { agentId: 'agent', sessionId: 'session',
+    processKey: 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa\0cursor\0' + '42\0' + '12345' },
+    frontier: { index: -1, digest: null }, namespace: 'linux:4:5' }
+  f.capture.mockReturnValue(known)
+  f.revoke.mockImplementation(() => { known.namespace = 'linux:4:6' })
+  await expect(f.controller.cancel(row())).resolves.toBe(true)
+  const saved = f.rows.get('agent')!
+  expect(saved.nativeControl!.cancel.namespace).toBe('linux:4:5')
+  f.journal.mockResolvedValue({ recorded: false, source: f.result().source })
+  await expect(f.controller.cancel(saved)).resolves.toBe(false)
+  expect(f.rows.get('agent')!.nativeControl).toEqual(saved.nativeControl)
+})
+
+it.each(['legacy', 'unknown'])('never fills missing %s Cancel scope from a later capture', async kind => {
+  const f = fixture()
+  if (kind === 'unknown') f.capture.mockReturnValue(undefined)
+  await f.controller.cancel(row())
+  const saved = f.rows.get('agent')!, previous = structuredClone(saved.nativeControl)
+  f.capture.mockReturnValue({ owner: { agentId: 'agent', sessionId: 'session',
+    processKey: 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa\0cursor\0' + '42\0' + '12345' },
+    frontier: { index: -1, digest: null }, namespace: 'linux:4:5' })
+  f.journal.mockResolvedValue({ recorded: false, source: f.result().source })
+  await f.controller.cancel(saved)
+  expect(f.rows.get('agent')!.nativeControl).toEqual(previous)
+  expect(Object.hasOwn(f.rows.get('agent')!.nativeControl!.cancel, 'namespace')).toBe(false)
+})
+
 it.each(['missing', 'mismatch', 'session', 'throws', 'unbound'] as const)('saves %s ownership as permanently unknown without interrupting', async kind => {
   const f = fixture(), original = row()
   if (kind === 'throws') f.capture.mockImplementation(() => { throw Error('unavailable') })

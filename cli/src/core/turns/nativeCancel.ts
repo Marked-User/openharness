@@ -13,7 +13,7 @@ export interface NativeCancelDeps {
   registry: Pick<typeof registry, 'byAgent' | 'commitNativeControl' | 'readNativeControl'>
   /** Previously confirmed identity only. Physical authority is renewed by the
    * journal port against this exact key after persistence. */
-  capture(row: RegisteredSession): { owner: NativeGenerationOwner; frontier: NativeGenerationFrontier } | undefined
+  capture(row: RegisteredSession): { owner: NativeGenerationOwner; frontier: NativeGenerationFrontier; namespace?: string } | undefined
   revoke(row: RegisteredSession): void
   revokeRearm(requestId: string): void
   journal(owner: NativeGenerationOwner, request: NativeGenerationCancellation): Promise<NativeCancellationResult>
@@ -140,7 +140,8 @@ export function createNativeCancel({ registry, capture, revoke, revokeRearm, jou
       try { if (!reserved || reserved.replacement) known = capture(original) } catch { /* Retain an unknown owner. */ }
       const owner = known?.owner.agentId === id && known.owner.sessionId === original.sessionId ? known : undefined
       const intent = original.nativeControl && !reserved ? original.nativeControl : parseNativeTurnIntent({ version: 1,
-        cancel: { processKey: owner?.owner.processKey ?? null, target, request: {
+        cancel: { processKey: owner?.owner.processKey ?? null, target,
+          ...(owner?.namespace === undefined ? {} : { namespace: owner.namespace }), request: {
           requestId: randomUUID(), nonce: randomUUID(), agentId: id, conversationId: original.sessionId,
           frontier: owner?.frontier ?? { index: -1, digest: null },
         } }, ...(reserved && !reserved.replacement ? { rearm: { ...reserved, revoked: true } } : {}),

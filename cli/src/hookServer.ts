@@ -46,6 +46,7 @@ import { inspectNativeHookOrigin, nativeHookOriginCaller, nativeHookIdentityV1 }
 import { nativeHookAcknowledgement, nativeHookWireIdentity, type NativeHookAcknowledgement,
   type NativeHookWireIdentity } from './engines/kit/nativeHookClientProtocol.js'
 import type { NativeHookCaller, NativeHookCallerReader, NativeHookOwner, NativeHookOwnerProof, NativeHookOwnerReader } from './engines/kit/nativeHookOwner.js'
+import { nativeTurnProcess } from './lib/nativeTurnIntent.js'
 
 /**
  * Which agent does a hook belong to, given the two grades of evidence?
@@ -117,6 +118,9 @@ export interface HookServerHandlers {
   onNativeGenerations?: (entry: RegisteredSession, source: NativeGenerationSource, pending: boolean) => void
   /** Production supplies precise kernel evidence; fixture-only servers inject their own process resolver. */
   readNativeHookOwner?: NativeHookOwnerReader
+  /** Captures the original PID view for durable Cancel only at generation
+   * confirmation, without changing the persisted hook-owner wire shape. */
+  readNativeGenerationOwner?: NativeHookOwnerReader
   captureNativeHookCaller?: NativeHookCallerReader
   /** Retain an uncorrelated native Stop before attaching a newly admitted conversation. */
   onAdmissionStop?: (entry: RegisteredSession, unmatched: boolean) => boolean
@@ -415,7 +419,7 @@ export function startHookServer(
     await (opened ?? nativeStorage)?.close()
   })().catch(error => { closingStorage = undefined; throw error })
   type DurableProcess = { key: string; journal: Journal; restored: Set<string>; claims: Map<string, NativeHookClaim>;
-    ready: boolean; confirming: number; recoveredFactIds: readonly string[]; owner?: NativeHookOwner }
+    ready: boolean; confirming: number; recoveredFactIds: readonly string[]; owner?: NativeHookOwner; namespace?: string }
   const durableProcesses = new Map<string, DurableProcess>()
   const openingProcesses = new Map<string, Promise<DurableProcess>>()
   const nativeKeys = new Map<string, string>()
@@ -528,6 +532,14 @@ export function startHookServer(
       context.restored.add(id)
     }
   }
+  const originalNamespace = (context: DurableProcess, row: RegisteredSession) => {
+    const cancel = row.nativeControl?.cancel
+    const saved = cancel?.processKey === context.key ? cancel.namespace : undefined
+    if (context.namespace !== undefined && saved !== undefined && context.namespace !== saved) {
+      throw new IdentityReadUnavailable('the original native generation PID view changed')
+    }
+    return context.namespace ?? saved
+  }
   const confirmedState = async (context: DurableProcess, row: RegisteredSession, publish: boolean,
     publicationGuard?: (source: NativeGenerationSource) => void) => {
     if (publish) ready(context, false)
@@ -582,7 +594,21 @@ export function startHookServer(
       const retained = await createNativeGenerationSource({ owner: original, read: async () => snapshot }).read()
       // Confirmation can outlive a kernel incarnation even while Registry is
       // unchanged. verify() checks the budget; this final read re-probes it.
-      if (handlers.readNativeHookOwner) verifyNativeOwner = (await handlers.readNativeHookOwner(row, context.owner)).verify
+      let namespace: string | undefined
+      const readOwner = handlers.readNativeGenerationOwner ?? handlers.readNativeHookOwner
+      if (readOwner) {
+        const retainedNamespace = originalNamespace(context, row)
+        const expected = context.owner && { ...context.owner,
+          ...(retainedNamespace === undefined ? {} : { namespace: retainedNamespace }) }
+        const native = await readOwner(row, expected)
+        if (native.key !== original.processKey || native.evidence !== context.owner?.evidence
+          || (handlers.readNativeGenerationOwner || native.namespace !== undefined)
+            && !nativeTurnProcess({ processKey: native.key, namespace: native.namespace })) {
+          throw new IdentityReadUnavailable('the native generation process scope belongs to another owner')
+        }
+        namespace = native.namespace
+        verifyNativeOwner = native.verify
+      }
       const verify = () => {
         retained.verify()
         verifyNativeOwner()
@@ -590,10 +616,18 @@ export function startHookServer(
         if (closed || !latest?.active || latest.sessionId !== original.sessionId || durableKey(latest) !== original.processKey) {
           throw new IdentityReadUnavailable('the native generation binding changed')
         }
+        const expected = originalNamespace(context, latest)
+        if (expected !== undefined && namespace !== expected) {
+          throw new IdentityReadUnavailable('the original native generation PID view changed')
+        }
       }
-      source = Object.freeze({ ...retained, observations, recoveredFactIds: context.recoveredFactIds, verify })
+      source = Object.freeze({ ...retained, observations, recoveredFactIds: context.recoveredFactIds,
+        ...(namespace === undefined ? {} : { namespace }), verify })
       publicationGuard?.(source)
       verify()
+      // This historical association is fixed only after the complete source
+      // and its final native owner have both been verified. It grants no effect.
+      if (namespace !== undefined) context.namespace = namespace
       if (publish) handlers.onNativeGenerations!(structuredClone(owner), source, pending)
       publicationGuard?.(source)
       verify()

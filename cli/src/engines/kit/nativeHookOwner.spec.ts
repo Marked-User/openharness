@@ -6,6 +6,7 @@ import { controlIdentity, nativeProcessControl, type NativeControlRow } from '..
 import { nativeBytes } from './nativeEvidence.js'
 import { createNativeHookOwnerReader } from './nativeHookOwner.js'
 import { nativeHookIdentityV1 } from './nativeHookOrigin.js'
+import type { nativeHookScope, NativeHookScope } from './nativeHookScope.js'
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }))
 vi.mock('../../lib/processEvidence.js', () => ({ readProcessEvidence: vi.fn() }))
@@ -146,4 +147,94 @@ it('keeps caller ancestry available while the independent Cursor runtime probe i
   fail()
   const caller = await pending
   expect(caller.owner(row())).toMatchObject({ source: 'caller', evidence: controlIdentity(native) })
+})
+
+function scoped() {
+  const root = '/fixture/private-registry'
+  const scopes: Array<NativeHookScope & { verify: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn> }> = []
+  const scope = vi.fn<typeof nativeHookScope>(async () => {
+    const result = { boot: `linux:${BOOT}`, namespace: 'linux:4:5', storage: 'fixture-local-volume', verify: vi.fn(), close: vi.fn() }
+    scopes.push(result); return result
+  })
+  const reader = createNativeHookOwnerReader({ root, scope })
+  const cursor: RegisteredSession = { ...row(), engine: 'cursor' }
+  return { reader, cursor, root, scope, scopes }
+}
+
+it('captures a historical PID view only in the final generation path without changing ordinary owner evidence', async () => {
+  const f = scoped(), original = await f.reader(f.cursor)
+  await f.reader.captureCaller(43, [f.cursor])
+  expect(f.scope).not.toHaveBeenCalled()
+  vi.mocked(readProcessEvidence).mockClear()
+  const result = await f.reader.generation(f.cursor, original)
+  expect(result).toMatchObject({ key: original.key, evidence: original.evidence, namespace: 'linux:4:5' })
+  expect(Object.isFrozen(result)).toBe(true)
+  expect(f.scope).toHaveBeenCalledTimes(2)
+  expect(f.scope.mock.calls.every(([root]) => root === f.root)).toBe(true)
+  expect(readProcessEvidence).toHaveBeenCalledTimes(2)
+  for (const scope of f.scopes) {
+    expect(scope.verify).toHaveBeenCalledWith(f.root); expect(scope.close).toHaveBeenCalledOnce()
+  }
+  clock.now = 4000
+  expect(() => result.verify()).toThrow('deadline')
+  expect(result.namespace).toBe('linux:4:5')
+})
+
+it.each(['root', 'engine', 'inactive', 'identity'])('holds generation capture without %s authority', async change => {
+  const f = scoped(), cursor = f.cursor
+  if (change === 'engine') cursor.engine = 'codex'
+  if (change === 'inactive') cursor.active = false
+  if (change === 'identity') cursor.processIdentity = null
+  await expect((change === 'root' ? createNativeHookOwnerReader() : f.reader).generation(cursor)).rejects.toThrow('scope is unavailable')
+  expect(f.scope).not.toHaveBeenCalled()
+})
+
+it.each(['boot', 'namespace', 'storage', 'original-root', 'final-root', 'pid', 'image', 'deadline', 'birth'])('holds %s changes across generation scope capture', async change => {
+  const f = scoped(), scope = f.scope.getMockImplementation()!
+  f.scope.mockImplementation(async (...args) => {
+    const result = await scope(...args)
+    if (f.scopes.length === 2) {
+      if (change === 'boot') result.boot = `linux:${BOOT.replace('aaaa', 'bbbb')}`
+      if (change === 'namespace') result.namespace = 'linux:4:6'
+      if (change === 'storage') result.storage = 'different-volume'
+      if (change === 'original-root') f.scopes[0].verify.mockImplementation(() => { throw Error('original root changed') })
+      if (change === 'final-root') vi.mocked(result.verify).mockImplementation(() => { throw Error('final root changed') })
+      if (change === 'pid') native.birth = '12346'
+      if (change === 'image') native.imagePath = '/fixture/successor'
+      if (change === 'deadline') clock.now = 4000
+    }
+    return result
+  })
+  if (change === 'birth') native.birth = '0012345'
+  await expect(f.reader.generation(f.cursor)).rejects.toThrow()
+  for (const scope of f.scopes) expect(scope.close).toHaveBeenCalledOnce()
+})
+
+it.each(['boot', 'namespace'])('refuses a foreign initial %s scope before a native read', async change => {
+  const f = scoped(), scope = f.scope.getMockImplementation()!
+  f.scope.mockImplementation(async (...args) => {
+    const result = await scope(...args)
+    if (change === 'boot') result.boot = `linux:${BOOT.replace('aaaa', 'bbbb')}`
+    return result
+  })
+  const original = { ...await f.reader(f.cursor), namespace: change === 'namespace' ? 'linux:4:6' : 'linux:4:5' }
+  vi.mocked(readProcessEvidence).mockClear()
+  await expect(f.reader.generation(f.cursor, original)).rejects.toThrow('scope changed')
+  expect(readProcessEvidence).not.toHaveBeenCalled()
+  expect(f.scopes[0].close).toHaveBeenCalledOnce()
+})
+
+it.each(['first-close', 'final-close', 'close-error', 'final-read'])('holds %s failure while closing every acquired generation scope', async change => {
+  const f = scoped(), scope = f.scope.getMockImplementation()!
+  f.scope.mockImplementation(async (...args) => {
+    if (change === 'final-read' && f.scopes.length) throw Error('final scope unavailable')
+    const result = await scope(...args)
+    if (f.scopes.length === (change === 'first-close' ? 1 : 2)) vi.mocked(result.close).mockImplementation(() => {
+      if (change === 'close-error') throw Error('scope close failed')
+      clock.now = 4000
+    })
+    return result
+  })
+  await expect(f.reader.generation(f.cursor)).rejects.toThrow()
+  for (const scope of f.scopes) expect(scope.close).toHaveBeenCalledOnce()
 })

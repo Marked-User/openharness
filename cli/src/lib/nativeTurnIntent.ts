@@ -2,6 +2,7 @@
  * process. The process journal remains the only authority for physical Cancel. */
 import { createHash } from 'node:crypto'
 import { validNativeGenerationCancellation, type NativeGenerationCancellation } from '../engines/kit/nativeGenerationCancellation.js'
+import { validNativeHookWriter, type NativeHookWriter } from '../engines/kit/nativeHookWriter.js'
 import type { RegisteredSession } from './registry.js'
 
 export interface NativeTurnIntent {
@@ -10,6 +11,9 @@ export interface NativeTurnIntent {
     /** Null retains Cancel when no native owner was proven at request entry.
      * It grants no interrupt authority and can never be filled in by recovery. */
     readonly processKey: string | null
+    /** Captured with the original engine. Missing historical scope can never be
+     * filled from a later PID view, including on an otherwise identical retry. */
+    readonly namespace?: string
     readonly target: string
     readonly request: NativeGenerationCancellation
   }
@@ -36,12 +40,24 @@ const processKey = (value: unknown): value is string => typeof value === 'string
 const token = (value: unknown): value is string => typeof value === 'string' && /^[a-zA-Z0-9_-]{16,96}$/.test(value)
 const digest = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 
+/** Only a complete original Cursor association can be used for precise death
+ * observations. Legacy opaque keys remain readable without that authority. */
+export function nativeTurnProcess(owner: { processKey: unknown; namespace?: unknown }): Readonly<NativeHookWriter> | null {
+  if (typeof owner.processKey !== 'string' || owner.processKey.length > 512 || typeof owner.namespace !== 'string') return null
+  const parts = owner.processKey.split('\0')
+  if (parts.length !== 4 || parts[1] !== 'cursor' || String(Number(parts[2])) !== parts[2]) return null
+  const process = { boot: parts[0], namespace: owner.namespace, pid: Number(parts[2]), birth: parts[3] }
+  return validNativeHookWriter(process) ? Object.freeze(process) : null
+}
+
 /** No caller may normalize unknown control data into an uncancelled agent.
  * Archives can have a new row ID: preserve the original Cancel owner verbatim. */
 export function parseNativeTurnIntent(value: unknown): NativeTurnIntent | null {
   if (!object(value) || value.version !== 1 || !exact(value, value.rearm === undefined ? 'cancel,version' : 'cancel,rearm,version')) return null
   const cancel = value.cancel
-  if (!object(cancel) || !exact(cancel, 'processKey,request,target') || cancel.processKey !== null && !processKey(cancel.processKey)
+  if (!object(cancel) || !exact(cancel, Object.hasOwn(cancel, 'namespace') ? 'namespace,processKey,request,target' : 'processKey,request,target')
+    || Object.hasOwn(cancel, 'namespace') && !nativeTurnProcess({ processKey: cancel.processKey, namespace: cancel.namespace })
+    || cancel.processKey !== null && !processKey(cancel.processKey)
     || !digest(cancel.target)) return null
   // Cancel before the first native binding still holds this agent. Only that
   // null-owner association may omit a conversation; it is never a journal request.
@@ -118,7 +134,7 @@ export function nativeTurnTransition(row: RegisteredSession, next: NativeTurnInt
   if (!previous) return !next.rearm && cancel()
   // Compare fields independently of caller property order.
   const originalCancel = (value: NativeTurnIntent['cancel']) => [value.processKey, value.target, value.request.requestId,
-    value.request.nonce, value.request.agentId, value.request.conversationId, value.request.frontier.index, value.request.frontier.digest]
+    value.request.nonce, value.request.agentId, value.request.conversationId, value.request.frontier.index, value.request.frontier.digest, value.namespace]
   if (!same(originalCancel(previous.cancel), originalCancel(next.cancel))) {
     // A newly admitted replacement may itself be cancelled. An unknown owner
     // never becomes known by filling in the old request after recovery.

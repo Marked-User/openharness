@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { nativeRearmRequest, nativeTurnAdmitted, nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
+import { nativeRearmRequest, nativeTurnAdmitted, nativeTurnProcess, nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
 import type { RegisteredSession } from './registry.js'
 
 const cancel = () => ({ processKey: 'boot\0cursor\0original', target: 'a'.repeat(64), request: {
@@ -11,6 +11,41 @@ const replacement = () => ({ processKey: 'boot\0cursor\0replacement', sessionId:
 const targetRow = () => ({ agentId: 'agent', registeredAt: 1, engine: 'cursor', sessionId: 'session', boundAt: 2, active: true,
   processIdentity: { pid: 42, executable: '<cursor>', startMarker: 'birth' }, runtimes: [{ backend: 'tmux', paneId: '%1' }],
   primaryRuntimeKey: 'tmux:%1', tmuxPane: '%1', cwd: '/fixture/project', transcriptPath: null } as RegisteredSession)
+
+const scopedCancel = (platform = 'linux') => ({ ...cancel(), namespace: platform === 'linux' ? 'linux:4:5' : 'darwin',
+  processKey: `${platform}:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa\0cursor\0${42}\0${platform === 'linux' ? '12345' : '1791547140:123456'}` })
+
+it.each(['linux', 'darwin'])('retains canonical %s Cancel scope as immutable original identity', platform => {
+  const original = { ...intent(), cancel: scopedCancel(platform) }, saved = parseNativeTurnIntent(original)!
+  expect(saved).toEqual(original)
+  const process = nativeTurnProcess(saved.cancel)!
+  expect(process).toEqual({ boot: saved.cancel.processKey!.split('\0')[0], namespace: saved.cancel.namespace, pid: 42,
+    birth: platform === 'linux' ? '12345' : '1791547140:123456' })
+  expect(Object.isFrozen(process)).toBe(true)
+  const row = { ...targetRow(), nativeControl: saved }
+  expect(nativeTurnTransition(row, saved)).toBe(true)
+  expect(nativeTurnTransition(row, { ...saved, cancel: { ...saved.cancel, namespace: 'linux:4:6' } })).toBe(false)
+  const { namespace: _namespace, ...legacy } = saved.cancel
+  expect(nativeTurnTransition(row, { ...saved, cancel: legacy })).toBe(false)
+  row.nativeControl = { ...saved, cancel: legacy }
+  expect(nativeTurnTransition(row, saved)).toBe(false)
+  expect(nativeTurnProcess(legacy)).toBeNull()
+})
+
+it.each([
+  { namespace: undefined }, { namespace: null }, { namespace: 'darwin' }, { namespace: 'linux:04:5' },
+  { namespace: 'linux:4:0' }, { namespace: 'linux:4:18446744073709551616' }, { processKey: null },
+  { processKey: 'original-process' }, { processKey: 'x'.repeat(513) }, { processKey: scopedCancel().processKey + '\0extra' },
+  { processKey: scopedCancel().processKey.replace('cursor', 'codex') },
+  { processKey: scopedCancel().processKey.replace('\0' + 42 + '\0', '\0' + '042' + '\0') },
+  { processKey: scopedCancel().processKey.replace('12345', '0012345') },
+  { processKey: scopedCancel().processKey.replace('12345', '9007199254740992') },
+  { processKey: scopedCancel('darwin').processKey.replace('123456', '000001'), namespace: 'darwin' },
+])('refuses incomplete or noncanonical Cancel scope %#', change => {
+  const cancel = { ...scopedCancel(), ...change }
+  expect(parseNativeTurnIntent({ ...intent(), cancel })).toBeNull()
+  expect(nativeTurnProcess(cancel)).toBeNull()
+})
 
 it('copies an immutable cancellation and admits only its explicitly confirmed replacement', () => {
   const original = intent(), saved = parseNativeTurnIntent(original)!
@@ -117,6 +152,36 @@ it('binds a durable target to the original process, conversation and routes, ind
     { cwd: '/fixture/other' }, { transcriptPath: '/fixture/transcript' }, { codexHome: '/fixture/codex' }, { hermesHome: '/fixture/hermes' },
     { permissionMode: 'ask' }, { bypassPermission: true },
   ]) expect(nativeTurnTarget({ ...row, ...altered } as RegisteredSession)).not.toBe(target)
+  row.nativeArchive = { version: 1, agentId: row.agentId, requestId: rearm().requestId,
+    launchToken: rearm().launchToken, target: 'a'.repeat(64) }
+  const transferred = nativeTurnTarget(row)
+  expect(transferred).not.toBe(target)
+  for (const [key, value] of Object.entries({ agentId: 'other', requestId: 'different-request',
+    launchToken: 'different-token', target: 'b'.repeat(64) })) {
+    expect(nativeTurnTarget({ ...row, nativeArchive: { ...row.nativeArchive, [key]: value } })).not.toBe(transferred)
+  }
+})
+
+it('pins retirement and pending-abort evidence and cannot reopen the retired live owner', () => {
+  const row = targetRow(), control = intent()
+  row.nativeControl = control
+  row.nativeRetirement = { version: 1, phase: 'returning', link: { version: 1, agentId: row.agentId,
+    requestId: rearm().requestId, launchToken: rearm().launchToken, target: 'a'.repeat(64) },
+  sourceTarget: 'b'.repeat(64), controlFingerprint: 'c'.repeat(64), checkpoint: 'd'.repeat(64), savedTarget: 'e'.repeat(64) }
+  const retired = nativeTurnTarget(row)
+  for (const key of ['sourceTarget', 'controlFingerprint', 'checkpoint', 'savedTarget'] as const) {
+    expect(nativeTurnTarget({ ...row, nativeRetirement: { ...row.nativeRetirement, [key]: 'f'.repeat(64) } })).not.toBe(retired)
+  }
+  expect(nativeTurnTransition(row, control)).toBe(false)
+  row.nativeRetirement = { ...row.nativeRetirement, pendingAbort: { kind: 'untransferred',
+    priorRole: '1'.repeat(64), pendingControl: '2'.repeat(64), requestFingerprint: '3'.repeat(64) } }
+  const aborted = nativeTurnTarget(row)
+  expect(aborted).not.toBe(retired)
+  for (const key of ['priorRole', 'pendingControl', 'requestFingerprint'] as const) {
+    expect(nativeTurnTarget({ ...row, nativeRetirement: { ...row.nativeRetirement,
+      pendingAbort: { ...row.nativeRetirement.pendingAbort!, [key]: 'f'.repeat(64) } } })).not.toBe(aborted)
+  }
+  expect(nativeTurnTransition(row, control)).toBe(false)
 })
 
 it.each([undefined, 'ask', 'auto', 'plan', 'full'] as const)('reconstructs the immutable reserved request with permission override %s', permissionMode => {

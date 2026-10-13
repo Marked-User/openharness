@@ -205,8 +205,11 @@ it('continues the exact Cancel after a real commit publishes but its final proof
   } finally { controller.close(); vi.useRealTimers() }
 })
 
-it('keeps cancellation across registration, load and an automatic process identity change', () => {
-  const saved = commit(), expected = saved.nativeControl
+it.each([false, true])('keeps cancellation across registration, load and an automatic process identity change (scoped=%s)', scoped => {
+  const control = cancellation()
+  const saved = registry.commitNativeControl(row, scoped ? { ...control, cancel: { ...control.cancel,
+    processKey: 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa\0cursor\0' + '42\0' + '12345', namespace: 'linux:4:5' } } : control, () => {})
+  const expected = saved.nativeControl
   registry.register({ ...input(), sessionId: row.sessionId, title: 'A later observation' })
   registry.load()
   expect(registry.byAgent(row.agentId)?.nativeControl).toEqual(expected)
@@ -216,8 +219,11 @@ it('keeps cancellation across registration, load and an automatic process identi
   expect(nativeTurnAdmitted(current.nativeControl, { agentId: row.agentId, sessionId: row.sessionId, processKey: 'replacement' })).toBe(false)
 })
 
-it('preserves the original association in stopped storage and an abandoned-conversation clone', () => {
-  const saved = commit(), store = new StoppedAgentStore(join(data, 'stopped-agents'))
+it.each([false, true])('preserves the original association in stopped storage and an abandoned-conversation clone (scoped=%s)', scoped => {
+  const control = cancellation()
+  const saved = registry.commitNativeControl(row, scoped ? { ...control, cancel: { ...control.cancel,
+    processKey: 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa\0cursor\0' + '42\0' + '12345', namespace: 'linux:4:5' } } : control, () => {})
+  const store = new StoppedAgentStore(join(data, 'stopped-agents'))
   store.save(saved)
   expect(store.get(row.agentId)?.nativeControl).toEqual(saved.nativeControl)
   const publish = vi.fn(async () => {})
