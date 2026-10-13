@@ -8,6 +8,7 @@ import 'sections/connectors_section.dart';
 import 'sections/debug_section.dart';
 import 'sections/experimental_section.dart';
 import 'sections/notifications_section.dart';
+import 'sections/privacy_section.dart';
 import 'sections/shortcuts_section.dart';
 import 'sections/usage_section.dart';
 import 'settings_section.dart';
@@ -38,6 +39,7 @@ class SettingsBody extends StatelessWidget {
         'Customization opens over the workspace.',
       ),
       SettingsSection.notifications => const NotificationsSection(),
+      SettingsSection.privacy => PrivacySection(notifier: notifier),
       SettingsSection.experimental => ExperimentalSection(
         store: experimentalFeatures ?? notifier.experimentalFeatures,
       ),

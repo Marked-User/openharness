@@ -90,6 +90,7 @@ import { ensureManagedGrid, ensureManagedRuntime } from './lib/runtimeInstall.js
 // which silently costs the daemon every pane it would have discovered. See lib/childLocale.ts.
 ensureUtf8Locale()
 import { prepareLogFile } from './lib/log.js'
+import { privacyCommand } from './lib/privacyCommand.js'
 
 
 // Daemon stdout/stderr. Capped at LOG_MAX_BYTES — see prepareLogFile/trimLogFile in lib/log.ts.
@@ -116,6 +117,7 @@ Machine:
   harness login --json         emit machine-readable NDJSON instead of opening a browser (for GUI clients)
   harness login --entry-point=desktop   record which surface started the sign-in (GUI clients; default cli)
   harness auth status --json   print {loggedIn,...} for this computer's saved session
+  harness privacy status|on|off   view or change product usage sharing for this account
   harness start                start the adapter using the saved SSO session
   harness start -f             run the daemon in the FOREGROUND (for a supervisor; logs to stdout): harnessd's
                                master, as launchd and systemd run it, its core and services its children
@@ -2514,6 +2516,9 @@ if (cmd === 'version' || cmd === '--version' || cmd === '-v') { console.log(VERS
 
 
 switch (cmd) {
+  case 'privacy':
+    privacyCommand(args[0], flags.includes('--json')).catch(onError)
+    break
   case 'send':
     sendCommand(rest).then(code => { process.exitCode = code }).catch(onError)
     break

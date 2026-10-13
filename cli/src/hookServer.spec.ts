@@ -351,6 +351,34 @@ describe('the Agent Messages proxy', () => {
 })
 
 describe('account Experimental settings proxy', () => {
+  it('proxies only voluntary fixed-choice feedback and guards it from cross-origin requests', async () => {
+    const send = vi.fn(async () => ({ status: 200, body: { success: true, data: { accepted: true } } }))
+    const { base } = await start({ onProductFeedback: send })
+    const path = `${base}/api/product-usage/feedback`
+    const body = { id: '12345678-1234-4234-8234-123456789012', answer: 'useful' }
+    const headers = { 'x-adapter-local': '1', 'content-type': 'application/json' }
+    for (const h of [{}, { ...headers, origin: 'https://untrusted.example' }]) {
+      expect((await fetch(path, { method: 'POST', headers: h, body: JSON.stringify(body) })).status).toBe(403)
+    }
+    for (const invalid of [{ ...body, text: 'PRIVATE_CANARY' }, { ...body, answer: 'PRIVATE_CANARY' }, { ...body, id: 'PRIVATE_CANARY' }]) {
+      expect((await fetch(path, { method: 'POST', headers, body: JSON.stringify(invalid) })).status).toBe(400)
+    }
+    expect(send).not.toHaveBeenCalled()
+    expect((await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) })).status).toBe(200)
+    expect(send).toHaveBeenCalledExactlyOnceWith(body)
+  })
+  it('serves the Privacy switch and rejects cross-origin, extra-field and malformed writes', async () => {
+    const write = vi.fn(async () => ({ status: 200, body: { success: true, data: { enabled: false, revision: 1 } } }))
+    const { base } = await start({ onProductUsageRead: async () => ({ status: 200, body: { success: true, data: { enabled: true, revision: 0 } } }), onProductUsageWrite: write })
+    expect((await (await fetch(`${base}/api/product-usage/settings`)).json())).toMatchObject({ data: { enabled: true } })
+    const path = `${base}/api/product-usage/settings`
+    expect((await fetch(path, { method: 'POST', body: '{"enabled":false}' })).status).toBe(403)
+    const headers = { 'x-adapter-local': '1', 'content-type': 'application/json' }
+    expect((await fetch(path, { method: 'POST', headers: { ...headers, origin: 'https://untrusted.example' }, body: '{"enabled":false}' })).status).toBe(403)
+    expect((await fetch(path, { method: 'POST', headers, body: '{"enabled":false,"userId":"other"}' })).status).toBe(400)
+    expect((await fetch(path, { method: 'POST', headers, body: '{"enabled":false}' })).status).toBe(200)
+    expect(write).toHaveBeenCalledExactlyOnceWith({ enabled: false })
+  })
   it('reads through the account proxy and guards writes with the local header', async () => {
     const snapshot = { accountId: 'owner', revision: 0, features: { focus_bar_creature: false, share_button: false } }
     const write = vi.fn(async (body: unknown) => ({ status: 200, body: { success: true, data: { ...snapshot, echo: body } } }))

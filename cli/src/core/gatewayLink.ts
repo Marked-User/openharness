@@ -174,6 +174,8 @@ export function createGatewayLink(deps: GatewayLinkDeps) {
   }
 
   const port: GatewayPort = {
+    usageLaunch: (signal) => { send('usageLaunch', { signal }) },
+    usageCounter: (metric) => { send('usageCounter', { metric }) },
     connect: () => { dial = 'connect'; need(); send('connect') },
     serveThisComputerOnly: () => { dial = 'local'; send('thisComputerOnly') },
     holdRequests: () => { requestsOpen = false; send('hold') },

@@ -10,6 +10,8 @@
  * and the core going away stops it: a core's restart is the relay's, as it always was, so a remote client
  * that kept its socket opens a new session, as it did when both ran in one process.
  */
+import type { ProductUsageLaunchSignal } from '../lib/productUsageSignals.js'
+import type { ProductUsageMetric } from '../lib/productUsageContract.js'
 import type { GatewayAccount, GatewayEvents, WindowRelaySession } from '../core/api.js'
 import { localWindowsOf, windowSurfaceOf } from '../lib/windowSurfaces.js'
 import { decodeGatewayBinary, encodeGatewayBinary, GatewayBinary, GATEWAY_CALLS } from '../lib/gatewayWire.js'
@@ -155,6 +157,8 @@ export function runGatewayService(options: GatewayServiceOptions): ServiceProces
     const { port, ops } = gateway
     const connId = text(payload.connId)
     switch (kind) {
+      case 'usageLaunch': port.usageLaunch?.(payload.signal as ProductUsageLaunchSignal); return
+      case 'usageCounter': port.usageCounter?.(payload.metric as ProductUsageMetric); return
       case 'connect': port.connect(); return
       case 'thisComputerOnly': port.serveThisComputerOnly(); return
       case 'hold': port.holdRequests(); return

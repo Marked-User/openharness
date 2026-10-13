@@ -1,3 +1,4 @@
+import { PRODUCT_FEEDBACK } from './lib/productUsageContract.js'
 /**
  * Tiny localhost HTTP server for the Claude Code hook callbacks. `hook/notify.mjs` POSTs here on
  * SessionStart/SessionEnd (127.0.0.1:<PORT>). This replaces the old Fastify routes — the browser
@@ -208,6 +209,9 @@ export interface HookServerHandlers {
    *  here too (core/experiments.ts `createAgentSettingsSync`). */
   onExperimentalRead?: () => Promise<PairOutcome>
   onExperimentalWrite?: (body: unknown) => Promise<PairOutcome>
+  onProductFeedback?: (body: unknown) => Promise<PairOutcome>
+  onProductUsageRead?: () => Promise<PairOutcome>
+  onProductUsageWrite?: (body: unknown) => Promise<PairOutcome>
   /** /api/store/* — proxy the Harness Store's ratings and reviews to backend the same way: reads
    *  ungated like the machine list, writes (PUT/DELETE) CSRF-guarded like a rename. See storeProxy.ts. */
   onStore?: StoreHandler
@@ -1758,6 +1762,33 @@ export function startHookServer(
       if (req.method === 'GET' && url === '/api/experimental-settings') {
         if (!handlers.onExperimentalRead) { json(503, { error: 'UNAVAILABLE' }); return }
         await proxied(handlers.onExperimentalRead); return
+      }
+      if (req.method === 'POST' && url === '/api/product-usage/feedback') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onProductFeedback) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: unknown
+        try { body = JSON.parse(await readBody(req)) } catch { json(400, { error: 'BAD_REQUEST' }); return }
+        const feedback = body as { answer?: unknown; id?: unknown } | null
+        if (!feedback || typeof feedback !== 'object' || Object.keys(feedback).length !== 2
+            || !PRODUCT_FEEDBACK.includes(feedback.answer as never) || typeof feedback.id !== 'string'
+            || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(feedback.id)) {
+          json(400, { error: 'BAD_REQUEST' }); return
+        }
+        await proxied(() => handlers.onProductFeedback!(feedback)); return
+      }
+      if (req.method === 'GET' && url === '/api/product-usage/settings') {
+        if (!handlers.onProductUsageRead) { json(503, { error: 'UNAVAILABLE' }); return }
+        await proxied(handlers.onProductUsageRead); return
+      }
+      if (req.method === 'POST' && url === '/api/product-usage/settings') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onProductUsageWrite) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: unknown
+        try { body = JSON.parse(await readBody(req)) } catch { json(400, { error: 'BAD_REQUEST' }); return }
+        if (!body || typeof body !== 'object' || Object.keys(body).length !== 1 || typeof (body as { enabled?: unknown }).enabled !== 'boolean') {
+          json(400, { error: 'BAD_REQUEST' }); return
+        }
+        await proxied(() => handlers.onProductUsageWrite!(body)); return
       }
       if (req.method === 'PATCH' && url === '/api/experimental-settings') {
         if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }

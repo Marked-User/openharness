@@ -582,6 +582,13 @@ October 13; validation overlapped 19:35–19:57. Merge, publication and external
 waiting remain zero. Physical adapters, orchestration, activation and full-PR
 acceptance remain open and are excluded from this scoped approval.
 
+Current main `ce68e2fac` was then integrated without conflicts. The new optional
+usage ports and HTTP settings routes leave native recovery source unchanged.
+Types and all 162 architecture, API, gateway-link, private HTTP and usage-signal
+interaction cases pass (`20261013T195758.514021Z-72326`, 15.4/7.5 seconds).
+Independent review found no native interaction blocker in this integration delta;
+it does not approve activation or the full PR. Validation ran at 19:58 UTC.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R

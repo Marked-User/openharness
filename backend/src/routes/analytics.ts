@@ -19,8 +19,8 @@ import { machineIdFromKey } from '../utils/crypto.js'
 import { validateBody, validateQuery } from '../middlewares/validation.js'
 import { sendSuccess, sendError } from '../utils/response.js'
 import { logger } from '../utils/logger.js'
-import { AnalyticsEpochError, ingestReport } from '../lib/analyticsIngest.js'
 import { analyticsOverview, buildConsentView } from '../lib/analyticsQuery.js'
+import { deleteLegacyProductUsage, setProductUsageChoice } from '../lib/productUsage.js'
 import {
   ANALYTICS_SCHEMA_VERSION,
   CONSENT_STATES,
@@ -146,27 +146,10 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
     '/api/analytics/report',
     { bodyLimit: REPORT_BODY_LIMIT, preHandler: [machineAuth, validateBody(reportSchema)] },
     async (req, reply) => {
-      const ctx = (req as WithMachine).machineCtx!
-      try {
-        const body = req.body as AnalyticsReportRequest
-        const result = await ingestReport(ctx, {
-          ...body,
-          collector: { ...body.collector, enginesPresent: body.collector.enginesPresent ?? [] },
-        })
-        return sendSuccess(reply, result)
-      } catch (err) {
-        if (err instanceof AnalyticsEpochError) {
-          // 409 is the collector's signal to drop its local queue: this history was deleted.
-          return sendError(
-            reply,
-            `Analytics history was reset; current epoch is ${err.currentEpoch}`,
-            'ANALYTICS_EPOCH_STALE',
-            409,
-          )
-        }
-        logger.error('POST /api/analytics/report failed', err, { machineId: ctx.machineId })
-        return sendError(reply, 'Could not store analytics report', 'ANALYTICS_INGEST_FAILED', 500)
-      }
+      const body = req.body as AnalyticsReportRequest
+      // The old collector stored machine/account histories. Tell old clients to stop uploading;
+      // the replacement is /api/product-usage/report with aggregate-only storage.
+      return sendSuccess(reply, { consent: 'off', epoch: body.epoch, serverTime: new Date().toISOString(), accepted: 0, quarantined: 0 })
     },
   )
 
@@ -215,6 +198,8 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
       if (machineId && !(await ownedMachineIds(userId)).includes(machineId)) {
         return sendError(reply, 'Unknown machine', 'NO_MACHINE', 404)
       }
+      // Preserve old switches as valid controls. A per-machine off is conservatively account-wide.
+      if (consent === 'off' || !machineId) await setProductUsageChoice(userId, consent === 'on')
       for (const target of targets) {
         await prisma.analyticsMachineState.upsert({
           where: { machineId: target },
@@ -236,6 +221,7 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/analytics/delete', async (req, reply) => {
     const userId = req.user?.sub
     if (!userId) return sendError(reply, 'Unauthorized', 'UNAUTHORIZED', 401)
+    await deleteLegacyProductUsage(userId)
     const [buckets, machineDays] = await Promise.all([
       prisma.analyticsDailyBucket.deleteMany({ where: { userId } }),
       prisma.analyticsDailyMachine.deleteMany({ where: { userId } }),

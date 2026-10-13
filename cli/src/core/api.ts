@@ -1,3 +1,5 @@
+import type { ProductUsageLaunchSignal } from '../lib/productUsageSignals.js'
+import type { ProductUsageMetric } from '../lib/productUsageContract.js'
 import type { PreparedHandoff, HandoffPermit, HandoffOutcome } from '../lib/handoffAuthority.js'
 import type { AgentTokenUsage, AgentUsageTarget } from '../lib/agentUsageWire.js'
 import type { CloudHarness } from '../lib/cloudAgents.js'
@@ -1181,6 +1183,9 @@ import type { LocalWindows, WindowSurface } from '../lib/windowSurfaces.js'
 
 /** What the core asks of the gateway: everything bound for a remote client, and the link's state. */
 export interface GatewayPort {
+  /** Optional, fixed-name counter to the gateway; no user payload or identifier. */
+  usageCounter?(metric: ProductUsageMetric): void
+  usageLaunch?(signal: ProductUsageLaunchSignal): void
   /** Dial the backend: this daemon is signed in. */
   connect(): void
   /** Never dial: signed out, so nothing is sealed or queued for a link that will not open. */

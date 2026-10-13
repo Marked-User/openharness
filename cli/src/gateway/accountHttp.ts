@@ -23,11 +23,21 @@ const failure = (status: number, code: string, message: string): HttpAnswer =>
 
 export function createAccountHttp(deps: AccountHttpDeps) {
   const request = deps.request ?? fetch
+  const accountFence = () => {
+    const account = deps.account()
+    return [account.machineId, account.autonomousEnv, account.signIn?.epoch, account.signIn?.acct]
+  }
   async function backend(method: string, path: string, body?: unknown, timeoutMs = PROXY_BACKEND_TIMEOUT_MS): Promise<HttpAnswer> {
+    const owner = accountFence()
     let accessToken: string
     try { accessToken = await deps.tokens.accessToken() } catch (error) {
       const signedOut = error instanceof AuthSessionError && error.code !== 'UNAVAILABLE'
       return failure(signedOut ? 401 : 502, signedOut ? 'NOT_SIGNED_IN' : 'AUTH_UNAVAILABLE', error instanceof Error ? error.message : String(error))
+    }
+    // Token refresh can overlap sign-out/sign-in. In particular, a queued usage report must not
+    // be admitted under a different account's sharing choice after that await.
+    if (accountFence().some((value, index) => value !== owner[index])) {
+      return failure(409, 'ACCOUNT_CHANGED', 'The account changed. Refresh and try again.')
     }
     let res: Response
     try {

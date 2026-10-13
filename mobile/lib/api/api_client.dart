@@ -15,6 +15,24 @@ import 'multipart_body.dart';
 
 /// Authenticated control-plane REST client for the phone.
 class ApiClient {
+  Future<void> productUsageFeedback(String answer, String receipt) async {
+    final response = await _dio.post(
+      '/api/product-usage/feedback',
+      data: {'answer': answer, 'id': receipt},
+    );
+    final result = unwrapApiResponse(response);
+    if (result is! Map || result['accepted'] != true) {
+      throw StateError('Feedback was not accepted');
+    }
+  }
+
+  Future<Map<String, dynamic>> productUsageSettings({bool? enabled}) async {
+    final response = enabled == null
+        ? await _dio.get('/api/product-usage/settings')
+        : await _dio.post('/api/product-usage/settings', data: {'enabled': enabled});
+    return Map<String, dynamic>.from(unwrapApiResponse(response) as Map);
+  }
+
   final AppConfig config;
   final AuthSession session;
   final AccessTokenSource? auth;

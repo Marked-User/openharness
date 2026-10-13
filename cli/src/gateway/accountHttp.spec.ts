@@ -23,6 +23,16 @@ function setup() {
 }
 
 describe('account HTTP in the gateway', () => {
+  it('does not send a queued report if sign-in changes while a token is being read', async () => {
+    const { api, tokens, request, account } = setup()
+    let resolve!: (token: string) => void
+    tokens.accessToken.mockImplementationOnce(() => new Promise(done => { resolve = done }))
+    const pending = api.backend('POST', '/api/product-usage/report', { counters: { turns_started: 1 } })
+    account({ machineId: 'account-b', signIn: null, autonomousEnv: 'test' })
+    resolve('other-account-token')
+    expect(await pending).toMatchObject({ status: 409, body: { error: { code: 'ACCOUNT_CHANGED' } } })
+    expect(request).not.toHaveBeenCalled()
+  })
   it('forwards response bodies, status, credentials and environment without holding a credential', async () => {
     const { api, request, tokens } = setup()
     request.mockResolvedValueOnce(response({ error: { code: 'CONFLICT' } }, 409))
