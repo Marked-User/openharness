@@ -168,6 +168,27 @@ UTC on October 13, with validation overlapping. Merge and publication remain
 zero. This remains inactive machinery: controller composition and final installed
 client acceptance are still required before the PR can land.
 
+Native rearm preparation can now observe actual receipt settlement separately
+from its five-second client reply. The promise resolves only after preparation,
+any claimed effect and receipt cleanup finish, including lost claims and errors.
+Authority is revoked and the old in-flight entry is removed before subscribers
+can retry. A directory-close failure still releases capacity and remains a failed
+receipt operation. The pending-launch wrapper also waits for its underlying
+preparation: its own timeout cannot release an occupied dependency slot.
+
+Types and 137 cases across five files pass, including the unchanged launch golden
+and architecture (`20261013T131304.527202Z-4609`, 5.0 and 48.7 seconds), with 100%
+statements, branches, functions and lines in the touched pending-launch module.
+All seven deliberate settlement faults fail by assertion after passing baselines
+(`20261013T131445.663379Z-8449`, 20.7 seconds). The earlier receipt remains failed:
+its cleanup fixture targeted an incidental descriptor rather than the retained
+directory; the corrected fixture closes the real descriptor before injecting the
+failure. Independent review approved the settlement delta over `237ea9a20`,
+conditional on these completed checks. Implementation/review ran approximately
+12:58–13:19 UTC on October 13, with validation overlapping; merge, publication and
+external waiting remain zero. Controller integration and final acceptance are
+still required; this checkpoint is not approval to activate or land the PR.
+
 October 13 recap checkpoint: the recaps port now derives a bounded summary from
 the exact answer retained for an owner and generation. Core copies the input
 before a service wait and checks the reply's generation identity, input digest

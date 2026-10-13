@@ -19,6 +19,9 @@ export interface CreationHold { service: string; detail: string }
 export interface PendingCreationIntent { id: string; fingerprint: string; request: Record<string, unknown>; held: CreationHold }
 export interface CreationAuthority {
   readonly id: string
+  /** Actual preparation/effect and receipt cleanup have finished. Never rejects
+   * or grants authority; the five-second client reply can finish much earlier. */
+  readonly settled?: Promise<void>
   /** The original durable intent still owns preparation, or this callback's exact dispatch claim. */
   current(): boolean
   /** Status only; a hold is never permission to repeat an effect. */
@@ -226,8 +229,10 @@ export class AgentCreationReceipts {
     }
     let dispatchToken: string | undefined
     let alive = true
+    let settle!: () => void
+    const settled = new Promise<void>(resolve => { settle = resolve })
     const authority: CreationAuthority = {
-      id,
+      id, settled,
       current: () => {
         if (!alive) return false
         try {
@@ -282,7 +287,16 @@ export class AgentCreationReceipts {
         return this.intentStatus(id, currentReceipt(), false)
       }
       return this.intentStatus(id, currentReceipt(), false)
-    }).finally(() => { alive = false; directory.close(); clearTimeout(replyTimer); this.inFlight.delete(id) })
+    }).finally(() => {
+      alive = false
+      try { directory.close() }
+      finally {
+        clearTimeout(replyTimer); this.inFlight.delete(id)
+        // Release capacity only after the actual work and directory close,
+        // including lost claims and errors. A subscriber may start a new retry.
+        settle()
+      }
+    })
     // The client gets its held receipt promptly while the SAME preparation
     // continues. A slow successful service answer can still win dispatch;
     // reconnects must not start several preparations for that one request.
