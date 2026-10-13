@@ -84,7 +84,8 @@ async function fixture(hold = false, spaced = false, originalPane = '%1', source
   const target = nativeTurnTarget(saved)
   const control: NativeTurnIntent = { version: 1, cancel: { processKey: null, target, request: {
     requestId: 'original-cancel-request', nonce: 'original-cancel-nonce', agentId, conversationId: saved.sessionId, frontier: { index: -1, digest: null },
-  } }, rearm: { requestId: id, agentId, operation: source === 'live' ? 'restart' : 'resume', launchToken: token, target, source } }
+  } }, rearm: { requestId: id, agentId, operation: source === 'live' ? 'restart' : 'resume', launchToken: token, target, source,
+    sourceProcess: { processKey: null } } }
   if (source === 'saved') {
     mkdirSync(join(directory, 'stopped-agents'), { mode: 0o700 })
     writeFileSync(join(directory, 'stopped-agents', `${agentId}.json`), JSON.stringify({ version: 1, session: { ...saved, nativeControl: control } }), { mode: 0o600 })

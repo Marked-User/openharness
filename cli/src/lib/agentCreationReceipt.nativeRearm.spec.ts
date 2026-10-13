@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentCreationReceipts, creationFingerprint, type AgentCreationOutcome } from './agentCreationReceipt.js'
 import type { NativeArchiveLink } from './nativeArchive.js'
+import type { NativeTurnProcessReference } from './nativeTurnIntent.js'
 
 const faults = vi.hoisted(() => ({ linked: false, failDirectory: false, beforeLink: undefined as (() => void) | undefined,
   inspect: undefined as ((path: string) => void) | undefined, captureResult: undefined as (() => void) | undefined,
@@ -52,10 +53,11 @@ async function uncertain() {
   return { ...value, effect }
 }
 
-async function savedCompletion(kind: 'created' | 'cancelled' | 'not-dispatched' | 'pending' | 'uncertain' | 'generic-failure' | 'direct-success' | 'no-witness' = 'created', permissionMode?: 'full') {
+async function savedCompletion(kind: 'created' | 'cancelled' | 'not-dispatched' | 'pending' | 'uncertain' | 'generic-failure' | 'direct-success' | 'no-witness' = 'created', permissionMode?: 'full', sourceProcess?: NativeTurnProcessReference) {
   const p = fixture()
   const link: NativeArchiveLink = { version: 1, agentId: request.agentId, requestId: id, launchToken: request.launchToken, target: 'a'.repeat(64) }
-  const value = { ...request, source: 'saved', target: link.target, ...(permissionMode ? { permissionMode } : {}) }
+  const value = { ...request, source: 'saved', target: link.target, ...(permissionMode ? { permissionMode } : {}),
+    ...(sourceProcess === undefined ? {} : { sourceProcess }) }
   const fingerprint = creationFingerprint({ kind: 'native-rearm', agentId: link.agentId, operation: 'resume', source: 'saved',
     ...(permissionMode ? { permissionMode } : {}) })
   await p.receipts.runIntent(id, fingerprint, value, held, async () => kind === 'pending' || kind === 'cancelled' ? null : async () => {
@@ -78,6 +80,33 @@ it.each(['created', 'cancelled', 'not-dispatched'] as const)('reads exact %s Res
   expect(() => proof.verify()).not.toThrow()
   expect(Object.isFrozen(proof.request)).toBe(true)
   expect(proof.outcome).toEqual(cold.status(id))
+})
+
+it.each(['created', 'cancelled', 'not-dispatched'] as const)('retains original engine provenance in %s cold Resume cleanup', async kind => {
+  const sourceProcess = { processKey: `${processOwner.boot}\0cursor\0${42}\0${12345}`, namespace: 'linux:4:5' }
+  const p = await savedCompletion(kind, 'full', sourceProcess), cold = new AgentCreationReceipts(p.directory)
+  expect(() => cold.readNativeResumeCleanup(p.link)).not.toThrow()
+  const proof = cold.readNativeResumeCleanup(p.link)
+  expect(proof.request).toEqual(p.request); expect(proof.request.sourceProcess).toEqual(sourceProcess)
+  expect(Object.isFrozen(proof.request.sourceProcess)).toBe(true)
+  proof.verify()
+})
+
+it('keeps explicit unknown original-engine provenance distinct from a legacy omission', async () => {
+  const unknown = await savedCompletion('cancelled', undefined, { processKey: null })
+  expect(new AgentCreationReceipts(unknown.directory).readNativeResumeCleanup(unknown.link).request.sourceProcess).toEqual({ processKey: null })
+  const legacy = await savedCompletion('cancelled')
+  expect(new AgentCreationReceipts(legacy.directory).readNativeResumeCleanup(legacy.link).request).not.toHaveProperty('sourceProcess')
+})
+
+it.each([null, {}, { processKey: '' }, { processKey: null, namespace: 'linux:4:5' },
+  { processKey: `${processOwner.boot}\0cursor\0${42}\0${12345}`, namespace: 'linux:04:5' },
+])('refuses malformed original-engine provenance in a coherent cleanup receipt %#', async sourceProcess => {
+  const p = await savedCompletion('cancelled'), raw = JSON.parse(readFileSync(p.file(), 'utf8'))
+  raw.request.sourceProcess = sourceProcess
+  raw.checksum = creationFingerprint({ fingerprint: raw.fingerprint, request: raw.request, held: raw.held })
+  writeFileSync(p.file(), JSON.stringify(raw), { mode: 0o600 })
+  expect(() => new AgentCreationReceipts(p.directory).readNativeResumeCleanup(p.link)).toThrow('CREATION_CONFLICT')
 })
 
 it.each(['pending', 'uncertain', 'generic-failure', 'direct-success', 'no-witness'] as const)('holds %s receipt evidence instead of inferring cleanup authority', async kind => {

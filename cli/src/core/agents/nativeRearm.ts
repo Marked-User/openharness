@@ -160,6 +160,8 @@ export function createNativeRearm({ registry, saved, receipts, prepare, held }: 
           if (existing) return hold(options.agentId, 'the original reservation is missing')
           const next = parseNativeTurnIntent({ ...control, rearm: { requestId: options.creationId, agentId: row.agentId,
             operation: options.operation, source: options.source, target: nativeTurnTarget(row), launchToken: randomUUID(),
+            sourceProcess: { processKey: control.cancel.processKey,
+              ...(control.cancel.namespace === undefined ? {} : { namespace: control.cancel.namespace }) },
             ...(options.permissionMode === undefined ? {} : { permissionMode: options.permissionMode }),
           } })
           if (!next) return hold(options.agentId, 'the original launch options are invalid')

@@ -67,6 +67,33 @@ it('proves only the recorded Cursor incarnation and original direct pane placeme
   expect(proof.verify).toThrow('witness replaced')
 })
 
+it('replacement proof retains the complete original process association independent of key order', async () => {
+  const p = fixture(), sourceProcess = { processKey: `${bootId}\0cursor\0${41}\0${4100}`, namespace: 'linux:4:5' }
+  p.row.nativeControl = { ...p.row.nativeControl!, rearm: { ...p.row.nativeControl!.rearm!, sourceProcess } }
+  Object.assign(p.request.request, { sourceProcess: { namespace: sourceProcess.namespace, processKey: sourceProcess.processKey } })
+  const proof = await p.run()
+  expect(proof.source.requestFingerprint).toBe(creationFingerprint(p.request))
+  proof.verify()
+})
+
+it.each(['omitted', 'null', 'key', 'namespace', 'enriched', 'legacy-null'])('replacement proof rejects %s original engine provenance before probing', async change => {
+  const p = fixture(), sourceProcess = { processKey: `${bootId}\0cursor\0${41}\0${4100}`, namespace: 'linux:4:5' }
+  p.row.nativeControl = { ...p.row.nativeControl!, rearm: { ...p.row.nativeControl!.rearm!, sourceProcess } }
+  const request = p.request.request as Record<string, unknown>
+  request.sourceProcess = sourceProcess
+  if (change === 'omitted') delete request.sourceProcess
+  if (change === 'null') request.sourceProcess = null
+  if (change === 'key') request.sourceProcess = { ...sourceProcess, processKey: sourceProcess.processKey.replace(/4100$/, '4101') }
+  if (change === 'namespace') request.sourceProcess = { ...sourceProcess, namespace: 'linux:4:6' }
+  if (change === 'enriched' || change === 'legacy-null') {
+    const { sourceProcess: _source, ...legacy } = p.row.nativeControl.rearm!
+    p.row.nativeControl = { ...p.row.nativeControl, rearm: legacy }
+    if (change === 'legacy-null') request.sourceProcess = null
+  }
+  await expect(p.run()).rejects.toThrow('reservation or current binding')
+  expect(p.probe).not.toHaveBeenCalled(); expect(p.receipts.readNativeRelaunchProcess).not.toHaveBeenCalled()
+})
+
 function reserveRecovery(p: ReturnType<typeof fixture>, source: 'live' | 'saved') {
   p.row.processIdentity = { pid: 41, executable: '<original-cursor>', startMarker: 'old-birth' }
   p.row.active = source === 'live'

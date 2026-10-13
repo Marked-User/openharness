@@ -72,7 +72,7 @@ beforeEach(async () => {
     source: 'hook', defaultName: 'Fixture', title: null, model: null, cliVersion: null, processIdentity: { pid: 42, executable: '<cursor>', startMarker: 'prior-start' } }
   store.save({ ...original, schemaVersion: 3, nativeControl: control(original) })
   const cancelled = store.get(original.agentId)!
-  saved = store.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: { agentId: cancelled.agentId,
+  saved = store.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: { agentId: cancelled.agentId, sourceProcess: { processKey: cancelled.nativeControl!.cancel.processKey },
     requestId: 'original-resume-request', launchToken: 'original-launch-token', operation: 'resume', source: 'saved',
     permissionMode: 'full', target: nativeTurnTarget(cancelled) } }, fence)
   fault.registry = join(data, 'registry.json'); fault.archive = join(archive, `${saved.agentId}.json`)
@@ -333,7 +333,7 @@ it('Registry absence cannot return live-owned archive control', async () => {
 })
 
 it('a newer live Cancel invalidates the checkpoint until it is saved again', () => {
-  const row = visit(), reserved = registry.commitNativeControl(row, { ...row.nativeControl!, rearm: {
+  const row = visit(), reserved = registry.commitNativeControl(row, { ...row.nativeControl!, rearm: { sourceProcess: { processKey: row.nativeControl!.cancel.processKey },
     agentId: row.agentId, requestId: 'next-restart-request', launchToken: 'next-restart-token', source: 'live', operation: 'restart', target: nativeTurnTarget(row),
   } }, () => {})
   const revoked = registry.commitNativeControl(reserved, { ...control(reserved), cancel: { ...control(reserved).cancel,
@@ -356,7 +356,7 @@ it('retirement blocks live control; saved edits survive uncertain cleanup withou
   } }, () => {})).toThrow('transition')
   fault.fail = 'cleanup'; expect(() => finish(retired)).toThrow(); fault.fail = ''; fault.phase = ''
   const prior = store.get(row.agentId)!
-  const reserved = store.commitNativeControl(prior, { ...prior.nativeControl!, rearm: {
+  const reserved = store.commitNativeControl(prior, { ...prior.nativeControl!, rearm: { sourceProcess: { processKey: prior.nativeControl!.cancel.processKey },
     agentId: row.agentId, requestId: 'next-resume-request', launchToken: 'next-resume-token', operation: 'resume', source: 'saved', target: nativeTurnTarget(prior),
   } }, fence)
   const cancelled = store.commitNativeControl(reserved, { ...control(reserved), cancel: { ...control(reserved).cancel,
@@ -464,7 +464,7 @@ it.each(['checkpoint', 'saved'])('retains the %s publisher through its first sub
 it('retirement cleanup cannot confirm an uncertain saved Cancel on its behalf', () => {
   const row = visit(); checkpoint(row); const retired = retire(row)
   fault.fail = 'cleanup'; expect(() => finish(retired)).toThrow(); fault.fail = ''; fault.phase = ''
-  const prior = store.get(row.agentId)!, next: NativeTurnIntent = { ...prior.nativeControl!, rearm: {
+  const prior = store.get(row.agentId)!, next: NativeTurnIntent = { ...prior.nativeControl!, rearm: { sourceProcess: { processKey: prior.nativeControl!.cancel.processKey },
     agentId: row.agentId, requestId: 'next-resume-request', launchToken: 'next-resume-token', operation: 'resume', source: 'saved', target: nativeTurnTarget(prior),
   } }
   fault.fail = 'saved'; expect(() => store.commitNativeControl(prior, next, fence)).toThrow(); fault.fail = ''; fault.phase = ''
@@ -476,7 +476,7 @@ it('retirement cleanup cannot confirm an uncertain saved Cancel on its behalf', 
 it('returns two successive visits without letting the first visit change the second', () => {
   const first = visit(); checkpoint(first); const retiredFirst = retire(first), finishedFirst = finish(retiredFirst)
   const firstRole = store.nativeReturn(first.agentId)!
-  saved = store.commitNativeControl(finishedFirst, { ...finishedFirst.nativeControl!, rearm: {
+  saved = store.commitNativeControl(finishedFirst, { ...finishedFirst.nativeControl!, rearm: { sourceProcess: { processKey: finishedFirst.nativeControl!.cancel.processKey },
     agentId: first.agentId, requestId: 'successor-resume-request', launchToken: 'successor-launch-token',
     operation: 'resume', source: 'saved', permissionMode: 'full', target: nativeTurnTarget(finishedFirst),
   } }, fence)
@@ -657,7 +657,7 @@ it('finishes an aborted visit without replaying its saved checkpoint over newer 
 
 it('preserves a prior closed visit until the exact next pending abort is closed', async () => {
   const first = visit(); checkpoint(first); const closed = finish(retire(first)), prior = store.nativeReturn(first.agentId)!
-  saved = store.commitNativeControl(closed, { ...closed.nativeControl!, rearm: {
+  saved = store.commitNativeControl(closed, { ...closed.nativeControl!, rearm: { sourceProcess: { processKey: closed.nativeControl!.cancel.processKey },
     agentId: first.agentId, requestId: 'next-pending-resume-request', launchToken: 'next-pending-launch-token',
     operation: 'resume', source: 'saved', permissionMode: 'full', target: nativeTurnTarget(closed),
   } }, fence)

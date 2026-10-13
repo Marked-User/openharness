@@ -6,6 +6,7 @@ import { readPrivateStateFile, secureStateDirectory } from './secureState.js'
 import { hookPreparationRoutes, inspectHookFile } from '../engines/kit/nativeHookFiles.js'
 import { inspectNativeControlFile } from './nativeControlFile.js'
 import { parseNativeArchiveLink, type NativeArchiveLink } from './nativeArchive.js'
+import { parseNativeTurnProcessReference } from './nativeTurnIntent.js'
 
 export type AgentCreationOutcome =
   | { state: 'created'; agentId: string; level?: 'native' | 'handoff'; resumed?: boolean }
@@ -474,9 +475,13 @@ export class AgentCreationReceipts {
     if (permission !== undefined && !['ask', 'auto', 'plan', 'full'].includes(permission as string)) {
       throw new AgentCreationReceiptError('CREATION_CONFLICT')
     }
+    const scoped = Object.hasOwn(receipt.request, 'sourceProcess')
+    const sourceProcess = scoped ? parseNativeTurnProcessReference(receipt.request.sourceProcess) : undefined
+    if (scoped && !sourceProcess) throw new AgentCreationReceiptError('CREATION_CONFLICT')
     const request = Object.freeze({ kind: 'native-rearm', creationId: id, agentId: link.agentId,
       operation: 'resume', source: 'saved', target: link.target, launchToken: link.launchToken,
       ...(permission === undefined ? {} : { permissionMode: permission }),
+      ...(sourceProcess === undefined ? {} : { sourceProcess }),
     })
     const fingerprint = creationFingerprint({ kind: 'native-rearm', agentId: link.agentId, operation: 'resume', source: 'saved',
       ...(permission === undefined ? {} : { permissionMode: permission }),

@@ -47,12 +47,14 @@ export function inspectNativeRearmWitness(text: string): NativeRearmWitnessReque
     || typeof value.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(value.fingerprint) || !object(value.request)) return held('request is unsupported')
   const control = parseNativeTurnIntent(value.control), rearm = control?.rearm, request = value.request
   if (!rearm || rearm.revoked || rearm.replacement || Object.keys(request).sort().join(',') !== ['agentId', 'creationId', 'kind', 'launchToken', 'operation', 'target',
-    ...(rearm.source === undefined ? [] : ['source']), ...(rearm.permissionMode === undefined ? [] : ['permissionMode'])].sort().join(',')
+    ...(rearm.source === undefined ? [] : ['source']), ...(rearm.permissionMode === undefined ? [] : ['permissionMode']),
+    ...(rearm.sourceProcess === undefined ? [] : ['sourceProcess'])].sort().join(',')
     || request.kind !== 'native-rearm' || request.creationId !== value.id
     || rearm.requestId !== value.id || request.agentId !== rearm.agentId || request.operation !== rearm.operation
     || request.launchToken !== rearm.launchToken || request.target !== rearm.target
     || request.source !== rearm.source || rearm.source !== undefined && value.source !== rearm.source
     || request.permissionMode !== rearm.permissionMode
+    || creationFingerprint(request.sourceProcess ?? null) !== creationFingerprint(rearm.sourceProcess ?? null)
     || !/^[a-zA-Z0-9_-]{1,128}$/.test(rearm.agentId)) return held('reservation is unavailable or revoked')
   return { ...value, control } as unknown as NativeRearmWitnessRequest
 }

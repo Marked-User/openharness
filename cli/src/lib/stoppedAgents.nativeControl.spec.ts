@@ -33,6 +33,7 @@ const cancel = (): NativeTurnIntent => ({ version: 1, cancel: { processKey: null
 } } })
 const reservation = (saved: RegisteredSession, id = 'original-rearm-request'): NativeTurnIntent => ({ ...saved.nativeControl!, rearm: {
   requestId: id, agentId: saved.agentId, operation: 'resume', target: nativeTurnTarget(saved), launchToken: 'original-launch-token',
+  sourceProcess: { processKey: saved.nativeControl!.cancel.processKey },
 } })
 const fence = (verify = () => {}, current = () => {}) => ({ verify, current })
 const commit = (input: RegisteredSession, next: NativeTurnIntent, verify: () => void) => store.commitNativeControl(input, next, fence(verify))

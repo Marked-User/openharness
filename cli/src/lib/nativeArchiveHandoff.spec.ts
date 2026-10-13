@@ -67,7 +67,7 @@ beforeEach(async () => {
     source: 'hook', defaultName: 'Fixture', title: null, model: null, cliVersion: null, processIdentity: { pid: 42, executable: '<cursor>', startMarker: 'prior-start' } }
   store.save({ ...original, schemaVersion: 3, nativeControl: control(original) })
   const cancelled = store.get(original.agentId)!
-  saved = store.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: { agentId: cancelled.agentId,
+  saved = store.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: { agentId: cancelled.agentId, sourceProcess: { processKey: cancelled.nativeControl!.cancel.processKey },
     requestId: 'original-resume-request', launchToken: 'original-launch-token', operation: 'resume', source: 'saved',
     permissionMode: 'full', target: nativeTurnTarget(cancelled) } }, fence)
   fault.registry = join(data, 'registry.json'); fault.archive = join(archive, `${saved.agentId}.json`)

@@ -77,7 +77,8 @@ it.each(['live', 'saved'] as const)('reserves complete %s control before depende
   p.prepare.mockImplementation(async supplied => {
     expect(supplied.source).toBe(source)
     const control = p.current(source).nativeControl!
-    expect(control.rearm).toMatchObject({ source, requestId: input.creationId, ...(input.permissionMode ? { permissionMode: input.permissionMode } : {}) })
+    expect(control.rearm).toMatchObject({ source, requestId: input.creationId, sourceProcess: { processKey: null },
+      ...(input.permissionMode ? { permissionMode: input.permissionMode } : {}) })
     expect(supplied.receipt.request).toEqual(nativeRearmRequest(control))
     expect(p.receipts.has(input.creationId, supplied.receipt.fingerprint)).toBe(true)
     expect(supplied.authority.current()).toBe(true)

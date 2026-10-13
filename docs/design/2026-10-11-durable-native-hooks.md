@@ -644,6 +644,34 @@ approximately 20:16–20:43 UTC October 13, with overlapping validation through
 engine provenance, physical Stop, activation and actual configured-client cost
 remain outside this scoped approval.
 
+Restart now preserves the original engine independently of its new allocation.
+Every new R copies the original Cancel process key and namespace into immutable
+`sourceProcess`; Cancel during preparation retains that association even when
+the replacement has no witness. Explicit unknown ownership remains unknown, and
+older R records remain readable without acquiring new authority. Exact request
+matching in the pre-exec witness, replacement proof and saved cleanup includes
+this association. Cold Registry and receipt recovery cover cancellation both
+before and after the exclusive dispatch claim.
+
+The initial complete affected run passed 884 cases and failed four new witness
+fixtures because they attempted to mutate a frozen request
+(`20261013T205053.667223Z-54392`, types 4.8 seconds, tests 263.2 seconds).
+Those fixtures now copy the request before introducing their fault. All 321
+cases in the four complete affected files pass with 100% statements, branches,
+functions and lines, and types pass
+(`20261013T205547.275064Z-70835`, 4.9/65.0 seconds). The other thirteen files in
+the earlier run passed, including the installed writer/private tmux lane,
+archive handoff/return, recovery, unchanged launch golden and architecture.
+The earlier superseded run was cancelled after an optional-fingerprint defect
+was found; it remains cancelled evidence. No golden changed.
+
+Complete mutation baselines pass and all thirteen deliberate provenance faults
+fail assertions (`20261013T205707.238296Z-75614`, 114.3 seconds). Independent
+review approved the sourceProcess slice over `158315326`, conditional on these
+completed gates. Implementation/review ran approximately 20:44–20:57 UTC October
+13; validation overlapped through 20:59. Merge, publication and external waiting
+remain zero. Physical Stop and activation remain outside this scoped approval.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R

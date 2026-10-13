@@ -5,6 +5,11 @@ import { validNativeGenerationCancellation, type NativeGenerationCancellation } 
 import { validNativeHookWriter, type NativeHookWriter } from '../engines/kit/nativeHookWriter.js'
 import type { RegisteredSession } from './registry.js'
 
+export interface NativeTurnProcessReference {
+  readonly processKey: string | null
+  readonly namespace?: string
+}
+
 export interface NativeTurnIntent {
   readonly version: 1
   readonly cancel: {
@@ -27,6 +32,10 @@ export interface NativeTurnIntent {
      * Older incomplete reservations stay readable but cannot be dispatched. */
     readonly source?: 'live' | 'saved'
     readonly permissionMode?: 'ask' | 'auto' | 'plan' | 'full'
+    /** A later Cancel may replace cancel with an unknown owner while this launch
+     * is pending. Keep the old engine obligation separately from the new exec.
+     * Missing legacy provenance and explicit null both grant no death authority. */
+    readonly sourceProcess?: NativeTurnProcessReference
     /** Cancel revokes admission without forgetting an already claimed launch.
      * Its exact receipt must be reconciled before another launch is reserved. */
     readonly revoked?: true
@@ -50,6 +59,14 @@ export function nativeTurnProcess(owner: { processKey: unknown; namespace?: unkn
   return validNativeHookWriter(process) ? Object.freeze(process) : null
 }
 
+export function parseNativeTurnProcessReference(value: unknown): NativeTurnProcessReference | null {
+  if (!object(value) || !exact(value, Object.hasOwn(value, 'namespace') ? 'namespace,processKey' : 'processKey')
+    || value.processKey !== null && !processKey(value.processKey)
+    || Object.hasOwn(value, 'namespace') && !nativeTurnProcess({ processKey: value.processKey, namespace: value.namespace })) return null
+  return Object.freeze({ processKey: value.processKey as string | null,
+    ...(Object.hasOwn(value, 'namespace') ? { namespace: value.namespace as string } : {}) })
+}
+
 /** No caller may normalize unknown control data into an uncancelled agent.
  * Archives can have a new row ID: preserve the original Cancel owner verbatim. */
 export function parseNativeTurnIntent(value: unknown): NativeTurnIntent | null {
@@ -69,7 +86,9 @@ export function parseNativeTurnIntent(value: unknown): NativeTurnIntent | null {
   if (rearm !== undefined) {
     if (!object(rearm) || !exact(rearm, ['agentId', 'launchToken', 'operation', 'requestId', 'target',
       ...(rearm.source === undefined ? [] : ['source']), ...(rearm.permissionMode === undefined ? [] : ['permissionMode']),
+      ...(Object.hasOwn(rearm, 'sourceProcess') ? ['sourceProcess'] : []),
       ...(rearm.replacement === undefined ? [] : ['replacement']), ...(rearm.revoked === undefined ? [] : ['revoked'])].sort().join(','))
+      || Object.hasOwn(rearm, 'sourceProcess') && !parseNativeTurnProcessReference(rearm.sourceProcess)
       || rearm.revoked !== undefined && rearm.revoked !== true
       || rearm.source !== undefined && rearm.source !== 'live' && rearm.source !== 'saved'
       || rearm.permissionMode !== undefined && (!rearm.source || rearm.operation !== 'resume'
@@ -82,7 +101,11 @@ export function parseNativeTurnIntent(value: unknown): NativeTurnIntent | null {
   }
   const copied = structuredClone(value) as unknown as NativeTurnIntent
   Object.freeze(copied.cancel.request.frontier); Object.freeze(copied.cancel.request); Object.freeze(copied.cancel)
-  if (copied.rearm) { if (copied.rearm.replacement) Object.freeze(copied.rearm.replacement); Object.freeze(copied.rearm) }
+  if (copied.rearm) {
+    if (copied.rearm.sourceProcess) Object.freeze(copied.rearm.sourceProcess)
+    if (copied.rearm.replacement) Object.freeze(copied.rearm.replacement)
+    Object.freeze(copied.rearm)
+  }
   return Object.freeze(copied)
 }
 
@@ -114,6 +137,7 @@ export function nativeRearmRequest(intent: NativeTurnIntent): Readonly<Record<st
   return Object.freeze({ kind: 'native-rearm', creationId: rearm.requestId, agentId: rearm.agentId,
     operation: rearm.operation, target: rearm.target, launchToken: rearm.launchToken, source: rearm.source,
     ...(rearm.permissionMode === undefined ? {} : { permissionMode: rearm.permissionMode }),
+    ...(rearm.sourceProcess === undefined ? {} : { sourceProcess: rearm.sourceProcess }),
   })
 }
 
@@ -129,6 +153,7 @@ export function nativeTurnTransition(row: RegisteredSession, next: NativeTurnInt
   if (row.nativeRetirement) return false
   const previous = row.nativeControl
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+  const source = (value: NativeTurnProcessReference | undefined) => value && [value.processKey, Object.hasOwn(value, 'namespace'), value.namespace]
   const cancel = () => next.cancel.target === nativeTurnTarget(row)
     && next.cancel.request.agentId === row.agentId && next.cancel.request.conversationId === row.sessionId
   if (!previous) return !next.rearm && cancel()
@@ -146,13 +171,14 @@ export function nativeTurnTransition(row: RegisteredSession, next: NativeTurnInt
   const reserved = previous.rearm, proposed = next.rearm
   if (!reserved) return !proposed || !proposed.replacement && !proposed.revoked && proposed.agentId === row.agentId
     && proposed.target === nativeTurnTarget(row)
-  // The caller's fence must prove the revoked receipt never dispatched, or the
-  // exact original allocation is now accounted for. Age is not that proof.
+    && proposed.sourceProcess !== undefined && same(source(proposed.sourceProcess), source(previous.cancel))
+  // The caller must account for the old sourceProcess and the new allocation.
+  // A never-dispatched receipt discharges only the new launch, not the old engine.
   if (!proposed) return reserved.revoked === true
   if (!same([reserved.requestId, reserved.agentId, reserved.operation, reserved.target, reserved.launchToken, reserved.revoked,
-    reserved.source, reserved.permissionMode],
+    reserved.source, reserved.permissionMode, source(reserved.sourceProcess)],
     [proposed.requestId, proposed.agentId, proposed.operation, proposed.target, proposed.launchToken, proposed.revoked,
-      proposed.source, proposed.permissionMode])) return false
+      proposed.source, proposed.permissionMode, source(proposed.sourceProcess)])) return false
   if (reserved.replacement) return same([reserved.replacement.processKey, reserved.replacement.sessionId],
     proposed.replacement && [proposed.replacement.processKey, proposed.replacement.sessionId])
   return !proposed.replacement || proposed.agentId === row.agentId && proposed.replacement.sessionId === row.sessionId

@@ -25,7 +25,7 @@ const row = (pid: number, parentPid: number): NativeControlRow => ({ pid, parent
   command: pid === 42 ? 'sh' : 'node', imagePath: pid === 42 ? realpathSync(process.platform === 'darwin' ? '/bin/bash' : '/bin/sh') : '/fixture/node', argv: ['fixture'], fds: [] })
 beforeEach(() => { clock.now = 0; root = realpathSync(mkdtempSync(join(tmpdir(), 'rearm-writer-'))) })
 afterEach(() => { vi.restoreAllMocks(); rmSync(root, { recursive: true, force: true }) })
-async function fixture(source: 'live' | 'saved' = 'live', options?: Pick<NonNullable<NativeTurnIntent['rearm']>, 'permissionMode'>) {
+async function fixture(source: 'live' | 'saved' = 'live', options?: Pick<NonNullable<NativeTurnIntent['rearm']>, 'permissionMode' | 'sourceProcess'>) {
   const engine = join(root, 'engine'), settings = join(root, 'settings')
   writeFileSync(engine, '#!/bin/sh\nexit 0\n', { mode: 0o700 }); writeFileSync(settings, 'original hooks', { mode: 0o600 })
   const executable = executableSnapshot(nativeVersionProbe({ args: [], output: /^$/, timeoutMs: 100 }, () => engine))!
@@ -65,6 +65,30 @@ async function fixture(source: 'live' | 'saved' = 'live', options?: Pick<NonNull
   const witness = join(root, 'agent-creations', `${id}.json.process`)
   return { input, receipts, processes, probe, write, file, witness, engine, settings, launch, scope, scopes }
 }
+
+const originalProcess = () => ({ processKey: 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa\0cursor\0' + '41\0' + '4100', namespace: 'linux:4:5' })
+
+it('the witness joins the exact reserved original engine before authorizing a new exec', async () => {
+  const p = await fixture('live', { sourceProcess: originalProcess() })
+  expect(inspectNativeRearmWitness(JSON.stringify(p.input)).request.sourceProcess).toEqual(originalProcess())
+  expect(await p.write()).toBe(true)
+  expect(p.receipts.readNativeRelaunchProcess(id, p.input).process.pid).toBe(42)
+})
+
+it.each(['omitted', 'null', 'key', 'namespace', 'enriched'])('holds %s original engine provenance before the witness probes or writes', async change => {
+  const p = await fixture('live', { sourceProcess: originalProcess() })
+  p.input.request = { ...p.input.request }
+  if (change === 'omitted') delete p.input.request.sourceProcess
+  if (change === 'null') p.input.request.sourceProcess = null
+  if (change === 'key') p.input.request.sourceProcess = { ...originalProcess(), processKey: originalProcess().processKey.replace(/4100$/, '4101') }
+  if (change === 'namespace') p.input.request.sourceProcess = { ...originalProcess(), namespace: 'linux:4:6' }
+  if (change === 'enriched') {
+    const { sourceProcess: _source, ...legacy } = p.input.control.rearm!
+    p.input.control = { ...p.input.control, rearm: legacy }
+  }
+  await expect(p.write()).rejects.toThrow('reservation is unavailable')
+  expect(p.probe).not.toHaveBeenCalled(); expect(existsSync(p.witness)).toBe(false)
+})
 
 it.each(['live', 'saved'] as const)('hands only the original %s reservation and exact parent incarnation an exec permit', async source => {
   const p = await fixture(source)

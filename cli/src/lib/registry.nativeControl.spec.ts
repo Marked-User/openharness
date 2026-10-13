@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { nativeRearmRequest, nativeTurnAdmitted, nativeTurnTarget, type NativeTurnIntent } from './nativeTurnIntent.js'
+import { nativeRearmRequest, nativeTurnAdmitted, nativeTurnProcess, nativeTurnTarget, type NativeTurnIntent } from './nativeTurnIntent.js'
 import { creationFingerprint } from './agentCreationReceipt.js'
 import { StoppedAgentStore } from './stoppedAgents.js'
 import { createKeepAbandonedConversation } from './keepAbandonedConversation.js'
@@ -111,7 +111,7 @@ it('retains the original archive epoch through load, registration and a later na
   expect(registered.nativeArchive).toEqual(link)
   const reserved = registry.commitNativeControl(registered, { ...registered.nativeControl!, rearm: {
     requestId: 'later-live-restart-request', launchToken: 'later-live-restart-token', source: 'live', operation: 'restart',
-    agentId: saved.agentId, target: nativeTurnTarget(registered),
+    agentId: saved.agentId, target: nativeTurnTarget(registered), sourceProcess: { processKey: registered.nativeControl!.cancel.processKey },
   } }, () => {})
   expect(reserved.nativeArchive).toEqual(link)
   expect(rows()[0].nativeArchive).toEqual(link)
@@ -203,6 +203,43 @@ it('continues the exact Cancel after a real commit publishes but its final proof
     expect(publish).toHaveBeenCalledOnce(); expect(journal).toHaveBeenCalledOnce()
     expect(rows()[0].nativeControl).toEqual(saved)
   } finally { controller.close(); vi.useRealTimers() }
+})
+
+it.each([false, true])('cold Cancel retains the old engine independently of an unwitnessed Restart (claimed=%s)', async claimed => {
+  const { createNativeRearm } = await import('../core/agents/nativeRearm.js')
+  const { createNativeCancel } = await import('../core/turns/nativeCancel.js')
+  const { AgentCreationReceipts } = await import('./agentCreationReceipt.js')
+  const processKey = 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa\0cursor\0' + '42\0' + '12345'
+  const sourceProcess = { processKey, namespace: 'linux:4:5' }
+  const prior = cancellation()
+  registry.commitNativeControl(row, { ...prior, cancel: { ...prior.cancel, ...sourceProcess } }, () => {})
+  const directory = join(data, 'agent-creations'), receipts = new AgentCreationReceipts(directory)
+  const creationId = 'unwitnessed-native-restart', input = { creationId, agentId: row.agentId, operation: 'restart' as const, source: 'live' as const }
+  const prepare = vi.fn(async () => claimed ? async (guard: { begin(): void }) => { guard.begin() } : null)
+  const rearm = createNativeRearm({ registry, saved: new StoppedAgentStore(join(data, 'stopped-agents')), receipts, prepare, held() {} })
+  const journal = vi.fn(async () => { throw Error('Pending Restart has no new interrupt owner') })
+  const cancel = createNativeCancel({ registry, capture: () => undefined, revoke() {}, revokeRearm: id => rearm.revoke(id), journal,
+    writer: { revoke() {}, interrupt: async () => { throw Error('Must not interrupt') } },
+    interrupt: async () => { throw Error('Must not signal') }, held() {} })
+  try {
+    expect((await rearm.start(input)).state).toBe(claimed ? 'unconfirmed' : 'pending')
+    const reserved = registry.byAgent(row.agentId)!, request = nativeRearmRequest(reserved.nativeControl!)!
+    expect(request.sourceProcess).toEqual(sourceProcess)
+    await expect(cancel.cancel(reserved)).resolves.toBe(false)
+    const cold = new (registry.constructor as new () => typeof registry)(); cold.load()
+    const control = cold.byAgent(row.agentId)!.nativeControl!
+    expect(control.cancel.processKey).toBeNull(); expect(control.cancel).not.toHaveProperty('namespace')
+    expect(control.rearm).toMatchObject({ revoked: true, sourceProcess })
+    expect(nativeRearmRequest(control)).toEqual(request)
+    expect(nativeTurnProcess(control.rearm!.sourceProcess!)).toEqual({ boot: processKey.split('\0')[0], namespace: 'linux:4:5', pid: 42, birth: '12345' })
+    const retained = JSON.parse(readFileSync(join(directory, `${creationId}.json`), 'utf8'))
+    expect(retained.request).toEqual(request)
+    const coldReceipts = new AgentCreationReceipts(directory)
+    expect(coldReceipts.status(creationId).state).toBe(claimed ? 'unconfirmed' : 'cancelled')
+    expect(existsSync(join(directory, `${creationId}.json.process`))).toBe(false)
+    expect(() => coldReceipts.readNativeRelaunchProcess(creationId, { fingerprint: retained.fingerprint, request })).toThrow()
+    expect(journal).not.toHaveBeenCalled(); expect(prepare).toHaveBeenCalledOnce()
+  } finally { cancel.close(); rearm.close() }
 })
 
 it.each([false, true])('keeps cancellation across registration, load and an automatic process identity change (scoped=%s)', scoped => {
@@ -325,7 +362,7 @@ function liveReservation(mode?: 'full') {
   const cancelled = commit()
   return registry.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: {
     requestId: 'original-rearm-request', agentId: row.agentId, operation: mode ? 'resume' : 'restart', source: 'live',
-    target: nativeTurnTarget(cancelled), launchToken: 'original-launch-token', ...(mode ? { permissionMode: mode } : {}),
+    target: nativeTurnTarget(cancelled), launchToken: 'original-launch-token', sourceProcess: { processKey: cancelled.nativeControl!.cancel.processKey }, ...(mode ? { permissionMode: mode } : {}),
   } }, () => {})
 }
 function replacementRequest(reserved: RegisteredSession) {
@@ -604,7 +641,7 @@ it.each(['missing', 'saved', 'revoked', 'target', 'pane', 'pid', 'key', 'mode', 
 it('requires a recovered enabling image to confirm file and directory durability before admission', () => {
   const cancelled = commit()
   const reserved = registry.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: {
-    requestId: 'original-rearm-request', agentId: row.agentId, operation: 'restart', target: nativeTurnTarget(cancelled), launchToken: 'original-launch-token',
+    requestId: 'original-rearm-request', agentId: row.agentId, operation: 'restart', target: nativeTurnTarget(cancelled), launchToken: 'original-launch-token', sourceProcess: { processKey: cancelled.nativeControl!.cancel.processKey },
   } }, () => {})
   registry.updateProcessIdentity(row.agentId, { ...input().processIdentity, pid: 43 })
   const candidate = registry.byAgent(row.agentId)!
@@ -624,7 +661,7 @@ it('requires a recovered enabling image to confirm file and directory durability
 it.each(['file', 'directory'] as const)('never syncs a substitute %s descriptor after a temporary route change', kind => {
   const cancelled = commit()
   const reserved = registry.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: {
-    requestId: 'original-rearm-request', agentId: row.agentId, operation: 'restart', target: nativeTurnTarget(cancelled), launchToken: 'original-launch-token',
+    requestId: 'original-rearm-request', agentId: row.agentId, operation: 'restart', target: nativeTurnTarget(cancelled), launchToken: 'original-launch-token', sourceProcess: { processKey: cancelled.nativeControl!.cancel.processKey },
   } }, () => {})
   const ready = registry.commitNativeControl(reserved, { ...reserved.nativeControl!, rearm: { ...reserved.nativeControl!.rearm!,
     replacement: { processKey: 'replacement-native-process', sessionId: row.sessionId } } }, () => {})

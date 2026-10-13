@@ -171,6 +171,8 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
             || rearm.agentId !== row.agentId || intent.kind !== 'native-rearm' || intent.creationId !== rearm.requestId
             || intent.agentId !== rearm.agentId || intent.operation !== rearm.operation || intent.target !== rearm.target
             || intent.source !== rearm.source || intent.permissionMode !== rearm.permissionMode
+            || Object.hasOwn(intent, 'sourceProcess') !== Object.hasOwn(rearm, 'sourceProcess')
+            || creationFingerprint(intent.sourceProcess ?? null) !== creationFingerprint(rearm.sourceProcess ?? null)
             || intent.launchToken !== rearm.launchToken) return held('reservation or current binding is unavailable')
           const declared = enginePathOverride('cursor')
           const current = () => {

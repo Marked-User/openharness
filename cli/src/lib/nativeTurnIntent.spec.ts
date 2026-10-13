@@ -1,12 +1,13 @@
 import { expect, it } from 'vitest'
-import { nativeRearmRequest, nativeTurnAdmitted, nativeTurnProcess, nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
+import { nativeRearmRequest, nativeTurnAdmitted, nativeTurnProcess, nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, parseNativeTurnProcessReference, type NativeTurnIntent } from './nativeTurnIntent.js'
 import type { RegisteredSession } from './registry.js'
 
 const cancel = () => ({ processKey: 'boot\0cursor\0original', target: 'a'.repeat(64), request: {
   requestId: 'original-cancel-request', nonce: 'original-cancel-nonce', agentId: 'agent', conversationId: 'session', frontier: { index: -1, digest: null },
 } })
 const intent = (): NativeTurnIntent => ({ version: 1, cancel: cancel() })
-const rearm = () => ({ requestId: 'explicit-rearm-request', agentId: 'agent', operation: 'restart' as const, target: 'b'.repeat(64), launchToken: 'original-launch-token' })
+const rearm = () => ({ requestId: 'explicit-rearm-request', agentId: 'agent', operation: 'restart' as const, target: 'b'.repeat(64), launchToken: 'original-launch-token',
+  sourceProcess: { processKey: cancel().processKey } })
 const replacement = () => ({ processKey: 'boot\0cursor\0replacement', sessionId: 'session' })
 const targetRow = () => ({ agentId: 'agent', registeredAt: 1, engine: 'cursor', sessionId: 'session', boundAt: 2, active: true,
   processIdentity: { pid: 42, executable: '<cursor>', startMarker: 'birth' }, runtimes: [{ backend: 'tmux', paneId: '%1' }],
@@ -45,6 +46,61 @@ it.each([
   const cancel = { ...scopedCancel(), ...change }
   expect(parseNativeTurnIntent({ ...intent(), cancel })).toBeNull()
   expect(nativeTurnProcess(cancel)).toBeNull()
+})
+
+it.each([null, undefined, [], {}, { processKey: undefined }, { processKey: '' }, { processKey: 7 },
+  { processKey: 'x'.repeat(513) }, { processKey: null, extra: true }, { processKey: null, namespace: 'linux:4:5' },
+  { processKey: scopedCancel().processKey, namespace: undefined }, { processKey: scopedCancel().processKey, namespace: 'linux:04:5' },
+])('refuses incomplete original Restart process provenance %#', sourceProcess => {
+  expect(parseNativeTurnProcessReference(sourceProcess)).toBeNull()
+  expect(parseNativeTurnIntent({ ...intent(), rearm: { ...rearm(), sourceProcess } })).toBeNull()
+})
+
+it.each([{ processKey: null }, { processKey: 'legacy-opaque-key' },
+  { processKey: scopedCancel().processKey, namespace: 'linux:4:5' }])('reserves only the exact original process association %j', sourceProcess => {
+  const row = targetRow(), control = { ...intent(), cancel: { ...cancel(), ...sourceProcess } }
+  row.nativeControl = control
+  const next: NativeTurnIntent = { ...control, rearm: { ...rearm(), source: 'live', target: nativeTurnTarget(row), sourceProcess } }
+  const parsed = parseNativeTurnIntent(next)!
+  expect(parsed).toEqual(next); expect(Object.isFrozen(parsed.rearm!.sourceProcess)).toBe(true)
+  expect(parseNativeTurnProcessReference(sourceProcess)).toEqual(sourceProcess)
+  expect(Object.isFrozen(parseNativeTurnProcessReference(sourceProcess))).toBe(true)
+  expect(nativeTurnTransition(row, parsed)).toBe(true)
+  expect(nativeRearmRequest(parsed)?.sourceProcess).toEqual(sourceProcess)
+  expect(Object.isFrozen(nativeRearmRequest(parsed)?.sourceProcess)).toBe(true)
+  const { sourceProcess: _source, ...without } = parsed.rearm!
+  expect(nativeTurnTransition(row, { ...parsed, rearm: without })).toBe(false)
+  expect(nativeTurnTransition(row, { ...parsed, rearm: { ...without, sourceProcess: { processKey: 'another-original' } } })).toBe(false)
+  row.nativeControl = parsed
+  expect(nativeTurnTransition(row, { ...parsed, rearm: without })).toBe(false)
+  expect(nativeTurnTransition(row, { ...parsed, rearm: { ...without, sourceProcess: { processKey: 'another-original' } } })).toBe(false)
+  // Existing legacy reservations are readable, but recovery cannot invent the
+  // original engine when later cancellation has already replaced its owner.
+  const legacy = { ...parsed, rearm: without }
+  row.nativeControl = legacy
+  expect(parseNativeTurnIntent(legacy)).toEqual(legacy)
+  expect(nativeTurnTransition(row, legacy)).toBe(true)
+  expect(nativeTurnTransition(row, parsed)).toBe(false)
+  expect(nativeRearmRequest(legacy)).not.toHaveProperty('sourceProcess')
+})
+
+it('keeps the original engine obligation when a new Cancel revokes an unfinished Restart', () => {
+  const row = targetRow(), sourceProcess = { processKey: scopedCancel().processKey, namespace: 'linux:4:5' }
+  const control: NativeTurnIntent = { ...intent(), cancel: scopedCancel(),
+    rearm: { ...rearm(), source: 'live', target: nativeTurnTarget(row), sourceProcess } }
+  row.nativeControl = control
+  const next: NativeTurnIntent = { ...control, cancel: { ...cancel(), processKey: null, target: nativeTurnTarget(row),
+    request: { ...cancel().request, requestId: 'cancel-the-pending-restart' } }, rearm: { ...control.rearm!, revoked: true } }
+  expect(nativeTurnTransition(row, next)).toBe(true)
+  expect(nativeRearmRequest(next)).toEqual(nativeRearmRequest(control))
+  expect(nativeTurnProcess(next.cancel)).toBeNull()
+  expect(nativeTurnProcess(next.rearm!.sourceProcess!)).toMatchObject({ pid: 42, namespace: 'linux:4:5' })
+  for (const reference of [{ ...sourceProcess, namespace: 'linux:4:6' }, { processKey: sourceProcess.processKey }, { processKey: null }]) {
+    const changed = { ...next, rearm: { ...next.rearm!, sourceProcess: reference } }
+    expect(nativeTurnTransition(row, changed)).toBe(false)
+    row.nativeControl = next
+    expect(nativeTurnTransition(row, changed)).toBe(false)
+  }
 })
 
 it('copies an immutable cancellation and admits only its explicitly confirmed replacement', () => {
@@ -196,6 +252,7 @@ it.each([undefined, 'ask', 'auto', 'plan', 'full'] as const)('reconstructs the i
   expect(Object.isFrozen(request)).toBe(true)
   expect(request).toEqual({ kind: 'native-rearm', creationId: next.rearm!.requestId, agentId: row.agentId,
     operation: 'resume', source: 'saved', target: nativeTurnTarget(row), launchToken: next.rearm!.launchToken,
+    sourceProcess: rearm().sourceProcess,
     ...(permissionMode === undefined ? {} : { permissionMode }) })
   for (const change of [{ source: 'live' as const }, { source: undefined },
     { permissionMode: permissionMode === 'full' ? 'ask' as const : 'full' as const }]) {
