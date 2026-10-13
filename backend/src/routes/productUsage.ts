@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { ingestProductUsage, productUsageChoice, setProductUsageChoice } from '../lib/productUsage.js'
-import { PRODUCT_USAGE_MAX_COUNT, PRODUCT_USAGE_METRICS } from '../types/productUsage.js'
+import { PRODUCT_FEEDBACK, PRODUCT_USAGE_MAX_COUNT, PRODUCT_USAGE_METRICS } from '../types/productUsage.js'
 import { sendError, sendSuccess } from '../utils/response.js'
 
 export const productUsageReportSchema = z.strictObject({
@@ -9,6 +9,7 @@ export const productUsageReportSchema = z.strictObject({
   day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   counters: z.partialRecord(z.enum(PRODUCT_USAGE_METRICS), z.number().int().min(0).max(PRODUCT_USAGE_MAX_COUNT)),
 })
+const feedbackSchema = z.strictObject({ id: z.uuid(), answer: z.enum(PRODUCT_FEEDBACK) })
 const choiceSchema = z.strictObject({ enabled: z.boolean() })
 
 export async function productUsageRoutes(app: FastifyInstance): Promise<void> {
@@ -29,7 +30,17 @@ export async function productUsageRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) return sendError(reply, 'Invalid usage preference', 'INVALID_USAGE_PREFERENCE', 400)
     return sendSuccess(reply, await setProductUsageChoice(req.user.sub, parsed.data.enabled))
   })
-  app.post('/api/product-usage/report', { bodyLimit: 4096 }, async (req, reply) => {
+  app.post('/api/product-usage/feedback', { bodyLimit: 256 }, async (req, reply) => {
+    if (!req.user?.sub) return sendError(reply, 'Unauthorized', 'UNAUTHORIZED', 401)
+    const parsed = feedbackSchema.safeParse(req.body)
+    if (!parsed.success) return sendError(reply, 'Invalid feedback', 'INVALID_FEEDBACK', 400)
+    const choice = await productUsageChoice(req.user.sub)
+    if (!choice.enabled) return sendError(reply, 'Product usage sharing is off', 'SHARING_DISABLED', 409)
+    const result = await ingestProductUsage(req.user.sub, { schemaVersion: 1, revision: choice.revision,
+      id: parsed.data.id, day: new Date().toISOString().slice(0, 10), counters: { [`feedback_${parsed.data.answer}`]: 1 } })
+    return sendSuccess(reply, result)
+  })
+  app.post('/api/product-usage/report', { bodyLimit: 8192 }, async (req, reply) => {
     if (!req.user?.sub) return sendError(reply, 'Unauthorized', 'UNAUTHORIZED', 401)
     const parsed = productUsageReportSchema.safeParse(req.body)
     // Never reflect rejected fields, values or raw validation errors into logs or responses.

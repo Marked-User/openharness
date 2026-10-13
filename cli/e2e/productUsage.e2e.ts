@@ -25,8 +25,17 @@ it('reports only local counters from a real turn, and the account switch stops t
   expect((await (await fetch(settings)).json())).toMatchObject({ data: { enabled: true } })
   client = await LocalClient.connect(d, { machineId: machine.machineId })
   const cwd = join(d.projectsDir, 'PRIVATE_PROJECT_CANARY'); mkdirSync(cwd, { recursive: true })
-  const created = await client.request('agent_create', { engine: 'claude', cwd, bypassPermission: true }, 90000)
-  expect(created.error).toBeUndefined()
+  const creationId = 'private-creation-canary'
+  const launched = await client.request('agent_create', { creationId, engine: 'claude', cwd, bypassPermission: true }, 90000)
+  expect(launched.error).toBeUndefined()
+  const created = launched.state === 'created' ? launched : await until('durable launch completes', async () => {
+    const reply = await client!.request('agent_create_status', { creationId })
+    return reply.state === 'created' ? reply : null
+  }, 90000)
+  // Retrying the durable request or polling it must not create another launch measurement.
+  await client.request('agent_create_status', { creationId })
+  const refused = await client.request('agent_create', { creationId: 'synthetic-invalid-creation', engine: 'not-an-engine', cwd })
+  expect(refused.error ?? refused.failure).toBeTruthy()
   const agentId = created.agent.id
   const turn = async () => {
     const ended = client!.next(frame => frame.type === 'turn_ended' && frame.agentId === agentId, 45000)
@@ -39,8 +48,13 @@ it('reports only local counters from a real turn, and the account switch stops t
   }, 45000)
   await turn()
   await until('a reduced completed turn report', () => backend!.productUsage!.reports.some(r => ((r.counters as Record<string, number>).turns_ended ?? 0) > 0) || null, 75000)
+  const sum = (metric: string) => backend!.productUsage!.reports.reduce((n, r) => n + ((r.counters as Record<string, number>)[metric] ?? 0), 0)
+  expect(sum('launch_started')).toBe(2)
+  expect(sum('launch_created')).toBe(1)
+  expect(sum('launch_failed')).toBe(1)
+  expect(sum('turns_with_response')).toBeGreaterThan(0)
   const wire = JSON.stringify(backend.productUsage.reports)
-  for (const privateValue of ['PRIVATE_', machine.machineId, machine.computerId, machine.token, agentId, cwd, 'userMessage', 'payload']) expect(wire).not.toContain(privateValue)
+  for (const privateValue of ['PRIVATE_', creationId, machine.machineId, machine.computerId, machine.token, agentId, cwd, 'userMessage', 'payload']) expect(wire).not.toContain(privateValue)
   expect((await fetch(settings, { method: 'POST', headers: { 'content-type': 'application/json', 'x-adapter-local': '1' }, body: '{"enabled":false}' })).status).toBe(200)
   const reportsBefore = backend.productUsage.reports.length
   const checksBefore = backend.seen.filter(x => x === 'GET /api/product-usage/settings').length

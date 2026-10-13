@@ -1,13 +1,16 @@
 import 'package:flutter/material.dart';
 
+import '../shared/widgets/product_feedback.dart';
+
 typedef UsagePreferenceRequest = Future<Map<String, dynamic>> Function({
   bool? enabled,
 });
 
 /// Account-wide privacy control, available without a connected computer.
 class PrivacyPage extends StatefulWidget {
-  const PrivacyPage({super.key, required this.request});
+  const PrivacyPage({super.key, required this.request, this.feedback});
   final UsagePreferenceRequest request;
+  final ProductFeedbackRequest? feedback;
 
   @override
   State<PrivacyPage> createState() => _PrivacyPageState();
@@ -97,17 +100,22 @@ class _PrivacyPageState extends State<PrivacyPage> {
           }),
           child: Text(_details ? 'Hide shared fields' : 'See what’s shared'),
         ),
+        if (_enabled == true && widget.feedback != null)
+          ProductFeedback(send: widget.feedback!),
         if (_details)
           const Text(
             'Shared fields: UTC day, a random retry receipt, protocol and preference revisions; '
             'active/working computer counts, first/repeat work, desktop/terminal opens, '
             'turns started/ended/interrupted (including automation), and duration buckets '
             '(under 10 seconds, 10–60 seconds, 1–5 minutes, over 5 minutes). '
+            'Also: request outcomes and fixed failure categories for launch/resume/restart/model changes/history, '
+            'response wait buckets, missing responses and error-event counts, and first-launch 24-hour response counts and D1/D7 working-day returns. '
+            'Feedback is a fixed answer sent only when you choose one. '
             'Older apps contribute connection, remote-session and turn-start totals separately.\n\n'
             'Sign-in checks your preference. Account, computer and agent identifiers are not stored '
             'with new totals. Queued local counters older than 35 days are discarded when Harness next runs. '
-            'Server retry receipts expire within 36 days; combined totals are kept for 13 months '
-            'and cannot be removed for one person. '
+            'Server retry receipts are scheduled to expire after 36 days; combined totals after 13 months. Background cleanup may lag. '
+            'Combined totals cannot be removed for one person. '
             'Previously collected activity records expire after 35 days. '
             'A turn ending does not establish task success.',
           ),

@@ -1,6 +1,7 @@
 /** Aggregate-only daily report. Run with a read-only database identity; never prints identifiers. */
 import { PrismaClient } from '@prisma/client'
 import { DAILY_PRODUCT_METRICS, dailyProductUsage } from './analytics/dailyProductUsage.js'
+import { dailyProductReview } from './analytics/dailyProductReview.js'
 const days = Number(process.argv[2] ?? 14)
 if (!Number.isInteger(days) || days < 1 || days > 90) throw new Error('Choose 1–90 days')
 const db = new PrismaClient()
@@ -8,8 +9,8 @@ try {
   const today = Math.floor(Date.now() / 86400000) * 86400000
   const rows = await db.productUsageTotal.findMany({
     // Retention always needs the two preceding complete weeks, even for a one-day daily view.
-    where: { dayUtc: { gte: new Date(today - Math.max(days - 1, 20) * 86400000), lt: new Date(today + 86400000) }, metric: { in: [...DAILY_PRODUCT_METRICS] } },
-    select: { dayUtc: true, metric: true, value: true }, orderBy: [{ dayUtc: 'asc' }, { metric: 'asc' }], take: 3000,
+    where: { dayUtc: { gte: new Date(today - Math.max(days - 1, 21) * 86400000), lt: new Date(today + 86400000) }, metric: { in: [...DAILY_PRODUCT_METRICS] } },
+    select: { dayUtc: true, metric: true, value: true }, orderBy: [{ dayUtc: 'asc' }, { metric: 'asc' }], take: Math.max(days, 22) * DAILY_PRODUCT_METRICS.length,
   })
   console.log(JSON.stringify({ generatedAt: new Date().toISOString(), timezone: 'UTC',
     definitions: {
@@ -22,6 +23,6 @@ try {
       outcomes: 'Matched observed turn ends and interruptions, not task success. Missing or interrupted telemetry is not a failed task.',
       relay: 'Legacy relay event totals are separate; never add them to the client counters.',
       coverage: 'New local counters need updated clients. Delayed/offline reports and privacy changes can affect counts; today is incomplete.',
-    }, ...dailyProductUsage(rows, days, new Date()) }, null, 2))
+    }, ...dailyProductUsage(rows, days, new Date()), review: dailyProductReview(rows, new Date()) }, null, 2))
 } catch { console.error('Could not read aggregate product usage. Check the read-only connection and schema.'); process.exitCode = 1 }
 finally { await db.$disconnect() }

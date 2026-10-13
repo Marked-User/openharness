@@ -30,9 +30,15 @@ it('passes only lifecycle scalars to product reporting and keeps relaying if rep
   gateway.productUsage = { observe, opened: vi.fn(), presence: vi.fn() }
   gateway.broadcast({ type: 'turn_ended', agentId: 'fixture-agent', payload: { aborted: true, content: 'PRIVATE_CANARY' } })
   expect(observe).toHaveBeenCalledWith('turn_ended', 'fixture-agent', false, true)
+  gateway.broadcast({ type: 'text_delta', agentId: 'fixture-agent', payload: { text: 'PRIVATE_CANARY' } })
+  expect(observe).toHaveBeenCalledWith('text_delta', 'fixture-agent', false, false)
+  gateway.broadcast({ type: 'error', agentId: 'fixture-agent', payload: { message: 'PRIVATE_CANARY' } })
+  expect(observe).toHaveBeenCalledWith('error', 'fixture-agent', false, false)
   expect(JSON.stringify(observe.mock.calls)).not.toContain('PRIVATE_CANARY')
   const fail = () => { throw new Error('Reporting unavailable') }
-  gateway.productUsage = { observe: fail, opened: fail, presence: fail }
+  gateway.productUsage = { observe: fail, opened: fail, presence: fail, counter: fail, launch: fail }
+  expect(() => gateway.usageCounter('create_requests')).not.toThrow()
+  expect(() => gateway.usageLaunch({ id: 'synthetic-creation-1', phase: 'start' })).not.toThrow()
   expect(() => gateway.broadcast({ type: 'turn_started', agentId: 'fixture-agent' })).not.toThrow()
   expect(() => gateway.windowOpened('desktop')).not.toThrow()
   expect(() => gateway.localClients({ desktop: 1, tui: 0 })).not.toThrow()

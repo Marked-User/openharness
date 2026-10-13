@@ -165,7 +165,7 @@ class _Body extends StatelessWidget {
           buildUsageSettingsRow(context, notifier),
           if (_sample(context) == null)
             SettingsRow(title: 'Privacy', onTap: () => Navigator.of(context).push(
-              phoneRoute((_) => PrivacyPage(request: notifier.api.productUsageSettings)),
+              phoneRoute((_) => PrivacyPage(request: notifier.api.productUsageSettings, feedback: notifier.api.productUsageFeedback)),
             )),
           // The computers this phone reaches — here rather than a menu of their own: linking one is
           // a once-a-while errand, and Find already reaches every agent on them.

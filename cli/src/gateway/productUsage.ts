@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import type { ProductUsageLaunchSignal } from '../lib/productUsageSignals.js'
 import { PRODUCT_USAGE_DAYS, PRODUCT_USAGE_MAX_COUNT, PRODUCT_USAGE_METRICS,
   type ProductUsageChoice, type ProductUsageMetric, type ProductUsageReport } from '../lib/productUsageContract.js'
 
@@ -14,11 +15,18 @@ interface State {
   workDay: string | null
   workWeek: string | null
   workedBefore: boolean
+  respondedBefore: boolean
+  launchedBefore: boolean
+  firstLaunchAt: number | null
+  launchWorked: boolean
+  launchResponded: boolean
+  workDays: string[]
   days: Record<string, Counters>
   pending: ProductUsageReport | null
 }
 const fresh = (revision: number): State => ({ revision, activeDay: null, workDay: null, workWeek: null,
-  workedBefore: false, days: {}, pending: null })
+  workedBefore: false, respondedBefore: false, launchedBefore: false, firstLaunchAt: null,
+  launchWorked: false, launchResponded: false, workDays: [], days: {}, pending: null })
 export interface ProductUsageDeps {
   file: string
   request(method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }>
@@ -34,9 +42,10 @@ export function createProductUsage(deps: ProductUsageDeps) {
   const now = deps.now ?? Date.now, uuid = deps.uuid ?? randomUUID
   let state = fresh(-1), enabled = false, stopped = false, active = false
   let syncing: Promise<void> | null = null, persistTimer: ReturnType<typeof setTimeout> | undefined
-  const running = new Map<string, number>()
+  const running = new Map<string, { started: number; response: boolean; error: boolean; waited: boolean }>()
+  const launches = new Map<string, { started: number; done: boolean; waits: Set<string> }>()
   try {
-    if (statSync(deps.file).size > 64 * 1024) throw new Error('Usage queue exceeds its bound')
+    if (statSync(deps.file).size > 256 * 1024) throw new Error('Usage queue exceeds its bound')
     // Reconstruct every field; even a corrupted local file cannot introduce a new upload property.
     const saved = JSON.parse(readFileSync(deps.file, 'utf8')) as State
     if (Number.isSafeInteger(saved.revision) && saved.revision >= 0) {
@@ -45,6 +54,13 @@ export function createProductUsage(deps: ProductUsageDeps) {
         if (typeof saved[field] === 'string' && validDay(saved[field]!)) state[field] = saved[field]
       }
       state.workedBefore = saved.workedBefore === true
+      state.respondedBefore = saved.respondedBefore === true
+      state.launchedBefore = saved.launchedBefore === true
+      state.firstLaunchAt = Number.isSafeInteger(saved.firstLaunchAt) && saved.firstLaunchAt! <= now()
+        && validDay(key(saved.firstLaunchAt!)) ? saved.firstLaunchAt : null
+      state.launchWorked = saved.launchWorked === true
+      state.launchResponded = saved.launchResponded === true
+      state.workDays = Array.isArray(saved.workDays) ? [...new Set(saved.workDays.filter(d => typeof d === 'string' && validDay(d)))].slice(-35) : []
       for (const [day, counters] of Object.entries(saved.days ?? {})) if (validDay(day)) state.days[day] = clean(counters)
       const pending = saved.pending
       if (pending && pending.schemaVersion === 1 && pending.revision === state.revision && validDay(pending.day)
@@ -71,6 +87,8 @@ export function createProductUsage(deps: ProductUsageDeps) {
     clearTimeout(persistTimer); persistTimer = undefined
     for (const field of ['activeDay', 'workDay', 'workWeek'] as const) if (state[field] && !validDay(state[field]!)) state[field] = null
     for (const day of Object.keys(state.days)) if (!validDay(day)) delete state.days[day]
+    state.workDays = state.workDays.filter(validDay)
+    if (state.firstLaunchAt !== null && !validDay(key(state.firstLaunchAt))) state.firstLaunchAt = null
     if (state.pending && !validDay(state.pending.day)) state.pending = null
     try {
       mkdirSync(dirname(deps.file), { recursive: true, mode: 0o700 })
@@ -82,8 +100,8 @@ export function createProductUsage(deps: ProductUsageDeps) {
   function dirty(): void {
     if (!persistTimer) { persistTimer = setTimeout(persist, 1000); persistTimer.unref() }
   }
-  function add(metric: ProductUsageMetric): void {
-    const counters = state.days[key(now())] ??= {}
+  function add(metric: ProductUsageMetric, day = key(now())): void {
+    const counters = state.days[day] ??= {}
     counters[metric] = Math.min(PRODUCT_USAGE_MAX_COUNT, (counters[metric] ?? 0) + 1)
     dirty()
   }
@@ -91,9 +109,17 @@ export function createProductUsage(deps: ProductUsageDeps) {
     if (!enabled || stopped) return
     if (state.activeDay !== key(now())) { state.activeDay = key(now()); add('active_installation_days') }
   }
+  function launchValue(response: boolean): void {
+    if (state.firstLaunchAt === null || now() < state.firstLaunchAt || now() - state.firstLaunchAt > DAY) return
+    const field = response ? 'launchResponded' : 'launchWorked'
+    if (!state[field]) {
+      state[field] = true
+      add(response ? 'first_launch_response_24h_installations' : 'first_launch_work_24h_installations', key(state.firstLaunchAt))
+    }
+  }
   function choice(value: ProductUsageChoice): void {
     if (state.revision !== value.revision || !value.enabled) {
-      state = fresh(value.revision); running.clear()
+      state = fresh(value.revision); running.clear(); launches.clear()
       enabled = false
       if (!persist()) return
     }
@@ -105,9 +131,16 @@ export function createProductUsage(deps: ProductUsageDeps) {
       if (stopped) return
       const body = response.body.data as ProductUsageChoice | undefined
       if (response.status !== 200 || typeof body?.enabled !== 'boolean'
-          || !Number.isSafeInteger(body.revision) || body.revision < 0) { enabled = false; running.clear(); return }
+          || !Number.isSafeInteger(body.revision) || body.revision < 0) { enabled = false; running.clear(); launches.clear(); return }
       choice(body)
       if (!enabled) return
+      for (const turn of running.values()) if (!turn.response && !turn.waited && now() - turn.started >= 60_000) {
+        turn.waited = true; add('turns_waiting_over_1m')
+      }
+      for (const [id, launch] of launches) {
+        if (!launch.done && now() - launch.started >= 15 * 60_000) { launch.done = true; add('launch_unobserved') }
+        if (now() - launch.started >= 35 * 60_000) launches.delete(id)
+      }
       if (active) markActive()
       if (!state.pending) {
         const day = Object.keys(state.days).sort().find(d => validDay(d) && Object.keys(state.days[d]).length)
@@ -123,9 +156,9 @@ export function createProductUsage(deps: ProductUsageDeps) {
       if (stopped) return
       const result = answer.body.data as { accepted?: boolean; reason?: string } | undefined
       if (answer.status === 200 && result?.accepted === true) { state.pending = null; persist() }
-      else if (result?.reason === 'CHOICE_CHANGED') { enabled = false; state = fresh(-1); running.clear(); persist() }
+      else if (result?.reason === 'CHOICE_CHANGED') { enabled = false; state = fresh(-1); running.clear(); launches.clear(); persist() }
       else if (result?.reason === 'EXPIRED') { state.pending = null; persist() }
-    } catch { enabled = false; running.clear() /* No error text or request body in logs. */ }
+    } catch { enabled = false; running.clear(); launches.clear() /* No error text or request body in logs. */ }
   }
   const sync = (): Promise<void> => syncing ??= syncOnce().finally(() => { syncing = null })
   const timer = setInterval(() => { void sync() }, 60_000)
@@ -133,20 +166,62 @@ export function createProductUsage(deps: ProductUsageDeps) {
 
   return {
     sync,
+    counter(metric: ProductUsageMetric): void {
+      if (enabled && !stopped && PRODUCT_USAGE_METRICS.includes(metric)) add(metric)
+    },
+    launch(signal: ProductUsageLaunchSignal): void {
+      if (!enabled || stopped || !signal || typeof signal.id !== 'string' || !/^[a-zA-Z0-9_-]{16,96}$/.test(signal.id)) return
+      if (signal.phase === 'start') {
+        if (launches.has(signal.id)) return
+        if (!state.launchedBefore) {
+          state.launchedBefore = true; state.firstLaunchAt = now(); add('first_launch_installations')
+        }
+        if (launches.size >= 1000) {
+          const oldest = launches.keys().next().value!
+          if (!launches.get(oldest)!.done) add('launch_unobserved')
+          launches.delete(oldest)
+        }
+        launches.set(signal.id, { started: now(), done: false, waits: new Set() }); add('launch_started'); return
+      }
+      const launch = launches.get(signal.id)
+      if (!launch || launch.done) return
+      if (signal.phase === 'pending') {
+        const wait = ['install', 'model', 'native'].includes(signal.wait ?? '') ? signal.wait! : 'other'
+        if (!launch.waits.has(wait)) { launch.waits.add(wait); add(`launch_wait_${wait}` as ProductUsageMetric) }
+        return
+      }
+      if (!['created', 'failed', 'cancelled', 'unconfirmed'].includes(signal.phase)) return
+      launch.done = true
+      add(`launch_${signal.phase}` as ProductUsageMetric)
+      if (signal.phase === 'failed') {
+        const kind = ['setup', 'auth', 'unavailable', 'invalid'].includes(signal.failure ?? '') ? signal.failure! : 'other'
+        add(`launch_failed_${kind}` as ProductUsageMetric)
+      }
+      const elapsed = Math.max(0, now() - launch.started)
+      add(elapsed < 10_000 ? 'launch_under_10s' : elapsed < 60_000 ? 'launch_10s_to_1m' : elapsed < 300_000 ? 'launch_1m_to_5m' : 'launch_over_5m')
+    },
     presence(value: boolean): void { active = value; if (value) markActive() },
     opened(surface: 'desktop' | 'tui'): void {
       if (!enabled || stopped) return
       markActive(); add(surface === 'desktop' ? 'desktop_opens' : 'tui_opens')
     },
-    observe(type: 'turn_started' | 'turn_ended', agent: string, replay: boolean, interrupted = false): void {
+    observe(type: 'turn_started' | 'turn_ended' | 'text_delta' | 'error', agent: string, replay: boolean, interrupted = false): void {
       if (!enabled || stopped || replay || !agent || agent.length > 256) return
       if (type === 'turn_started') {
         if (running.has(agent) || running.size >= 1000) return
-        running.set(agent, now()); markActive(); add('turns_started')
+        running.set(agent, { started: now(), response: false, error: false, waited: false }); markActive(); add('turns_started')
+        launchValue(false)
         if (state.workDay !== key(now())) {
           add('working_installation_days')
           add(state.workedBefore ? 'repeat_work_installation_days' : 'first_work_installations')
           state.workDay = key(now()); state.workedBefore = true
+          // Return counters belong to the earlier working-day cohort, not today's new starts.
+          // Only these date flags stay here; no server-side installation/user join is needed.
+          for (const [lag, metric] of [[1, 'd1_returning_work_installations'], [7, 'd7_returning_work_installations']] as const) {
+            const cohort = key(now() - lag * DAY)
+            if (state.workDays.includes(cohort)) add(metric, cohort)
+          }
+          state.workDays = [...state.workDays.filter(validDay), key(now())]
         }
         const currentWeek = week(now())
         if (state.workWeek !== currentWeek) {
@@ -155,16 +230,32 @@ export function createProductUsage(deps: ProductUsageDeps) {
           state.workWeek = currentWeek
         }
       } else {
-        const started = running.get(agent)
-        if (started == null) return
+        const turn = running.get(agent)
+        if (!turn) return
+        const elapsed = Math.max(0, now() - turn.started)
+        if (!turn.response && !turn.waited && elapsed >= 60_000) { turn.waited = true; add('turns_waiting_over_1m') }
+        if (type === 'error') {
+          if (!turn.error) { turn.error = true; add('turns_with_error') }
+          return
+        }
+        if (type === 'text_delta') {
+          if (!turn.response) {
+            turn.response = true; add('turns_with_response')
+            // Do not attribute a response from a turn already running when the first launch began.
+            if (state.firstLaunchAt !== null && turn.started >= state.firstLaunchAt) launchValue(true)
+            if (!state.respondedBefore) { state.respondedBefore = true; add('first_response_installations') }
+            add(elapsed < 10_000 ? 'response_under_10s' : elapsed < 60_000 ? 'response_10s_to_1m' : elapsed < 300_000 ? 'response_1m_to_5m' : 'response_over_5m')
+          }
+          return
+        }
         running.delete(agent)
+        if (!turn.response) add('turns_ended_without_response')
         add(interrupted ? 'turns_interrupted' : 'turns_ended')
-        const elapsed = Math.max(0, now() - started)
         add(elapsed < 10_000 ? 'duration_under_10s' : elapsed < 60_000 ? 'duration_10s_to_1m' : elapsed < 300_000 ? 'duration_1m_to_5m' : 'duration_over_5m')
       }
     },
     stop(discard = false): void {
-      stopped = true; enabled = false; clearInterval(timer); running.clear()
+      stopped = true; enabled = false; clearInterval(timer); running.clear(); launches.clear()
       if (discard) state = fresh(-1)
       persist()
     },

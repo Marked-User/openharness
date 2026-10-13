@@ -10,6 +10,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: PrivacyPage(
+          feedback: (_, _) async {},
           request: ({bool? enabled}) async {
             if (enabled != null) changes.add(enabled);
             return {'enabled': enabled ?? true};
@@ -18,9 +19,11 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    expect(find.text('How did your latest task go?'), findsOneWidget);
     await tester.tap(find.byType(Switch));
     await tester.pumpAndSettle();
     expect(changes, [false]);
+    expect(find.text('How did your latest task go?'), findsNothing);
     expect(find.textContaining('every computer and app'), findsOneWidget);
     await tester.tap(find.text('See what’s shared'));
     await tester.pumpAndSettle();

@@ -107,6 +107,18 @@ class ApiClient {
   }
 
   // -- auth (proxied by the local CLI — no credential on this leg) --
+  Future<void> productUsageFeedback(String answer, String receipt) async {
+    final response = await _dio.post(
+      '/api/product-usage/feedback',
+      data: {'answer': answer, 'id': receipt},
+      options: Options(headers: {'x-adapter-local': '1'}),
+    );
+    final result = unwrapApiResponse(response);
+    if (result is! Map || result['accepted'] != true) {
+      throw StateError('Feedback was not accepted');
+    }
+  }
+
   Future<Map<String, dynamic>> productUsageSettings({bool? enabled}) async {
     final response = enabled == null
         ? await _dio.get('/api/product-usage/settings')

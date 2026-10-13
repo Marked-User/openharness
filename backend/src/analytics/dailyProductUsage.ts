@@ -24,7 +24,8 @@ export function dailyProductUsage(rows: Row[], days: number, now: Date) {
   }
   const daily = Array.from({ length: days }, (_, i) => {
     const stamp = today - (days - 1 - i) * DAY, day = key(stamp), c = byDay.get(day) ?? {}
-    const observed = PRODUCT_USAGE_METRICS.some(metric => c[metric] !== undefined)
+    // Feedback and backdated cohort counters alone do not establish current-day activity coverage.
+    const observed = c.active_installation_days !== undefined
     const count = (metric: string) => observed ? c[metric] ?? 0 : null
     const ended = (c.turns_ended ?? 0) + (c.turns_interrupted ?? 0)
     return { day, period: stamp === today ? 'incomplete' : 'ended; late reports possible',

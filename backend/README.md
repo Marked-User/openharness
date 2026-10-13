@@ -145,13 +145,32 @@ manager-owned `agent_nodes`/`managers` (read those via raw queries when status e
 an existing legacy opt-out stays off until the person explicitly enables sharing. Guest computers
 send no product reports. This control does not disable operational records needed to run the service.
 
-The gateway reduces lifecycle signals locally to an exact allowlist: active/working installation
-days, first measured work, repeat work, consecutive-week work, desktop/terminal opens, turn starts,
-matched ends/interruption, and four duration buckets. No prompt, response, transcript, code, file or
-project name, path, tool argument, error text, engine name, or stable user/device/agent identifier
-is a report field. A temporary in-memory agent map matches starts to ends and is bounded to 1,000
-entries. The server authenticates requests to check the preference; this is **not anonymous network
-traffic**. No analytics SDK, session replay, fingerprinting, or third-party destination is added.
+The gateway reduces lifecycle signals locally to a fixed vocabulary: active/working installation
+days, first measured work and response, repeat work, D1/D7 and consecutive-week returns, app opens,
+launch attempts and outcomes, request refusals, response waits, matched turn ends/interruption,
+error-event counts, and coarse duration buckets. A first-launch cohort counts work and a text response
+within 24 hours of an installation's first measured launch attempt. Only day and counts leave the
+computer; its bounded local state keeps the follow-up flags. These are updated installations, not
+necessarily new people, and a response is not a judgment of task success.
+
+Launch outcomes follow the existing durable creation receipt. Status polling adds no attempts;
+install/model/native waits stay pending until an observed created, failed, cancelled or unconfirmed
+reply. A 15-minute observation bound or memory-cap eviction records an unknown outcome, not a
+failure. A daemon restart loses in-flight matches. Fixed request counters also cover resume, restart,
+model changes and history. Only exact known error codes select a fixed failure category; messages
+are never read. The response timer measures the first text event after an observed turn start,
+not model tokens or output quality; tool-only turns can have no text response.
+
+No prompt, response text, transcript, code, file or project name, path, tool argument, error text,
+engine name, or stable user/device/agent identifier is a report field. Agent and launch identifiers
+exist only in bounded in-memory maps (1,000 entries each) and never enter disk queues or HTTP reports.
+The server authenticates requests to check the preference; this is **not anonymous network traffic**.
+No analytics SDK, session replay, fingerprinting, or third-party destination is added.
+
+With sharing on, Privacy settings also offers optional feedback: Useful, Couldn't finish, Slow,
+Confusing, or Missing a feature. A deliberate button press sends only the fixed choice and a random
+retry receipt. It cannot include text, a task identifier or content. Ambiguous retries keep the same
+receipt and answer. This is self-selected feedback, not the task success rate of all users.
 
 The three new collections have distinct purposes:
 
@@ -159,7 +178,7 @@ The three new collections have distinct purposes:
 | --- | --- | --- |
 | `product_usage_preferences` | Account ID, enabled flag, revision | Saved account preference; no usage history |
 | `product_usage_totals` | UTC day, allowlisted metric, sum (plus DB primary key) | 396 days, approximately 13 months |
-| `product_usage_receipts` | Random report UUID and expiration date | At most 36 days from the report day |
+| `product_usage_receipts` | Random report UUID and expiration date | Scheduled expiry 36 days from the report day |
 
 No individual report body or arrival timestamp is stored. Receipt insertion and increments share a
 Mongo transaction so ambiguous retries cannot count twice. Saving a preference advances its revision;
@@ -170,7 +189,9 @@ finish; previously combined totals cannot be selectively removed for one person.
 the local queue on its next successful preference check. Queued counters older than 35 days are
 discarded when the app next runs; no task content is read to reconstruct missing metrics.
 
-The worker installs Mongo TTL indexes after schema setup. It also expires the eight legacy daily
+The worker installs Mongo TTL indexes after schema setup. Expiry is asynchronous: the Mongo
+[TTL background worker](https://www.mongodb.com/docs/manual/core/index-ttl/) may delete later than
+the configured threshold. It also expires the eight legacy daily
 history collections after 35 days. The old collector endpoint accepts no new rows, relay tracking
 writes only global event totals, and the existing account deletion control covers the six former
 presence collections as well as the old collector tables. These database lifetimes do not assert
@@ -183,7 +204,12 @@ cd backend
 npm run usage:daily -- 14
 ```
 
-The JSON includes daily headlines and the last complete week's return rate. Missing client data is
+The JSON includes daily headlines, the last complete week's return rate, and a `review` section
+with launch and response friction, fixed feedback counts, matured first-launch and D1/D7 cohorts,
+and equal seven-day descriptive comparisons. Each comparison includes its numerator, denominator,
+coverage limits and evidence caveats. Today and immature cohorts are excluded from comparisons.
+Low counts or incomplete windows are explicitly marked; no causal improvement is inferred.
+Suggested investigations use synthetic reproductions and benchmarks, never user content. Missing client data is
 unknown, and today is explicitly incomplete. Population is participating signed-in **computers**,
 including staff and both service environments, not unique people or an external-user cohort.
 Relay connection/turn totals from old clients stay separate from new client counters. Background
@@ -196,6 +222,7 @@ legacy account-cohort retention percentage or an industry benchmark.
 
 Ship the backend and its worker together, verify the unique and TTL indexes using synthetic reports,
 then ship the CLI and settings surfaces with a visible release note explaining the default and switch.
+The daily decision workflow and release note are in [the measurement guide](../docs/product-measurement.md).
 Mixed-version coverage remains explicit until clients update. The existing `usage:report` command
 below reads the bounded **historical** tables; its current-day counts cease when new history writes stop.
 

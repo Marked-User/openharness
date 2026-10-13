@@ -15,6 +15,8 @@
  */
 import { env } from '../config/env.js'
 import type { GatewayEvents, GatewayPort, RemoteRole, RemoteTransport } from '../core/api.js'
+import type { ProductUsageLaunchSignal } from '../lib/productUsageSignals.js'
+import type { ProductUsageMetric } from '../lib/productUsageContract.js'
 import { WINDOW_SURFACES, type LocalWindows, type WindowSurface } from '../lib/windowSurfaces.js'
 import { deviceDump } from '../lib/autonomous-device/dump.js'
 import type { AuthSessionManager } from '../lib/authSession.js'
@@ -51,9 +53,11 @@ export interface RelayGatewayOptions {
 export class RelayGateway implements GatewayPort {
   /** Optional scalar-only measurement hooks. Never hand a frame or user payload to the collector. */
   productUsage?: {
+    launch?(signal: ProductUsageLaunchSignal): void
+    counter?(metric: ProductUsageMetric): void
     presence(active: boolean): void
     opened(surface: WindowSurface): void
-    observe(type: 'turn_started' | 'turn_ended', agent: string, replay: boolean, interrupted?: boolean): void
+    observe(type: 'turn_started' | 'turn_ended' | 'text_delta' | 'error', agent: string, replay: boolean, interrupted?: boolean): void
   }
   /** Web↔adapter E2EE: group-encrypts user events, runs the CPace pairing, holds per-conn sessions. */
   readonly e2ee: E2eeManager
@@ -215,6 +219,14 @@ export class RelayGateway implements GatewayPort {
     this.openRequestGate()
   }
 
+  usageLaunch(signal: ProductUsageLaunchSignal): void {
+    try { this.productUsage?.launch?.(signal) } catch { /* Optional measurement. */ }
+  }
+
+  usageCounter(metric: ProductUsageMetric): void {
+    try { this.productUsage?.counter?.(metric) } catch { /* Work never waits for reporting. */ }
+  }
+
   windowOpened(surface: WindowSurface): void {
     try { this.productUsage?.opened(surface) } catch { /* Reporting must not affect the relay. */ }
     this.link.sendAppPresence('open', surface)
@@ -230,7 +242,7 @@ export class RelayGateway implements GatewayPort {
 
   /** User-content events are group-encrypted (E2EE) here; system frames pass through as plaintext. */
   broadcast(frame: Frame): void {
-    if ((frame.type === 'turn_started' || frame.type === 'turn_ended') && typeof frame.agentId === 'string') {
+    if ((frame.type === 'turn_started' || frame.type === 'turn_ended' || frame.type === 'text_delta' || frame.type === 'error') && typeof frame.agentId === 'string') {
       const interrupted = frame.type === 'turn_ended' && (frame.payload as { aborted?: unknown } | undefined)?.aborted === true
       try { this.productUsage?.observe(frame.type, frame.agentId, frame.replay === true, interrupted) } catch { /* Work continues without metrics. */ }
     }

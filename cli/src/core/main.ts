@@ -1905,6 +1905,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onExperimentalWrite: (body) => agentSettings.experimentalWrite(body),
     onAgentSettingsRead: () => agentSettings.settingsRead(),
     onAgentSettingsWrite: (body) => agentSettings.settingsWrite(body),
+    onProductFeedback: (body) => proxyBackend('POST', '/api/product-usage/feedback', body),
     onProductUsageRead: () => proxyBackend('GET', '/api/product-usage/settings'),
     onProductUsageWrite: (body) => proxyBackend('POST', '/api/product-usage/settings', body),
     onStore: (method, path, body) => proxyBackend(method, path, body),

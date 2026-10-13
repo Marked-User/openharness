@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 const methods = vi.hoisted(() => ({ ingestProductUsage: vi.fn(), productUsageChoice: vi.fn(), setProductUsageChoice: vi.fn() }))
 vi.mock('../lib/productUsage.js', () => methods)
 import { productUsageRoutes } from './productUsage.js'
+import { PRODUCT_USAGE_METRICS, PRODUCT_USAGE_MAX_COUNT } from '../types/productUsage.js'
 let app: ReturnType<typeof Fastify>
 beforeEach(async () => {
   vi.resetAllMocks()
@@ -58,4 +59,22 @@ it('the visible control changes only the authenticated account', async () => {
   expect((await app.inject(request)).statusCode).toBe(200)
   expect(methods.setProductUsageChoice).toHaveBeenCalledWith('account', false)
   expect((await app.inject({ ...request, payload: { enabled: true, userId: 'another' } })).statusCode).toBe(400)
+})
+
+it('the full fixed vocabulary fits the bounded report body', async () => {
+  const payload = { ...good, counters: Object.fromEntries(PRODUCT_USAGE_METRICS.map(k => [k, PRODUCT_USAGE_MAX_COUNT])) }
+  expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThan(8192)
+  expect((await submit(payload)).statusCode).toBe(200)
+})
+
+it('feedback reduces a voluntary fixed choice to one unlinked, retry-safe count', async () => {
+  const request = { method: 'POST' as const, url: '/api/product-usage/feedback', headers: { authorization: 'fixture' }, payload: { id: good.id, answer: 'useful' } }
+  expect((await app.inject(request)).statusCode).toBe(200)
+  expect(methods.ingestProductUsage).toHaveBeenCalledWith('account', expect.objectContaining({ id: good.id, revision: 0, counters: { feedback_useful: 1 } }))
+  methods.ingestProductUsage.mockClear()
+  const bad = await app.inject({ ...request, payload: { ...request.payload, task: 'PRIVATE_CANARY' } })
+  expect(bad.statusCode).toBe(400); expect(bad.body).not.toContain('PRIVATE_CANARY')
+  methods.productUsageChoice.mockResolvedValue({ enabled: false, revision: 1 })
+  expect((await app.inject(request)).statusCode).toBe(409)
+  expect(methods.ingestProductUsage).not.toHaveBeenCalled()
 })

@@ -342,6 +342,22 @@ describe('the Agent Messages proxy', () => {
 })
 
 describe('account Experimental settings proxy', () => {
+  it('proxies only voluntary fixed-choice feedback and guards it from cross-origin requests', async () => {
+    const send = vi.fn(async () => ({ status: 200, body: { success: true, data: { accepted: true } } }))
+    const { base } = await start({ onProductFeedback: send })
+    const path = `${base}/api/product-usage/feedback`
+    const body = { id: '12345678-1234-4234-8234-123456789012', answer: 'useful' }
+    const headers = { 'x-adapter-local': '1', 'content-type': 'application/json' }
+    for (const h of [{}, { ...headers, origin: 'https://untrusted.example' }]) {
+      expect((await fetch(path, { method: 'POST', headers: h, body: JSON.stringify(body) })).status).toBe(403)
+    }
+    for (const invalid of [{ ...body, text: 'PRIVATE_CANARY' }, { ...body, answer: 'PRIVATE_CANARY' }, { ...body, id: 'PRIVATE_CANARY' }]) {
+      expect((await fetch(path, { method: 'POST', headers, body: JSON.stringify(invalid) })).status).toBe(400)
+    }
+    expect(send).not.toHaveBeenCalled()
+    expect((await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) })).status).toBe(200)
+    expect(send).toHaveBeenCalledExactlyOnceWith(body)
+  })
   it('serves the Privacy switch and rejects cross-origin, extra-field and malformed writes', async () => {
     const write = vi.fn(async () => ({ status: 200, body: { success: true, data: { enabled: false, revision: 1 } } }))
     const { base } = await start({ onProductUsageRead: async () => ({ status: 200, body: { success: true, data: { enabled: true, revision: 0 } } }), onProductUsageWrite: write })

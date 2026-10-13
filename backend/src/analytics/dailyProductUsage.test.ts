@@ -4,6 +4,8 @@ import { dailyProductUsage } from './dailyProductUsage.js'
 it('keeps missing client coverage separate from zero and separates relay activity', () => {
   const report = dailyProductUsage([
     { dayUtc: new Date('2026-10-12'), metric: 'relay_turns_started', value: 10 },
+    { dayUtc: new Date('2026-10-12'), metric: 'feedback_useful', value: 2 },
+    { dayUtc: new Date('2026-10-12'), metric: 'd1_returning_work_installations', value: 1 },
     { dayUtc: new Date('2026-10-13'), metric: 'active_installation_days', value: 10 },
     { dayUtc: new Date('2026-10-13'), metric: 'working_installation_days', value: 4 },
     { dayUtc: new Date('2026-10-13'), metric: 'PRIVATE_CANARY', value: 1 },

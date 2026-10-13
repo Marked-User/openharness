@@ -8,7 +8,12 @@ void main() {
   Future<void> show(WidgetTester tester, UsagePreferenceRequest request) async {
     await tester.pumpWidget(
       MaterialApp(
-        home: Scaffold(body: ProductUsagePreference(request: request)),
+        home: Scaffold(
+          body: ProductUsagePreference(
+            request: request,
+            feedback: (_, _) async {},
+          ),
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -23,10 +28,12 @@ void main() {
         return {'enabled': enabled ?? true, 'revision': 1};
       });
       expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+      expect(find.text('How did your latest task go?'), findsOneWidget);
       await tester.tap(find.byType(Switch));
       await tester.pumpAndSettle();
       expect(changes, [false]);
       expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+      expect(find.text('How did your latest task go?'), findsNothing);
       expect(find.textContaining('every computer and app'), findsOneWidget);
       await tester.tap(find.text('See what’s shared'));
       await tester.pumpAndSettle();
