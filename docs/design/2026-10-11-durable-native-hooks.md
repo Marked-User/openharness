@@ -903,6 +903,57 @@ proof-backed compaction and public activation remain excluded. Implementation an
 review ran approximately 22:44–23:04 UTC October 13 with validation overlapping;
 merge, publication and external waiting remain zero.
 
+First creation now has an explicit `native-create-v2` receipt request. It retains
+the original preallocated agent ID, launch token, label and complete user choices
+before preparation. Retries with the same semantic fingerprint keep that first
+request; they cannot substitute newly generated identities. Initial creation has
+no predecessor process or synthetic Cancel. Its request is bounded to 24 KiB
+before publication, leaving room in the allocation ledger for later rearm
+references. Depth, entries and array length are bounded before serialization;
+sparse arrays cannot expand beyond the bound during JSON encoding.
+
+The existing intent/claim/process/result/confirmation protocol now supports this
+explicit kind. A first launch requires complete namespace and pane/server
+provenance, an exact initial `created` outcome, and a witnessed confirmation.
+Opening a pane alone remains unconfirmed. Only the original process-record
+publisher receives an exec permit; a cold retry or an interrupted directory sync
+never grants another. Rearm-only readers continue to reject initial requests,
+and initial known-not-dispatched evidence has its own exact outcome code.
+
+The former first-create receipt golden was recorded in its own commit
+`f82c49ea1`, before changing the reader/writer, with pinned Linux/Darwin platforms,
+UUIDs, placeholder paths and forbidden host subprocesses. Its recording receipt
+`20261013T230817.392887Z-71060` is source-changed, not a passing aggregate;
+unchanged playback passes in `20261013T230923.548272Z-76194` (2.1 seconds).
+Six unchanged generic/rearm receipt, compatibility/golden and architecture files
+pass in `20261013T231518.814704Z-1958`; that aggregate remains failed because two
+new interrupted-publication tests expected an unwrapped filesystem error.
+The next aggregate `20261013T231903.298126Z-17139` also remains failed: its parser
+and types passed, but the already-confirmed process retry correctly conflicted
+instead of returning an unconfirmed retry result. Those test expectations are
+corrected. Final complete parser/initial-receipt baselines, all 18 new assertion
+faults, three affected older receipt-accounting faults, and types pass in
+`20261013T232228.990147Z-34287` (41.9 seconds). The earlier compatibility goldens
+remain unchanged.
+
+Independent review caught sparse-array expansion, hidden custom JSON methods,
+and hidden required fields that disappear from durable JSON. The parser now
+rejects custom serializers/accessors without invoking them, then checks semantics
+on its bounded plain-data copy. Review also required a positive first-publisher
+permit assertion. Final complete parser/receipt baselines, all four affected
+parser faults and types pass in `20261013T233036.493922Z-73751` (18.9 seconds).
+All 21 new faults are caught by assertions across the final and earlier receipts;
+the earlier shared-receipt evidence remains applicable. The intervening
+`20261013T232851.376873Z-65685` aggregate failed on a recursive accessor in its
+test oracle, corrected in the passing `20261013T232953.280816Z-70432` receipt.
+Independent review approved the corrected scope conditional on the now-passing
+gates. This is
+receipt mechanics only: pending/admitted Registry ownership, the initial writer,
+same-pane transfer, compaction and public activation remain required. Work began
+about 23:05 and finished about 23:32 UTC October 13, with implementation, review
+and validation overlapping;
+no merge or publication occurred.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R

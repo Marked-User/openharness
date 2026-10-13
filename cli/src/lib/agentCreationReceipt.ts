@@ -8,6 +8,7 @@ import { inspectNativeControlFile } from './nativeControlFile.js'
 import { parseNativeArchiveLink, type NativeArchiveLink } from './nativeArchive.js'
 import { parseNativeTurnProcessReference } from './nativeTurnIntent.js'
 import { parseNativeLaunchAllocation, type NativeLaunchAllocation } from './nativeLaunchAllocation.js'
+import { nativeCreateFingerprint, parseNativeCreateRequest, type NativeCreateRequest } from './nativeCreateRequest.js'
 
 export type AgentCreationOutcome =
   | { state: 'created'; agentId: string; level?: 'native' | 'handoff'; resumed?: boolean }
@@ -52,6 +53,10 @@ export interface NativeRelaunchProcess {
   allocation?: NativeLaunchAllocation
 }
 export type NativeRelaunchRequest = Pick<NativeRelaunchConfirmation, 'fingerprint' | 'request'>
+export interface NativeCreationRequest { fingerprint: string; request: NativeCreateRequest }
+export interface NativeCreationConfirmation extends NativeCreationRequest {
+  outcome: { state: 'created'; agentId: string }
+}
 
 /** Metadata cleanup only. Neither outcome grants launch, admission or signal
  * permission. The full original request survives later Cancel and Restart. */
@@ -103,6 +108,25 @@ function nativeRelaunchRequest(id: string, request: Record<string, unknown>): bo
   return request.kind === 'native-rearm' && request.creationId === id && validCreationId(request.launchToken)
     && typeof request.agentId === 'string' && request.agentId.length > 0 && request.agentId.length <= 200
     && (request.operation === 'restart' || request.operation === 'resume')
+}
+
+function nativeCreationRequest(id: string, input: NativeRelaunchRequest): boolean {
+  const request = parseNativeCreateRequest(input.request)
+  return !!request && request.creationId === id && input.fingerprint === nativeCreateFingerprint(request)
+}
+
+function nativeLaunchRequest(id: string, input: NativeRelaunchRequest): boolean {
+  return nativeRelaunchRequest(id, input.request) || nativeCreationRequest(id, input)
+}
+
+function validNativeSuccess(request: Record<string, unknown>, outcome: AgentCreationOutcome): boolean {
+  return outcome?.state === 'created' && outcome.agentId === request.agentId
+    && (request.kind === 'native-create-v2' ? Object.keys(outcome).sort().join(',') === 'agentId,state'
+      : typeof outcome.resumed === 'boolean' && Object.keys(outcome).sort().join(',') === 'agentId,resumed,state')
+}
+
+function completeInitialProcess(request: Record<string, unknown>, process: NativeRelaunchProcess | undefined): boolean {
+  return request.kind !== 'native-create-v2' || !!process?.namespace && !!process.allocation
 }
 
 function validRelaunchProcess(value: NativeRelaunchProcess | undefined): value is NativeRelaunchProcess {
@@ -240,6 +264,9 @@ export class AgentCreationReceipts {
     }
     let receipt = this.read(id)
     if (!receipt) {
+      if (request.kind === 'native-create-v2' && !nativeCreationRequest(id, { request, fingerprint })) {
+        throw new AgentCreationReceiptError('CREATION_CONFLICT')
+      }
       const intended: IntentReceipt = { version: 2, fingerprint, request: structuredClone(request), held: { ...held },
         checksum: creationFingerprint({ fingerprint, request, held }) }
       this.publish(this.file(id), intended)
@@ -312,6 +339,9 @@ export class AgentCreationReceipts {
       const observed = this.intentStatus(id, currentReceipt(), false)
       if (observed.state === 'created' && this.readIntentPart(this.intentFile(id, 'confirmation')) && (outcome.state === 'unconfirmed'
         || creationFingerprint(outcome) === creationFingerprint(observed))) return observed
+      // A pane opening is not proof of the initial exec or its admitted agent.
+      // Only the witnessed confirmation can complete a native-v2 creation.
+      if (saved.request.kind === 'native-create-v2' && observed.state !== 'created' && outcome.state === 'created') outcome = { state: 'unconfirmed' }
       const completed: IntentResult = { fingerprint, token: claim.token, outcome }
       let published = false
       try { published = this.publish(this.intentFile(id, 'result'), completed, true) } catch { /* Retain the known outcome under its exact claim. */ }
@@ -388,10 +418,24 @@ export class AgentCreationReceipts {
   confirmNativeRelaunch(id: string, input: NativeRelaunchConfirmation, authority: CreationConfirmationFence,
     retain?: (proof: { verify(): void }) => void,
   ): AgentCreationStatus {
+    if (!nativeRelaunchRequest(id, input.request)) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    return this.confirmNativeLaunch(id, input, authority, retain)
+  }
+
+  /** First creation confirms its preallocated agent, without claiming a resumed
+   * conversation or inventing a predecessor incarnation. */
+  confirmNativeCreation(id: string, input: NativeCreationConfirmation, authority: CreationConfirmationFence,
+    retain?: (proof: { verify(): void }) => void,
+  ): AgentCreationStatus {
+    if (!nativeCreationRequest(id, input)) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    return this.confirmNativeLaunch(id, input, authority, retain)
+  }
+
+  private confirmNativeLaunch(id: string, input: NativeRelaunchConfirmation | NativeCreationConfirmation, authority: CreationConfirmationFence,
+    retain?: (proof: { verify(): void }) => void,
+  ): AgentCreationStatus {
     const expected = structuredClone(input)
-    if (!nativeRelaunchRequest(id, expected.request) || expected.outcome.state !== 'created'
-      || expected.outcome.agentId !== expected.request.agentId || typeof expected.outcome.resumed !== 'boolean'
-      || Object.keys(expected.outcome).sort().join(',') !== 'agentId,resumed,state') throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    if (!nativeLaunchRequest(id, expected) || !validNativeSuccess(expected.request, expected.outcome)) throw new AgentCreationReceiptError('CREATION_CONFLICT')
     authority.verify(); authority.current()
     const receipt = this.read(id)
     if (receipt?.version !== 2 || 'cancelled' in receipt || receipt.fingerprint !== expected.fingerprint
@@ -411,6 +455,7 @@ export class AgentCreationReceipts {
     const same = (content: string | null, value: unknown) => content !== null && creationFingerprint(JSON.parse(content)) === creationFingerprint(value)
     const capturedResult = result.content === null ? null : JSON.parse(result.content) as IntentResult | null
     if (!same(original.content, receipt) || !same(claimed.content, claim)
+      || receipt.request.kind === 'native-create-v2' && (!observedProcess || !completeInitialProcess(receipt.request, observedProcess.process))
       || observedProcess && (!validIntentProcess(observedProcess, receipt.request.launchToken) || observedProcess.fingerprint !== claim.fingerprint || observedProcess.token !== claim.token)
       || creationFingerprint(process.content === null ? null : JSON.parse(process.content)) !== creationFingerprint(observedProcess)
       || result.content !== null && (!capturedResult || capturedResult.fingerprint !== claim.fingerprint || capturedResult.token !== claim.token
@@ -442,13 +487,28 @@ export class AgentCreationReceipts {
   readNativeRelaunchCompletion(id: string, input: NativeRelaunchRequest): {
     outcome: Extract<AgentCreationStatus, { state: 'created' }>; verify(): void
   } {
+    if (!nativeRelaunchRequest(id, input.request)) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    return this.readNativeLaunchCompletion(id, input)
+  }
+
+  readNativeCreationCompletion(id: string, input: NativeCreationRequest): {
+    outcome: Extract<AgentCreationStatus, { state: 'created' }>; verify(): void
+  } {
+    if (!nativeCreationRequest(id, input)) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    return this.readNativeLaunchCompletion(id, input)
+  }
+
+  private readNativeLaunchCompletion(id: string, input: NativeRelaunchRequest): {
+    outcome: Extract<AgentCreationStatus, { state: 'created' }>; verify(): void
+  } {
     const expected = structuredClone(input), receipt = this.read(id)
-    if (!nativeRelaunchRequest(id, expected.request) || receipt?.version !== 2 || 'cancelled' in receipt
+    if (!nativeLaunchRequest(id, expected) || receipt?.version !== 2 || 'cancelled' in receipt
       || receipt.fingerprint !== expected.fingerprint || creationFingerprint(receipt.request) !== creationFingerprint(expected.request)) {
       throw new AgentCreationReceiptError('CREATION_CONFLICT')
     }
     const proof = this.retainNativeRelaunchReceipt(id, receipt), { status, verify } = proof
-    if (status.state !== 'created' || status.agentId !== expected.request.agentId || status.resumed !== true
+    if (status.state !== 'created' || !validNativeSuccess(expected.request, status)
+      || expected.request.kind !== 'native-create-v2' && status.resumed !== true
       || !proof.confirmation || !proof.process) throw new AgentCreationReceiptError('CREATION_CONFLICT')
     proof.confirm()
     return Object.freeze({ outcome: Object.freeze({ ...status }), verify })
@@ -457,8 +517,18 @@ export class AgentCreationReceipts {
   /** Cancel before receipt publication leaves an immutable ID tombstone. A
    * claimed launch without a witness is still uncertain, never undispatched. */
   readNativeRelaunchNotDispatched(id: string, input: NativeRelaunchRequest): NativeRelaunchNotDispatchedProof {
+    if (!nativeRelaunchRequest(id, input.request)) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    return this.readNativeLaunchNotDispatched(id, input)
+  }
+
+  readNativeCreationNotDispatched(id: string, input: NativeCreationRequest): NativeRelaunchNotDispatchedProof {
+    if (!nativeCreationRequest(id, input)) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    return this.readNativeLaunchNotDispatched(id, input)
+  }
+
+  private readNativeLaunchNotDispatched(id: string, input: NativeRelaunchRequest): NativeRelaunchNotDispatchedProof {
     const expected = structuredClone(input), receipt = this.read(id)
-    if (!nativeRelaunchRequest(id, expected.request) || !/^[a-f0-9]{64}$/.test(expected.fingerprint)
+    if (!nativeLaunchRequest(id, expected) || !/^[a-f0-9]{64}$/.test(expected.fingerprint)
       || receipt?.version !== 2 || !('cancelled' in receipt)
         && (receipt.fingerprint !== expected.fingerprint || creationFingerprint(receipt.request) !== creationFingerprint(expected.request))) {
       throw new AgentCreationReceiptError('CREATION_CONFLICT')
@@ -467,7 +537,8 @@ export class AgentCreationReceipts {
     const kind = 'cancelled' in receipt && proof.status.state === 'cancelled' ? 'cancelled-id'
       : proof.claim?.kind === 'cancel' && proof.status.state === 'cancelled' ? 'cancelled-request'
       : proof.claim?.kind === 'dispatch' && proof.result?.outcome.state === 'failed'
-        && proof.result.outcome.error === 'NATIVE_REARM_NOT_DISPATCHED' && proof.status.state === 'failed' ? 'not-dispatched' : null
+        && proof.result.outcome.error === (expected.request.kind === 'native-create-v2' ? 'NATIVE_CREATE_NOT_DISPATCHED' : 'NATIVE_REARM_NOT_DISPATCHED')
+        && proof.status.state === 'failed' ? 'not-dispatched' : null
     if (!kind || proof.confirmation || proof.process) throw new AgentCreationReceiptError('CREATION_CONFLICT')
     proof.confirm()
     return Object.freeze({ kind, verify: proof.verify })
@@ -553,8 +624,23 @@ export class AgentCreationReceipts {
   recordNativeRelaunchProcess(id: string, input: NativeRelaunchRequest, process: NativeRelaunchProcess,
     authority: CreationConfirmationFence,
   ): { verify(): void } | null {
+    if (!nativeRelaunchRequest(id, input.request)) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    return this.recordNativeLaunchProcess(id, input, process, authority)
+  }
+
+  recordNativeCreationProcess(id: string, input: NativeCreationRequest, process: NativeRelaunchProcess,
+    authority: CreationConfirmationFence,
+  ): { verify(): void } | null {
+    if (!nativeCreationRequest(id, input)) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    return this.recordNativeLaunchProcess(id, input, process, authority)
+  }
+
+  private recordNativeLaunchProcess(id: string, input: NativeRelaunchRequest, process: NativeRelaunchProcess,
+    authority: CreationConfirmationFence,
+  ): { verify(): void } | null {
     const owner = structuredClone(process), source = this.nativeRelaunchDispatch(id, input)
-    if (!validRelaunchProcess(owner) || owner.allocation && owner.allocation.token !== source.receipt.request.launchToken
+    if (!validRelaunchProcess(owner) || !completeInitialProcess(source.receipt.request, owner)
+      || owner.allocation && owner.allocation.token !== source.receipt.request.launchToken
       || source.status.state !== 'unconfirmed') throw new AgentCreationReceiptError('CREATION_CONFLICT')
     const value = { fingerprint: source.receipt.fingerprint, token: source.claim.token, process: owner }
     const completed: IntentProcess = { ...value, checksum: creationFingerprint(value) }
@@ -564,7 +650,7 @@ export class AgentCreationReceipts {
     let published: ReturnType<typeof inspectHookFile> | undefined
     if (!this.publish(file, completed, true, fence, proof => { published = proof })) return null
     if (!published) throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
-    const proof = this.readNativeRelaunchProcess(id, input)
+    const proof = this.readNativeLaunchProcess(id, input)
     if (creationFingerprint(proof.process) !== creationFingerprint(owner)) throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
     const original = published
     const verify = () => { authority.verify(); source.verify(); proof.verify(); original.verify(); authority.current() }
@@ -580,9 +666,24 @@ export class AgentCreationReceipts {
      * confirmation. Every original execution part remains pinned. */
     verifyConfirmation(): void
   } {
+    if (!nativeRelaunchRequest(id, input.request)) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    return this.readNativeLaunchProcess(id, input)
+  }
+
+  readNativeCreationProcess(id: string, input: NativeCreationRequest): {
+    process: NativeRelaunchProcess; verify(): void; verifyConfirmation(): void
+  } {
+    if (!nativeCreationRequest(id, input)) throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    return this.readNativeLaunchProcess(id, input)
+  }
+
+  private readNativeLaunchProcess(id: string, input: NativeRelaunchRequest): {
+    process: NativeRelaunchProcess; verify(): void; verifyConfirmation(): void
+  } {
     const source = this.nativeRelaunchDispatch(id, input)
     const part = this.readIntentPart<IntentProcess>(this.intentFile(id, 'process'))
-    if (!part || part.fingerprint !== source.claim.fingerprint || part.token !== source.claim.token || !validIntentProcess(part, source.receipt.request.launchToken)) {
+    if (!part || part.fingerprint !== source.claim.fingerprint || part.token !== source.claim.token || !validIntentProcess(part, source.receipt.request.launchToken)
+      || !completeInitialProcess(source.receipt.request, part.process)) {
       throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
     }
     const proof = inspectNativeControlFile(this.intentFile(id, 'process'), this.directory)
@@ -597,7 +698,7 @@ export class AgentCreationReceipts {
 
   private nativeRelaunchDispatch(id: string, input: NativeRelaunchRequest) {
     const expected = structuredClone(input), receipt = this.read(id)
-    if (!nativeRelaunchRequest(id, expected.request) || receipt?.version !== 2 || 'cancelled' in receipt
+    if (!nativeLaunchRequest(id, expected) || receipt?.version !== 2 || 'cancelled' in receipt
       || receipt.fingerprint !== expected.fingerprint || creationFingerprint(receipt.request) !== creationFingerprint(expected.request)) {
       throw new AgentCreationReceiptError('CREATION_CONFLICT')
     }
@@ -669,6 +770,9 @@ export class AgentCreationReceipts {
       if (known || confirmed || process || this.claim(id) || this.readIntentPart(this.intentFile(id, 'result'))) throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
       return { state: 'cancelled' }
     }
+    if (receipt.request.kind === 'native-create-v2' && !nativeCreationRequest(id, receipt)) {
+      throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
+    }
     const claim = this.claim(id)
     const result = this.readIntentPart<IntentResult>(this.intentFile(id, 'result'))
     // A completed effect cannot become pending or cancelled when its disk
@@ -691,14 +795,16 @@ export class AgentCreationReceipts {
         throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
       }
     }
-    if (process && (!nativeRelaunchRequest(id, receipt.request) || process.fingerprint !== claim.fingerprint || process.token !== claim.token
-      || !validIntentProcess(process, receipt.request.launchToken) || result?.outcome.state === 'failed' || known?.outcome.state === 'failed')) {
+    if (receipt.request.kind === 'native-create-v2' && [result, known].some(value => value?.outcome.state === 'created'
+      && (!validNativeSuccess(receipt.request, value.outcome) || !confirmed))) throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
+    if (process && (!nativeLaunchRequest(id, receipt) || process.fingerprint !== claim.fingerprint || process.token !== claim.token
+      || !validIntentProcess(process, receipt.request.launchToken) || !completeInitialProcess(receipt.request, process.process)
+      || result?.outcome.state === 'failed' || known?.outcome.state === 'failed')) {
       throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
     }
     if (confirmed) {
-      if (!nativeRelaunchRequest(id, receipt.request) || confirmed.fingerprint !== claim.fingerprint || confirmed.token !== claim.token
-        || confirmed.outcome?.state !== 'created' || confirmed.outcome.agentId !== receipt.request.agentId
-        || typeof confirmed.outcome.resumed !== 'boolean' || Object.keys(confirmed.outcome).sort().join(',') !== 'agentId,resumed,state'
+      if (!nativeLaunchRequest(id, receipt) || confirmed.fingerprint !== claim.fingerprint || confirmed.token !== claim.token
+        || !validNativeSuccess(receipt.request, confirmed.outcome) || receipt.request.kind === 'native-create-v2' && !process
         || confirmed.process !== (process?.checksum ?? null)
         || [result, known].some(previous => previous && previous.outcome.state !== 'unconfirmed'
           && creationFingerprint(previous.outcome) !== creationFingerprint(confirmed.outcome))) throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
