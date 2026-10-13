@@ -32,7 +32,7 @@ mutations = [
      '    permit.verify(); verifyScope(); budget.step()', '    verifyScope(); budget.step()', unit,
      'holds witness changes during the final'),
     ('old no-op client can grant exec', writer,
-     'prepareNativeHookArtifact(moduleUrl, undefined, undefined, true)',
+     "prepareNativeHookArtifact(moduleUrl, undefined, undefined, 'allocation')",
      'prepareNativeHookArtifact(moduleUrl, undefined, undefined, false)', unit,
      'requires the explicit writer capability'),
     ('writer error inherits success', 'src/nativeHookEntry.ts',
@@ -47,11 +47,12 @@ mutations = [
      process, 'a before-reset writer',
      ("    'shift 3',", "    'trap - INT QUIT HUP TERM',\n    'shift 3',")),
     ('engine launch omits the writer', 'src/lib/engineLaunch.ts',
-     'engineRunScript(engine, tmuxBinary, witness && nativeRearmExecCommand(witness))',
+     'engineRunScript(engine, tmuxBinary, witness && nativeRearmExecCommand(witness, { binary: tmuxBinary, owner: harnessPaneOwner(env.ADAPTER_DATA_DIR) }))',
      'engineRunScript(engine, tmuxBinary)', process,
      'the existing top-level wrapper'),
     ('writer omits the original PID namespace', writer,
-     '{ boot, namespace, pid: caller, birth: owner.birth }', '{ boot, pid: caller, birth: owner.birth }',
+     '{ boot, namespace, pid: caller, birth: owner.birth, ...(allocation ? { allocation } : {}) }',
+     '{ boot, pid: caller, birth: owner.birth, ...(allocation ? { allocation } : {}) }',
      unit, 'hands only the original'),
     ('writer accepts a changed kernel scope', writer,
      'finalScope.boot !== boot', 'false', unit, 'holds a changed boot scope'),
@@ -87,6 +88,10 @@ if sys.platform == 'darwin':
                       'the fixed handoff ignores'))
 
 environment = {**os.environ, 'TZ': 'UTC', 'TMPDIR': '/tmp'}
+selected = sys.argv[2:]
+if selected:
+    assert set(selected) <= {row[0] for row in mutations}, 'Unknown mutation label'
+    mutations = [row for row in mutations if row[0] in selected]
 for key in list(environment):
     if key in ['TMUX', 'TMUX_PANE'] or key.startswith('RECORD_'):
         environment.pop(key)
@@ -99,7 +104,7 @@ def run(files, pattern='.'):
                           text=True, capture_output=True, timeout=180)
 
 
-result = run([unit, process, storage])
+result = run(list(dict.fromkeys(row[4] for row in mutations)), '|'.join(row[5] for row in mutations)) if selected else run([unit, process, storage])
 if result.returncode:
     raise SystemExit('Baseline failed; no mutants ran.\n' + result.stdout + result.stderr)
 print('Native rearm writer baseline passed', flush=True)

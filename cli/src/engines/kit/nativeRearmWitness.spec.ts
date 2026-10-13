@@ -16,6 +16,7 @@ import { NativePaths } from './nativePaths.js'
 import { NativeEvidenceBudget } from './nativeEvidence.js'
 import type { NativeHookScope } from './nativeHookScope.js'
 import { appendNativeAllocation, type NativeAllocation } from '../../lib/nativeAllocation.js'
+import type { readNativeStopPane } from './nativePhysicalStop.js'
 
 const clock = vi.hoisted(() => ({ now: 0 }))
 vi.mock('node:perf_hooks', () => ({ performance: { now: () => clock.now } }))
@@ -64,10 +65,110 @@ async function fixture(source: 'live' | 'saved' = 'live', options?: Pick<NonNull
       verify: vi.fn(), close: vi.fn() }
     scopes.push(current); return current
   })
-  const write = () => writeNativeRearmWitness(JSON.stringify(input), '42', { selfPid: 43, probe, scope })
+  const environment: Pick<NodeJS.ProcessEnv, 'TMUX' | 'TMUX_PANE'> = { TMUX: undefined, TMUX_PANE: undefined }
+  const pane = vi.fn<typeof readNativeStopPane>(async (_input, _budget, serverDead) => { await serverDead(); return 'active' })
+  const write = () => writeNativeRearmWitness(JSON.stringify(input), '42', { selfPid: 43, probe, scope, pane, environment })
   const witness = join(root, 'agent-creations', `${id}.json.process`)
-  return { input, receipts, processes, probe, write, file, witness, engine, settings, launch, scope, scopes }
+  return { input, receipts, processes, probe, write, file, witness, engine, settings, launch, scope, scopes, pane, environment }
 }
+
+async function placed() {
+  const p = await fixture(), binary = join(root, 'tmux')
+  writeFileSync(binary, '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+  const executable = executableSnapshot(nativeVersionProbe({ args: [], output: /^$/, timeoutMs: 1 }, () => binary))!
+  p.input.version = 2; p.input.placement = { binary, identity: executable.identity, owner: 'a'.repeat(16) }
+  p.processes.set(10, row(10, 9)); p.processes.set(9, { ...row(9, 1), imagePath: binary })
+  p.environment.TMUX = `${root}/original,socket,9,0`; p.environment.TMUX_PANE = '%7'
+  return p
+}
+
+it('retains the original pane root and server before exec and after cold receipt recovery', async () => {
+  const p = await placed()
+  await expect(p.write()).resolves.toBe(true)
+  const proof = new AgentCreationReceipts(join(root, 'agent-creations')).readNativeRelaunchProcess(id, p.input)
+  expect(proof.process.allocation).toEqual({ pane: '%7', rootPid: 10, token, owner: 'a'.repeat(16),
+    root: { boot: p.scopes[0].boot, namespace: p.scopes[0].namespace, pid: 10, birth: '1000' },
+    endpoint: { binary: p.input.placement!.binary, socket: `${root}/original,socket`,
+      server: { boot: p.scopes[0].boot, namespace: p.scopes[0].namespace, pid: 9, birth: '900' } } })
+  expect(p.pane).toHaveBeenCalledTimes(2)
+  expect(p.probe.mock.calls.at(-1)?.[0]).toEqual([43, 42, 10, 9])
+  for (const value of [proof.process, proof.process.allocation, proof.process.allocation!.root,
+    proof.process.allocation!.endpoint, proof.process.allocation!.endpoint.server]) expect(Object.isFrozen(value)).toBe(true)
+  proof.verify()
+})
+
+it.each(['root-parent', 'root-missing', 'server-image', 'server-missing', 'caller', 'child', 'binary', 'socket', 'pane', 'duplicate-pid'] as const)(
+  'refuses the initial %s pane candidate without writing a witness', async change => {
+    const p = await placed()
+    if (change === 'root-parent') p.processes.get(10)!.parentPid = 1
+    if (change === 'root-missing') p.processes.delete(10)
+    if (change === 'server-image') p.processes.get(9)!.imagePath = '/fixture/other'
+    if (change === 'server-missing') p.processes.delete(9)
+    if (change === 'binary') writeFileSync(p.input.placement!.binary, 'changed')
+    if (change === 'socket') p.environment.TMUX = 'relative,9,0'
+    if (change === 'pane') p.environment.TMUX_PANE = 'not-a-pane'
+    if (change === 'duplicate-pid') p.environment.TMUX = `${root}/socket,10,0`
+    if (change === 'caller' || change === 'child') {
+      const original = p.probe.getMockImplementation()!
+      p.probe.mockImplementation(async pids => {
+        if (pids.length === 4) p.processes.get(change === 'caller' ? 42 : 43)!.birth = '9999'
+        return original(pids)
+      })
+    }
+    await expect(p.write()).rejects.toThrow()
+    expect(existsSync(p.witness)).toBe(false)
+  },
+)
+
+it.each(['released', 'absent'] as const)('never grants exec for an initially %s original allocation', async state => {
+  const p = await placed(); p.pane.mockResolvedValue(state)
+  await expect(p.write()).rejects.toThrow('no longer active')
+  expect(existsSync(p.witness)).toBe(false)
+})
+
+it('refuses a replaced server during the initial pane query before publishing anything', async () => {
+  const p = await placed(), original = p.pane.getMockImplementation()!
+  p.pane.mockImplementation(async (...args) => { p.processes.get(9)!.birth = '9999'; return original(...args) })
+  await expect(p.write()).rejects.toThrow('original tmux server changed')
+  expect(existsSync(p.witness)).toBe(false)
+})
+
+it.each(['released', 'absent', 'owner', 'server', 'binary'] as const)('rechecks %s pane ownership after witness durability', async change => {
+  const p = await placed(), original = p.pane.getMockImplementation()!
+  p.pane.mockImplementation(async (...args) => {
+    if (p.pane.mock.calls.length === 2) {
+      expect(existsSync(p.witness)).toBe(true)
+      if (change === 'released' || change === 'absent') return change
+      if (change === 'owner') throw Error('pane belongs to another allocation')
+      if (change === 'server') p.processes.get(9)!.birth = '9999'
+      if (change === 'binary') writeFileSync(p.input.placement!.binary, 'changed')
+    }
+    return original(...args)
+  })
+  await expect(p.write()).rejects.toThrow()
+  expect(existsSync(p.witness)).toBe(true)
+})
+
+it.each([9, 10] as const)('rechecks the original pane ancestry at final PID %i after the pane read', async pid => {
+  const p = await placed(), original = p.pane.getMockImplementation()!
+  p.pane.mockImplementation(async (...args) => {
+    const state = await original(...args)
+    if (p.pane.mock.calls.length === 2) p.processes.get(pid)!.birth = '9999'
+    return state
+  })
+  await expect(p.write()).rejects.toThrow('ancestry changed before handoff')
+  expect(existsSync(p.witness)).toBe(true)
+})
+
+it('rechecks the retained tmux executable after the final quartet wait', async () => {
+  const p = await placed(), original = p.probe.getMockImplementation()!
+  p.probe.mockImplementation(async pids => {
+    if (pids.length === 4 && p.pane.mock.calls.length === 2) writeFileSync(p.input.placement!.binary, 'changed')
+    return original(pids)
+  })
+  await expect(p.write()).rejects.toThrow('executable changed')
+  expect(existsSync(p.witness)).toBe(true)
+})
 
 it.each(['live', 'saved'] as const)('proves a later %s reservation without erasing its permanent allocation history', async source => {
   const choice = { kind: 'native-rearm', agentId, operation: 'resume', source: 'saved' }
@@ -314,6 +415,8 @@ it('requires the explicit writer capability and captures immutable arguments as 
   } }
   expect(() => prepareNativeRearmWitness(launch, p.input, '/fixture/node', module)).toThrow('required relaunch witness')
   writeFileSync(artifact, header + '// harness-native-rearm-witness:1\n')
+  expect(() => prepareNativeRearmWitness(launch, p.input, '/fixture/node', module)).toThrow('required pane witness')
+  writeFileSync(artifact, header + '// harness-native-rearm-witness:1\n// harness-native-pane-witness:1\n')
   const command = prepareNativeRearmWitness(launch, p.input, '/fixture/node', module)
   expect(command).toEqual(launch.rearmWitness); expect(Object.isFrozen(command)).toBe(true)
   expect(JSON.parse(command.request).dependencies.files.some((file: { target: string }) => file.target === artifact)).toBe(true)

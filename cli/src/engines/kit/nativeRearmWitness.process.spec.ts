@@ -199,6 +199,9 @@ it.skipIf(!supported)('the existing top-level wrapper resumes the witnessed engi
   expect(await tmux!.run('display-message', '-p', '-t', pane, `#{${NATIVE_PANE_ALLOCATION_OPTION}}`)).toBe(`active:${p.launch.token}:${rootPid}`)
   expect(existsSync(join(p.directory, 'agent-creations', `${p.input.id}.json.process`))).toBe(true)
   expect(p.receipts.readNativeRelaunchProcess(p.input.id, p.input).process.pid).toBe(pid)
+  const allocation = p.receipts.readNativeRelaunchProcess(p.input.id, p.input).process.allocation
+  expect(allocation).toMatchObject({ pane, rootPid: Number(rootPid), token: p.launch.token, owner: harnessPaneOwner(p.directory),
+    endpoint: { binary: realpathSync(resolveBinaryOnPath('tmux')!), socket: tmux!.socket } })
   const candidate = await replacement(p, pane, pid)
   expect((await candidate.prove()).key).toContain(`\0${pid}\0`)
   process.kill(pid, 'SIGSTOP')
@@ -216,15 +219,16 @@ for (const mode of ['active', 'released', 'lost-close-reply', 'detached-survivor
     const rootPid = Number(await tmux!.run('display-message', '-p', '-t', pane, '#{pane_pid}'))
     const serverPid = Number(await tmux!.run('display-message', '-p', '#{pid}'))
     const server = (await probeNativeProcessControl([serverPid], 0, new NativeEvidenceBudget(), false, p.helpers)).rows.get(serverPid)!
-    const endpoint = { binary: resolveBinaryOnPath('tmux')!, socket: tmux!.socket,
-      server: { boot: witness.boot, namespace: witness.namespace!, pid: serverPid, birth: server.birth } }
+    expect(witness.allocation).toMatchObject({ pane, rootPid, token: p.launch.token, owner: harnessPaneOwner(p.directory),
+      endpoint: { binary: realpathSync(resolveBinaryOnPath('tmux')!), socket: tmux!.socket,
+        server: { boot: witness.boot, namespace: witness.namespace!, pid: serverPid, birth: server.birth } } })
     const row = { ...p.saved, nativeControl: { ...p.control, rearm: { ...p.control.rearm!, revoked: true as const } } }
     const file = join(p.directory, 'registry.json'), image = JSON.stringify([row])
     writeFileSync(file, image, { mode: 0o600 })
     const owner: NativePhysicalStopOwner = {
       source: { target: nativeTurnTarget(row), controlFingerprint: creationFingerprint(row.nativeControl) },
       engines: [{ ...witness, namespace: witness.namespace! }],
-      allocations: [{ pane, rootPid, token: p.launch.token!, owner: harnessPaneOwner(p.directory), endpoint }],
+      allocations: [witness.allocation!],
       verify: () => { if (readFileSync(file, 'utf8') !== image) throw Error('original Stop source changed') },
       verifyAllocations: receipt.verify, current: () => {},
     }

@@ -39,6 +39,12 @@ const fingerprint = creationFingerprint({ operation: 'resume', agentId: request.
 const outcome = { state: 'created' as const, agentId: request.agentId, resumed: true }
 const held = { service: 'native', detail: 'Waiting for the original replacement.' }
 const processOwner = { boot: 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', pid: 234, birth: '123456' }
+const allocatedProcess = () => ({ ...processOwner, namespace: 'linux:4:5', allocation: {
+  pane: '%7', rootPid: 10, token: request.launchToken, owner: 'a'.repeat(16),
+  root: { boot: processOwner.boot, namespace: 'linux:4:5', pid: 10, birth: '1000' },
+  endpoint: { binary: '/fixture/tmux', socket: '/fixture/socket',
+    server: { boot: processOwner.boot, namespace: 'linux:4:5', pid: 9, birth: '900' } },
+} })
 const fence = () => ({ verify: vi.fn(), current: vi.fn() })
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'native-rearm-receipt-'))); roots.push(root)
@@ -52,6 +58,57 @@ async function uncertain() {
   await value.receipts.runIntent(id, fingerprint, request, held, async () => effect)
   return { ...value, effect }
 }
+
+it('retains original allocation metadata through immutable process and confirmation receipts', async () => {
+  const p = await uncertain(), source = allocatedProcess()
+  let permit: ReturnType<AgentCreationReceipts['recordNativeRelaunchProcess']>
+  expect(() => { permit = p.receipts.recordNativeRelaunchProcess(id, { fingerprint, request }, source, fence()) }).not.toThrow()
+  expect(permit!).not.toBeNull()
+  source.allocation.endpoint.socket = '/changed/socket'
+  const cold = new AgentCreationReceipts(p.directory), proof = cold.readNativeRelaunchProcess(id, { fingerprint, request })
+  expect(proof.process).toEqual(allocatedProcess())
+  for (const value of [proof.process.allocation, proof.process.allocation!.root,
+    proof.process.allocation!.endpoint, proof.process.allocation!.endpoint.server]) expect(Object.isFrozen(value)).toBe(true)
+  expect(cold.confirmNativeRelaunch(id, { fingerprint, request, outcome }, fence())).toEqual(outcome)
+  expect(new AgentCreationReceipts(p.directory).readNativeRelaunchCompletion(id, { fingerprint, request }).outcome).toEqual(outcome)
+})
+
+it('keeps a former process witness readable without inventing allocation metadata', async () => {
+  const p = await uncertain()
+  p.receipts.recordNativeRelaunchProcess(id, { fingerprint, request }, processOwner, fence())
+  expect(new AgentCreationReceipts(p.directory).readNativeRelaunchProcess(id, { fingerprint, request }).process).toEqual(processOwner)
+})
+
+it.each(['token', 'root', 'namespace', 'extra', 'null'] as const)('refuses %s allocation metadata before process publication', async change => {
+  const p = await uncertain(), process: any = allocatedProcess()
+  if (change === 'token') process.allocation.token = 'another-launch-token'
+  if (change === 'root') process.allocation.rootPid = 11
+  if (change === 'namespace') delete process.namespace
+  if (change === 'extra') process.allocation.extra = true
+  if (change === 'null') process.allocation = null
+  expect(() => p.receipts.recordNativeRelaunchProcess(id, { fingerprint, request }, process, fence())).toThrow()
+  expect(fs.existsSync(p.file('process'))).toBe(false)
+})
+
+it.each(['token', 'root', 'namespace', 'extra', 'null'] as const)('every cold receipt reader rejects coherently checksummed %s allocation damage', async change => {
+  const p = await uncertain()
+  p.receipts.recordNativeRelaunchProcess(id, { fingerprint, request }, allocatedProcess(), fence())
+  p.confirm()
+  const part = JSON.parse(readFileSync(p.file('process'), 'utf8'))
+  if (change === 'token') part.process.allocation.token = 'another-launch-token'
+  if (change === 'root') part.process.allocation.rootPid = 11
+  if (change === 'namespace') delete part.process.namespace
+  if (change === 'extra') part.process.allocation.extra = true
+  if (change === 'null') part.process.allocation = null
+  part.checksum = creationFingerprint({ fingerprint: part.fingerprint, token: part.token, process: part.process })
+  writeFileSync(p.file('process'), JSON.stringify(part), { mode: 0o600 })
+  const confirmation = JSON.parse(readFileSync(p.file('confirmation'), 'utf8')); confirmation.process = part.checksum
+  writeFileSync(p.file('confirmation'), JSON.stringify(confirmation), { mode: 0o600 })
+  const cold = new AgentCreationReceipts(p.directory)
+  for (const read of [() => cold.status(id), () => cold.readNativeRelaunchProcess(id, { fingerprint, request }),
+    () => cold.readNativeRelaunchCompletion(id, { fingerprint, request }),
+    () => cold.confirmNativeRelaunch(id, { fingerprint, request, outcome }, fence())]) expect(read).toThrow()
+})
 
 async function savedCompletion(kind: 'created' | 'cancelled' | 'not-dispatched' | 'pending' | 'uncertain' | 'generic-failure' | 'direct-success' | 'no-witness' = 'created', permissionMode?: 'full', sourceProcess?: NativeTurnProcessReference) {
   const p = fixture()

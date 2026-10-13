@@ -827,6 +827,44 @@ Implementation/review ran approximately 22:00–22:26 UTC October 13, with
 overlapping validation through 22:27. Merge, publication and external waiting
 remain zero. No compatibility golden was changed by the implementation.
 
+The pre-exec witness now retains its original pane/root and tmux endpoint/server
+incarnation. The wrapper binds its actual tmux binary snapshot and daemon owner
+into a version-2 request, and requires a separate shipped pane-witness capability
+before dispatch. `TMUX` and `TMUX_PANE` supply candidates only. The writer proves
+its own child relationship, the fixed exec shell, the pane root's original tmux
+parent and that server's native image, under the original boot/namespace scope.
+The existing bounded endpoint reader must observe the exact active token and
+owner before publication and again after durability and final scope acquisition.
+A final quartet probe and dependency/receipt/scope fences precede exec.
+
+Allocation metadata is part of the immutable process checksum and confirmation.
+Every receipt path checks its launch token against the original request, not the
+independent dispatch claim. Nested root/server/endpoint data is copied and frozen.
+Legacy version-1 requests and witnesses remain readable with their original
+omissions; recovery cannot fill missing provenance from today's processes. The
+private physical Stop fixture now consumes the persisted association instead of
+synthesizing an endpoint after launch. This does not yet implement selection of
+every retained receipt or compaction.
+
+All 523 cases in ten complete affected files pass, with one existing skip,
+including the shipped writer/private tmux, physical Stop, receipt and initial
+launch goldens, and architecture (`20261013T223630.576126Z-21902`, 166.1 seconds).
+That aggregate remains failed because its typecheck found an empty optional-env
+test fixture. Corrected types and all 102 cases across the complete writer and
+native launch/row compatibility goldens pass
+(`20261013T224019.648731Z-40833`, 4.8/32.7 seconds). No golden was changed.
+
+Healthy mutation baselines pass. Eighteen new faults fail assertions in
+`20261013T224151.688876Z-47043`; the reader-loss fault initially raised a storage
+error before the positive assertion. Explicit success now makes that fault fail
+an assertion. Its corrected healthy/fault pair, three affected former writer
+faults and types pass (`20261013T224253.441978Z-51481`, 16.8 seconds). All nineteen
+new faults are caught on unchanged runtime source. Independent review found no
+source blocker, conditional on these completed gates; physical selection,
+compaction and activation remain excluded. Implementation/review ran about
+22:29–22:43 UTC October 13, with overlapping validation through 22:44. Merge,
+publication and external waiting remain zero.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R

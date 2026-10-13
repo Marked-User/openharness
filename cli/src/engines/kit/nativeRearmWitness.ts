@@ -11,20 +11,24 @@ import type { RegisteredSession } from '../../lib/registry.js'
 import { prepareProcessImageHelper, type ProcessImageArtifact } from '../../lib/nativeProcessImageArtifact.js'
 import { controlIdentity, probeNativeProcessControl, type NativeControlHelpers, type NativeControlSnapshot } from '../../lib/nativeProcessControlProbe.js'
 import { secureStateDirectory } from '../../lib/secureState.js'
+import { parseNativeLaunchAllocation, type NativeLaunchAllocation } from '../../lib/nativeLaunchAllocation.js'
 import { shellSingleQuote } from '../../lib/shellQuote.js'
 import type { NativeLaunch } from '../nativeLaunch.js'
 import { nativeHookScope, type NativeHookScope } from './nativeHookScope.js'
 import { prepareNativeHookArtifact } from './nativeHookArtifact.js'
 import { NativeEvidenceBudget, nativeUnavailable } from './nativeEvidence.js'
 import { nativeLaunchProof, verifyNativeLaunchProof, type NativeLaunchProof } from './nativeLaunchGuard.js'
+import { executableSnapshot, nativeVersionProbe } from './nativeVersion.js'
+import { readNativeStopPane } from './nativePhysicalStop.js'
 
 export interface NativeRearmWitnessRequest extends NativeRelaunchRequest {
-  version: 1
+  version: 1 | 2
   dataDir: string
   source: 'live' | 'saved'
   id: string
   control: NativeTurnIntent
   dependencies: NativeLaunchProof
+  placement?: { binary: string; identity: string; owner: string }
 }
 export interface NativeRearmWitnessCommand {
   readonly token: string
@@ -42,10 +46,16 @@ export function inspectNativeRearmWitness(text: string): NativeRearmWitnessReque
   if (Buffer.byteLength(text) > 128 * 1024) return held('request exceeds its limit')
   let value: unknown
   try { value = JSON.parse(text) } catch { return held('request is incomplete') }
-  if (!object(value) || value.version !== 1 || Object.keys(value).sort().join(',') !== 'control,dataDir,dependencies,fingerprint,id,request,source,version'
+  if (!object(value) || value.version !== 1 && value.version !== 2
+    || Object.keys(value).sort().join(',') !== (value.version === 2
+      ? 'control,dataDir,dependencies,fingerprint,id,placement,request,source,version' : 'control,dataDir,dependencies,fingerprint,id,request,source,version')
     || typeof value.dataDir !== 'string' || !isAbsolute(value.dataDir) || value.dataDir.includes('\0') || value.dataDir.length > 4096
     || value.source !== 'live' && value.source !== 'saved' || !validCreationId(value.id) || !object(value.dependencies)
     || typeof value.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(value.fingerprint) || !object(value.request)) return held('request is unsupported')
+  if (value.version === 2 && (!object(value.placement) || Object.keys(value.placement).sort().join(',') !== 'binary,identity,owner'
+    || typeof value.placement.binary !== 'string' || !isAbsolute(value.placement.binary) || value.placement.binary.length > 4096
+    || /[\0\r\n]/.test(value.placement.binary) || typeof value.placement.identity !== 'string' || value.placement.identity.length > 16384
+    || typeof value.placement.owner !== 'string' || !/^[a-f0-9]{16}$/.test(value.placement.owner))) return held('pane request is unsupported')
   const control = parseNativeTurnIntent(value.control), rearm = control?.rearm, request = value.request
   if (!rearm || rearm.revoked || rearm.replacement || Object.keys(request).sort().join(',') !== ['agentId', 'creationId', 'kind', 'launchToken', 'operation', 'target',
     ...(rearm.source === undefined ? [] : ['source']), ...(rearm.permissionMode === undefined ? [] : ['permissionMode']),
@@ -91,8 +101,11 @@ export async function writeNativeRearmWitness(text: string, parent: string, deps
   artifact?: ProcessImageArtifact
   probe?: (pids: readonly number[], budget: NativeEvidenceBudget) => Promise<NativeControlSnapshot>
   scope?: typeof nativeHookScope
+  pane?: typeof readNativeStopPane
+  environment?: Pick<NodeJS.ProcessEnv, 'TMUX' | 'TMUX_PANE'>
 }): Promise<boolean> {
   const input = inspectNativeRearmWitness(text), budget = new NativeEvidenceBudget(), self = deps.selfPid
+  const environment = { ...(deps.environment ?? { TMUX: process.env.TMUX, TMUX_PANE: process.env.TMUX_PANE }) }
   const caller = /^[1-9]\d*$/.test(parent) ? Number(parent) : 0
   if (!Number.isSafeInteger(caller) || caller <= 1 || caller > 0x7fffffff
     || !Number.isSafeInteger(self) || self <= 1 || self > 0x7fffffff || self === caller) return held('parent is unavailable')
@@ -118,9 +131,42 @@ export async function writeNativeRearmWitness(text: string, parent: string, deps
     if (!child || child.parentPid !== caller) return held('writer is no longer the original shell’s child')
     if (!owner || owner.imagePath !== shell) return held(`original exec shell could not be proven (${owner?.imagePath ?? 'missing'})`)
     const childIdentity = controlIdentity(child), parentIdentity = controlIdentity(owner)
+    let allocation: NativeLaunchAllocation | undefined, original: ReadonlyMap<number, string> | undefined
+    let verifyPane: (() => Promise<void>) | undefined
+    const placement = input.placement
+    if (placement) {
+      const match = typeof environment.TMUX === 'string' && environment.TMUX.length <= 4160
+        ? /^(\/[^\0\r\n]+),([1-9]\d*),(?:0|[1-9]\d*)$/.exec(environment.TMUX) : null
+      const serverPid = Number(match?.[2]), pane = environment.TMUX_PANE, rootPid = owner.parentPid
+      if (!match || !pane || !/^%[0-9]{1,20}$/.test(pane) || !Number.isSafeInteger(serverPid) || serverPid <= 1 || serverPid > 0x7fffffff
+        || rootPid <= 1 || new Set([self, caller, rootPid, serverPid]).size !== 4) return held('original pane candidates are unavailable')
+      const verifyBinary = () => verifyNativeLaunchProof({ ready: true, command: placement.binary, identity: placement.identity, files: [] }, budget)
+      verifyBinary()
+      const observed = await probe([self, caller, rootPid, serverPid], budget), root = observed.rows.get(rootPid), server = observed.rows.get(serverPid)
+      if (!root || !server || root.parentPid !== serverPid || server.imagePath !== realpathSync(placement.binary)
+        || !observed.rows.get(self) || controlIdentity(observed.rows.get(self)!) !== childIdentity
+        || !observed.rows.get(caller) || controlIdentity(observed.rows.get(caller)!) !== parentIdentity) return held('original pane ancestry changed')
+      original = new Map([...observed.rows].map(([pid, row]) => [pid, controlIdentity(row)]))
+      allocation = parseNativeLaunchAllocation({ pane, rootPid, token: input.request.launchToken, owner: placement.owner,
+        root: { boot, namespace, pid: rootPid, birth: root.birth },
+        endpoint: { binary: realpathSync(placement.binary), socket: match[1], server: { boot, namespace, pid: serverPid, birth: server.birth } },
+      }, { boot, namespace, pid: caller }) ?? held('original pane association is invalid')
+      const serverIdentity = controlIdentity(server), retained = allocation
+      verifyPane = async () => {
+        verifyBinary()
+        const state = await (deps.pane ?? readNativeStopPane)(retained, budget, async () => {
+          const fresh = (await probe([serverPid], budget)).rows.get(serverPid)
+          if (!fresh || controlIdentity(fresh) !== serverIdentity) return held('original tmux server changed')
+          verifyBinary(); return false
+        })
+        verifyBinary()
+        if (state !== 'active') return held('original pane allocation is no longer active')
+      }
+      await verifyPane()
+    }
     const receipt = new AgentCreationReceipts(receiptDirectory)
     const verifyScope = () => { originalScope.verify(receiptDirectory); finalScope?.verify(receiptDirectory); budget.step() }
-    const permit = receipt.recordNativeRelaunchProcess(input.id, input, { boot, namespace, pid: caller, birth: owner.birth },
+    const permit = receipt.recordNativeRelaunchProcess(input.id, input, { boot, namespace, pid: caller, birth: owner.birth, ...(allocation ? { allocation } : {}) },
       { verify: () => { control.verify(); verifyScope() }, current: () => budget.step() })
     if (!permit) return false
     // Namespace and local-volume evidence belong to the original witness. A
@@ -130,12 +176,18 @@ export async function writeNativeRearmWitness(text: string, parent: string, deps
     if (finalScope.boot !== boot || finalScope.namespace !== namespace || finalScope.storage !== storage) {
       return held('process or storage scope changed before handoff')
     }
+    // Fsync can outlive pane ownership even if every PID remains the same.
+    await verifyPane?.()
     // Durability and scope preparation may wait. This paired probe is the last
     // asynchronous observation: neither a reparented writer nor a new shell wins.
-    const final = await probe([self, caller], budget), currentChild = final.rows.get(self), currentOwner = final.rows.get(caller)
+    const final = await probe(original ? [...original.keys()] : [self, caller], budget), currentChild = final.rows.get(self), currentOwner = final.rows.get(caller)
     if (!currentChild || !currentOwner || controlIdentity(currentChild) !== childIdentity || controlIdentity(currentOwner) !== parentIdentity) {
       return held('exec shell changed before handoff')
     }
+    if (original && [...original].some(([pid, identity]) => !final.rows.get(pid) || controlIdentity(final.rows.get(pid)!) !== identity)) {
+      return held('original pane ancestry changed before handoff')
+    }
+    if (placement) verifyNativeLaunchProof({ ready: true, command: placement.binary, identity: placement.identity, files: [] }, budget)
     verifyNativeLaunchProof(input.dependencies, budget)
     permit.verify(); verifyScope(); budget.step()
   } finally { try { finalScope?.close() } finally { originalScope.close() } }
@@ -151,7 +203,7 @@ export function prepareNativeRearmWitness(launch: NativeLaunch, request: Omit<Na
 ): NativeRearmWitnessCommand {
   const saved = structuredClone(request), input = inspectNativeRearmWitness(JSON.stringify({ ...saved, dependencies: nativeLaunchProof(launch) }))
   if (launch.token !== input.control.rearm!.launchToken || !isAbsolute(node) || !launch.current()) return held('prepared launch changed')
-  const artifact = prepareNativeHookArtifact(moduleUrl, undefined, undefined, true)
+  const artifact = prepareNativeHookArtifact(moduleUrl, undefined, undefined, 'allocation')
   if (!launch.retain?.(artifact.proof)) return held('writer artifact could not be retained')
   const text = JSON.stringify({ ...saved, dependencies: nativeLaunchProof(launch) })
   inspectNativeRearmWitness(text)
@@ -163,7 +215,16 @@ export function prepareNativeRearmWitness(launch: NativeLaunch, request: Omit<Na
 /** This shell is the foreground job, with its own job control left off. The
  * writer's status is tested before exec; no failure path can run a manual shell
  * under the witnessed PID. The outer wrapper still owns Stop and final exit. */
-export function nativeRearmExecCommand(command: NativeRearmWitnessCommand): string {
+export function nativeRearmExecCommand(command: NativeRearmWitnessCommand, placement?: { binary: string | null; owner: string }): string {
+  let request = command.request
+  if (placement) {
+    if (!placement.binary || !isAbsolute(placement.binary)) return held('original tmux binary is unavailable')
+    const executable = executableSnapshot(nativeVersionProbe({ args: [], output: /^$/, timeoutMs: 1 }, () => placement.binary!))
+    if (!executable) return held('original tmux binary could not be retained')
+    request = JSON.stringify({ ...inspectNativeRearmWitness(request), version: 2,
+      placement: { binary: executable.command, identity: executable.identity, owner: placement.owner } })
+    inspectNativeRearmWitness(request)
+  }
   const script = [
     'harness_rearm_interrupted=0',
     "trap 'harness_rearm_interrupted=1' INT QUIT HUP TERM",
@@ -180,6 +241,6 @@ export function nativeRearmExecCommand(command: NativeRearmWitnessCommand): stri
   ].join('\n')
   // Privileged mode suppresses startup files and inherited shell functions;
   // the fixed script is the only code allowed to run before this exec.
-  return [witnessShell(), '-p', '-c', script, 'harness-native-rearm', command.node, command.artifact, command.request].map(shellSingleQuote).join(' ')
+  return [witnessShell(), '-p', '-c', script, 'harness-native-rearm', command.node, command.artifact, request].map(shellSingleQuote).join(' ')
     + ' "$harness_engine_bin" "$@"'
 }

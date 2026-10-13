@@ -7,6 +7,7 @@ import { hookPreparationRoutes, inspectHookFile } from '../engines/kit/nativeHoo
 import { inspectNativeControlFile } from './nativeControlFile.js'
 import { parseNativeArchiveLink, type NativeArchiveLink } from './nativeArchive.js'
 import { parseNativeTurnProcessReference } from './nativeTurnIntent.js'
+import { parseNativeLaunchAllocation, type NativeLaunchAllocation } from './nativeLaunchAllocation.js'
 
 export type AgentCreationOutcome =
   | { state: 'created'; agentId: string; level?: 'native' | 'handoff'; resumed?: boolean }
@@ -47,6 +48,8 @@ export interface NativeRelaunchProcess {
   birth: string
   /** Older witnesses remain readable but cannot prove death across PID views. */
   namespace?: string
+  /** Captured before exec; omission in an older receipt remains unknown. */
+  allocation?: NativeLaunchAllocation
 }
 export type NativeRelaunchRequest = Pick<NativeRelaunchConfirmation, 'fingerprint' | 'request'>
 
@@ -105,7 +108,8 @@ function nativeRelaunchRequest(id: string, request: Record<string, unknown>): bo
 function validRelaunchProcess(value: NativeRelaunchProcess | undefined): value is NativeRelaunchProcess {
   const decimal = (text: string, minimum: number, maximum = Number.MAX_SAFE_INTEGER) =>
     Number.isSafeInteger(Number(text)) && Number(text) >= minimum && Number(text) <= maximum && String(Number(text)) === text
-  return !!value && Object.keys(value).sort().join(',') === (Object.hasOwn(value, 'namespace') ? 'birth,boot,namespace,pid' : 'birth,boot,pid')
+  return !!value && Object.keys(value).sort().join(',') === ['birth', 'boot', 'pid',
+    ...(Object.hasOwn(value, 'namespace') ? ['namespace'] : []), ...(Object.hasOwn(value, 'allocation') ? ['allocation'] : [])].sort().join(',')
     && typeof value.boot === 'string' && /^(linux|darwin):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value.boot)
     && Number.isSafeInteger(value.pid) && value.pid > 1 && value.pid <= 0x7fffffff
     && typeof value.birth === 'string' && value.birth.length <= 40
@@ -115,10 +119,12 @@ function validRelaunchProcess(value: NativeRelaunchProcess | undefined): value i
       ? /^linux:(?:0|[1-9][0-9]{0,19}):[1-9][0-9]{0,19}$/.test(value.namespace)
         && value.namespace.split(':').slice(1).every(part => BigInt(part) <= 0xffffffffffffffffn)
       : value.namespace === 'darwin'))
+    && (!Object.hasOwn(value, 'allocation') || !!parseNativeLaunchAllocation(value.allocation, value))
 }
 
-function validIntentProcess(value: IntentProcess): boolean {
+function validIntentProcess(value: IntentProcess, launchToken: unknown): boolean {
   return Object.keys(value).sort().join(',') === 'checksum,fingerprint,process,token' && validRelaunchProcess(value.process)
+    && (!value.process.allocation || value.process.allocation.token === launchToken)
     && value.checksum === creationFingerprint({ fingerprint: value.fingerprint, token: value.token, process: value.process })
 }
 
@@ -405,7 +411,7 @@ export class AgentCreationReceipts {
     const same = (content: string | null, value: unknown) => content !== null && creationFingerprint(JSON.parse(content)) === creationFingerprint(value)
     const capturedResult = result.content === null ? null : JSON.parse(result.content) as IntentResult | null
     if (!same(original.content, receipt) || !same(claimed.content, claim)
-      || observedProcess && (!validIntentProcess(observedProcess) || observedProcess.fingerprint !== claim.fingerprint || observedProcess.token !== claim.token)
+      || observedProcess && (!validIntentProcess(observedProcess, receipt.request.launchToken) || observedProcess.fingerprint !== claim.fingerprint || observedProcess.token !== claim.token)
       || creationFingerprint(process.content === null ? null : JSON.parse(process.content)) !== creationFingerprint(observedProcess)
       || result.content !== null && (!capturedResult || capturedResult.fingerprint !== claim.fingerprint || capturedResult.token !== claim.token
         || !validOutcome(capturedResult.outcome) || capturedResult.outcome.state !== 'unconfirmed'
@@ -548,7 +554,8 @@ export class AgentCreationReceipts {
     authority: CreationConfirmationFence,
   ): { verify(): void } | null {
     const owner = structuredClone(process), source = this.nativeRelaunchDispatch(id, input)
-    if (!validRelaunchProcess(owner) || source.status.state !== 'unconfirmed') throw new AgentCreationReceiptError('CREATION_CONFLICT')
+    if (!validRelaunchProcess(owner) || owner.allocation && owner.allocation.token !== source.receipt.request.launchToken
+      || source.status.state !== 'unconfirmed') throw new AgentCreationReceiptError('CREATION_CONFLICT')
     const value = { fingerprint: source.receipt.fingerprint, token: source.claim.token, process: owner }
     const completed: IntentProcess = { ...value, checksum: creationFingerprint(value) }
     const file = this.intentFile(id, 'process'), before = inspectHookFile(file, 0o600)
@@ -575,7 +582,7 @@ export class AgentCreationReceipts {
   } {
     const source = this.nativeRelaunchDispatch(id, input)
     const part = this.readIntentPart<IntentProcess>(this.intentFile(id, 'process'))
-    if (!part || part.fingerprint !== source.claim.fingerprint || part.token !== source.claim.token || !validIntentProcess(part)) {
+    if (!part || part.fingerprint !== source.claim.fingerprint || part.token !== source.claim.token || !validIntentProcess(part, source.receipt.request.launchToken)) {
       throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
     }
     const proof = inspectNativeControlFile(this.intentFile(id, 'process'), this.directory)
@@ -584,7 +591,8 @@ export class AgentCreationReceipts {
     const verify = () => { source.verify(); proof.verify() }
     verify()
     const verifyConfirmation = () => { source.verifyConfirmation(); proof.verify() }
-    return { process: Object.freeze({ ...part.process }), verify, verifyConfirmation }
+    return { process: Object.freeze({ ...part.process, ...(part.process.allocation
+      ? { allocation: parseNativeLaunchAllocation(part.process.allocation, part.process)! } : {}) }), verify, verifyConfirmation }
   }
 
   private nativeRelaunchDispatch(id: string, input: NativeRelaunchRequest) {
@@ -684,7 +692,7 @@ export class AgentCreationReceipts {
       }
     }
     if (process && (!nativeRelaunchRequest(id, receipt.request) || process.fingerprint !== claim.fingerprint || process.token !== claim.token
-      || !validIntentProcess(process) || result?.outcome.state === 'failed' || known?.outcome.state === 'failed')) {
+      || !validIntentProcess(process, receipt.request.launchToken) || result?.outcome.state === 'failed' || known?.outcome.state === 'failed')) {
       throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
     }
     if (confirmed) {

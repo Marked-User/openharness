@@ -589,7 +589,7 @@ export function buildEngineLaunchArgv(
     ? nativePaneAllocationScript(operation, witness.token, tmuxBinary, runtimeNode, harnessPaneOwner(env.ADAPTER_DATA_DIR), waiting) : ''
   const enginePrelude = engineFallbackPrelude(engine, interactive.path, tmuxBinary, allocation('release'))
   const prelude = enginePrelude + clearEnvPrelude(opts.clearEnv) + clearEnvPrelude(opts.native?.clearEnvironment) + nativeEnv + gridPanePrelude(gridBinary) + browserPrelude() + noDevtoolsPrelude() + (opts.harnessNode ? harnessNodePrelude(runtimeNode) : '')
-  const body = `${JOB_CONTROL}${SIGNAL_GUARD}${engineFound}shift\n${guard}${allocation('claim')}${engineRunScript(engine, tmuxBinary, witness && nativeRearmExecCommand(witness))}`
+  const body = `${JOB_CONTROL}${SIGNAL_GUARD}${engineFound}shift\n${guard}${allocation('claim')}${engineRunScript(engine, tmuxBinary, witness && nativeRearmExecCommand(witness, { binary: tmuxBinary, owner: harnessPaneOwner(env.ADAPTER_DATA_DIR) }))}`
   // The open-files raise goes ahead of everything, the installer included: a pane inherits the tmux
   // SERVER's soft limit, which is launchd's 256 whenever the desktop app started the daemon that
   // started the server, and an engine (Claude Code refuses outright) or an npm install under 256 is
