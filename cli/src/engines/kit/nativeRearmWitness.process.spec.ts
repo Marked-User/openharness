@@ -21,6 +21,7 @@ import { isolatedTmux, type IsolatedTmux } from '../../testing/isolatedTmux.js'
 import type { NativeLaunch } from '../nativeLaunch.js'
 import { NativeEvidenceBudget } from './nativeEvidence.js'
 import { kernelBootId } from './nativeHookBoot.js'
+import { nativeHookScope } from './nativeHookScope.js'
 import type { HookPreparationProof } from './nativeHookFiles.js'
 import { nativeRearmExecCommand, prepareNativeRearmWitness, type NativeRearmWitnessCommand } from './nativeRearmWitness.js'
 import { createNativeRearmProof } from './nativeRearmProof.js'
@@ -146,6 +147,8 @@ it.skipIf(!supported)('the shipped writer preserves boot/PID/precise birth throu
   const witness = p.receipts.readNativeRelaunchProcess(p.input.id, p.input).process
   expect(witness.boot).toBe(await kernelBootId(new NativeEvidenceBudget()))
   expect(witness.pid).toBe(engine.pid)
+  const scope = await nativeHookScope(join(p.directory, 'agent-creations'), new NativeEvidenceBudget(), p.helpers)
+  try { expect(witness.namespace).toBe(scope.namespace) } finally { scope.close() }
   const row = (await probeNativeProcessControl([engine.pid], 0, new NativeEvidenceBudget(), false, p.helpers)).rows.get(engine.pid)!
   expect(row.birth).toBe(witness.birth)
   const replay = p.run()

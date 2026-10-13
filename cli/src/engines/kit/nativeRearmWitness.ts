@@ -12,7 +12,7 @@ import { controlIdentity, probeNativeProcessControl, type NativeControlHelpers, 
 import { secureStateDirectory } from '../../lib/secureState.js'
 import { shellSingleQuote } from '../../lib/shellQuote.js'
 import type { NativeLaunch } from '../nativeLaunch.js'
-import { kernelBootId } from './nativeHookBoot.js'
+import { nativeHookScope, type NativeHookScope } from './nativeHookScope.js'
 import { prepareNativeHookArtifact } from './nativeHookArtifact.js'
 import { NativeEvidenceBudget, nativeUnavailable } from './nativeEvidence.js'
 import { nativeLaunchProof, verifyNativeLaunchProof, type NativeLaunchProof } from './nativeLaunchGuard.js'
@@ -84,6 +84,7 @@ export async function writeNativeRearmWitness(text: string, parent: string, deps
   selfPid: number
   artifact?: ProcessImageArtifact
   probe?: (pids: readonly number[], budget: NativeEvidenceBudget) => Promise<NativeControlSnapshot>
+  scope?: typeof nativeHookScope
 }): Promise<boolean> {
   const input = inspectNativeRearmWitness(text), budget = new NativeEvidenceBudget(), self = deps.selfPid
   const caller = /^[1-9]\d*$/.test(parent) ? Number(parent) : 0
@@ -102,23 +103,38 @@ export async function writeNativeRearmWitness(text: string, parent: string, deps
     invalidate: () => { prepared = undefined },
   }
   const probe = deps.probe ?? ((pids, budget) => probeNativeProcessControl(pids, 0, budget, false, helpers))
-  const boot = await kernelBootId(budget)
-  const before = await probe([self, caller], budget), child = before.rows.get(self), owner = before.rows.get(caller)
-  if (!child || child.parentPid !== caller) return held('writer is no longer the original shell’s child')
-  if (!owner || owner.imagePath !== shell) return held(`original exec shell could not be proven (${owner?.imagePath ?? 'missing'})`)
-  const childIdentity = controlIdentity(child), parentIdentity = controlIdentity(owner)
-  const receipt = new AgentCreationReceipts(join(input.dataDir, 'agent-creations'))
-  const permit = receipt.recordNativeRelaunchProcess(input.id, input, { boot, pid: caller, birth: owner.birth },
-    { verify: control.verify, current: () => budget.step() })
-  if (!permit) return false
-  // Durability and helper preparation may wait. This paired probe is the last
-  // asynchronous observation: neither a reparented writer nor a new shell wins.
-  const final = await probe([self, caller], budget), currentChild = final.rows.get(self), currentOwner = final.rows.get(caller)
-  if (!currentChild || !currentOwner || controlIdentity(currentChild) !== childIdentity || controlIdentity(currentOwner) !== parentIdentity) {
-    return held('exec shell changed before handoff')
-  }
-  verifyNativeLaunchProof(input.dependencies, budget)
-  permit.verify(); budget.step()
+  const receiptDirectory = join(input.dataDir, 'agent-creations')
+  const scope = deps.scope ?? nativeHookScope, originalScope = await scope(receiptDirectory, budget, helpers)
+  let finalScope: NativeHookScope | undefined
+  try {
+    const { boot, namespace, storage } = originalScope
+    const before = await probe([self, caller], budget), child = before.rows.get(self), owner = before.rows.get(caller)
+    if (!child || child.parentPid !== caller) return held('writer is no longer the original shell’s child')
+    if (!owner || owner.imagePath !== shell) return held(`original exec shell could not be proven (${owner?.imagePath ?? 'missing'})`)
+    const childIdentity = controlIdentity(child), parentIdentity = controlIdentity(owner)
+    const receipt = new AgentCreationReceipts(receiptDirectory)
+    const verifyScope = () => { originalScope.verify(receiptDirectory); finalScope?.verify(receiptDirectory); budget.step() }
+    const permit = receipt.recordNativeRelaunchProcess(input.id, input, { boot, namespace, pid: caller, birth: owner.birth },
+      { verify: () => { control.verify(); verifyScope() }, current: () => budget.step() })
+    if (!permit) return false
+    // Namespace and local-volume evidence belong to the original witness. A
+    // different PID view must never turn ESRCH into permission to retire it.
+    finalScope = await scope(receiptDirectory, budget, helpers)
+    verifyScope()
+    if (finalScope.boot !== boot || finalScope.namespace !== namespace || finalScope.storage !== storage) {
+      return held('process or storage scope changed before handoff')
+    }
+    // Durability and scope preparation may wait. This paired probe is the last
+    // asynchronous observation: neither a reparented writer nor a new shell wins.
+    const final = await probe([self, caller], budget), currentChild = final.rows.get(self), currentOwner = final.rows.get(caller)
+    if (!currentChild || !currentOwner || controlIdentity(currentChild) !== childIdentity || controlIdentity(currentOwner) !== parentIdentity) {
+      return held('exec shell changed before handoff')
+    }
+    verifyNativeLaunchProof(input.dependencies, budget)
+    permit.verify(); verifyScope(); budget.step()
+  } finally { try { finalScope?.close() } finally { originalScope.close() } }
+  // Descriptor cleanup belongs to the same deadline as witness publication.
+  budget.step()
   return true
 }
 

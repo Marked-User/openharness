@@ -589,6 +589,24 @@ interaction cases pass (`20261013T195758.514021Z-72326`, 15.4/7.5 seconds).
 Independent review found no native interaction blocker in this integration delta;
 it does not approve activation or the full PR. Validation ran at 19:58 UTC.
 
+The pre-exec witness now records its original PID namespace with canonical
+boot/PID/birth evidence. Both scope observations prove the actual
+`agent-creations` directory, including its local filesystem, and retain that
+directory through the final paired writer/shell observation. Success checks the
+original deadline after both descriptors close. Scope-less older witnesses remain
+readable but cannot supply cross-namespace death authority. No golden changed.
+
+Types and all 306 cases in seven affected files pass, including the installed
+writer/private tmux lane, unchanged launch golden and architecture
+(`20261013T201020.983441Z-15318`, 4.9/98.5 seconds). Complete mutation baselines
+pass and all 24 deliberate wiring faults fail assertions
+(`20261013T201309.751896Z-25571`, 135.2 seconds). Independent review approved the
+slice over `0c64e141f` after correcting parent-only locality and post-cleanup
+deadline checks. Implementation/review ran approximately 20:00–20:13 UTC October
+13; validation overlapped 20:02–20:16. Merge, publication and external waiting
+remain zero. Ordinary Cancel scope capture, physical Stop and activation remain
+outside this scoped approval.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R

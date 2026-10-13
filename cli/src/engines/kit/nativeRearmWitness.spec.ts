@@ -14,6 +14,7 @@ import { nativeLaunchProof } from './nativeLaunchGuard.js'
 import { inspectHookFile, type HookPreparationProof } from './nativeHookFiles.js'
 import { NativePaths } from './nativePaths.js'
 import { NativeEvidenceBudget } from './nativeEvidence.js'
+import type { NativeHookScope } from './nativeHookScope.js'
 
 const clock = vi.hoisted(() => ({ now: 0 }))
 vi.mock('node:perf_hooks', () => ({ performance: { now: () => clock.now } }))
@@ -54,9 +55,15 @@ async function fixture(source: 'live' | 'saved' = 'live', options?: Pick<NonNull
   const processes = new Map([[43, row(43, 42)], [42, row(42, 10)]])
   const probe = vi.fn(async (pids: readonly number[]) => ({ parent: 0, children: [],
     rows: new Map(pids.flatMap(pid => processes.has(pid) ? [[pid, structuredClone(processes.get(pid)!)] as const] : [])) }))
-  const write = () => writeNativeRearmWitness(JSON.stringify(input), '42', { selfPid: 43, probe })
+  const scopes: Array<NativeHookScope & { verify: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn> }> = []
+  const scope = vi.fn(async (_location: string) => {
+    const current = { boot: 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', namespace: 'linux:4:123', storage: 'fixture-local-volume',
+      verify: vi.fn(), close: vi.fn() }
+    scopes.push(current); return current
+  })
+  const write = () => writeNativeRearmWitness(JSON.stringify(input), '42', { selfPid: 43, probe, scope })
   const witness = join(root, 'agent-creations', `${id}.json.process`)
-  return { input, receipts, processes, probe, write, file, witness, engine, settings, launch }
+  return { input, receipts, processes, probe, write, file, witness, engine, settings, launch, scope, scopes }
 }
 
 it.each(['live', 'saved'] as const)('hands only the original %s reservation and exact parent incarnation an exec permit', async source => {
@@ -64,9 +71,87 @@ it.each(['live', 'saved'] as const)('hands only the original %s reservation and 
   expect(await p.write()).toBe(true)
   expect(p.probe.mock.calls.map(([pids]) => pids)).toEqual([[43, 42], [43, 42]])
   const proof = p.receipts.readNativeRelaunchProcess(id, p.input)
-  expect(proof.process).toEqual({ boot: 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', pid: 42, birth: '4200' }); proof.verify()
+  expect(proof.process).toEqual({ boot: 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', namespace: 'linux:4:123', pid: 42, birth: '4200' }); proof.verify()
+  expect(p.scope.mock.calls.map(([location]) => location)).toEqual([join(root, 'agent-creations'), join(root, 'agent-creations')])
+  for (const scope of p.scopes) expect(scope.verify.mock.calls.every(([location]) => location === join(root, 'agent-creations'))).toBe(true)
+  expect(p.scopes).toHaveLength(2); for (const scope of p.scopes) expect(scope.close).toHaveBeenCalledOnce()
   expect(await p.write()).toBe(false)
   expect(p.probe).toHaveBeenCalledTimes(3)
+  expect(p.scopes).toHaveLength(3); expect(p.scopes[2].close).toHaveBeenCalledOnce()
+})
+
+it('cannot publish a witness without local storage and PID-view evidence', async () => {
+  const p = await fixture(); p.scope.mockRejectedValueOnce(Error('Local scope unavailable'))
+  await expect(p.write()).rejects.toThrow('Local scope unavailable')
+  expect(p.probe).not.toHaveBeenCalled(); expect(existsSync(p.witness)).toBe(false)
+})
+
+it('holds when the witness directory is unavailable even though its parent is local', async () => {
+  const p = await fixture(), scope = p.scope.getMockImplementation()!
+  p.scope.mockImplementation(async location => {
+    if (location === root) return scope(location)
+    throw Error('Witness volume is unavailable')
+  })
+  await expect(p.write()).rejects.toThrow('Witness volume is unavailable')
+  expect(p.probe).not.toHaveBeenCalled(); expect(existsSync(p.witness)).toBe(false)
+})
+
+it.each(['boot', 'namespace', 'storage', 'root', 'deadline'])('holds a changed %s scope after witness publication and before the final paired probe', async change => {
+  const p = await fixture(), scope = p.scope.getMockImplementation()!
+  p.scope.mockImplementation(async location => {
+    const result = await scope(location)
+    if (p.scopes.length === 2) {
+      if (change === 'boot') result.boot = 'linux:bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb'
+      if (change === 'namespace') result.namespace = 'linux:4:456'
+      if (change === 'storage') result.storage = 'other-local-volume'
+      if (change === 'root') p.scopes[0].verify.mockImplementation(() => { throw Error('Original root changed') })
+      if (change === 'deadline') clock.now = 4000
+    }
+    return result
+  })
+  await expect(p.write()).rejects.toThrow()
+  expect(p.probe).toHaveBeenCalledOnce(); expect(existsSync(p.witness)).toBe(true)
+  for (const scope of p.scopes) expect(scope.close).toHaveBeenCalledOnce()
+})
+
+it.each(['first', 'final'])('retains the %s scope through the final paired process observation', async which => {
+  const p = await fixture(), probe = p.probe.getMockImplementation()!
+  p.probe.mockImplementation(async pids => {
+    if (p.probe.mock.calls.length === 2) p.scopes[which === 'first' ? 0 : 1].verify.mockImplementation(() => { throw Error('Original scope changed') })
+    return probe(pids)
+  })
+  await expect(p.write()).rejects.toThrow('Original scope changed')
+  for (const scope of p.scopes) expect(scope.close).toHaveBeenCalledOnce()
+})
+
+it('closes the original scope after an unavailable final scope read', async () => {
+  const p = await fixture(), scope = p.scope.getMockImplementation()!
+  p.scope.mockImplementation(async location => { if (p.scopes.length) throw Error('Scope read unavailable'); return scope(location) })
+  await expect(p.write()).rejects.toThrow('Scope read unavailable')
+  expect(p.scopes[0].close).toHaveBeenCalledOnce()
+})
+
+it('a final descriptor close failure still closes the original scope and refuses exec', async () => {
+  const p = await fixture(), scope = p.scope.getMockImplementation()!
+  p.scope.mockImplementation(async location => {
+    const result = await scope(location)
+    if (p.scopes.length === 2) result.close.mockImplementation(() => { throw Error('Scope close failed') })
+    return result
+  })
+  await expect(p.write()).rejects.toThrow('Scope close failed')
+  for (const scope of p.scopes) expect(scope.close).toHaveBeenCalledOnce()
+})
+
+it.each(['first', 'final'])('refuses exec when the %s descriptor close crosses the deadline', async which => {
+  const p = await fixture(), scope = p.scope.getMockImplementation()!
+  p.scope.mockImplementation(async location => {
+    const result = await scope(location)
+    if (p.scopes.length === (which === 'first' ? 1 : 2)) result.close.mockImplementation(() => { clock.now = 4000 })
+    return result
+  })
+  await expect(p.write()).rejects.toThrow('deadline')
+  expect(existsSync(p.witness)).toBe(true)
+  for (const scope of p.scopes) expect(scope.close).toHaveBeenCalledOnce()
 })
 
 it.each([undefined, 'ask', 'auto', 'plan', 'full'] as const)('retains a saved permission override %s without rewriting original control before exec', async permissionMode => {

@@ -44,6 +44,8 @@ export interface NativeRelaunchProcess {
   boot: string
   pid: number
   birth: string
+  /** Older witnesses remain readable but cannot prove death across PID views. */
+  namespace?: string
 }
 export type NativeRelaunchRequest = Pick<NativeRelaunchConfirmation, 'fingerprint' | 'request'>
 
@@ -92,11 +94,18 @@ function nativeRelaunchRequest(id: string, request: Record<string, unknown>): bo
 }
 
 function validRelaunchProcess(value: NativeRelaunchProcess | undefined): value is NativeRelaunchProcess {
-  return !!value && Object.keys(value).sort().join(',') === 'birth,boot,pid'
+  const decimal = (text: string, minimum: number, maximum = Number.MAX_SAFE_INTEGER) =>
+    Number.isSafeInteger(Number(text)) && Number(text) >= minimum && Number(text) <= maximum && String(Number(text)) === text
+  return !!value && Object.keys(value).sort().join(',') === (Object.hasOwn(value, 'namespace') ? 'birth,boot,namespace,pid' : 'birth,boot,pid')
     && typeof value.boot === 'string' && /^(linux|darwin):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value.boot)
     && Number.isSafeInteger(value.pid) && value.pid > 1 && value.pid <= 0x7fffffff
     && typeof value.birth === 'string' && value.birth.length <= 40
-    && (value.boot.startsWith('linux:') ? /^[1-9]\d*$/.test(value.birth) : /^[1-9]\d*:\d{1,6}$/.test(value.birth))
+    && (value.boot.startsWith('linux:') ? decimal(value.birth, 1)
+      : value.birth.split(':').length === 2 && decimal(value.birth.split(':')[0], 1) && decimal(value.birth.split(':')[1], 0, 999_999))
+    && (!Object.hasOwn(value, 'namespace') || typeof value.namespace === 'string' && (value.boot.startsWith('linux:')
+      ? /^linux:(?:0|[1-9][0-9]{0,19}):[1-9][0-9]{0,19}$/.test(value.namespace)
+        && value.namespace.split(':').slice(1).every(part => BigInt(part) <= 0xffffffffffffffffn)
+      : value.namespace === 'darwin'))
 }
 
 function validIntentProcess(value: IntentProcess): boolean {

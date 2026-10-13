@@ -419,6 +419,30 @@ it.each(['intent', 'claim', 'result', 'process', 'confirmation'])('retains the o
   expect(retained!.verify).toThrow()
 })
 
+it.each(['linux', 'darwin'] as const)('retains the exact %s PID view of a new witness', async platform => {
+  const p = await uncertain(), process = { ...processOwner, boot: processOwner.boot.replace('linux:', platform + ':'),
+    birth: platform === 'linux' ? '123456' : '123456:1', namespace: platform === 'linux' ? 'linux:4:123' : 'darwin' }
+  expect(p.receipts.recordNativeRelaunchProcess(id, { fingerprint, request }, process, fence())).not.toBeNull()
+  const proof = p.receipts.readNativeRelaunchProcess(id, { fingerprint, request })
+  expect(proof.process).toEqual(process)
+  const original = JSON.parse(readFileSync(p.file('process'), 'utf8'))
+  original.process.namespace = platform === 'linux' ? 'linux:4:124' : 'linux:4:123'
+  original.checksum = creationFingerprint({ fingerprint: original.fingerprint, token: original.token, process: original.process })
+  writeFileSync(p.file('process'), JSON.stringify(original), { mode: 0o600 })
+  expect(() => proof.verify()).toThrow()
+})
+
+it.each([
+  { birth: '123456:000001', boot: 'darwin:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa' },
+  { birth: '9007199254740992' }, { birth: '123456:1000000', boot: 'darwin:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa' },
+  { namespace: undefined }, { namespace: 'darwin' }, { namespace: 'linux:04:123' },
+  { namespace: 'linux:4:0' }, { namespace: 'linux:4:18446744073709551616' },
+])('rejects noncanonical birth or namespace evidence: %j', async fields => {
+  const p = await uncertain()
+  expect(() => p.receipts.recordNativeRelaunchProcess(id, { fingerprint, request }, { ...processOwner, ...fields }, fence())).toThrow()
+  expect(fs.existsSync(p.file('process'))).toBe(false)
+})
+
 it('retains its own actual confirmation inode before directory durability', async () => {
   const { receipts, file } = await uncertain()
   receipts.recordNativeRelaunchProcess(id, { fingerprint, request }, processOwner, fence())
