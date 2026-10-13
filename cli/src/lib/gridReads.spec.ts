@@ -13,7 +13,7 @@ import { createServer, type IncomingHttpHeaders, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { installFakeGrid, type FakeGrid, type FakeGridPlan, type FakeGridTurn } from './__fixtures__/fakeGrid.js'
-import { forgetGridModels, gridInventory, listAllGridModels, listGridModels, resetGridModels, type GridModelsService, type GridSection } from './gridModels.js'
+import { forgetGridModels, gridInventory, gridServingNodes, listAllGridModels, listGridModels, resetGridModels, type GridModelsService, type GridSection } from './gridModels.js'
 
 // Every look starts the fake `grid`, a node process, for its list and each grid's info: the seam under test is
 // that subprocess. The longest test here looks 13 times, about 26 starts: 2.7 s under 12 busy loops on a
@@ -526,6 +526,28 @@ describe('a picture an older build saved', () => {
 
     // The first answer is the saved picture.
     expect(section(await listAllGridModels(OWN), TEAM).models).toEqual([{ id: 'qwen', node: 'rig' }, { id: 'laya-english', node: 'rig' }])
+  })
+})
+
+describe('another grid read for what this computer serves there', () => {
+  it('answers its nodes as a picker reads them, never taking it for the own grid', async () => {
+    answer(TEAM_ID, OVERVIEW, awake([node('rig', ['qwen'])]))
+    // Answered at once from what is known — nothing yet — and read in the background: never waited for.
+    expect(await gridServingNodes(TEAM)).toMatchObject({ nodes: [] })
+    await service.settled()
+    const read = await gridServingNodes(TEAM)
+    expect(read.state).toBe('awake')
+    expect(read.nodes.map((n) => n.name)).toEqual(['rig'])
+    expect((await look()).map((s) => [s.name, s.own])).toEqual([[OWN, true], [TEAM, false]])
+  })
+
+  it('answers a sleeping grid asleep, with no nodes, and does not wake it', async () => {
+    answer(TEAM_ID, OVERVIEW, asleep())
+    await gridServingNodes(TEAM)
+    await service.settled()
+    const read = await gridServingNodes(TEAM)
+    expect(read).toMatchObject({ state: 'asleep', nodes: [] })
+    expect(grid.calls().some((argv) => argv.includes('wake'))).toBe(false)
   })
 })
 

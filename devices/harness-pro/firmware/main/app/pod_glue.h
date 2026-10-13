@@ -18,6 +18,9 @@ enum { POD_TAP_SLOP = 24 };
 // Console gestures: hold this long to talk; slide down this far after it to cancel; the command bar's height and the
 // travel of a swipe down from it.
 enum { POD_HOLD_MS = 400, POD_BAR_H = 72, POD_BAR_SWIPE = 80, POD_BOTTOM_Y = 620, POD_EDGE_SWIPE = 80 };
+// Console Tab (cards and Recent's rows) and the Inbox fill the screen to its bottom margin, so their bottom zone (a swipe up goes
+// back) starts below the content instead of at POD_BOTTOM_Y: a swipe up from the last row or card scrolls or pages.
+enum { POD_LIST_BOTTOM_Y = 692 };
 enum { POD_PG_IDLE, POD_PG_DRAG, POD_PG_ANIM };
 enum { POD_PG_ANIM_MS = 170, POD_PG_STEP_MS = 16, POD_PG_FLICK = 300 };   // settle time; animation step; flick velocity, px/s (0.3 px/ms)      // px: farther than this from the DOWN and the contact is a drag, not a tap
 
@@ -84,9 +87,8 @@ typedef struct {
     bool scroll_reversed, scroll_begun;
     uint32_t down_ms;
     // Console hold to talk: armed at a DOWN that may talk, fired by the first still sample at or after hold_due_ms (pod_ui_touch, on the touch task); hold_voice is a recording
-    // under way for this contact; hold_tile: it opened the agent from a Tab tile first. bar: the
-    // contact began in the command bar below the root.
-    bool hold_armed, hold_fired, hold_voice, hold_tile, bar;
+    // under way for this contact. bar: the contact began in the command bar below the root.
+    bool hold_armed, hold_fired, hold_voice, bar;
     bool hands_free;   // Console: the hold started a recording that outlives the finger; the next new tap sends it (cleared by END, ABORT, talk_over, a skin switch)
     uint32_t hold_due_ms;
     uint8_t hold_depth;
@@ -170,6 +172,8 @@ bool pod_ui_updating(const pod_ui_t *);
 #define POD_BANNER_MS 6000
 #define POD_BANNER_SWIPE_PX 40
 // `awake`: the glass is lit. A dark one is not looking, even when it rests on that agent's screen.
+// When the current banner started (it shows for POD_BANNER_MS); the banner draw reads it for its timer line.
+uint32_t pod_ui_banner_shown_ms(const pod_ui_t *);
 bool pod_ui_notify(pod_ui_t *, const char *agent_id, bool awake, uint32_t now_ms);
 // notif.replace: begin (clears the list), one row per item, end. The banner is not shown for these.
 void pod_ui_notif_begin(pod_ui_t *);

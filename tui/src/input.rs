@@ -878,6 +878,8 @@ fn fill_rows(app: &App, kind: &PickerKind, picker: &mut Picker) {
             }
             picker.right_half = true;
             picker.hints = vec![("enter", "use · get"), ("C-s", "stop a local model")];
+            // Where a local model runs, its preview's Run on buttons (on a computer that offers them).
+            if crate::models::community_label(app).is_some() { picker.hints.push(("←→", "choose")) }
             picker.empty = if crate::models::target(app).is_none() { crate::models::no_target_why(app) } else { "Loading its models…".into() };
             picker.status = crate::models::target(app).and_then(|t| app.fleet.agent(&t.machine, &t.agent)).map(|a| a.name.clone()).unwrap_or_default();
         }
@@ -2416,6 +2418,15 @@ fn picker_key(app: &mut App, key: KeyEvent, kind: PickerKind, picker: Picker) {
             End::Stay => {}
         }
     } else {
+        // Models: → chooses where a local model runs as its community, ← as Personal grid (its preview's
+        // Run on buttons; ← on Personal grid stays there) — a plain arrow with nothing searched, on a row
+        // that offers the choice. Anywhere else the arrows are the list's, as before.
+        if matches!(kind, PickerKind::Models) && !ctrl && !alt && !shift && matches!(key.code, KeyCode::Left | KeyCode::Right)
+            && crate::models::searched(&picker).is_empty() {
+            if let Some(id) = picker.current_id() {
+                if crate::models::choose_run_on(app, &id, key.code == KeyCode::Right) { picker.armed = None; app.modal = Some(Modal::Picker { kind, picker }); return }
+            }
+        }
         // The look/theme picker: right on a section opens it, left/Esc steps out one level (a plain
         // arrow with an empty query — with a query they edit the query, as fzf's do).
         if matches!(kind, PickerKind::Theme) {

@@ -136,6 +136,42 @@ static void pet_test_inside_box(void)
                 }
             }
 }
+static void pet_render_on(uint32_t ground, bool plain, uint16_t *buf)
+{
+    enum { W = 270, H = 270 };
+    ht_scene_t s; ht_scene_clear(&s, 0);
+    if (plain) pod_pet_draw(&s, 0, 0, W, "claude", POD_SCENE_LISTEN, 700, 0);
+    else pod_pet_draw_on(&s, 0, 0, W, "claude", POD_SCENE_LISTEN, 700, 0, ground);
+    for (int i = 0; i < W * H; i++) buf[i] = ht_rgb(ground);
+    ht_rect_t clip = {0, 0, W, H};
+    for (int i = 0; i < s.count; i++) {
+        if (s.runs[i].pro_kind >= POD_KIND_BASE) pod_draw_raster(&s.runs[i], clip, buf);
+        else ht_pro_raster(&s.runs[i], clip, buf);
+    }
+}
+static int luma(uint16_t p)   // 0..255*1000, from the expanded channels
+{
+    int r = (p >> 11) * 255 / 31, g = ((p >> 5) & 63) * 255 / 63, b = (p & 31) * 255 / 31;
+    return 299 * r + 587 * g + 114 * b;
+}
+static int brighter(const uint16_t *buf, uint16_t g)   // pixels lighter than the ground
+{
+    int n = 0;
+    for (int i = 0; i < 270 * 270; i++) if (luma(buf[i]) > luma(g)) n++;
+    return n;
+}
+static void pet_test_wave_ground(void)
+{
+    static uint16_t a[270 * 270], b[270 * 270], c[270 * 270];
+    uint16_t g = ht_rgb(0xf6f6f0);
+    pet_render_on(0xf6f6f0, false, a);
+    CHECK(brighter(a, g) == 0);
+    pet_render_on(0xf6f6f0, true, b);   // the white-fading default on the same ground: waves go lighter than it
+    CHECK(brighter(b, g) > 0);
+    pet_render_on(0xffffff, true, b);
+    pet_render_on(0xffffff, false, c);
+    CHECK(memcmp(b, c, sizeof b) == 0);
+}
 static void pet_test_palette_colour(void)
 {
     enum { W = 270, H = 270 };
@@ -266,6 +302,7 @@ int main(void)
     pet_test_default_mark();
     pet_test_inside_box();
     pet_test_palette_colour();
+    pet_test_wave_ground();
     pet_test_logo_exact();
     pet_test_cover_centre_exact();
     printf("test_pod_pet: %d checks ok\n", checks);

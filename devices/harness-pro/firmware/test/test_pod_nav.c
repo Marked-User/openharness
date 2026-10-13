@@ -755,7 +755,30 @@ static void nav_test_attention_and_steps(void) {
     CHECK(act(POD_A_FOLLOW, 99, 0).fx == POD_FX_NONE);
 }
 
+static void test_origin_label(void) {
+    fresh();
+    CHECK(!strcmp(pod_nav_origin(&N, &M), "Back"));   // the root
+    to_agent(0, 0);
+    CHECK(!strcmp(pod_nav_origin(&N, &M), "Build"));
+    act(POD_A_TABS, 0, 0);
+    to_agent(1, 0);
+    CHECK(!strcmp(pod_nav_origin(&N, &M), "Docs"));
+    act(POD_A_TABS, 0, 0);
+    act(POD_A_OPEN_TAB, POD_TAB_RECENT, 0);
+    CHECK(!strcmp(pod_nav_origin(&N, &M), "Tabs"));   // the Recent list itself came from Tabs (its view shows "Back")
+    act(POD_A_OPEN_AGENT, 0, 0);
+    CHECK(top()->view != POD_V_TAB && !strcmp(pod_nav_origin(&N, &M), "Recent"));
+    act(POD_A_TABS, 0, 0);
+    act(POD_A_INBOX, 0, 0);
+    CHECK(!strcmp(pod_nav_origin(&N, &M), "Tabs"));   // the Inbox view itself shows "Back"
+    pod_model_unread_add(&M, "a3", "Gamma", "Shipped.", 5, 100);
+    act(POD_A_OPEN_NOTIF, 0, 0);
+    CHECK(top()->view == POD_V_RECAP || top()->view == POD_V_AGENT);
+    CHECK(!strcmp(pod_nav_origin(&N, &M), "Inbox"));
+}
+
 int main(void) {
+    test_origin_label();
     nav_test_grid_scroll();
     nav_test_open_by_state();
     nav_test_prev_next_wrap();

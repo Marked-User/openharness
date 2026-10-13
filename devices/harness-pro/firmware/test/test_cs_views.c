@@ -16,7 +16,7 @@ static int texts(const char *t);
 
 static ht_scene_t S;
 static pod_out_frame_t F;
-static void fresh(void) { memset(&F, 0, sizeof F); ht_scene_clear(&S, ht_rgb(0x08090A)); F.scene = &S; }
+static void fresh(void) { memset(&F, 0, sizeof F); ht_scene_clear(&S, ht_rgb(CS_GROUND)); F.scene = &S; }
 static const ht_run_t *text_run(const char *t) {
     for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && !strcmp(S.runs[i].text, t)) return &S.runs[i];
     return NULL;
@@ -42,7 +42,7 @@ int main(void) {
     CHECK(cur);
     for (int i = 0; i < F.hit_count; i++) CHECK(!(F.hits[i].x < cur->x && F.hits[i].x + F.hits[i].w > cur->x + cur->w && F.hits[i].action == POD_A_BACK));
     CHECK(hits_of(POD_A_ATTENTION) == 0);          // asking == 0: no chip
-    CHECK(S.runs[0].fg == ht_rgb(0x0b0c0e));
+    CHECK(S.runs[0].fg == ht_rgb(CS_GROUND));
 
     fresh();
     cs_bar(&F, crumbs, 2, 6, 2, 0, NULL, 0);
@@ -156,7 +156,7 @@ int main(void) {
     fresh();
     cs_bar(&F, crumbs, 2, 1, 0, 0, "make the", 0);
     CHECK(hits_of(POD_A_BACK) == 0);
-    CHECK(S.runs[0].pro_kind == K_RECT && S.runs[0].fg == ht_rgb(0x14122a));
+    CHECK(S.runs[0].pro_kind == K_RECT && S.runs[0].fg == ht_rgb(CS_VOICE_BAR));
     CHECK(text_run("make the") && text_run("Backend"));
 
     fresh();
@@ -174,7 +174,7 @@ int main(void) {
     CHECK(!cs_logo(&S, 10, 10, 40, "claude") && text_run("CL") && S.runs[0].w == 40);   // 40 is not baked
 
     cs_dot(&S, 100, 100, 'q', 0);
-    CHECK(S.runs[S.count - 1].pro_kind == K_RECT_AA && S.runs[S.count - 1].fg == ht_rgb(0xF5A524));
+    CHECK(S.runs[S.count - 1].pro_kind == K_RECT_AA && S.runs[S.count - 1].fg == ht_rgb(CS_ASK));
 
     // the working mark: four 5 px bars, 2 px gaps (26 px wide), anchored at the bottom of a 22 px box, each 40..100 % tall, moving with the clock
     {
@@ -205,9 +205,7 @@ int main(void) {
 
     fresh();
     cs_bar(&F, crumbs, 2, 6, 3, 0, NULL, 0);
-    const char *keys[] = {"hold", "\xe2\x86\x90 \xe2\x86\x92", "\xe2\x86\x91"}, *labels[] = {"talk to landing", "panes", "Desktop"};
-    cs_hints(&F, keys, labels, 3);
-    CHECK(text_run("\xe2\x86\x90 \xe2\x86\x92") && text_run("\xe2\x96\xb2 3"));   // the marks reach the atlas
+    CHECK(text_run("\xe2\x96\xb2 3"));   // the mark reaches the atlas
     CHECK(cs_runs(&F) < 40);
 
     // ---- Overview and Recent ----
@@ -248,53 +246,42 @@ int main(void) {
         fresh();
         cs_view_overview(&F, &N, &M, now);
         CHECK(text_run("Recent") && text_run("Firmware") && text_run("Backend"));
-        CHECK(text_run("1 ask") && text_run("\xe2\x96\xb2 1"));
+        CHECK(text_run("2") && text_run("3") && !text_run("2 agents") && text_run("\xe2\x96\xb2 1") && !text_run("1 ask"));
+        {   // the count chip: its number in the 24 px mono face
+            const ht_run_t *k3 = text_run("3");
+            CHECK(k3 && k3->pro_font == &cs_mono_24);
+        }
         CHECK(hits_of(POD_A_OPEN_TAB) == 4);
         CHECK(nth_hit(POD_A_OPEN_TAB, 0)->arg == POD_TAB_RECENT && nth_hit(POD_A_OPEN_TAB, 1)->arg == 0 && !strcmp(nth_hit(POD_A_OPEN_TAB, 1)->id, "s0"));
         CHECK(cs_runs(&F) <= 184);
-        // 2 x 2 cards of 338 x 277 at x 16 / 366, y 86 / 375
+        // 2 x 2 cards of 338 x 296 at x 16 / 366, y 86 / 394
         {
             const pod_hit_t *c0 = nth_hit(POD_A_OPEN_TAB, 0), *c1 = nth_hit(POD_A_OPEN_TAB, 1), *c2 = nth_hit(POD_A_OPEN_TAB, 2), *c3 = nth_hit(POD_A_OPEN_TAB, 3);
-            CHECK(c0->x == 16 && c0->y == 86 && c0->w == 338 && c0->h == 277);
-            CHECK(c1->x == 366 && c1->y == 86 && c2->x == 16 && c2->y == 375 && c3->x == 366 && c3->y == 375 && c3->w == 338);
-            // names in the 28 px medium face, tab names in the 34 px semibold, logos not badges, at most three rows a card
-            const ht_run_t *an = text_run("agent-0"), *tn = text_run("Firmware");
-            CHECK(an && an->pro_font == &cs_md_28 && tn && tn->pro_font == &cs_sb_34);
+            CHECK(c0->x == 16 && c0->y == 86 && c0->w == 338 && c0->h == 296);
+            CHECK(c1->x == 366 && c1->y == 86 && c2->x == 16 && c2->y == 394 && c3->x == 366 && c3->y == 394 && c3->w == 338);
+            // one hero per tab: the tab name left in the 28 px medium face, the count chip right, the lead (working first) and its name in the
+            // 28 px medium face; no agent rows, no logos at 36, no badges
+            const ht_run_t *tn = text_run("Firmware");
+            CHECK(tn && tn->pro_font == &cs_md_28 && tn->x == 366 + 19);   // the lead's size, left at the card's pad (Firmware is the second card)
+            CHECK(cs_card_lead(&M, 2) == pod_model_find(&M, "a4"));      // Backend: a4 works, so it leads over a2 that asks
+            CHECK(pod_model_eff(&M, cs_card_lead(&M, 0)) == POD_WORKING); // Recent: a working agent leads
+            CHECK(cs_card_lead(&M, 1) == pod_model_find(&M, "a0") && cs_card_lead(&M, 3) == pod_model_find(&M, "a5"));
+            const ht_run_t *ln = text_run("agent-4");
+            CHECK(ln && ln->pro_font == &cs_md_28 && text_run("agent-0") && text_run("agent-5") && !text_run("agent-2"));
             CHECK(!text_run("CL") && !text_run("CO") && !text_run("MU"));
             int imgs = 0;
             for (int i = 0; i < S.count; i++) imgs += S.runs[i].pro_kind == 3 && S.runs[i].w == 36;
-            CHECK(imgs == 9);   // Recent 3 rows, Firmware 2, Backend 3, Tab2 1
+            CHECK(imgs == 0);
+            CHECK(cs_cards_move(&N, &M));
+            uint32_t nx = cs_cards_next_ms(&N, &M, now);
+            CHECK(nx >= 1 && nx <= 1000);
         }
 
-        // ▲ hint is dropped when nobody asks
-        pod_model_question_close(&M, "a2");
-        fresh();
-        cs_view_overview(&F, &N, &M, now);
-        CHECK(!text_run("go to the ask") && !text_run("\xe2\x96\xb2 1"));
-        pod_model_question(&M, "a2", "Run the migration now?");
-        fresh();
-        cs_view_overview(&F, &N, &M, now);
-        CHECK(text_run("go to the ask"));
-        {   // v3b A: "↓ inbox" is a hint; one page has no "← → pages"; every hint fits the strip whole
-            fresh();
-            cs_view_overview(&F, &N, &M, now);
-            CHECK(pod_tabs_pages_of(&N, &M) == 1 && text_run("open tab") && text_run("inbox") && text_run("go to the ask") && !text_run("pages"));
-            CHECK(text_run("\xe2\x86\x93") && !text_run("\xe2\x86\x90 \xe2\x86\x92"));
-            const char *const lab[] = {"open tab", "pages", "inbox", "go to the ask"};
-            for (int k = 0; k < 2; k++) {
-                if (k) { pod_model_swarms(&M, sw, lists, counts, 6, "s0", NULL, 0); fresh(); cs_view_overview(&F, &N, &M, now); CHECK(text_run("pages") && text_run("\xe2\x86\x90 \xe2\x86\x92")); }
-                for (int i = 0; i < 4; i++) {
-                    const ht_run_t *r = text_run(lab[i]);
-                    if (!r) continue;
-                    CHECK(r->w >= ht_pro_width(r->pro_font, lab[i]) && r->x + r->w <= POD_W - 24);   // not cut
-                }
-            }
-            pod_model_swarms(&M, sw, lists, counts, 3, "s0", NULL, 0);
-            pod_model_question_close(&M, "a2");
-            fresh();
-            cs_view_overview(&F, &N, &M, now);
-            CHECK(text_run("inbox") && text_run("open tab") && !text_run("go to the ask"));
-            pod_model_question(&M, "a2", "Run the migration now?");
+        // no hint strip: no key caps or labels along the bottom, and nothing is drawn in the last CS_FOOT_H px but the page dots
+        {
+            const char *const gone[] = {"open tab", "pages", "inbox", "go to the ask", "tap"};
+            for (int k = 0; k < 5; k++) CHECK(!text_run(gone[k]));
+            for (int i = 0; i < F.hit_count; i++) CHECK(F.hits[i].y + F.hits[i].h <= POD_W - CS_FOOT_H);
         }
 
         // 6 tabs: 7 covers, 4 to a page: two pages; the second holds the last three
@@ -320,22 +307,23 @@ int main(void) {
         N.stack[0].scroll = 0;
         pod_model_swarms(&M, sw, lists, counts, 3, "s0", NULL, 0);
 
-        // Recent: 8 agents, five rows of 108 px at a time; drag scroll shows the rest
+        // Recent: 8 agents, six rows of 104 px at a time (the screen down to its bottom margin); drag scroll shows the rest
         pod_nav_act(&N, &M, POD_A_OPEN_TAB, POD_TAB_RECENT, now);
         fresh();
         cs_view_recent(&F, &N, &M, now);
         const pod_agent_t *rl[POD_RECENT_MAX];
         int rn = pod_model_recent(&M, rl, POD_RECENT_MAX);
-        CHECK(rn == 8 && hits_of(POD_A_OPEN_AGENT) == 5);
-        for (int i = 0; i < 5; i++) { const pod_hit_t *h = nth_hit(POD_A_OPEN_AGENT, i); CHECK(!strcmp(h->id, rl[i]->id) && h->arg == i && h->y == 76 + i * 108 && h->h == 108); }
+        CHECK(rn == 8 && hits_of(POD_A_OPEN_AGENT) == 6);
+        for (int i = 0; i < 6; i++) { const pod_hit_t *h = nth_hit(POD_A_OPEN_AGENT, i); CHECK(!strcmp(h->id, rl[i]->id) && h->arg == i && h->y == 76 + i * 104 && h->h == 104); }
+        CHECK(76 + 6 * 104 <= POD_W - CS_FOOT_H);   // the last row ends above the bottom margin
         CHECK(text_run("ask") && text_run("Recent") && text_run("Overview") && text_run("go to the ask") == NULL);
         CHECK(hits_of(POD_A_BACK) == 1);
-        CHECK(text_run("open") && text_run("tabs") && text_run("back") && text_run("home") && text_run("\xe2\x86\x90 \xe2\x86\x92") && text_run("\xe2\x86\x91") && text_run("\xe2\x86\x93") && !text_run("open agent"));
+        CHECK(!text_run("open") && !text_run("tabs") && !text_run("back") && !text_run("home"));   // no hint strip
         CHECK(cs_runs(&F) <= 184);
-        CHECK(pod_scroll_pitch(&N) == 108 && pod_scroll_max(&N, &M) == 3);
+        CHECK(pod_scroll_pitch(&N) == 104 && pod_scroll_max(&N, &M) == 2);
         {   // a WORKING agent has the four bars and no dot; the others a dot and no bars
             int work = 0, bars = 0, green_dots = 0;
-            for (int i = 0; i < 5; i++) work += pod_model_eff(&M, rl[i]) == POD_WORKING;
+            for (int i = 0; i < CS_ROWS_MAX; i++) work += pod_model_eff(&M, rl[i]) == POD_WORKING;
             for (int i = 0; i < S.count; i++) {
                 const ht_run_t *r = &S.runs[i];
                 bars += r->pro_kind == K_RECT && r->w == 5 && r->fg == ht_rgb(CS_RUN);
@@ -348,11 +336,11 @@ int main(void) {
             CHECK(ln && ln->pro_font == &cs_rg_27);
             CHECK(text_run("Firmware"));   // Recent names each agent's tab
         }
-        N.stack[N.depth - 1].scroll = 3;
+        N.stack[N.depth - 1].scroll = 2;
         fresh();
         cs_view_recent(&F, &N, &M, now);
-        CHECK(hits_of(POD_A_OPEN_AGENT) == 5);
-        for (int i = 0; i < 5; i++) { const pod_hit_t *h = nth_hit(POD_A_OPEN_AGENT, i); CHECK(!strcmp(h->id, rl[3 + i]->id) && h->arg == 3 + i); }
+        CHECK(hits_of(POD_A_OPEN_AGENT) == 6);
+        for (int i = 0; i < 6; i++) { const pod_hit_t *h = nth_hit(POD_A_OPEN_AGENT, i); CHECK(!strcmp(h->id, rl[2 + i]->id) && h->arg == 2 + i); }
         N.stack[N.depth - 1].scroll = 0;
 
         // ---- Tab: the real pane split (3 panes, then 8) ----
@@ -372,17 +360,23 @@ int main(void) {
             fresh();
             cs_view_tab(&F, &N, &M, now);
             CHECK(hits_of(POD_A_OPEN_AGENT) == 3);
-            // the Recent row style, in pane order: 108 px rows right under the bar; the hit's arg is the agent's place in the list
+            // cards in pane order on the Overview grid; the hit's arg is the agent's place in the list
             for (int i = 0; i < 3; i++) {
                 const pod_hit_t *h = nth_hit(POD_A_OPEN_AGENT, i);
-                CHECK(h->y == 76 + i * 108 && h->h == 108 && h->arg == i && !strcmp(h->id, a3[i]));
+                CHECK(h->x == CS_CARD_MARGIN + (i % 2) * (CS_CARD_W + CS_CARD_GAP) && h->y == CS_CARD_TOP + (i / 2) * (CS_CARD_H + CS_CARD_GAP));
+                CHECK(h->w == CS_CARD_W && h->h == CS_CARD_H && h->arg == i && !strcmp(h->id, a3[i]));
             }
-            CHECK(texts("Backend") == 1);   // the bar's crumb only: no tab name in a row
-            CHECK(text_run("Run the migration now?") && text_run("Overview") && text_run("Backend"));
-                        CHECK(text_run("open") && text_run("tabs") && text_run("back") && text_run("home") && text_run("\xe2\x86\x90 \xe2\x86\x92") && !text_run("talk to a pane") && !text_run("open pane"));
+            CHECK(texts("Backend") == 1);   // the bar's crumb only: no tab name on a card
+            CHECK(text_run("Overview") && text_run("Backend") && !text_run("Run the migration now?"));   // no activity line
+            // the state, in a word at each card's foot, in its colour; the name in the 28 px face; the asking card's time is "ask"
+            { const ht_run_t *w = text_run("Needs you"); CHECK(w && w->fg == ht_rgb(CS_ASK) && w->pro_font == &cs_sb_26); }
+            { const ht_run_t *w = text_run("Working"); CHECK(w && w->fg == ht_rgb(CS_RUN)); }
+            CHECK(text_run("ask") && text_run("ask")->fg == ht_rgb(CS_ASK));
+            CHECK(!text_run("open") && !text_run("home") && !text_run("talk to a pane") && !text_run("open pane"));
+            CHECK(cs_tab_pages(&N, &M) == 1);
             CHECK(cs_runs(&F) <= 184);
 
-            // 8 panes: five rows, drag scroll shows the rest
+            // 8 panes: two pages of four; the frame's scroll is the page, and page dots run down the right edge
             cable_swarm_t sw8;
             memset(&sw8, 0, sizeof sw8);
             snprintf(sw8.id, SWARM_ID_MAX, "big");
@@ -401,16 +395,23 @@ int main(void) {
             pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, now);
             fresh();
             cs_view_tab(&F, &N, &M, now);
-            CHECK(hits_of(POD_A_OPEN_AGENT) == 5 && pod_scroll_max(&N, &M) == 3 && pod_scroll_pitch(&N) == 108);
+            CHECK(hits_of(POD_A_OPEN_AGENT) == 4 && cs_tab_pages(&N, &M) == 2 && pod_scroll_max(&N, &M) == 1);
             CHECK(cs_runs(&F) <= 184);
-            N.stack[N.depth - 1].scroll = 3;
+            int dots = 0;
+            for (int i = 0; i < S.count; i++) dots += S.runs[i].pro_kind == K_RECT && S.runs[i].w == 8 && S.runs[i].x > POD_W - 20;
+            CHECK(dots == 2);
+            N.stack[N.depth - 1].scroll = 1;
             fresh();
             cs_view_tab(&F, &N, &M, now);
-            CHECK(hits_of(POD_A_OPEN_AGENT) == 5 && !strcmp(nth_hit(POD_A_OPEN_AGENT, 0)->id, "a3") && nth_hit(POD_A_OPEN_AGENT, 4)->arg == 7);
+            CHECK(hits_of(POD_A_OPEN_AGENT) == 4 && !strcmp(nth_hit(POD_A_OPEN_AGENT, 0)->id, "a4") && nth_hit(POD_A_OPEN_AGENT, 3)->arg == 7);
+            N.stack[N.depth - 1].scroll = 9;   // past the end: the last page
+            fresh();
+            cs_view_tab(&F, &N, &M, now);
+            CHECK(hits_of(POD_A_OPEN_AGENT) == 4 && !strcmp(nth_hit(POD_A_OPEN_AGENT, 0)->id, "a4"));
         }
     }
 
-    // a tab with 20 agents, every one working with a long line: five rows, the scroll reaches the rest, the run budget holds
+    // a tab with 20 agents, every one working with a long name: five pages of cards, the last reachable, the run budget holds
     {
         static pod_model_t M;
         static pod_nav_t N;
@@ -435,16 +436,39 @@ int main(void) {
         pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 100000u);
         fresh();
         cs_view_tab(&F, &N, &M, 100000u);
-        CHECK(hits_of(POD_A_OPEN_AGENT) == 5 && pod_scroll_max(&N, &M) == 15);
+        CHECK(hits_of(POD_A_OPEN_AGENT) == 4 && pod_scroll_max(&N, &M) == 4);
         CHECK(cs_runs(&F) <= 184);
-        N.stack[N.depth - 1].scroll = 15;
+        N.stack[N.depth - 1].scroll = 4;
         fresh();
         cs_view_tab(&F, &N, &M, 100000u);
-        CHECK(hits_of(POD_A_OPEN_AGENT) == 5 && nth_hit(POD_A_OPEN_AGENT, 4)->arg == 19);
-        bool cut = false;   // the long name and line end with an ellipsis
+        CHECK(hits_of(POD_A_OPEN_AGENT) == 4 && nth_hit(POD_A_OPEN_AGENT, 3)->arg == 19);
+        CHECK(cs_runs(&F) <= 184);
+        bool cut = false;   // the long name ends with an ellipsis
         for (int i = 0; i < S.count; i++) cut |= S.runs[i].pro_kind == K_TEXT && strstr(S.runs[i].text, "...") != NULL;
         CHECK(cut);
         printf("runs tab-20 %d\n", cs_runs(&F));
+    }
+
+    // a tab of ten panes where only the ninth works: it still leads the tab's Overview card (every pane is ranked)
+    {
+        static pod_model_t M;
+        pod_model_reset(&M);
+        pod_model_agents_begin(&M);
+        static char ids[10][8], *idp[10];
+        for (int i = 0; i < 10; i++) { snprintf(ids[i], sizeof ids[i], "c%d", i); idp[i] = ids[i]; pod_model_agent(&M, ids[i], ids[i], "claude", "mac"); }
+        pod_model_agents_end(&M);
+        cable_swarm_t sw;
+        memset(&sw, 0, sizeof sw);
+        snprintf(sw.id, SWARM_ID_MAX, "ten");
+        snprintf(sw.name, CABLE_NAME_MAX, "Ten");
+        sw.panes = sw.agents = 10;
+        const char *const *lists[1] = {(const char *const *)idp};
+        uint8_t cnt[1] = {10};
+        pod_model_swarms(&M, &sw, lists, cnt, 1, "ten", NULL, 0);
+        pod_model_link(&M, true);
+        pod_model_turn(&M, "c8", "activity", "Editing", 12, 100000u);
+        pod_model_clock(&M, 100000u);
+        CHECK(cs_card_lead(&M, 1) == pod_model_find(&M, "c8"));
     }
 
     // ---- Agent, Recap, Talk, Inbox, Toast, Update (Task 10) ----
@@ -500,10 +524,10 @@ int main(void) {
         fresh();
         cs_view_agent(&F, &N, &M, now);
         { const ht_run_t *r = text_run("Running"); CHECK(r && r->fg == ht_rgb(CS_RUN) && r->pro_font == &cs_md_28); }
-        CHECK(text_run("NOW") && text_run("landing") && text_run("hold") && text_run("src/hero.tsx"));
+        CHECK(text_run("NOW") && text_run("landing") && !text_run("hold") && text_run("src/hero.tsx"));
         { const ht_run_t *r = text_run("landing"); CHECK(r && r->pro_font == &cs_sb_34); }
         CHECK(!text_run("THIS TURN") && !text_run("LEADING UP TO IT") && !text_run("TOKENS") && !text_run("step 0") && !text_run("step 5"));
-        CHECK(text_run("talk") && text_run("back") && text_run("home") && text_run("panes") && text_run("Desktop") && !text_run("Overview"));
+        CHECK(!text_run("talk") && !text_run("back") && !text_run("home") && !text_run("panes") && text_run("Desktop") && !text_run("Overview"));
         for (int i = 0; i < S.count; i++) CHECK(S.runs[i].pro_kind != K_TEXT || !strstr(S.runs[i].text, "pane "));   // no "pane i of n"
         CHECK(text_run("Mac Studio") && text_run("\xc2\xb7"));
         { const ht_run_t *r = text_run("Mac Studio"); CHECK(r->pro_font == &cs_rg_20); }
@@ -559,7 +583,7 @@ int main(void) {
         CHECK(!text_run("LEADING UP TO IT") && !text_run("THIS TURN") && !text_run("TOKENS") && !text_run("NOW"));
         // M9: voice on an asking agent stays refused, so the screen does not offer it: no hold hint, no voice line.
         CHECK(!text_run("or hold to answer by voice") && !text_run("answer by voice") && !text_run("hold") && !text_run("talk") && !text_run("talk to harness-cli"));
-        CHECK(text_run("panes") && text_run("back") && text_run("home") && text_run("\xe2\x86\x91"));
+        CHECK(!text_run("panes") && !text_run("back") && !text_run("home"));
         CHECK(!text_run("Read migrations/0042.sql") && !text_run("Ran the migration on a copy"));
         CHECK(cs_runs(&F) <= 184);
         printf("runs agent-ask %d\n", cs_runs(&F));
@@ -571,7 +595,7 @@ int main(void) {
         cs_view_recap(&F, &N, &M, now);
         CHECK(!text_run("SUMMARY") && text_run("Done") && text_run("TOKENS") && text_run("DURATION") && text_run("TESTS") && text_run("COMMITS"));
         CHECK(!text_run("STEPS"));
-        CHECK(text_run("54 \xe2\x9c\x93") && text_run("talk") && text_run("4:12"));
+        CHECK(text_run("54 \xe2\x9c\x93") && !text_run("talk") && text_run("4:12"));
         CHECK(text_run("61.4k") && text_prefix("in 42.9k") && text_prefix("in 42.9k")->pro_font == &cs_mono_15);
         {   // the sub-line, when drawn, starts "in " and is never cut inside a number: "in 42.9k" or "in 42.9k \xc2\xb7 out 18.5k", whole (Linux fonts are wider than macOS)
             const ht_run_t *sub = text_prefix("in ");
@@ -590,7 +614,7 @@ int main(void) {
             CHECK(tiles == 4 && tile_h > 0 && tile_h <= 54);   // half of the old 108 px
             for (int k = 0; k < 4; k++) {
                 const ht_run_t *l = NULL, *v = NULL;
-                for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && S.runs[i].y >= 500 && S.runs[i].y < 640) {   // the tile band
+                for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && S.runs[i].y >= 500 && S.runs[i].y < POD_W - CS_FOOT_H) {   // the tile band
                     if (!strcmp(S.runs[i].text, labels[k])) l = &S.runs[i];
                     if (!strcmp(S.runs[i].text, values[k])) v = &S.runs[i];
                 }
@@ -696,7 +720,7 @@ int main(void) {
             CHECK(bars == 36);
         }
         CHECK(hmax[1] > hmax[0] + 20);
-        CHECK(text_run("Listening \xc2\xb7 0:03") && text_run("landing") && text_run("Tap anywhere to send") && text_run("tap") && text_run("send") && !text_run("release") && !text_run("slide \xe2\x86\x93"));
+        CHECK(text_run("Listening \xc2\xb7 0:03") && text_run("landing") && text_run("Tap anywhere to send") && !text_run("tap") && !text_run("send") && !text_run("release") && !text_run("slide \xe2\x86\x93"));
         CHECK(F.hit_count && F.hits[F.hit_count - 1].action == POD_A_TALK && F.hits[F.hit_count - 1].w == POD_W);   // topmost: wins over crumbs and chip
         CHECK(cs_runs(&F) <= 184);
         printf("runs talk-listen %d\n", cs_runs(&F));
@@ -719,7 +743,7 @@ int main(void) {
         {
             const ht_run_t *g1 = text_run("NEEDS YOU"), *g2 = text_run("FINISHED"), *g3 = text_run("FAILED");
             CHECK(g1 && g2 && g3 && g1->y < g2->y && g2->y < g3->y);
-            CHECK(text_run("api-retry") && text_run("harness-cli") && text_run("tap") && text_run("home"));
+            CHECK(text_run("api-retry") && text_run("harness-cli") && !text_run("tap") && !text_run("home"));
             CHECK(cs_runs(&F) <= 184);
             printf("runs inbox %d\n", cs_runs(&F));
             // NEEDS YOU rows have no unread entry: they register FOLLOW (index into model->agents), and it opens the agent
@@ -752,8 +776,7 @@ int main(void) {
             int logos = 0;
             for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind != K_TEXT && S.runs[i].w == 44 && S.runs[i].pro_height == 44) logos++;
             CHECK(logos >= 2);
-            CHECK(text_run("tap") && text_run("open") && text_run("\xe2\x86\x93") && text_run("home"));
-            CHECK(!text_run("back") && !text_run("\xe2\x86\x91") && !text_run("\xe2\x86\x90"));
+            CHECK(!text_run("tap") && !text_run("open") && !text_run("home") && !text_run("back"));   // no hint strip
             CHECK(cs_runs(&F) <= 184);
             // a tall list: 8 entries of mixed lengths, each reachable by scrolling
             const char *const msgs[] = {"Done.", "OTA resend on a gap; 3 tests added.", longmsg, "Short one", longmsg, "Draft ready for review.", "Build green on all targets after the rebase onto main today.", "Last row"};
@@ -774,7 +797,7 @@ int main(void) {
                 CHECK(cs_runs(&F) <= 184);
                 for (int i = 0; i < F.hit_count; i++) {
                     if (F.hits[i].action != POD_A_OPEN_NOTIF) continue;
-                    CHECK(F.hits[i].y + F.hits[i].h <= POD_W - CS_HINT_H);
+                    CHECK(F.hits[i].y + F.hits[i].h <= POD_W - CS_FOOT_H);
                     for (int k = 0; k < 8; k++) { char id[8]; snprintf(id, sizeof id, "x%d", k); if (!strcmp(F.hits[i].id, id)) seen[k] = true; }
                 }
             }

@@ -657,6 +657,16 @@ notify = true              # OS notifications through the terminal
 
 `hn --keys` lists every binding, tmux-style, and reports problems in either file.
 
+## Models on Omarchy
+
+On an Omarchy computer in Omagrid, a local model that is not running yet offers
+`[ Personal grid ]  [ Omarchy community ]` in its Models preview: `←` and `→` choose (with nothing
+searched), Enter runs it there. On the community grid it serves anyone in Omagrid and your harness
+stays on its model; pick it under Shared with you to use it. A model that serves shows a
+`Grid │ Requests  Out  In  Cached` table of what this computer answered on each grid.
+Other computers see none of this: `set -g @hn-models-serving-os omarchy` is the default, and
+it takes `macos`, `linux` or `all` too.
+
 ## Environment
 
 | Variable | |

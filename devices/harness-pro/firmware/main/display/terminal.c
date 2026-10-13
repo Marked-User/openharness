@@ -54,14 +54,14 @@ uint32_t ht_utf8_next(const char **p)
 }
 
 // Does the Pro's text path draw this code point as itself? Latin-1, typographic punctuation (aliased to ASCII by
-// pro_canvas.c) and the Vietnamese letters its proportional atlases carry. The five marks below keep their UTF-8
-// through normalization as well, as they always have; the atlases draw them as '?'.
-static bool native_glyph(uint32_t cp, bool console)
+// pro_canvas.c), the Vietnamese letters and the marks in the face's extras table. With a face, nothing else is kept
+// (it would draw '?'). With no face, the five marks below keep their UTF-8 through normalization as they always have.
+static bool native_glyph(uint32_t cp, const struct ht_pro_font *face)
 {
-    if (console && ht_pro_extra_index(cp) >= 0) return true;   // the Console atlases carry these marks
+    if (ht_pro_can_draw(face, cp)) return true;   // the face carries this mark
     if (cp < 32 || (cp >= 127 && cp < 160)) return false;
     if (ht_pro_vietnamese_index(cp) >= 0) return true;
-    if (cp == 0x2713 || cp == 0x2717 || cp == 0x2192 || cp == 0x2197 || cp == 0xe000) return true;
+    if (!face && (cp == 0x2713 || cp == 0x2717 || cp == 0x2192 || cp == 0x2197 || cp == 0xe000)) return true;
     cp = punctuation_alias(cp);
     return cp >= 32 && cp <= 255;
 }
@@ -100,7 +100,7 @@ typedef struct {
     bool fraction, digit, space;
     char scratch[12];
 } display_token_t;
-static void display_token(const char **cursor, display_token_t *t, bool console)
+static void display_token(const char **cursor, display_token_t *t, const struct ht_pro_font *face)
 {
     const char *start = *cursor;
     uint32_t cp = (unsigned char)*start;
@@ -114,7 +114,7 @@ static void display_token(const char **cursor, display_token_t *t, bool console)
     }
     t->fraction = (cp >= 0xbc && cp <= 0xbe) || (cp >= 0x2150 && cp < 0x215f) || cp == 0x2189;
     if (cp >= 9 && cp <= 13) { t->text=" "; t->bytes=1; }
-    else if (cp == 0xa0 || cp == 0xad || t->fraction || !native_glyph(cp, console)) {
+    else if (cp == 0xa0 || cp == 0xad || t->fraction || !native_glyph(cp, face)) {
         t->text = display_fallback(cp,t->scratch);
         t->bytes = t->cells = (unsigned)strlen(t->text); // fallback pool is ASCII only
     }
@@ -127,8 +127,8 @@ static bool token_gap(const display_token_t *t, bool digit, bool fraction)
     return t->bytes && ((t->fraction && digit) ||
         (fraction && t->text[0] >= '0' && t->text[0] <= '9'));
 }
-bool ht_display_text(char *dst, size_t cap, const char *src) { return ht_display_text_ex(dst, cap, src, false); }
-bool ht_display_text_ex(char *dst, size_t cap, const char *src, bool console)
+bool ht_display_text(char *dst, size_t cap, const char *src) { return ht_display_text_ex(dst, cap, src, NULL); }
+bool ht_display_text_ex(char *dst, size_t cap, const char *src, const struct ht_pro_font *face)
 {
     // Byte capacity also bounds cell count, avoiding unbounded size_t -> int.
     if (!cap) return false;
@@ -138,7 +138,7 @@ bool ht_display_text_ex(char *dst, size_t cap, const char *src, bool console)
     bool digit = false, fraction = false, complete = true;
     while (*p) {
         bool newline = *p == '\n';
-        display_token_t t; display_token(&p,&t,console);
+        display_token_t t; display_token(&p,&t,face);
         bool gap = token_gap(&t,digit,fraction);
         if (t.cells + gap > (unsigned)columns || t.bytes + gap >= cap - used) {
             complete = false; break;

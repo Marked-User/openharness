@@ -1993,3 +1993,116 @@ describe('models other apps downloaded, started in their own app', () => {
   })
 
 })
+
+describe('the grids this computer serves a model on', () => {
+  /** Omagrid beside the own grid: `grid ls` lists both, and this computer's engine for Small-Q4 has a run
+   *  record there too (as `grid join` on Omagrid writes it). */
+  const onOmagrid = async (record: Record<string, unknown> = {}) => {
+    const folder = join(home, 'run', 'engines', 'grid-oma')
+    await mkdir(folder, { recursive: true })
+    await writeFile(join(folder, 'remote.json'), JSON.stringify({ node_id: 'oma-node', engines: [{ endpoint_url: null, models: ['Small-Q4.gguf'] }], advertise_as: ['Small-Q4'], ...record }))
+    await writeFile(join(folder, 'remote.heartbeat'), '')
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => args.includes('ls')
+      ? ok([{ grid: 'home', id: 'grid-home' }, { grid: 'Omagrid', id: 'grid-oma' }]) : original(args, output))
+  }
+  /** Omagrid's overview: a stranger's node serving the same model, and this computer's. */
+  const omagrid = (): GridInventory => ({ state: 'awake', status: null, nodes: [
+    { node_id: 'stranger', online: true, models: ['small-q4'], answered: { window_seconds: 86400, requests: 900, by_model: [{ model: 'small-q4', requests: 900, tokens_out: 9_000_000 }] } },
+    { node_id: 'oma-node', online: true, models: ['small-q4'], answered: { window_seconds: 86400, requests: 268, by_model: [{ model: 'small-q4', requests: 268, tokens_out: 1_100_000, tokens_in: 2_400_000, tokens_cached: 1_800_000 }] } },
+  ] })
+  const withServingNodes = (servingNodes: (grid: string) => Promise<GridInventory>, extra: Partial<ConstructorParameters<typeof LocalModels>[0]> = {}) =>
+    modelFixture({ stateDir, processEnv: { GRID_HOME: home }, run, request: request as typeof fetch, inventory, servingNodes, ...extra })
+
+  it('names the own grid and every other grid it serves on, with only its own engine’s figures there', async () => {
+    const servingNodes = vi.fn(async () => omagrid())
+    service = withServingNodes(servingNodes)
+    await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    await onOmagrid()
+    expect((await service.list('home', true)).models[0].servedOn).toEqual([
+      // Each with the name that grid lists it under — what a harness moves onto it there by.
+      { grid: 'home', servedAs: ['Small-Q4'], requests: 4, windowSeconds: 3600 },
+      { grid: 'Omagrid', servedAs: ['Small-Q4'], requests: 268, tokensOut: 1_100_000, tokensIn: 2_400_000, tokensCached: 1_800_000, windowSeconds: 86400 },
+    ])
+    // Read as another grid's nodes, never through the own grid's inventory, which takes a grid for the account's own.
+    expect(servingNodes.mock.calls).toEqual([['Omagrid']])
+    expect(inventory.mock.calls.every(([grid]) => grid === 'home')).toBe(true)
+  })
+
+  it('names no grid for a model it serves nowhere, and reads no other grid without a run record here', async () => {
+    const servingNodes = vi.fn(async () => omagrid())
+    service = withServingNodes(servingNodes)
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => args.includes('ls')
+      ? ok([{ grid: 'home', id: 'grid-home' }, { grid: 'Omagrid', id: 'grid-oma' }]) : original(args, output))
+    expect((await service.list('home')).models[0]).not.toHaveProperty('servedOn')
+    expect(servingNodes).not.toHaveBeenCalled()
+  })
+
+  it('names a grid that sleeps while its engine here is alive, with no figures; not one whose engine is gone', async () => {
+    service = withServingNodes(async () => ({ state: 'asleep', status: 'asleep', nodes: [] }))
+    await onOmagrid({ pid: process.pid })
+    expect((await service.list('home', true)).models[0].servedOn).toEqual([{ grid: 'Omagrid', servedAs: ['Small-Q4'] }])
+    await onOmagrid({ pid: 0 })
+    expect((await service.list('home', true)).models[0]).not.toHaveProperty('servedOn')
+  })
+
+  it('names a grid whose overview does not list this computer’s engine yet, or could not be read, while its process is alive', async () => {
+    // No process for its record (gone, or mid-spawn): not serving there.
+    service = withServingNodes(async () => ({ state: 'awake', status: null, nodes: [omagrid().nodes[0]] }))
+    await onOmagrid()
+    expect((await service.list('home', true)).models[0]).not.toHaveProperty('servedOn')
+    service = withServingNodes(async () => { throw new Error('unreachable') })
+    expect((await service.list('home', true)).models[0]).not.toHaveProperty('servedOn')
+    // Its process alive: serving there, figures unknown — so the own grid never starts a second engine of it.
+    await onOmagrid({ pid: process.pid })
+    expect((await service.list('home', true)).models[0].servedOn).toEqual([{ grid: 'Omagrid', servedAs: ['Small-Q4'] }])
+    service = withServingNodes(async () => ({ state: 'awake', status: null, nodes: [omagrid().nodes[0]] }))
+    expect((await service.list('home', true)).models[0].servedOn).toEqual([{ grid: 'Omagrid', servedAs: ['Small-Q4'] }])
+  })
+
+  it('starts a model this computer knows from another grid’s list on the community grid by the same id', async () => {
+    // Small-Q4 served on the own grid, then its run record gone: known there as `local:Small-Q4.gguf` only.
+    catalogCards = []
+    await writeFile(join(home, 'models', 'Small-Q4.gguf'), Buffer.alloc(64))
+    await writeFile(join(records, 'remote.json'), JSON.stringify({ node_id: 'local-node', engines: [{ endpoint_url: null, models: ['Small-Q4.gguf'] }], advertise_as: [] }))
+    expect((await service.list('home', true)).models.map(m => m.id)).toContain('local:Small-Q4.gguf')
+    await rm(join(records, 'remote.json'))
+    await service.act('Omagrid', 'local:Small-Q4.gguf', 'start'); await service.settled()
+    expect(calls.find(args => args.includes('join'))?.slice(0, 5)).toEqual(['--remote', 'join', 'Omagrid', '--serve', 'Small-Q4.gguf'])
+  })
+
+  it('reads only the own grid for a caller that gives no other grid’s reader (as before)', async () => {
+    await service.act('home', 'org/Small-GGUF', 'start'); await service.settled()
+    await onOmagrid()
+    expect((await service.list('home', true)).models[0].servedOn).toEqual([{ grid: 'home', servedAs: ['Small-Q4'], requests: 4, windowSeconds: 3600 }])
+  })
+
+  it('says which OS grid this computer claims, and nothing for none', async () => {
+    expect((await withServingNodes(async () => omagrid(), { os: () => 'omarchy' }).list('home')).os).toBe('omarchy')
+    expect(await withServingNodes(async () => omagrid(), { os: () => undefined }).list('home')).not.toHaveProperty('os')
+  })
+
+  it('names the community grid of this computer’s OS that the account is in, for a start there', async () => {
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => args.includes('ls') ? ok([
+      { grid: 'home', id: 'grid-home', type: 'permissioned-public' }, { grid: '--flag', id: 'x', type: 'os-community' },
+      { grid: 'Omagrid', id: 'grid-oma', type: 'os-community' },
+    ]) : original(args, output))
+    expect((await service.list('home')).osGrid).toBe('Omagrid')
+    expect(await service.communityGrid()).toBe('Omagrid')
+    run.mockImplementation(original)
+    expect(await service.communityGrid()).toBeNull()
+    expect(await service.list('home', true)).not.toHaveProperty('osGrid')
+  })
+
+  it('a list of the own grid says how a start on the community grid goes, and how it ended', async () => {
+    const ack = await service.act('Omagrid', 'org/Small-GGUF', 'start')
+    expect((await service.list('home', true)).models[0].operation).toMatchObject({ id: ack.operation!.id, phase: 'running' })
+    await service.settled()
+    expect((await service.list('home', true)).models[0].operation).toMatchObject({ id: ack.operation!.id, phase: 'done' })
+    // An operation on the own grid after it: its own receipt again.
+    const own = await service.act('home', 'org/Small-GGUF', 'stop'); await service.settled()
+    expect((await service.list('home', true)).models[0].operation).toMatchObject({ id: own.operation!.id, action: 'stop' })
+  })
+})

@@ -77,6 +77,26 @@ pub struct LocalModel {
     pub app: Option<String>,
     /// The names the grid lists it under while it runs here (`servedAs`; absent from an older daemon).
     pub served_as: Vec<String>,
+    /// Every grid this computer serves it on, with what its engine answered there (`servedOn`; absent
+    /// from an older daemon).
+    pub served_on: Vec<ServedOn>,
+}
+
+/// A grid this computer serves a model on, and what this computer's engine answered there over the
+/// grid's window — none of the other machines' figures. No figures: its grid sleeps.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ServedOn { pub grid: String, pub requests: Option<f64>,
+    /// Tokens its engine wrote, was sent, and reused from its prompt cache (part of [tokens_in]).
+    pub tokens_out: Option<f64>, pub tokens_in: Option<f64>, pub tokens_cached: Option<f64>, pub window_secs: Option<f64>,
+    /// The names that grid lists it under: what a harness moves onto it there by (`servedAs`).
+    pub served_as: Vec<String> }
+
+impl ServedOn {
+    fn from(v: &Value) -> Option<ServedOn> {
+        Some(ServedOn { grid: text(&v["grid"])?, requests: num(&v["requests"]), tokens_out: num(&v["tokensOut"]), tokens_in: num(&v["tokensIn"]),
+            tokens_cached: num(&v["tokensCached"]), window_secs: num(&v["windowSeconds"]),
+            served_as: v["servedAs"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default() })
+    }
 }
 
 impl LocalModel {
@@ -88,7 +108,8 @@ impl LocalModel {
             tok_s: num(&v["tokensPerSecond"]), requests: num(&v["requests"]), window_secs: num(&v["windowSeconds"]),
             context: num(&v["contextWindow"]), est_tok_s: num(&v["estTokS"]), params_b: num(&v["paramsB"]),
             operation: Operation::parse(&v["operation"]), asleep: v["gridAsleep"] == true, app: text(&v["app"]),
-            served_as: v["servedAs"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default(), id,
+            served_as: v["servedAs"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+            served_on: v["servedOn"].as_array().map(|a| a.iter().filter_map(ServedOn::from).collect()).unwrap_or_default(), id,
         })
     }
     pub fn running(&self) -> bool { self.state == "running" }
@@ -99,7 +120,8 @@ impl LocalModel {
     pub fn answers_to(&self, id: &str) -> bool {
         self.id.eq_ignore_ascii_case(id) || self.name.eq_ignore_ascii_case(id) || self.served_as.iter().any(|s| s.eq_ignore_ascii_case(id))
     }
-    /// Its name as shown: without the quantization a file name ends in, which the Quant line says.
+    /// Its name as shown: without the quantization a file name ends in, which the Quant line says
+    /// where two downloads of one model need it.
     /// [name] stays whole — it is what the grid serves it as, and what a harness is matched to it by.
     pub fn shown(&self) -> String { without_quant(&self.name).to_string() }
     pub fn downloaded(&self) -> bool { self.state == "downloaded" || self.running() }
@@ -143,7 +165,13 @@ pub struct Snapshot { pub models: Vec<LocalModel>, pub memory: Option<f64>, pub 
     /// What the catalog fits models to, and whether that is an NVIDIA card's VRAM (`fitMemory: vram`)
     /// with its cards' VRAM in all: [memory] is the machine's RAM, not what such a model runs in.
     pub fit: Option<f64>, pub fit_vram: bool, pub gpu_memory: Option<f64>,
-    pub grid_setup_needed: bool, pub grid_setup_error: Option<String> }
+    pub grid_setup_needed: bool, pub grid_setup_error: Option<String>,
+    /// The OS grid this computer claims, as grid names it: `macos`, `linux`, `omarchy` (absent from an
+    /// older daemon, and for no OS grid).
+    pub os: Option<String>,
+    /// The community grid of that OS this account is in (`osGrid`: `Omagrid`), where the Run on
+    /// community button runs a model. None: in none, or an older daemon.
+    pub os_grid: Option<String> }
 
 /// None when there is no list — a daemon too old for it, or a reply that failed.
 pub fn parse_local(reply: &Value) -> Option<Snapshot> {
@@ -154,6 +182,7 @@ pub fn parse_local(reply: &Value) -> Option<Snapshot> {
         notice: text(&reply["notice"]), busy: reply["busy"] == true, supports_download: reply["supportsDownload"] == true,
         grid_setup_needed: reply["gridSetupNeeded"] == true, grid_setup_error: text(&reply["gridSetupError"]),
         fit: num(&reply["fitBytes"]).filter(|m| *m > 0.0), fit_vram: reply["fitMemory"] == "vram", gpu_memory: num(&reply["gpuMemoryBytes"]).filter(|m| *m > 0.0),
+        os: text(&reply["os"]), os_grid: text(&reply["osGrid"]),
     })
 }
 
@@ -355,6 +384,9 @@ pub struct Use {
     /// that one answers until this one can start.
     pub stops: Option<(String, String)>,
     pub identity: Option<crate::session_close::Identity>,
+    /// Run on the community grid of this computer's OS (its button's label, `Omarchy community`), for its
+    /// members: started and served there, no harness moved — one picks it under Shared with you.
+    pub community: Option<String>,
 }
 
 /// An `agent_retarget` sent: the harness, the model it goes to (empty: its own login), and when —
@@ -368,13 +400,20 @@ const SWITCH_FOR: Duration = Duration::from_secs(60);
 /// A Use over: its row, its model's name, the step it reached, and why it failed (None: ready);
 /// [seen]: the cursor has been on its row since (leaving the row then ends it).
 #[derive(Clone, Debug)]
-pub struct Ended { pub row: String, pub name: String, pub step: Step, pub failed: Option<String>, pub seen: bool, pub stops: Option<String> }
+pub struct Ended { pub row: String, pub name: String, pub step: Step, pub failed: Option<String>, pub seen: bool, pub stops: Option<String>,
+    /// A run on the community grid ([Use::community]).
+    pub community: Option<String> }
 
-/// A Use's steps, as its preview lists them: a stop of the model running here only when it makes one.
-pub fn steps(stops: Option<&str>) -> Vec<String> {
+/// A Use's steps, as its preview lists them: a stop of the model running here only when it makes one;
+/// a run on [community] ends serving there, with no harness to switch.
+pub fn steps(stops: Option<&str>, community: Option<&str>) -> Vec<String> {
     let mut out = vec!["Download".to_string()];
     out.extend(stops.map(|name| format!("Stop {name}")));
-    out.extend(["Start", "Serve", "Switch harness"].map(String::from));
+    out.push("Start".into());
+    match community {
+        Some(label) => out.push(format!("Serve on {label}")),
+        None => out.extend(["Serve", "Switch harness"].map(String::from)),
+    }
     out
 }
 
@@ -470,6 +509,10 @@ pub struct Models {
     /// The first Enter's question on a row (row id, words), in its preview until Enter, Esc or the
     /// cursor leaves the row.
     pub confirm: Option<(String, String)>,
+    /// The row whose preview has its other Run on button chosen (→): the community button on a model not
+    /// running yet, Enter runs it there; the Personal grid button on one running on the community grid,
+    /// Enter also runs it on the personal grid. None (←, and where every row starts): Enter's Use.
+    pub run_other: Option<String>,
     /// How the last Use ended: its preview's checklist and ✓ / ✗ stay until the cursor leaves its
     /// row or another action starts.
     pub ended: Option<Ended>,
@@ -592,6 +635,8 @@ fn served_in(grids: Option<&Grids>, m: &LocalModel) -> Option<(String, String)> 
 
 /// The model running on this computer besides [m]: the one a Use of [m] stops first.
 fn other_running(app: &App, m: &LocalModel) -> Option<LocalModel> {
+    // (One running on the community grid does not count: one local model runs at a time on the personal
+    // grid; a computer may serve its community beside it — owner, 2026-10-13.)
     app.models_view.local.get(&app.fleet.local_id)?.models.iter().find(|o| o.can_stop && o.id != m.id).cloned()
 }
 
@@ -659,10 +704,13 @@ pub fn facts(app: &App, m: &LocalModel, t: Option<&Target>) -> Facts {
     let other = other_running(app, m).map(|o| o.shown());
     let runs = t.is_some_and(|t| can_run(app, &t.engine));
     let served = served_in(v.grids.get(machine), m);
-    let in_use = t.is_some_and(|t| m.running() && !t.grid_model.is_empty()
-        && (served.as_ref().is_some_and(|(_, id)| id.eq_ignore_ascii_case(&t.grid_model)) || m.answers_to(&t.grid_model)));
+    // Running on the community grid alone: the name it is listed under there is it too.
+    let community = if m.running() || !on_community(app, m) { None } else { community_served(app, m).map(|(_, name)| name) };
+    let on_community_as = |id: &str| community.as_ref().is_some_and(|n| n.eq_ignore_ascii_case(id));
+    let in_use = t.is_some_and(|t| !t.grid_model.is_empty() && (on_community_as(&t.grid_model) || m.running()
+        && (served.as_ref().is_some_and(|(_, id)| id.eq_ignore_ascii_case(&t.grid_model)) || m.answers_to(&t.grid_model))));
     let get = !m.downloaded() && m.can_start && !busy && online;
-    let names = |id: &str| m.answers_to(id) || served.as_ref().is_some_and(|(_, s)| s.eq_ignore_ascii_case(id));
+    let names = |id: &str| m.answers_to(id) || served.as_ref().is_some_and(|(_, s)| s.eq_ignore_ascii_case(id)) || on_community_as(id);
     Facts {
         switching: switching_for(app, t).is_some_and(|to| !to.is_empty() && names(to)),
         failed: op.as_ref().is_some_and(Operation::failed),
@@ -768,6 +816,9 @@ fn local_row(app: &App, m: &LocalModel, t: Option<&Target>, group: &str) -> Row 
     // No mark before the name (owner, 2026-10-13: "remove these silly icons"): the word on the right
     // says it — ✓ In use, Running, Downloaded, Get, Failed, a download's progress.
     let word = f.word(m);
+    // Run on the community grid alone: Shared (the own grid's list calls it downloaded) — a word of its own
+    // still wins: under way, failed, in use.
+    let word = if !m.running() && on_community(app, m) && matches!(word.as_str(), "Use" | "Get" | "Downloaded" | "") { "Shared".to_string() } else { word };
     // As the desktop's row: the name alone, then its size and speed (or the app it runs in) in
     // columns that line up, then the word — the word alone where the list is narrow. Its
     // quantization and app are in the preview, and found by a search.
@@ -1008,6 +1059,11 @@ pub enum Plan {
     Use { model: String, download: bool },
     /// A download, start or stop alone (no harness to move).
     Act { model: String, action: &'static str },
+    /// A local model run on the community grid of this computer's OS: got, started and served there, no
+    /// harness moved ([start_community]).
+    Community { model: String, download: bool },
+    /// A local model stopped on the community grid.
+    StopCommunity(String),
     Wake(String),
     More,
     Api(String),
@@ -1051,7 +1107,11 @@ fn api_payload(app: &App, api: &Api, model: &str, t: Option<&Target>) -> Result<
 }
 
 /// What Enter does on row [id].
-pub fn plan_enter(app: &App, id: &str) -> Plan {
+pub fn plan_enter(app: &App, id: &str) -> Plan { plan_enter_on(app, id, false) }
+
+/// [plan_enter]; [personal]: on a model Shared on the community grid, its Personal grid button chosen — run
+/// it on the personal grid too (a Use, the harness moved there), not onto it on the community grid.
+fn plan_enter_on(app: &App, id: &str, personal: bool) -> Plan {
     let t = target(app);
     let t = t.as_ref();
     let v = &app.models_view;
@@ -1100,6 +1160,17 @@ pub fn plan_enter(app: &App, id: &str) -> Plan {
     if let (true, Some(t), Some((grid, served))) = (f.use_running, t, f.served.clone()) {
         return Plan::Retarget { machine: t.machine.clone(), payload: json!({ "agentId": t.agent, "gridModel": served, "gridName": grid }), name: m.shown() };
     }
+    // Running on the community grid alone (Shared): Enter moves this harness onto it there, as its Shared with
+    // you row does — no second engine on the personal grid unless its Personal grid button asks for one
+    // ([personal]; owner, 2026-10-13).
+    if !personal && !m.running() && on_community(app, &m) {
+        return match (t, community_served(app, &m)) {
+            (None, _) => say("Running on its community grid — ^S stops it"),
+            (Some(t), _) if !can_run(app, &t.engine) => Plan::Say(format!("{} runs only on its own login", engine_label(&t.engine))),
+            (Some(t), Some((grid, served))) => Plan::Retarget { machine: t.machine.clone(), payload: json!({ "agentId": t.agent, "gridModel": served, "gridName": grid }), name: m.shown() },
+            (Some(_), None) => say("Not serving yet — try again in a moment"),
+        };
+    }
     if m.running() {
         return match t {
             None => say("Running — ^S stops it"),
@@ -1146,6 +1217,11 @@ pub fn plan_stop(app: &App, id: &str) -> Plan {
     let Some(m) = id.strip_prefix("mv:local:").and_then(|model| local_model(app, model)) else { return Plan::Nothing };
     let f = facts(app, &m, None);
     if f.busy { return Plan::Say("Wait for the current model operation to finish.".into()) }
+    // Run on the community grid alone: stopped there.
+    if !m.can_stop && on_community(app, &m) {
+        let label = community_label(app).unwrap_or_else(|| "the community grid".into());
+        return Plan::Arm(format!("^S again stops {} on {label} — the download is kept", m.shown()), Box::new(Plan::StopCommunity(m.id.clone())));
+    }
     if !m.can_stop { return Plan::Say(if m.running() { "Other models share its engine — stop it from the desktop's Model Manager".into() } else { "It is not running".into() }) }
     Plan::Arm(format!("^S again stops {} — the download is kept", m.shown()), Box::new(Plan::Act { model: m.id.clone(), action: "stop" }))
 }
@@ -1157,7 +1233,13 @@ pub fn choose(app: &mut App, picker: &mut Picker, id: &str, stop: bool) {
         picker.say(no_target_why(app)); return;
     }
     let key = format!("{id}\u{1f}{}", if stop { "stop" } else { "enter" });
-    let plan = if stop { plan_stop(app, id) } else { plan_enter(app, id) };
+    // (Its other button chosen — → on its preview — Enter runs it on the community grid, or, on one Shared
+    // there, on the personal grid too.)
+    let other = app.models_view.run_other.as_deref() == Some(id);
+    let plan = if stop { plan_stop(app, id) }
+        else if other && run_on_choice(app, id).is_some() { plan_community(app, id) }
+        else if other && personal_choice(app, id) { plan_enter_on(app, id, true) }
+        else { plan_enter(app, id) };
     run(app, picker, plan, &key);
 }
 
@@ -1201,6 +1283,9 @@ fn run(app: &mut App, picker: &mut Picker, plan: Plan, key: &str) {
         // (Its steps are the preview's checklist.)
         Plan::Use { model, download } => start_use(app, &model, download),
         Plan::Act { model, action } => { picker.say(format!("{}…", pending_word(action))); act(app, &model, action) }
+        // (Its steps are the preview's checklist, as a Use's.)
+        Plan::Community { model, download } => start_community(app, &model, download),
+        Plan::StopCommunity(model) => { picker.say("Stopping…"); act_on(app, &model, "stop", true) }
         Plan::Wake(name) => { wake(app, &name); picker.say(STARTING_UP_WAIT) }
         Plan::More => {
             let before: std::collections::HashSet<String> = rows(app, "").into_iter().map(|r| r.id).collect();
@@ -1730,13 +1815,18 @@ pub fn on_api_models(app: &mut App, id: &str, reply: Result<Value, RpcError>) {
 }
 
 /// A download, start or stop of this computer's [model].
-fn act(app: &mut App, model: &str, action: &'static str) {
+fn act(app: &mut App, model: &str, action: &'static str) { act_on(app, model, action, false) }
+
+/// [act], on the community grid of this computer's OS when [community] (a start or stop; the daemon's
+/// `community`).
+fn act_on(app: &mut App, model: &str, action: &'static str, community: bool) {
     let machine = app.fleet.local_id.clone();
     app.models_view.pending = Some((machine.clone(), model.to_string(), action));
     app.models_view.use_error = None;
     let ty = match action { "download" => "grid_fleet_model_download", "start" => "grid_fleet_model_start", _ => "grid_fleet_model_stop" };
     let m = machine.clone();
-    if !read_rpc(app, &machine, "act", ty, json!({ "modelId": model }), Duration::from_secs(30), move |app, r| on_act(app, &m, r)) {
+    let payload = if community { json!({ "modelId": model, "community": true }) } else { json!({ "modelId": model }) };
+    if !read_rpc(app, &machine, "act", ty, payload, Duration::from_secs(30), move |app, r| on_act(app, &m, r)) {
         app.models_view.pending = None;
         app.say("This computer is not connected", theme::WARN);
     }
@@ -1800,7 +1890,7 @@ fn on_retarget_for(app: &mut App, name: &str, job: bool, reply: Result<Value, Rp
     let used = if job { app.models_view.using.take() } else { None };
     let who = app.models_view.switching.as_ref().and_then(|s| app.fleet.agent(&s.machine, &s.agent)).map(|a| a.name.clone()).unwrap_or_else(|| "the harness".into());
     // (A Use's last step: its end, and the one toast that says it.)
-    let end = |app: &mut App, failed: Option<String>| if let Some(u) = &used { app.models_view.ended = Some(Ended { row: format!("mv:local:{}", u.model), name: u.name.clone(), step: Step::Switch, failed, seen: false, stops: u.stops.as_ref().map(|(_, n)| n.clone()) }) };
+    let end = |app: &mut App, failed: Option<String>| if let Some(u) = &used { app.models_view.ended = Some(Ended { row: format!("mv:local:{}", u.model), name: u.name.clone(), step: Step::Switch, failed, seen: false, stops: u.stops.as_ref().map(|(_, n)| n.clone()), community: None }) };
     match reply {
         // Moved: the list has done its job — it closes, and the status line says so.
         Ok(_) if used.is_some() => { end(app, None); if same_panel { close(app); } app.say(format!("✓ {name} is ready · {who} is on it"), theme::ONLINE) }
@@ -1824,7 +1914,14 @@ pub fn close(app: &mut App) {
 
 /// What a Use does next, from what the daemon last said.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Next { Wait, Stop, Start, Serve, Retarget { grid: String, model: String }, Fail(String) }
+pub enum Next { Wait, Stop, Start, Serve, Retarget { grid: String, model: String },
+    /// A run on the community grid serves there: over, no harness to move.
+    Shared, Fail(String) }
+
+/// Whether [m] serves on the community grid [snap] names (its `servedOn`): [on_community] from a snapshot.
+fn on_grid(snap: Option<&Snapshot>, m: &LocalModel) -> bool {
+    snap.and_then(|s| s.os_grid.as_deref()).is_some_and(|g| m.served_on.iter().any(|r| r.grid == g))
+}
 
 /// The model [job] stops first, still able to stop in [snap]: it runs here yet.
 fn still_running(job: &Use, snap: Option<&Snapshot>) -> bool {
@@ -1857,7 +1954,16 @@ pub fn next(job: &Use, snap: Option<&Snapshot>, op: Option<&Operation>, pending:
         }
         Step::Start => {
             if let Some(o) = op.filter(|o| o.failed()) { return Next::Fail(o.error.clone().unwrap_or_else(|| "Could not start this model. Try again.".into())) }
-            if m.is_some_and(|m| m.running()) && !active { return Next::Serve }
+            // (On the community grid: started once the daemon's start is done — its own start, not an older
+            // operation on the row — or it serves there; the own grid does not list it.)
+            let started = if job.community.is_some() { op.is_some_and(|o| !o.active() && o.action == "start") || m.is_some_and(|m| on_grid(snap, m)) } else { m.is_some_and(|m| m.running()) };
+            if started && !active { return Next::Serve }
+            if late { Next::Fail(STILL.into()) } else { Next::Wait }
+        }
+        Step::Serve if job.community.is_some() => {
+            // (A start that failed late says why, not that it is still starting.)
+            if let Some(o) = op.filter(|o| o.failed() && o.action == "start") { return Next::Fail(o.error.clone().unwrap_or_else(|| "Could not start this model. Try again.".into())) }
+            if m.is_some_and(|m| on_grid(snap, m)) { return Next::Shared }
             if late { Next::Fail(STILL.into()) } else { Next::Wait }
         }
         Step::Serve => {
@@ -1878,12 +1984,23 @@ fn start_use(app: &mut App, model: &str, download: bool) {
     let stops = other_running(app, &m).map(|o| { let shown = o.shown(); (o.id, shown) });
     let step = match (&stops, download && supports) { (_, true) => Step::Get, (Some(_), false) => Step::Stop, (None, false) => if download { Step::Get } else { Step::Start } };
     let identity = app.fleet.agent(&t.machine, &t.agent).map(|a| crate::session_close::Identity::capture(app, a));
-    app.models_view.using = Some(Use { model: m.id.clone(), name: m.shown(), machine: t.machine, agent: t.agent, step, stops: stops.clone(), since: Instant::now(), identity });
+    app.models_view.using = Some(Use { model: m.id.clone(), name: m.shown(), machine: t.machine, agent: t.agent, step, stops: stops.clone(), since: Instant::now(), identity, community: None });
     app.models_view.ended = None;
+    // (A run begun, its button choice is spent: the row comes back as Use.)
+    app.models_view.run_other = None;
     match (step, stops) {
         (Step::Stop, Some((other, _))) => act(app, &other, "stop"),
         _ => act(app, &m.id, if download && supports { "download" } else { "start" }),
     }
+}
+
+/// A run on the community grid serves there: over — its preview says so, with one toast.
+fn shared(app: &mut App) {
+    let Some(job) = app.models_view.using.take() else { return };
+    let label = job.community.clone().unwrap_or_default();
+    app.models_view.ended = Some(Ended { row: format!("mv:local:{}", job.model), name: job.name.clone(), step: Step::Serve, failed: None, seen: false,
+        stops: job.stops.as_ref().map(|(_, n)| n.clone()), community: job.community.clone() });
+    app.say(format!("✓ {} runs on {label}", job.name), theme::ONLINE);
 }
 
 /// The Use stops at its step: its row's preview says why (✗) and how to try again, and one toast.
@@ -1891,7 +2008,7 @@ fn fail(app: &mut App, why: &str) {
     let Some(job) = app.models_view.using.take() else { return };
     let row = format!("mv:local:{}", job.model);
     app.models_view.use_error = Some((row.clone(), why.to_string()));
-    app.models_view.ended = Some(Ended { row, name: job.name.clone(), step: job.step, failed: Some(why.to_string()), seen: false, stops: job.stops.as_ref().map(|(_, n)| n.clone()) });
+    app.models_view.ended = Some(Ended { row, name: job.name.clone(), step: job.step, failed: Some(why.to_string()), seen: false, stops: job.stops.as_ref().map(|(_, n)| n.clone()), community: job.community.clone() });
     app.say(format!("✗ {}: {why}", job.name), theme::DANGER);
 }
 
@@ -1913,12 +2030,14 @@ pub fn advance(app: &mut App) {
     match next(&job, snap, op.as_ref(), pending, v.grids.get(&machine), Instant::now()) {
         Next::Wait => {}
         Next::Stop => { step(app, Step::Stop); if let Some((other, _)) = &job.stops { act(app, other, "stop") } }
-        Next::Start => { step(app, Step::Start); act(app, &job.model, "start") }
-        Next::Serve => { step(app, Step::Serve); read_grids(app, &machine) }
+        Next::Start => { step(app, Step::Start); act_on(app, &job.model, "start", job.community.is_some()) }
+        // (On the community grid, this computer's list says when it serves there: read it again.)
+        Next::Serve => { step(app, Step::Serve); if job.community.is_some() { read_local(app, &machine) } else { read_grids(app, &machine) } }
         Next::Retarget { grid, model } => {
             step(app, Step::Switch);
             retarget(app, &job.machine, json!({ "agentId": job.agent, "gridModel": model, "gridName": grid }), &job.name, true);
         }
+        Next::Shared => shared(app),
         Next::Fail(why) => fail(app, &why),
     }
 }
@@ -2025,20 +2144,179 @@ fn bold(t: impl Into<String>) -> Line<'static> { Line::from(span(t, Style::defau
 fn warn(t: impl Into<String>) -> Line<'static> { Line::from(span(t, fg(theme::WARN))) }
 fn dim(t: impl Into<String>) -> Line<'static> { Line::from(span(t, Style::default().add_modifier(Modifier::DIM))) }
 
+/// The OS grids whose computers show a local model's "Serving on" table, as grid names them
+/// (`macos`, `linux`, `omarchy`; `all` for every computer), separated by commas or spaces.
+pub const SERVING_OS: &str = "@hn-models-serving-os";
+/// Omarchy's alone, for now (Omagrid): another computer shows them only when the option names it.
+const SERVING_OS_DEFAULT: &str = "omarchy";
+
+/// Whether this computer shows the "Serving on" table and the Run on buttons: its OS is one
+/// [SERVING_OS] names.
+fn serving_shown(app: &App) -> bool {
+    let shown = app.options.get(SERVING_OS, "", None).unwrap_or_else(|| SERVING_OS_DEFAULT.into()).to_ascii_lowercase();
+    let shown: Vec<&str> = shown.split([',', ' ', '\t']).filter(|w| !w.is_empty()).collect();
+    let os = app.models_view.local.get(&app.fleet.local_id).and_then(|s| s.os.clone());
+    shown.contains(&"all") || os.is_some_and(|os| shown.contains(&os.as_str()))
+}
+
+/// The rows of [m]'s "Serving on" table, where this computer shows one: the grids it served [m] on,
+/// with what its own engine answered there — only a grid it has answered something on (owner,
+/// 2026-10-13: no empty values). None: not shown here, or nothing to list.
+fn serving_rows(app: &App, m: &LocalModel) -> Option<Vec<ServedOn>> {
+    if !serving_shown(app) { return None }
+    let answered = |n: Option<f64>| n.is_some_and(|n| n > 0.0);
+    // The community grid by its button's name (`macOS community`), not grid's (`macOS`).
+    let community = app.models_view.local.get(&app.fleet.local_id).and_then(|s| s.os_grid.clone()).zip(community_label(app));
+    let rows: Vec<ServedOn> = m.served_on.iter().filter(|r| answered(r.requests) || answered(r.tokens_out)).map(|r| match &community {
+        Some((grid, label)) if *grid == r.grid => ServedOn { grid: label.clone(), ..r.clone() },
+        _ => r.clone(),
+    }).collect();
+    (!rows.is_empty()).then_some(rows)
+}
+
+/// The second Run on button's label, `Omarchy community` (`macOS community`): a computer that shows
+/// the buttons, in the community grid of its OS. None: no such button here.
+pub fn community_label(app: &App) -> Option<String> {
+    let snap = app.models_view.local.get(&app.fleet.local_id)?;
+    snap.os_grid.as_ref()?;
+    let os = match snap.os.as_deref()? { "macos" => "macOS", "linux" => "Linux", "omarchy" => "Omarchy", _ => return None };
+    serving_shown(app).then(|| format!("{os} community"))
+}
+
+/// Whether [m] runs on the community grid of this computer's OS now (its `servedOn` names that grid) —
+/// said only on a computer that shows these ([serving_shown]): elsewhere its row and ^S are as before.
+fn on_community(app: &App, m: &LocalModel) -> bool { serving_shown(app) && on_grid(app.models_view.local.get(&app.fleet.local_id), m) }
+
+/// The community grid [m] runs on and the name it lists it under (grid, model): what a harness moves onto
+/// it there by. None: not listed under a name yet.
+fn community_served(app: &App, m: &LocalModel) -> Option<(String, String)> {
+    let grid = app.models_view.local.get(&app.fleet.local_id)?.os_grid.clone()?;
+    let name = m.served_on.iter().find(|r| r.grid == grid)?.served_as.first()?.clone();
+    Some((grid, name))
+}
+
+/// Row [id]'s Run on choice — its community button's label — where its preview offers one: a local model
+/// not running anywhere yet that this computer can run (owner: where it runs is chosen before it runs, on
+/// the preview's buttons — not a dialog).
+pub fn run_on_choice(app: &App, id: &str) -> Option<String> {
+    let label = community_label(app)?;
+    let m = local_model(app, id.strip_prefix("mv:local:")?)?;
+    let machine = &app.fleet.local_id;
+    if m.running() || on_community(app, &m) || app.models_view.busy(machine) || app.models_view.using.is_some() { return None }
+    // Grid's own models alone (another app's — Ollama, LM Studio — runs in that app, on the own grid), and
+    // only one this computer can start now: as the Personal grid button would.
+    let grids_own = m.app.as_deref().is_none_or(|app| app == GRID_APP);
+    (grids_own && m.can_start).then_some(label)
+}
+
+/// What a model Grid's own engine runs says it runs in (`app`), as the daemon names it.
+const GRID_APP: &str = "Grid";
+
+/// Whether row [id] — a model running on the community grid alone (Shared) — offers to run it on the
+/// personal grid too: its one `[ Personal grid ]` button, not chosen until → (owner, 2026-10-13: Enter
+/// stays Use, moving the harness onto it on the community grid).
+pub fn personal_choice(app: &App, id: &str) -> bool {
+    let Some(m) = id.strip_prefix("mv:local:").and_then(|model| local_model(app, model)) else { return false };
+    let machine = &app.fleet.local_id;
+    !m.running() && on_community(app, &m) && m.app.as_deref().is_none_or(|app| app == GRID_APP) && m.can_start
+        && !app.models_view.busy(machine) && app.models_view.using.is_none()
+}
+
+/// → on row [id] chooses its other Run on button — the community on a model not running yet, Personal grid
+/// on one running on the community grid — and ← leaves it, back to Enter's Use; never round (owner: "left
+/// on personal does not choose it"). False: the row offers no choice, and the arrow is the list's as before.
+pub fn choose_run_on(app: &mut App, id: &str, other: bool) -> bool {
+    if run_on_choice(app, id).is_none() && !personal_choice(app, id) { return false }
+    let v = &mut app.models_view;
+    v.run_other = other.then(|| id.to_string());
+    v.confirm = None;
+    true
+}
+
+/// Enter on row [id] with its community button chosen: run it there, beside whatever runs on the personal
+/// grid (owner: a computer runs its own models and serves its community). A download is gigabytes: asked
+/// first, as Get asks.
+fn plan_community(app: &App, id: &str) -> Plan {
+    let Some(label) = run_on_choice(app, id) else { return Plan::Nothing };
+    let Some(m) = id.strip_prefix("mv:local:").and_then(|model| local_model(app, model)) else { return Plan::Nothing };
+    let go = Plan::Community { model: m.id.clone(), download: !m.downloaded() };
+    if m.downloaded() { return go }
+    let size = m.size.map(gb).map(|s| format!(" ({s})")).unwrap_or_default();
+    Plan::Arm(format!("Get {}{size}, run it on {label}? Enter · Esc", m.shown()), Box::new(go))
+}
+
+/// Run [model] on the community grid: got (when [download]), started
+/// there and waited for until it serves — the Use's steps, with no harness to move.
+fn start_community(app: &mut App, model: &str, download: bool) {
+    let Some(label) = community_label(app) else { return };
+    let Some(m) = local_model(app, model) else { return };
+    let supports = app.models_view.local.get(&app.fleet.local_id).is_some_and(|s| s.supports_download);
+    // (Beside the model running on the personal grid, which it leaves running: owner, 2026-10-13.)
+    let step = if download && supports { Step::Get } else { Step::Start };
+    app.models_view.using = Some(Use { model: m.id.clone(), name: m.shown(), machine: app.fleet.local_id.clone(), agent: String::new(), step,
+        stops: None, since: Instant::now(), identity: None, community: Some(label) });
+    app.models_view.ended = None;
+    // (Its community button choice spent: Shared there next, its Personal grid button is not chosen.)
+    app.models_view.run_other = None;
+    if step == Step::Get { act(app, &m.id, "download") } else { act_on(app, &m.id, "start", true) }
+}
+
+/// A grid's name in the table: at most this many characters, an ellipsis past it.
+const SERVING_NAME_MAX: usize = 18;
+
+/// A count as the table says it: `950`, `12.3k`, `180k`, `1.1M`, `2.4B` — cut, never rounded up, so it
+/// never claims more than was counted, nor reads `1000k` (owner: thousands k, millions M, billions B).
+pub fn count_label(n: u64) -> String {
+    let cut = |n: u64, unit: u64, suffix: &str| {
+        let tenths = n / (unit / 10);
+        if tenths >= 1000 { format!("{}{suffix}", tenths / 10) } else { format!("{}.{}{suffix}", tenths / 10, tenths % 10).replace(&format!(".0{suffix}"), suffix) }
+    };
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => cut(n, 1_000, "k"),
+        1_000_000..=999_999_999 => cut(n, 1_000_000, "M"),
+        _ => cut(n, 1_000_000_000, "B"),
+    }
+}
+
+/// Columns between two of the table's columns.
+const SERVING_GAP: &str = "  ";
+
+/// [rows] as the preview shows them: a dim header with one rule under it, no box (owner, 2026-10-13: "no
+/// table, just a border under it") — each grid, then its requests and the tokens its engine wrote, was
+/// sent and reused, centred in their columns (`—`: none counted); no legend under it (owner).
+fn serving_table(rows: &[ServedOn]) -> Vec<Line<'static>> {
+    let name = |g: &str| if g.chars().count() > SERVING_NAME_MAX { format!("{}…", g.chars().take(SERVING_NAME_MAX - 1).collect::<String>()) } else { g.to_string() };
+    let figure = |n: Option<f64>| n.map_or_else(|| "—".to_string(), |n| count_label(n.round() as u64));
+    let head = ["Grid", "Requests", "Out", "In", "Cached"];
+    let cells: Vec<[String; 5]> = rows.iter().map(|r| [name(&r.grid), figure(r.requests), figure(r.tokens_out), figure(r.tokens_in), figure(r.tokens_cached)]).collect();
+    let widths: Vec<usize> = (0..5).map(|i| cells.iter().map(|c| c[i].chars().count()).chain([head[i].len()]).max().unwrap_or(0)).collect();
+    // A row of [texts]: the grid's name left-aligned, a dim rule down after it (owner: the grid column
+    // ruled off), then its figures centred under their headers.
+    let figures = |texts: &[&str]| texts.iter().zip(&widths[1..]).map(|(t, &w)| format!("{t:^w$}")).collect::<Vec<_>>().join(SERVING_GAP).trim_end().to_string();
+    let w = widths[0];
+    let rule_dim = Style::default().add_modifier(Modifier::DIM);
+    let row = |texts: [&str; 5], style: Style| Line::from(vec![span(format!("{:<w$}", texts[0]), style), span(" │ ", rule_dim), span(figures(&texts[1..]), style)]);
+    let across = widths[1..].iter().sum::<usize>() + SERVING_GAP.len() * (widths.len() - 2);
+    let mut out = vec![row(head, rule_dim), dim(format!("{}┼{}", "─".repeat(w + 1), "─".repeat(across + 1)))];
+    out.extend(cells.iter().map(|c| row([&c[0], &c[1], &c[2], &c[3], &c[4]], Style::default())));
+    out
+}
+
 /// A local row's first-Enter question, or its Use's checklist — Download · Start · Serve · Switch
 /// harness — and how it ended: what its preview says under its status.
 fn use_lines(app: &App, m: &LocalModel, id: &str) -> Vec<Line<'static>> {
     let v = &app.models_view;
     if let Some((_, words)) = v.confirm.as_ref().filter(|(row, _)| row == id) { return vec![Line::raw(""), Line::from(span(words.clone(), theme::bold(theme::accent())))] }
     let ended = v.ended.as_ref().filter(|e| e.row == id);
-    let (step, op, since, stops) = match (v.using.as_ref().filter(|u| u.model == m.id), ended) {
-        (Some(u), _) => (u.step, v.op_for(&app.fleet.local_id, m).cloned(), Some(u.since), u.stops.as_ref().map(|(_, n)| n.clone())),
-        (None, Some(e)) => (e.step, None, None, e.stops.clone()),
+    let (step, op, since, stops, community) = match (v.using.as_ref().filter(|u| u.model == m.id), ended) {
+        (Some(u), _) => (u.step, v.op_for(&app.fleet.local_id, m).cloned(), Some(u.since), u.stops.as_ref().map(|(_, n)| n.clone()), u.community.clone()),
+        (None, Some(e)) => (e.step, None, None, e.stops.clone(), e.community.clone()),
         _ => return vec![],
     };
     let ended = ended.filter(|_| since.is_none());
     let mut out = vec![Line::raw("")];
-    for (name, mark) in steps(stops.as_deref()).iter().zip(checklist(step, stops.is_some(), op.as_ref(), ended.map(|e| e.failed.is_none()))) {
+    for (name, mark) in steps(stops.as_deref(), community.as_deref()).iter().zip(checklist(step, stops.is_some(), op.as_ref(), ended.map(|e| e.failed.is_none()))) {
         out.push(match mark {
             Mark::Done => Line::from(span(format!("✓ {name}"), fg(theme::ONLINE))),
             Mark::Now(Some(p)) => Line::from(span(format!("↻ {name}  {} {}%", bar(p), percent(p)), fg(theme::accent()))),
@@ -2048,7 +2326,14 @@ fn use_lines(app: &App, m: &LocalModel, id: &str) -> Vec<Line<'static>> {
         });
     }
     match ended.map(|e| (e.failed.as_ref(), &e.name)) {
-        Some((None, name)) => { out.push(Line::raw("")); out.push(Line::from(span(format!("✓ Ready · this harness is on {name}"), theme::bold(theme::ONLINE)))) }
+        Some((None, name)) => {
+            out.push(Line::raw(""));
+            match &community {
+                // (No harness moved: one picks it under Shared with you.)
+                Some(label) => { out.push(Line::from(span(format!("✓ Ready · {name} runs on {label}"), theme::bold(theme::ONLINE)))); out.push(dim("Shared with you lists it.")) }
+                None => out.push(Line::from(span(format!("✓ Ready · this harness is on {name}"), theme::bold(theme::ONLINE)))),
+            }
+        }
         Some((Some(why), _)) => { out.push(Line::raw("")); out.push(Line::from(span(format!("✗ Failed · {why}"), fg(theme::DANGER)))); out.push(Line::from(span("Enter tries again.", fg(theme::accent())))) }
         None => {}
     }
@@ -2078,6 +2363,9 @@ pub fn preview(app: &App, id: &str) -> Vec<Line<'static>> {
         let status = if let Some(o) = f.op.as_ref().filter(|o| o.active()) { o.word() } else if let Some(p) = f.pending { p.to_string() } else if f.failed { "Failed · try again".into() }
             else if m.running() { "Running".into() } else if m.downloaded() { "Downloaded".into() } else { "Not downloaded".into() };
         let status = if f.switching { format!("{SWITCHING} this harness is moving onto it") } else if f.in_use { format!("{status} · this harness is on it") } else { status };
+        // Run on the community grid alone: said where (the own grid's list calls it downloaded).
+        let community = community_label(app).filter(|_| !m.running() && !active && f.pending.is_none() && on_community(app, &m));
+        let status = match &community { Some(label) => format!("Running on {label}"), None => status };
         let mut out = vec![bold(m.shown()), Line::raw(status)];
         // (A Use's end says why it failed itself.)
         if !v.ended.as_ref().is_some_and(|e| e.row == id) { out.extend(failed) }
@@ -2102,15 +2390,49 @@ pub fn preview(app: &App, id: &str) -> Vec<Line<'static>> {
         }
         if let Some(w) = m.context { out.push(kv("Context", format!("{} window", context_label(w as u64)))) }
         if let Some(p) = m.params_b { out.push(kv("Params", format!("{p}B"))) }
-        out.push(kv("Quant", m.quantization().unwrap_or_else(|| "—".into())));
+        // Where these show ([serving_shown]): the quant only where it tells two downloads of one model apart
+        // (the desktop's twins), their rows reading the same name. Elsewhere, as before: always.
+        let twin = snap.is_some_and(|s| s.models.iter().any(|o| o.id != m.id && o.shown().eq_ignore_ascii_case(&m.shown())));
+        if twin || !serving_shown(app) { out.push(kv("Quant", m.quantization().unwrap_or_else(|| "—".into()))) }
         out.push(kv("Machine", capital(here)));
-        if let (true, Some(r), Some(w)) = (m.running(), m.requests, m.window_secs) { out.push(kv("Window", format!("{} req / {}", r as u64, window_label(w)))) }
+        // Where it serves, as a table (the own grid's requests among them), else the own grid's requests alone.
+        let table = serving_rows(app, &m).map(|rows| serving_table(&rows));
+        if let (None, true, Some(r), Some(w)) = (&table, m.running(), m.requests, m.window_secs) { out.push(kv("Window", format!("{} req / {}", r as u64, window_label(w)))) }
         if m.resting() { out.push(kv("State", "Resting until your next message")) }
+        // Where it runs, chosen on its buttons (owner: Personal grid, or the community of this computer's OS),
+        // the chosen one in the panel's chosen style — over the serving table (owner). Not running yet: both,
+        // Personal grid chosen until →. Shared on the community grid: Personal grid alone, chosen only by →
+        // (Enter's Use until then).
+        let run_on = run_on_choice(app, id);
+        let personal = personal_choice(app, id);
+        let other_chosen = (run_on.is_some() || personal) && v.run_other.as_deref() == Some(id);
+        let chosen = crate::settings::chrome().selected;
+        let style = |on: bool| if on { chosen } else { Style::default() };
+        let key = || span(format!("{:<9}", "Run on"), Style::default().add_modifier(Modifier::DIM));
+        if let Some(label) = &run_on {
+            out.push(Line::raw(""));
+            out.push(Line::from(vec![key(), span("[ Personal grid ]", style(!other_chosen)), Span::raw("  "), span(format!("[ {label} ]"), style(other_chosen))]));
+        } else if personal {
+            out.push(Line::raw(""));
+            out.push(Line::from(vec![key(), span("[ Personal grid ]", style(other_chosen))]));
+        }
+        if let Some(table) = table { out.push(Line::raw("")); out.extend(table) }
         let short = !m.downloaded() && f.pending.is_none() && !active && m.size.zip(snap.and_then(|s| s.free_disk)).is_some_and(|(s, d)| s + GIB > d);
         if short { out.push(warn(format!("Free up disk space on {here} to get it."))) }
         else if !m.downloaded() && !snap.is_some_and(|s| s.supports_download) && m.can_start && f.pending.is_none() && !active { out.push(warn(format!("Downloads and starts on {here}."))) }
         let mut said = Vec::new();
-        if !f.in_use {
+        if let (true, Some(label)) = (other_chosen, &run_on) {
+            // (Beside what runs on the personal grid: a community run stops nothing.)
+            said.push(format!("Enter runs it on {label}: anyone in the {label} can call it. This harness stays on its model."));
+        } else if other_chosen && personal {
+            said.push(match &f.other {
+                None => "Enter also runs it on your Personal grid, and moves this harness onto it there.".to_string(),
+                Some(o) => format!("Enter stops {o}, also runs it on your Personal grid, and moves this harness onto it there."),
+            });
+        } else if let (Some(label), Some(_), false) = (&community, t, f.in_use) {
+            // (Running there alone: Enter moves this harness onto it there — [plan_enter].)
+            said.push(format!("Enter moves this harness onto it on {label}."));
+        } else if !f.in_use {
             if f.get_use { said.push(match &f.other { None => "Enter gets it: downloads it, starts it, and moves this harness onto it.".to_string(), Some(o) => format!("Enter gets it: downloads it, stops {o}, starts it, and moves this harness onto it.") }) }
             else if f.get { said.push(match &f.other { None => "Enter downloads it.".into(), Some(o) => format!("Enter downloads it. Stop {o} to run it: one local model runs at a time.") }) }
             else if f.use_running { said.push("Enter moves this harness onto it.".into()) }
@@ -2118,6 +2440,7 @@ pub fn preview(app: &App, id: &str) -> Vec<Line<'static>> {
             else if t.is_none() && m.downloaded() && !m.running() && m.can_start { said.push("Enter starts it.".into()) }
         }
         if m.can_stop { said.push("^S stops it and frees its memory. The download is kept.".into()) }
+        else if let Some(label) = &community { said.push(format!("^S stops it on {label}. The download is kept.")) }
         if !said.is_empty() { out.push(Line::raw("")); out.extend(said.into_iter().map(|s| Line::from(span(s, fg(theme::accent()))))) }
         if let Some(e) = f.op.as_ref().and_then(|o| o.error.clone()) { out.push(warn(e)) }
         if let Some(e) = snap.and_then(|s| s.notice.clone()).or_else(|| v.local_error.get(&machine).cloned()) { out.push(warn(e)) }
@@ -2666,7 +2989,7 @@ mod tests {
         assert!(text(&preview(&app, "mv:local:gemma-12b")).contains("✗ Failed · Stop a running model to make room"));
 
         // A download the daemon reports failed.
-        let job = Use { identity: None, model: "qwen-35b".into(), name: "Qwen".into(), machine: "local".into(), agent: "a1".into(), step: Step::Get, since: Instant::now(), stops: None };
+        let job = Use { identity: None, model: "qwen-35b".into(), name: "Qwen".into(), machine: "local".into(), agent: "a1".into(), step: Step::Get, since: Instant::now(), stops: None, community: None };
         let failed = Operation::parse(&op("download", "downloading", "failed", None)).map(|mut o| { o.error = Some("The download stopped. Start again to resume.".into()); o });
         assert_eq!(next(&job, None, failed.as_ref(), false, None, Instant::now()), Next::Fail("The download stopped. Start again to resume.".into()));
         // Started, but never listed as served: after three minutes it says so.
@@ -2696,8 +3019,10 @@ mod tests {
         assert_eq!(checklist(Step::Switch, false, None, Some(true)), [Done, Done, Done, Done]);
         assert_eq!(checklist(Step::Start, false, o("start", "starting", "failed", None).as_ref(), Some(false)), [Done, Failed, Later, Later]);
         assert_eq!(checklist(Step::Get, false, None, Some(false)), [Failed, Later, Later, Later]);
-        assert_eq!(steps(None), ["Download", "Start", "Serve", "Switch harness"]);
-        assert_eq!(steps(Some("Phi")), ["Download", "Stop Phi", "Start", "Serve", "Switch harness"]);
+        assert_eq!(steps(None, None), ["Download", "Start", "Serve", "Switch harness"]);
+        assert_eq!(steps(Some("Phi"), None), ["Download", "Stop Phi", "Start", "Serve", "Switch harness"]);
+        // A run on the community grid ends serving there: no harness to switch.
+        assert_eq!(steps(Some("Phi"), Some("macOS community")), ["Download", "Stop Phi", "Start", "Serve on macOS community"]);
         assert_eq!(checklist(Step::Stop, true, None, None), [Done, Now(None), Later, Later, Later]);
         assert_eq!(checklist(Step::Start, true, None, None), [Done, Done, Now(None), Later, Later]);
         assert_eq!(checklist(Step::Stop, true, None, Some(false)), [Done, Failed, Later, Later, Later]);
@@ -2877,7 +3202,7 @@ mod tests {
         on_local(&mut app, "local", Ok(with_phi(gemma("downloaded", Value::Null), qwen("downloaded", Value::Null), phi("downloaded", op_on("phi", "stop", "stopping", "done")))));
         assert_eq!(last_sent(&app), ("local".into(), "grid_fleet_model_start".into(), json!({ "modelId": "qwen-35b" })));
         // Phi stopped already by the time the download ends: straight to the start.
-        let job = Use { identity: None, model: "qwen-35b".into(), name: "Qwen".into(), machine: "local".into(), agent: "a1".into(), step: Step::Get, since: Instant::now(), stops: Some(("phi".into(), "Phi".into())) };
+        let job = Use { identity: None, model: "qwen-35b".into(), name: "Qwen".into(), machine: "local".into(), agent: "a1".into(), step: Step::Get, since: Instant::now(), stops: Some(("phi".into(), "Phi".into())), community: None };
         let snap = parse_local(&with_phi(gemma("downloaded", Value::Null), qwen("downloaded", Value::Null), phi("downloaded", Value::Null))).unwrap();
         assert_eq!(next(&job, Some(&snap), None, false, None, Instant::now()), Next::Start);
         // A stop that never ends says so after three minutes.
@@ -3124,6 +3449,12 @@ mod tests {
             "Context  128K window", "Params   35B", "Quant    Q4_K_M", "Machine  This", "Enter gets it: downloads it, starts it, and moves this harness onto it."] {
             assert!(s.contains(want), "{want:?} missing:\n{s}");
         }
+        // On Omarchy (where the serving table shows): its quant tells nothing apart, no other download of it.
+        let mut omarchy = loaded();
+        let mut reply = local_reply(qwen("available", Value::Null), false);
+        reply["os"] = json!("omarchy");
+        on_local(&mut omarchy, "local", Ok(reply));
+        assert!(!text(&preview(&omarchy, "mv:local:qwen-35b")).contains("Quant"));
         // Not room on the disk for it: said before Get.
         on_local(&mut app, "local", Ok({ let mut r = local_reply(qwen("available", Value::Null), false); r["freeDiskBytes"] = json!(10.0 * GIB); r }));
         assert!(text(&preview(&app, "mv:local:qwen-35b")).contains(&format!("Free up disk space on {here} to get it.")));
@@ -3654,20 +3985,403 @@ mod tests {
         assert!(app.models_view.sent.iter().all(|s| s.1 != "grid_fleet_model_stop"));
     }
 
+    /// The daemon's list on an Omarchy computer serving Qwen on its own grid and on Omagrid — `servedOn`
+    /// and `os` as `LocalModels.servedOn` answers them — and the global option [name] set to [value].
+    fn serving(os: &str, options: &[(&str, &str)]) -> App {
+        let mut app = loaded();
+        let mut q = qwen("running", Value::Null);
+        q["requests"] = json!(42); q["windowSeconds"] = json!(86400);
+        q["servedOn"] = json!([
+            { "grid": "own-grid", "requests": 42, "tokensOut": 180_000, "tokensIn": 400_000, "tokensCached": 300_000, "windowSeconds": 86400 },
+            { "grid": "Omagrid", "requests": 268, "tokensOut": 1_100_000, "tokensIn": 2_400_000_000u64, "tokensCached": 1_800_000, "windowSeconds": 86400 },
+        ]);
+        let mut reply = local_reply(q, false);
+        if !os.is_empty() { reply["os"] = json!(os) }
+        on_local(&mut app, "local", Ok(reply));
+        let global = crate::options::SetFlags { global: true, ..Default::default() };
+        for (name, value) in options { app.options.set(name, Some(value), &global, "", 0).unwrap(); }
+        app
+    }
+
+    /// A local model's preview lists the grids this computer serves it on, with only its own figures,
+    /// as a table — on Omarchy, until [SERVING_OS] names more — in place of the own grid's Window line.
+    #[test]
+    fn a_served_model_says_which_grids_it_serves_on_and_what_it_answered_there() {
+        let s = text(&preview(&serving("omarchy", &[]), "mv:local:qwen-35b"));
+        // Every figure this computer's engine answered — requests, and tokens written, sent, reused — under a
+        // dim header and one rule, centred in their columns, the grid column ruled off; no box, no legend.
+        let table = [
+            "Grid     │ Requests  Out    In   Cached",
+            "─────────┼─────────────────────────────",
+            "own-grid │    42     180k  400k   300k",
+            "Omagrid  │   268     1.1M  2.4B   1.8M",
+        ];
+        assert!(s.contains(&(table.join("\n") + "\n\n")), "{s}");
+        assert!(!s.contains('┌') && !s.contains("Tokens ·"), "{s}");
+        // No window line, nor the own grid's Window line beside the table.
+        assert!(!s.contains("last ") && !s.contains("Window"), "{s}");
+        // Not an Omarchy computer: the own grid's requests, as before, and no table.
+        const TABLE: &str = "Requests  Out";
+        for os in ["macos", "linux", ""] {
+            let s = text(&preview(&serving(os, &[]), "mv:local:qwen-35b"));
+            assert!(s.contains("Window   42 req / 1d") && !s.contains(TABLE), "{os}: {s}");
+        }
+        // The option names the computers that show it.
+        assert!(text(&preview(&serving("macos", &[(SERVING_OS, "all")]), "mv:local:qwen-35b")).contains(TABLE));
+        assert!(text(&preview(&serving("linux", &[(SERVING_OS, "macos, linux")]), "mv:local:qwen-35b")).contains(TABLE));
+        assert!(!text(&preview(&serving("omarchy", &[(SERVING_OS, "macos")]), "mv:local:qwen-35b")).contains(TABLE));
+    }
+
+    /// Counts read thousands k, millions M, billions B — cut, never rounded up past what was counted.
+    #[test]
+    fn counts_read_k_m_and_b() {
+        for (n, want) in [(0, "0"), (950, "950"), (1_000, "1k"), (1_500, "1.5k"), (12_345, "12.3k"), (180_000, "180k"), (999_999, "999k"),
+            (1_000_000, "1M"), (1_100_000, "1.1M"), (12_345_678, "12.3M"), (999_999_999, "999M"),
+            (1_000_000_000, "1B"), (2_400_000_000, "2.4B"), (1_234_567_890_123, "1234B")] {
+            assert_eq!(count_label(n), want, "{n}");
+        }
+    }
+
+    /// Only a grid this computer answered something on is a row (owner: no empty values): not one that
+    /// sleeps, nor one it answered nothing on yet; none such, no table. A long name is cut.
+    #[test]
+    fn only_a_grid_it_answered_on_is_a_row() {
+        let mut app = serving("omarchy", &[]);
+        let mut q = qwen("running", Value::Null);
+        q["servedOn"] = json!([
+            { "grid": "a-grid-with-a-very-long-name", "requests": 3, "tokensOut": 72, "tokensIn": 30, "tokensCached": 23, "windowSeconds": 3600 },
+            { "grid": "sleeping" }, { "grid": "quiet", "requests": 0, "tokensOut": 0, "windowSeconds": 3600 },
+        ]);
+        let mut reply = local_reply(q, false);
+        reply["os"] = json!("omarchy");
+        on_local(&mut app, "local", Ok(reply));
+        let s = text(&preview(&app, "mv:local:qwen-35b"));
+        assert!(s.contains("\na-grid-with-a-ver… │    3      72   30    23\n"), "{s}");
+        assert!(!s.contains("sleeping") && !s.contains("quiet") && !s.contains('—'), "{s}");
+        let mut q = qwen("running", Value::Null);
+        q["servedOn"] = json!([{ "grid": "sleeping" }, { "grid": "quiet", "requests": 0 }]);
+        let mut reply = local_reply(q, false);
+        reply["os"] = json!("omarchy");
+        on_local(&mut app, "local", Ok(reply));
+        assert!(!text(&preview(&app, "mv:local:qwen-35b")).contains("Requests  Out"));
+        // An older daemon sends neither `servedOn`, `os` nor `osGrid`.
+        let snap = parse_local(&local_reply(qwen("running", Value::Null), false)).unwrap();
+        assert!(snap.os.is_none() && snap.os_grid.is_none() && snap.models[0].served_on.is_empty());
+    }
+
+    /// The daemon's list on a computer of [os] in the community grid Omagrid, Qwen [state] and nothing
+    /// running; [options] set as in [serving].
+    fn community(os: &str, state: &str, options: &[(&str, &str)]) -> App {
+        let mut app = loaded();
+        let mut reply = local_reply(qwen(state, Value::Null), false);
+        reply["os"] = json!(os); reply["osGrid"] = json!("Omagrid");
+        on_local(&mut app, "local", Ok(reply));
+        let global = crate::options::SetFlags { global: true, ..Default::default() };
+        for (name, value) in options { app.options.set(name, Some(value), &global, "", 0).unwrap(); }
+        app
+    }
+
+    /// A local model not running yet offers where to run it on its preview — Personal grid, or the
+    /// community of this computer's OS — on Omarchy (until [SERVING_OS] names more). → chooses the
+    /// community, ← Personal grid, never round: ← on Personal grid stays there, → on the community too.
+    #[test]
+    fn a_model_not_running_offers_where_to_run_it() {
+        let id = "mv:local:qwen-35b";
+        let chosen = |app: &App| app.models_view.run_other.as_deref() == Some(id);
+        let mut app = community("omarchy", "downloaded", &[]);
+        let s = text(&preview(&app, id));
+        assert!(s.contains("Run on   [ Personal grid ]  [ Omarchy community ]"), "{s}");
+        // (The arrows are said on the list's keys line, at its foot: ←→ choose.)
+        assert!(s.contains("Enter starts it and moves this harness onto it.") && !s.contains("←"), "{s}");
+        // ← on Personal grid: it stays chosen.
+        assert!(choose_run_on(&mut app, id, false) && !chosen(&app));
+        assert!(choose_run_on(&mut app, id, true) && chosen(&app));
+        let s = text(&preview(&app, id));
+        assert!(s.contains("Enter runs it on Omarchy community: anyone in the Omarchy community can call it. This harness stays on its model."), "{s}");
+        assert!(!s.contains("moves this harness"), "{s}");
+        // → on the community: it stays chosen; ← back to Personal grid.
+        assert!(choose_run_on(&mut app, id, true) && chosen(&app));
+        assert!(choose_run_on(&mut app, id, false) && !chosen(&app));
+        assert!(text(&preview(&app, id)).contains("Enter starts it and moves this harness onto it."));
+        // Not downloaded yet: offered too (got, then run where chosen).
+        assert!(text(&preview(&community("omarchy", "available", &[]), id)).contains("[ Omarchy community ]"));
+        // A Mac: only when the option names it, and called by its own OS.
+        assert!(!text(&preview(&community("macos", "downloaded", &[]), id)).contains("Run on"));
+        assert!(text(&preview(&community("macos", "downloaded", &[(SERVING_OS, "macos")]), id)).contains("[ Personal grid ]  [ macOS community ]"));
+        // Running already, in no community grid, or another row: no choice — the arrows are the list's.
+        let mut running = community("omarchy", "running", &[]);
+        assert!(!text(&preview(&running, id)).contains("Run on") && !choose_run_on(&mut running, id, true));
+        let mut none = loaded();
+        let mut reply = local_reply(qwen("downloaded", Value::Null), false);
+        reply["os"] = json!("omarchy");
+        on_local(&mut none, "local", Ok(reply));
+        assert!(!text(&preview(&none, id)).contains("Run on") && !choose_run_on(&mut none, id, true));
+        assert!(!choose_run_on(&mut app, "mv:sub:claude\t7f0c", true));
+    }
+
+    /// Enter on the community button runs the model there — started with `community`, served there — and
+    /// moves no harness: one picks it under Shared with you. It then reads Shared, and ^S stops it there.
+    #[test]
+    fn enter_on_the_community_button_runs_it_there_and_moves_no_harness() {
+        let id = "mv:local:qwen-35b";
+        let mut app = community("omarchy", "downloaded", &[]);
+        open(&mut app);
+        let mut picker = Picker::new("models", "");
+        assert!(choose_run_on(&mut app, id, true));
+        choose(&mut app, &mut picker, id, false);
+        assert_eq!(last_sent(&app), ("local".into(), "grid_fleet_model_start".into(), json!({ "modelId": "qwen-35b", "community": true })));
+        assert_eq!(app.models_view.using.as_ref().and_then(|u| u.community.clone()).as_deref(), Some("Omarchy community"));
+        assert!(text(&preview(&app, id)).contains("Serve on Omarchy community"));
+        on_act(&mut app, "local", Ok(json!({ "operation": op("start", "starting", "running", None) })));
+        // Started (the own grid's list still calls it downloaded), then served on Omagrid: over.
+        let mut q = qwen("downloaded", op("start", "verifying", "done", None));
+        q["servedOn"] = json!([{ "grid": "Omagrid", "windowSeconds": 86400 }]);
+        let mut reply = local_reply(q, false);
+        reply["os"] = json!("omarchy"); reply["osGrid"] = json!("Omagrid");
+        on_local(&mut app, "local", Ok(reply.clone()));
+        on_local(&mut app, "local", Ok(reply));
+        assert!(app.models_view.using.is_none());
+        let s = text(&preview(&app, id));
+        assert!(s.starts_with("Qwen3.6-35B-A3B\nRunning on Omarchy community"), "{s}");
+        assert!(s.contains("✓ Ready · Qwen3.6-35B-A3B runs on Omarchy community\nShared with you lists it."), "{s}");
+        assert!(s.contains("^S stops it on Omarchy community. The download is kept."), "{s}");
+        // Shared there now: its Personal grid button, the community choice spent — not chosen, Enter is Use.
+        assert!(s.contains("Run on   [ Personal grid ]\n") && app.models_view.run_other.is_none(), "{s}");
+        assert!(toast(&app).contains("Qwen3.6-35B-A3B runs on Omarchy community"));
+        assert!(app.models_view.sent.iter().all(|s| s.1 != "agent_retarget"));
+        assert_eq!(row(&rows_of(&app), id).right_narrow.as_deref(), Some("Shared"));
+        match plan_stop(&app, id) {
+            Plan::Arm(words, then) => { assert!(words.contains("on Omarchy community")); assert_eq!(*then, Plan::StopCommunity("qwen-35b".into())) }
+            other => panic!("{other:?}"),
+        }
+        choose(&mut app, &mut picker, id, true);
+        choose(&mut app, &mut picker, id, true);
+        assert_eq!(last_sent(&app), ("local".into(), "grid_fleet_model_stop".into(), json!({ "modelId": "qwen-35b", "community": true })));
+    }
+
+    /// A model running on the community grid alone (Shared): Enter on its Your models row moves this harness
+    /// onto it there, as its Shared with you row does — never a second engine on the personal grid (owner,
+    /// 2026-10-13: "it inferences another instance for the personal grid instead of using it").
+    #[test]
+    fn enter_on_a_shared_model_moves_this_harness_onto_it_on_the_community_grid() {
+        let id = "mv:local:qwen-35b";
+        let mut q = qwen("downloaded", Value::Null);
+        q["servedOn"] = json!([{ "grid": "Omagrid", "servedAs": ["Qwen3.6-35B-A3B-Q4_K_M"] }]);
+        let mut reply = local_reply(q, false);
+        reply["os"] = json!("omarchy"); reply["osGrid"] = json!("Omagrid");
+        let mut app = loaded();
+        on_local(&mut app, "local", Ok(reply));
+        assert_eq!(row(&rows_of(&app), id).right_narrow.as_deref(), Some("Shared"));
+        assert!(text(&preview(&app, id)).contains("Enter moves this harness onto it on Omarchy community."));
+        match plan_enter(&app, id) {
+            Plan::Retarget { payload, name, .. } => {
+                assert_eq!((payload["gridName"].as_str(), payload["gridModel"].as_str()), (Some("Omagrid"), Some("Qwen3.6-35B-A3B-Q4_K_M")));
+                assert_eq!(name, "Qwen3.6-35B-A3B");
+            }
+            other => panic!("{other:?}"),
+        }
+        open(&mut app);
+        let mut picker = Picker::new("models", "");
+        choose(&mut app, &mut picker, id, false);
+        assert!(app.models_view.sent.iter().all(|s| !s.1.starts_with("grid_fleet_model_")), "no second engine");
+        assert_eq!(last_sent(&app).1, "agent_retarget");
+        // On it there now: In use, and Enter says so rather than moving it again.
+        app.fleet.agents.get_mut(&("local".into(), "a1".into())).unwrap().grid_model = "Qwen3.6-35B-A3B-Q4_K_M".into();
+        assert_eq!(row(&rows_of(&app), id).right_narrow.as_deref(), Some("✓ In use"));
+        assert_eq!(plan_enter(&app, id), Plan::Say(IN_USE.into()));
+    }
+
+    /// The choice only where the community run can work: not for another app's model (Ollama, LM Studio run it
+    /// in that app, on the own grid), nor one this computer cannot start now.
+    #[test]
+    fn the_choice_is_offered_only_for_grids_models_this_computer_can_start() {
+        let id = "mv:local:qwen-35b";
+        let with = |patch: &dyn Fn(&mut Value)| {
+            let mut q = qwen("downloaded", Value::Null);
+            patch(&mut q);
+            let mut reply = local_reply(q, false);
+            reply["os"] = json!("omarchy"); reply["osGrid"] = json!("Omagrid");
+            let mut app = loaded();
+            on_local(&mut app, "local", Ok(reply));
+            app
+        };
+        assert!(run_on_choice(&with(&|q| q["app"] = json!("Grid")), id).is_some());
+        assert!(run_on_choice(&with(&|q| q["app"] = json!("Ollama")), id).is_none());
+        assert!(run_on_choice(&with(&|q| q["app"] = json!("LM Studio")), id).is_none());
+        assert!(run_on_choice(&with(&|q| q["canStart"] = json!(false)), id).is_none());
+        assert!(run_on_choice(&with(&|q| { q["state"] = json!("available"); q["canStart"] = json!(false) }), id).is_none());
+    }
+
+    /// A model running on the community grid does not count as the one running here: a Use of another on the
+    /// personal grid starts it beside it, stopping nothing (owner, 2026-10-13).
+    #[test]
+    fn a_model_on_the_community_grid_leaves_the_personal_grid_free() {
+        let mut gemma = json!({ "id": "gemma-12b", "name": "gemma-12b", "state": "downloaded", "sizeBytes": 7.5 * GIB, "canStart": true, "canStop": false, "estTokS": 40 });
+        gemma["servedOn"] = json!([{ "grid": "Omagrid", "servedAs": ["gemma-12b"] }]);
+        let mut reply = local_reply(qwen("downloaded", Value::Null), false);
+        reply["models"][1] = gemma;
+        reply["os"] = json!("omarchy"); reply["osGrid"] = json!("Omagrid");
+        let mut app = loaded();
+        on_local(&mut app, "local", Ok(reply));
+        let qwen_m = local_model(&app, "qwen-35b").unwrap();
+        assert!(other_running(&app, &qwen_m).is_none());
+        assert_eq!(plan_enter(&app, "mv:local:qwen-35b"), Plan::Use { model: "qwen-35b".into(), download: false });
+    }
+
+    /// On a model Shared on the community grid: one `[ Personal grid ]` button, not chosen — Enter stays Use,
+    /// moving the harness onto it there. → chooses it: Enter also runs it on the personal grid (a Use, the
+    /// harness moved there). ← leaves it: Use again.
+    #[test]
+    fn a_shared_model_offers_the_personal_grid_too() {
+        let id = "mv:local:qwen-35b";
+        let mut q = qwen("downloaded", Value::Null);
+        q["servedOn"] = json!([{ "grid": "Omagrid", "servedAs": ["Qwen3.6-35B-A3B-Q4_K_M"], "requests": 3, "tokensOut": 72 }]);
+        let mut reply = local_reply(q, false);
+        reply["os"] = json!("omarchy"); reply["osGrid"] = json!("Omagrid");
+        let mut app = loaded();
+        on_local(&mut app, "local", Ok(reply));
+        assert!(personal_choice(&app, id) && run_on_choice(&app, id).is_none());
+        let s = text(&preview(&app, id));
+        assert!(s.contains("Run on   [ Personal grid ]\n") && !s.contains("community ]"), "{s}");
+        // Its buttons over the serving table (owner).
+        assert!(s.find("Run on").zip(s.find("Grid ")).is_some_and(|(run, table)| run < table), "{s}");
+        assert!(s.contains("Enter moves this harness onto it on Omarchy community."), "{s}");
+        // ← on it: nothing chosen, still Use.
+        assert!(choose_run_on(&mut app, id, false) && app.models_view.run_other.is_none());
+        assert!(choose_run_on(&mut app, id, true));
+        assert!(text(&preview(&app, id)).contains("Enter also runs it on your Personal grid, and moves this harness onto it there."));
+        open(&mut app);
+        let mut picker = Picker::new("models", "");
+        choose(&mut app, &mut picker, id, false);
+        assert_eq!(last_sent(&app), ("local".into(), "grid_fleet_model_start".into(), json!({ "modelId": "qwen-35b" })));
+        assert!(app.models_view.using.as_ref().is_some_and(|u| u.community.is_none() && u.agent == "a1"), "a Use: the harness moves to the personal grid");
+        // ← back: Enter is Use onto it on the community grid again.
+        let mut app2 = loaded();
+        let mut reply = local_reply({ let mut q = qwen("downloaded", Value::Null); q["servedOn"] = json!([{ "grid": "Omagrid", "servedAs": ["Qwen3.6-35B-A3B-Q4_K_M"] }]); q }, false);
+        reply["os"] = json!("omarchy"); reply["osGrid"] = json!("Omagrid");
+        on_local(&mut app2, "local", Ok(reply));
+        choose_run_on(&mut app2, id, true);
+        choose_run_on(&mut app2, id, false);
+        open(&mut app2);
+        let mut picker = Picker::new("models", "");
+        choose(&mut app2, &mut picker, id, false);
+        assert_eq!(last_sent(&app2).1, "agent_retarget");
+    }
+
+    /// Off Omarchy (no [SERVING_OS] naming it), nothing of this shows: a model this computer serves on its
+    /// OS's community grid — `grid join` by hand — reads and stops as it did, no Shared, no Run on, no table,
+    /// and the Quant line as before.
+    #[test]
+    fn nothing_of_it_shows_off_omarchy() {
+        let id = "mv:local:qwen-35b";
+        let mut q = qwen("downloaded", Value::Null);
+        q["servedOn"] = json!([{ "grid": "macOS", "requests": 3, "tokensOut": 72 }]);
+        let mut reply = local_reply(q, false);
+        reply["os"] = json!("macos"); reply["osGrid"] = json!("macOS");
+        let mut app = loaded();
+        on_local(&mut app, "local", Ok(reply));
+        let s = text(&preview(&app, id));
+        assert!(s.starts_with("Qwen3.6-35B-A3B\nDownloaded"), "{s}");
+        assert!(!s.contains("Run on") && !s.contains("Requests  Out") && !s.contains("community") && s.contains("Quant    Q4_K_M"), "{s}");
+        assert_ne!(row(&rows_of(&app), id).right_narrow.as_deref(), Some("Shared"));
+        assert!(!matches!(plan_stop(&app, id), Plan::Arm(_, ref then) if matches!(**then, Plan::StopCommunity(_))));
+        assert!(!choose_run_on(&mut app, id, true));
+    }
+
+    /// The arrows through the picker's own key handling: on a row that offers the choice, with nothing
+    /// searched, → chooses the community and ← Personal grid; with a search typed they move in it as before.
+    #[test]
+    fn the_arrows_choose_where_it_runs_only_with_nothing_searched() {
+        use crossterm::event::{Event as CEvent, KeyCode, KeyEvent, KeyModifiers};
+        let id = "mv:local:qwen-35b";
+        let key = |app: &mut App, code: KeyCode| crate::input::handle(app, CEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        let mut app = community("omarchy", "downloaded", &[]);
+        app.size = (160, 50);
+        back_to_models(&mut app, Some(id.to_string()));
+        let picker = |app: &App| match &app.modal { Some(crate::modal::Modal::Picker { picker, .. }) => (picker.current_id(), picker.query.clone(), picker.qcursor), _ => panic!("Models closed") };
+        assert_eq!(picker(&app).0.as_deref(), Some(id));
+        // The list's keys line, at its foot, says the arrows (here, where the buttons are offered).
+        let hints = |app: &App| match &app.modal { Some(crate::modal::Modal::Picker { picker, .. }) => picker.hints.clone(), _ => vec![] };
+        assert!(hints(&app).contains(&("←→", "choose")), "{:?}", hints(&app));
+        let mut mac = community("macos", "downloaded", &[]);
+        mac.size = (160, 50);
+        back_to_models(&mut mac, Some(id.to_string()));
+        assert!(!hints(&mac).iter().any(|h| h.0 == "←→"), "not offered on a Mac by default");
+        key(&mut app, KeyCode::Left);
+        assert!(app.models_view.run_other.is_none(), "← on Personal grid stays there");
+        key(&mut app, KeyCode::Right);
+        assert_eq!(app.models_view.run_other.as_deref(), Some(id));
+        key(&mut app, KeyCode::Right);
+        assert_eq!(app.models_view.run_other.as_deref(), Some(id), "→ on the community stays there");
+        key(&mut app, KeyCode::Left);
+        assert!(app.models_view.run_other.is_none());
+        assert_eq!(picker(&app).0.as_deref(), Some(id), "the cursor stays on the row");
+        // A search typed: the arrows move in it, and choose nothing.
+        key(&mut app, KeyCode::Char('q'));
+        let (_, query, at) = picker(&app);
+        key(&mut app, KeyCode::Left);
+        assert!(app.models_view.run_other.is_none());
+        assert_eq!((picker(&app).1, picker(&app).2), (query, at - 1));
+    }
+
+    /// Not downloaded yet: got first (asked first), then started there. A model running on the personal grid
+    /// is left running: a computer serves its community beside its own model (owner, 2026-10-13).
+    #[test]
+    fn a_community_run_gets_the_model_and_leaves_the_personal_one_running() {
+        let id = "mv:local:qwen-35b";
+        let mut app = community("omarchy", "available", &[]);
+        open(&mut app);
+        let mut picker = Picker::new("models", "");
+        choose_run_on(&mut app, id, true);
+        // A download is gigabytes: the first Enter asks, in the preview, as the Personal grid's Get asks.
+        choose(&mut app, &mut picker, id, false);
+        assert_eq!(app.models_view.confirm.as_ref().map(|c| c.1.as_str()), Some("Get Qwen3.6-35B-A3B (20 GB), run it on Omarchy community? Enter · Esc"));
+        assert!(app.models_view.sent.iter().all(|s| !s.1.starts_with("grid_fleet_model_")), "asked first");
+        choose(&mut app, &mut picker, id, false);
+        assert_eq!(last_sent(&app), ("local".into(), "grid_fleet_model_download".into(), json!({ "modelId": "qwen-35b" })));
+        assert_eq!(app.models_view.using.as_ref().map(|u| (u.step, u.community.clone())), Some((Step::Get, Some("Omarchy community".into()))));
+        let mut app = community("omarchy", "downloaded", &[]);
+        let mut reply = local_reply(qwen("downloaded", Value::Null), false);
+        reply["models"][1]["state"] = json!("running"); reply["models"][1]["canStop"] = json!(true);
+        reply["os"] = json!("omarchy"); reply["osGrid"] = json!("Omagrid");
+        on_local(&mut app, "local", Ok(reply));
+        open(&mut app);
+        choose_run_on(&mut app, id, true);
+        assert!(text(&preview(&app, id)).contains("Enter runs it on Omarchy community: anyone in the Omarchy community can call it. This harness stays on its model."));
+        let mut picker = Picker::new("models", "");
+        choose(&mut app, &mut picker, id, false);
+        assert_eq!(last_sent(&app), ("local".into(), "grid_fleet_model_start".into(), json!({ "modelId": "qwen-35b", "community": true })));
+        assert!(app.models_view.sent.iter().all(|s| s.1 != "grid_fleet_model_stop"), "gemma keeps running");
+        assert_eq!(app.models_view.using.as_ref().map(|u| (u.step, u.stops.clone())), Some((Step::Start, None)));
+    }
+
     /// A model a Grid setup left running, which the catalog does not list: grid serves it under its
-    /// file's name, quant and all. It is shown without the quant (the Quant line says it), and a
-    /// harness still moves onto it by the name grid serves.
+    /// file's name, quant and all. It is shown without the quant (the Quant line says it — on Omarchy,
+    /// only beside another download of the model), and a harness still moves onto it by the name grid serves.
     #[test]
     fn a_running_model_is_shown_without_its_quant_and_still_switched_onto_by_its_served_name() {
         let mut app = app();
         let file = json!({ "id": "local:Qwen3.8-27B-UD-Q4_K_M.gguf", "name": "Qwen3.8-27B-UD-Q4_K_M", "state": "running", "quant": "", "canStart": false, "canStop": true, "app": "Grid" });
-        on_local(&mut app, "local", Ok(local_reply(file, false)));
+        on_local(&mut app, "local", Ok(local_reply(file.clone(), false)));
         on_grids(&mut app, "local", Ok(grids_reply(&["Qwen3.8-27B-UD-Q4_K_M"])));
         let id = "mv:local:local:Qwen3.8-27B-UD-Q4_K_M.gguf";
         assert_eq!(row(&rows_of(&app), id).label, "Qwen3.8-27B");
         let panel = text(&preview(&app, id));
         assert!(panel.starts_with("Qwen3.8-27B\n"), "{panel}");
         assert!(panel.contains("Quant    Q4_K_M"), "{panel}");
+        // On Omarchy: no Quant line for a model with no other download — beside one, the quant is what
+        // tells the two apart.
+        let mut alone = local_reply(file.clone(), false);
+        alone["os"] = json!("omarchy");
+        on_local(&mut app, "local", Ok(alone));
+        assert!(!text(&preview(&app, id)).contains("Quant"));
+        let q8 = json!({ "id": "local:Qwen3.8-27B-Q8_0.gguf", "name": "Qwen3.8-27B-Q8_0", "state": "downloaded", "canStart": true, "app": "Grid" });
+        let mut both = local_reply(file.clone(), false);
+        both["models"].as_array_mut().unwrap().push(q8);
+        both["os"] = json!("omarchy");
+        on_local(&mut app, "local", Ok(both));
+        assert!(text(&preview(&app, id)).contains("Quant    Q4_K_M"));
+        assert!(text(&preview(&app, "mv:local:local:Qwen3.8-27B-Q8_0.gguf")).contains("Quant    Q8_0"));
         match plan_enter(&app, id) {
             Plan::Retarget { payload, name, .. } => {
                 assert_eq!(payload["gridModel"], "Qwen3.8-27B-UD-Q4_K_M");

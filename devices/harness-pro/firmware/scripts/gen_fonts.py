@@ -7,6 +7,7 @@ Emits ht_pro_24, ht_pro_32, ht_pro_42 and ht_pro_56 (ht_pro_font_t, see main/dis
 The default font is the system sans on macOS when present, else the bundled Liberation Sans.
 Also emits the Console faces (cs_sb_*, cs_md_*, cs_rg_*, cs_mono_*) from the committed Inter / JetBrains Mono TTFs in
 fonts/, whatever --font says: full coverage, plus the CONSOLE_EXTRA marks appended after the Vietnamese entries.
+And the Classic faces (ci_rg_*, ci_bd_*) from Liberation Sans Regular / Bold in fonts/, with the ellipsis appended.
 The output is a build artifact; it is generated at build time and never committed.
 """
 import argparse
@@ -26,7 +27,7 @@ SPARSE = {42: "#>_?", 56: "#>_?"}
 # Keep in sync with ht_pro_vietnamese_index().
 VIETNAMESE = list(range(0x1ea0, 0x1efa)) + [0x102, 0x103, 0x110, 0x111, 0x128, 0x129,
                                             0x168, 0x169, 0x1a0, 0x1a1, 0x1af, 0x1b0]
-# Console faces: (symbol, font file, size). Extras follow the Vietnamese entries; keep in sync with ht_pro_extra_index().
+# Console faces: (symbol, font file, size). Extras follow the Vietnamese entries; each face lists its own extras in its extras table (ht_pro_font_t.extras), which pro_canvas.c searches.
 # Console glyphs are cropped to their inked rows (ht_pro_glyph_t top/rows). A mark the face lacks gets a copy of '?', so it never draws as an empty box.
 FONTS = ROOT / 'fonts'
 CONSOLE = [('cs_sb_48', 'Inter-SemiBold.ttf', 48), ('cs_sb_34', 'Inter-SemiBold.ttf', 34),
@@ -44,6 +45,26 @@ CONSOLE = [('cs_sb_48', 'Inter-SemiBold.ttf', 48), ('cs_sb_34', 'Inter-SemiBold.
 CONSOLE_CUT = {'cs_sb_48': '0123456789.-+_ abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\u2026',
                'cs_mono_24': ''.join(chr(c) for c in range(32, 127))}
 CONSOLE_EXTRA = [0x2026, 0x2192, 0x2191, 0x2193, 0x2190, 0x21e2, 0x25b2, 0x25c6, 0x2713]
+# Classic faces: Liberation Sans Regular / Bold, always from fonts/ whatever --font says. Latin-1 and Vietnamese, plus
+# CLASSIC_EXTRA after them (the ellipsis; U+00B7 is Latin-1). Each face carries its own table of these code points
+# (emitted by emit()); pro_canvas.c draws a mark only if the face's table lists it.
+LS_REG, LS_BOLD = 'LiberationSans-Regular.ttf', 'LiberationSans-Bold.ttf'
+CLASSIC = ([('ci_rg_%d' % n, LS_REG, n) for n in (20, 22, 23, 24, 25, 26, 28, 30, 32, 33, 41, 43, 48)]
+           + [('ci_bd_%d' % n, LS_BOLD, n) for n in (20, 23, 24, 26, 30, 45)])
+CLASSIC_EXTRA = [0x2026, 0x2014]   # ellipsis, em dash (unknown time)
+# Faces that draw a few known strings keep only those characters (the Classic total cap is 800 KB, see test_fonts.py).
+_DIGITS = '0123456789'
+_ASCII = ''.join(chr(c) for c in range(0x20, 0x7f)) + '\u2026\u00b7\u2014'   # fixed English copy, digits or the brand: no Latin-1 high half or Vietnamese
+CLASSIC_CUT = {'ci_rg_20': _ASCII,   # labels, "Updated\u2026", footer caps
+               'ci_rg_25': _ASCII,   # band state word, "Connection lost" copy
+               'ci_rg_28': _ASCII,   # Talk button
+               'ci_bd_20': _ASCII,   # eyebrows, list state words
+               'ci_bd_24': _ASCII,   # count pill
+               'ci_bd_26': _ASCII,   # brand "Harness"
+               'ci_rg_43': 'No panes yet.' + 'Connection lost.',
+               'ci_rg_48': 'Listening.' + 'unread.' + _DIGITS,
+               'ci_bd_45': 'Sending your words\u2026' + 'Updating to' + 'Restarting\u2026' + _DIGITS + '.'
+               + ''.join(chr(c) for c in range(0x20, 0x7f))}   # "Updating to %s" draws any version string
 
 
 def has_glyph(f, cp):
@@ -101,7 +122,7 @@ def bake(font_path, size, sparse_chars=None, extras=(), crop=False):
     return height, data, glyphs
 
 
-def emit(source, name, height, data, glyphs):
+def emit(source, name, height, data, glyphs, extras=()):
     tag = name.removeprefix('ht_pro_')   # the array names Classic has always had: alpha_24, glyphs_24
     source.append(f'static const uint8_t alpha_{tag}[]={{\n')
     source.extend(','.join(str(v) for v in data[i:i + 96]) + ',\n' for i in range(0, len(data), 96))
@@ -109,7 +130,12 @@ def emit(source, name, height, data, glyphs):
     source.append(f'static const ht_pro_glyph_t glyphs_{tag}[]={{\n')
     source.extend('{' + ','.join(map(str, g)) + '},\n' for g in glyphs)
     source.append('};\n')
-    source.append(f'const ht_pro_font_t {name}={{32,255,{height},{len(glyphs)},glyphs_{tag},alpha_{tag}}};\n')
+    if extras:   # the code points baked after the Vietnamese entries, in glyph order (pro_canvas.c code() searches it)
+        source.append(f'static const uint16_t extras_{tag}[]={{' + ','.join('0x%04x' % cp for cp in extras) + '};\n')
+        table = f'extras_{tag},{len(extras)}'
+    else:
+        table = '0,0'
+    source.append(f'const ht_pro_font_t {name}={{32,255,{height},{len(glyphs)},glyphs_{tag},alpha_{tag},{table}}};\n')
 
 
 def main():
@@ -125,7 +151,9 @@ def main():
         height, data, glyphs = bake(args.font, size)
         emit(source, f'ht_pro_{size}', height, data, glyphs)
     for name, ttf, size in CONSOLE:
-        emit(source, name, *bake(FONTS / ttf, size, sparse_chars=CONSOLE_CUT.get(name, ''), extras=CONSOLE_EXTRA, crop=True))
+        emit(source, name, *bake(FONTS / ttf, size, sparse_chars=CONSOLE_CUT.get(name, ''), extras=CONSOLE_EXTRA, crop=True), CONSOLE_EXTRA)
+    for name, ttf, size in CLASSIC:
+        emit(source, name, *bake(FONTS / ttf, size, sparse_chars=CLASSIC_CUT.get(name, ''), extras=CLASSIC_EXTRA, crop=True), CLASSIC_EXTRA)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(''.join(source))
 

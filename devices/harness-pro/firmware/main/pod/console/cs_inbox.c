@@ -14,7 +14,7 @@
 #define C(rgb) ht_rgb(rgb)
 enum { PADX = 24, LOGO = 44, TEXT_X = PADX + LOGO + 16, HEAD_H = 44, TOP = CS_BAR_H + 2, MAX_ITEMS = 40, ROW_RUNS = 12, BUDGET = 184,
        LINE_H = 34, LINES_MAX = 3, ROW_PAD_TOP = 14, NAME_H = 36, MSG_GAP = 6, ROW_PAD_BOT = 16, PITCH = 108,
-       AVAIL = POD_W - CS_HINT_H - TOP };
+       AVAIL = POD_W - CS_FOOT_H - TOP };
 
 typedef struct { char group; const pod_agent_t *a; const pod_unread_t *u; int unread_index; } item_t;   // group: 0 NEEDS YOU, 1 FINISHED, 2 FAILED
 
@@ -82,7 +82,7 @@ static int row_h(const item_t *it)
     return ROW_PAD_TOP + NAME_H + (n ? MSG_GAP + n * LINE_H : 0) + ROW_PAD_BOT + 1;
 }
 
-// The scroll limit: the first row from which the rest of the list fits above the hint strip, so the last row can be reached.
+// The scroll limit: the first row from which the rest of the list fits above the bottom margin, so the last row can be reached.
 int cs_inbox_max_row(const pod_model_t *m)
 {
     item_t it[MAX_ITEMS];
@@ -116,7 +116,7 @@ static int row(pod_out_frame_t *f, const pod_model_t *m, const item_t *it, int y
     char line[POD_UNREAD_TEXT], rows[LINES_MAX][POD_ROW_MAX], age[8];
     line_of(it, line, sizeof line);
     int n = wrap3(line, rows);
-    unsigned lc = it->group == 0 ? CS_ASK : it->group == 2 ? CS_FAIL : 0xc9ccd2;
+    unsigned lc = it->group == 0 ? CS_ASK : it->group == 2 ? CS_FAIL : CS_INK2;
     if (it->u) {
         int32_t d = (int32_t)(m->clock_ms - it->u->at_ms);
         pod_fmt_age(age, sizeof age, d > 0 ? (uint32_t)d / 1000 : 0);
@@ -124,7 +124,7 @@ static int row(pod_out_frame_t *f, const pod_model_t *m, const item_t *it, int y
     if (unread) ht_pro_rect(s, 0, y, 4, h - 1, 0, C(CS_FOCUS));
     cs_logo(s, PADX, y + ROW_PAD_TOP + 4, LOGO, a ? a->engine : NULL);
     const int cy = y + ROW_PAD_TOP + NAME_H / 2, aw = ht_pro_width(&cs_mono_22, age);
-    cs_text(s, right - aw, cy, aw + 2, &cs_mono_22, mix(0x6b7078, dim), age);
+    cs_text(s, right - aw, cy, aw + 2, &cs_mono_22, mix(CS_DIM, dim), age);
     int x = TEXT_X;
     cs_dot(s, x + 6, cy, it->group == 0 ? 'q' : it->group == 2 ? 'r' : 'd', 0);
     x += 22;
@@ -133,10 +133,10 @@ static int row(pod_out_frame_t *f, const pod_model_t *m, const item_t *it, int y
     if (nw > avail * 3 / 5) nw = avail * 3 / 5;
     cs_text(s, x, cy, nw, &cs_sb_32, mix(CS_INK, dim), name);
     const pod_tab_t *tab = a ? pod_tab_of(m, a) : NULL;
-    if (tab && avail - nw - 10 > 20) cs_text(s, x + nw + 10, cy, avail - nw - 10, &cs_rg_22, mix(0x6b7078, dim), tab->name);
+    if (tab && avail - nw - 10 > 20) cs_text(s, x + nw + 10, cy, avail - nw - 10, &cs_rg_22, mix(CS_DIM, dim), tab->name);
     for (int i = 0; i < n; i++)
         cs_text(s, TEXT_X, y + ROW_PAD_TOP + NAME_H + MSG_GAP + LINE_H / 2 + i * LINE_H, right - TEXT_X, &cs_rg_27, mix(lc, dim), rows[i]);
-    ht_pro_rect(s, 0, y + h - 1, POD_W, 1, 0, C(0x15161a));
+    ht_pro_rect(s, 0, y + h - 1, POD_W, 1, 0, C(CS_RAISED));
     // A row with an unread entry marks it read (OPEN_NOTIF); asking and failed agents have none: FOLLOW opens them by id.
     if (it->u) pod_hit_add_id(f, 0, y, POD_W, h, POD_A_OPEN_NOTIF, it->unread_index, it->u->agent);
     else pod_hit_add_id(f, 0, y, POD_W, h, POD_A_FOLLOW, (int)(a - m->agents), a->id);
@@ -150,8 +150,6 @@ void cs_view_inbox(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, uin
     cs_counts(m, &running, &asking);
     const char *const crumbs[] = {"Inbox"};
     cs_bar(f, crumbs, 1, running, asking, 0, NULL, now_ms);
-    const char *const keys[] = {"tap", "\xe2\x86\x93"}, *const labels[] = {"open", "home"};
-    cs_hints(f, keys, labels, 2);
     item_t it[MAX_ITEMS];
     int n = collect(m, it);
     if (n == 0) {
@@ -168,11 +166,11 @@ void cs_view_inbox(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, uin
     int first = fr->scroll < 0 ? 0 : fr->scroll > max ? max : fr->scroll, y = TOP, prev = -1;
     for (int i = first; i < n; i++) {
         int need = (it[i].group != prev ? HEAD_H : 0) + row_h(&it[i]);
-        if (y + need > POD_W - CS_HINT_H || cs_runs(f) + ROW_RUNS + 2 > BUDGET) break;
+        if (y + need > POD_W - CS_FOOT_H || cs_runs(f) + ROW_RUNS + 2 > BUDGET) break;
         if (it[i].group != prev) {
             char c[8];
             snprintf(c, sizeof c, "%d", count[(int)it[i].group]);
-            cs_text(s, PADX, y + 16 + 11, ht_pro_width(&cs_mono_18, title[(int)it[i].group]) + 2, &cs_mono_18, 0x6b7078, title[(int)it[i].group]);
+            cs_text(s, PADX, y + 16 + 11, ht_pro_width(&cs_mono_18, title[(int)it[i].group]) + 2, &cs_mono_18, CS_DIM, title[(int)it[i].group]);
             int cw = ht_pro_width(&cs_mono_18, c);
             cs_text(s, POD_W - PADX - cw, y + 16 + 11, cw + 2, &cs_mono_18, CS_MUTED, c);
             y += HEAD_H;

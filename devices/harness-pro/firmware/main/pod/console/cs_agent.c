@@ -10,7 +10,7 @@
 #include "pro_canvas.h"
 
 #define C(rgb) ht_rgb(rgb)
-enum { HERO_BOTTOM = 240, PADX = 28, BOX_W = 170, BOX_H = 130, MUTED_LBL = 0x5f646d, EQ_N = 30, EQ_H = 30, LOGO = 28 };
+enum { HERO_BOTTOM = 240, PADX = 28, BOX_W = 170, BOX_H = 130, MUTED_LBL = CS_DIM, EQ_N = 30, EQ_H = 30, LOGO = 28 };
 
 const char *cs_parent_name(const pod_nav_t *nav, const pod_model_t *m)
 {
@@ -31,7 +31,7 @@ void cs_label(ht_scene_t *s, int x, int cy, unsigned rgb, const char *t)
 
 void cs_spin(ht_scene_t *s, int cx, int cy, unsigned rgb, uint32_t now_ms)
 {
-    pod_arc(s, cx * 16, cy * 16, 10 * 16, 3 * 16, 0, 180, C(0x24262b));
+    pod_arc(s, cx * 16, cy * 16, 10 * 16, 3 * 16, 0, 180, C(CS_EDGE));
     pod_arc(s, cx * 16, cy * 16, 10 * 16, 3 * 16, (int)((360 - now_ms % 900 * 360 / 900) % 360), 50, C(rgb));
 }
 
@@ -46,8 +46,8 @@ int cs_hero(pod_out_frame_t *f, const pod_nav_t *nav, const pod_model_t *m, cons
     ht_scene_t *s = f->scene;
     pod_state_t st = pod_model_eff(m, a);
     const int by = CS_BAR_H + 20;
-    unsigned border = st == POD_ASKING ? 0x5a4210 : st == POD_DONE ? 0x26282d : CS_BORDER;
-    ht_pro_rect_aa_stroke(s, PADX, by, BOX_W, BOX_H, 20, C(border), C(st == POD_ASKING ? 0x17130a : CS_SURFACE));
+    unsigned border = st == POD_ASKING ? CS_ASK_EDGE : st == POD_DONE ? CS_EDGE : CS_BORDER;
+    ht_pro_rect_aa_stroke(s, PADX, by, BOX_W, BOX_H, 20, C(border), C(st == POD_ASKING ? CS_ASK_FILL : CS_SURFACE));
     pod_pet_draw(s, PADX + (BOX_W - 112) / 2, by + (BOX_H - 112) / 2, 112, a->engine, scene_for(st), now_ms, 0);
 
     const int x = PADX + BOX_W + 24, w = POD_W - PADX - x;
@@ -59,7 +59,7 @@ int cs_hero(pod_out_frame_t *f, const pod_nav_t *nav, const pod_model_t *m, cons
     // state . time: the state word in the 28 px medium face; an unknown time draws no time and no dot
     const char *label = st == POD_WORKING ? "Running" : st == POD_ASKING ? "Needs input" : st == POD_DONE ? "Done" :
                         st == POD_OFFLINE ? "Offline" : a->failed ? "Failed" : "Idle";
-    unsigned col = st == POD_WORKING ? CS_RUN : st == POD_ASKING ? CS_ASK : st == POD_DONE ? 0xc9ccd2 :
+    unsigned col = st == POD_WORKING ? CS_RUN : st == POD_ASKING ? CS_ASK : st == POD_DONE ? CS_INK2 :
                    (st != POD_OFFLINE && a->failed) ? CS_FAIL : CS_MUTED;
     const int cy = by + 70;
     cs_dot(s, x + 6, cy, cs_state_dot(m, a), now_ms);
@@ -69,7 +69,7 @@ int cs_hero(pod_out_frame_t *f, const pod_nav_t *nav, const pod_model_t *m, cons
         char t[12];
         pod_fmt_time(t, sizeof t, pod_agent_secs(a, now_ms));
         int dw = ht_pro_width(&cs_rg_22, "\xc2\xb7"), tx = x + 22 + lw + 10;
-        cs_text(s, tx, cy, dw + 2, &cs_rg_22, 0x3a3d44, "\xc2\xb7");
+        cs_text(s, tx, cy, dw + 2, &cs_rg_22, CS_TRACK, "\xc2\xb7");
         cs_text(s, tx + dw + 10, cy, ht_pro_width(&cs_mono_26, t) + 2, &cs_mono_26, CS_INK, t);
     }
 
@@ -89,7 +89,7 @@ static void equaliser(ht_scene_t *s, int x, int y, uint32_t now_ms)
     for (int i = 0; i < EQ_N; i++) {
         uint32_t period = 700 + (uint32_t)(i % 4) * 130, p = (now_ms + (uint32_t)i * 173) % period, half = period / 2;
         int h = 9 + (int)((p < half ? p : period - p) * 21 / half);
-        ht_pro_rect(s, x + i * pitch, y + EQ_H - h, 17, h, 2, C(i >= EQ_N - 8 ? CS_RUN : 0x1f3a2c));
+        ht_pro_rect(s, x + i * pitch, y + EQ_H - h, 17, h, 2, C(i >= EQ_N - 8 ? CS_RUN : CS_RUN_DIM));
     }
 }
 
@@ -110,18 +110,13 @@ void cs_view_agent(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, uin
     if (!a) return;
     cs_back_hit(f, crumbs[0]);   // the bar names only the tab; a tap on it goes up
     pod_state_t st = pod_model_eff(m, a);
-    // Voice stays refused on an asking agent (owner): no hold hint, and the glue does not arm the hold there.
-    const char *const keys[] = {"hold", "\xe2\x86\x90 \xe2\x86\x92", "\xe2\x86\x91", "\xe2\x86\x93"};
-    const char *const labels[] = {"talk", "panes", "back", "home"};
-    if (st == POD_ASKING) cs_hints(f, keys + 1, labels + 1, 3);
-    else cs_hints(f, keys, labels, 4);
     int y = cs_hero(f, nav, m, a, now_ms);
 
     if (st == POD_ASKING) {
         char rows[4][POD_ROW_MAX];
         int n = pod_wrap(a->question, &cs_sb_34, POD_W - 2 * 18 - 44, 4, rows);
         const int top = y + 16, h = 18 + 18 + 10 + n * 42 + 16 + 28 + 24 + 18;
-        ht_pro_rect_aa_stroke(s, 18, top, POD_W - 36, h, 18, C(0x5a4210), C(0x16120a));
+        ht_pro_rect_aa_stroke(s, 18, top, POD_W - 36, h, 18, C(CS_ASK_EDGE), C(CS_ASK_FILL));
         cs_label(s, 18 + 22, top + 18 + 9, CS_ASK, "QUESTION");
         for (int i = 0; i < n; i++) cs_text(s, 18 + 22, top + 18 + 18 + 10 + i * 42 + 21, POD_W - 36 - 44, &cs_sb_34, CS_INK, rows[i]);
         int ay = top + 18 + 18 + 10 + n * 42 + 16;

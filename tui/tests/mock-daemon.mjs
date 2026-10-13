@@ -415,7 +415,27 @@ wss.on('connection', (ws) => {
       }
       case 'grid_models_list': return reply({ supportsModelLaunch: true, localModelEngines: ['codex', 'claude'], grids: [
         { name: 'studio', own: true, models: [{ id: 'demo-model', node: 'studio' }] },
+        ...(process.env.MOCK_SERVING ? [
+          { name: 'Omagrid', own: false, state: 'awake', models: [{ id: 'Qwen3.8-27B-UD-Q4_K_M', node: 'Omarchy machine' }] },
+          { name: 'team', own: false, state: 'awake', models: [] },
+        ] : []),
       ] })
+      // MOCK_SERVING=<os>: this computer, on that OS grid and in its community grid Omagrid, serves Qwen on its
+      // own grid and on Omagrid — `servedOn`, `os` and `osGrid` as `LocalModels` answers them — for the Models
+      // view's serving table and its Run on dialog (Enter on gemma, downloaded, not running). MOCK_SERVING_IDLE:
+      // Qwen stopped too, so Enter on gemma runs it with no other model to stop first.
+      case 'grid_fleet_models_list': if (!process.env.MOCK_SERVING) return
+        return reply({ os: process.env.MOCK_SERVING, osGrid: 'Omagrid', busy: false, supportsDownload: true, memoryBytes: 64 * 1024 ** 3,
+          freeDiskBytes: 120 * 1024 ** 3, observedAt: now, models: [
+            { id: 'local:Qwen3.8-27B-UD-Q4_K_M.gguf', name: 'Qwen3.8-27B-UD-Q4_K_M', state: process.env.MOCK_SERVING_IDLE ? 'downloaded' : 'running',
+              sizeBytes: 17 * 1024 ** 3, canStart: !!process.env.MOCK_SERVING_IDLE, canStop: !process.env.MOCK_SERVING_IDLE,
+              app: 'Grid', servedAs: ['Qwen3.8-27B-UD-Q4_K_M'], tokensPerSecond: 41.8, contextWindow: 131072, requests: 42, windowSeconds: 86400,
+              servedOn: [
+                { grid: 'studio', requests: 42, tokensOut: 180000, tokensIn: 400000, tokensCached: 300000, windowSeconds: 86400 },
+                { grid: 'Omagrid', requests: 268, tokensOut: 1100000, tokensIn: 2400000000, tokensCached: 1800000, windowSeconds: 86400 },
+              ] },
+            { id: 'org/gemma-4-12b', name: 'gemma-4-12b', state: 'downloaded', sizeBytes: 8 * 1024 ** 3, canStart: true, canStop: false, estTokS: 70, app: 'Grid' },
+          ] })
       case 'codex_profiles_list': return reply({ profiles: [{ path: '/home/demo/.codex-work', label: 'Work' }] })
       case 'dsh_list': return reply({ dsh: process.env.MOCK_NEW_UI ? [{ id: 'example/blender', name: 'Blender', engine: 'codex', engines: ['codex', 'claude'], installed: true }] : [] })
       // The agent accounts' limits, as the vendors answer (MOCK_USAGE: Claude's 5-hour window, %).

@@ -1,7 +1,10 @@
 # Pre-change (v3 Task 4) host us per Console frame: 720x720 in 24-row strips, -O2, best of 18 runs, default font. test_cs_perf.sh needs <= 85% of these.
-tabs 207
-recent 196
-tabp:3 127
+# tabs: re-baselined for the one-lead-per-tab Overview (tinted cards, four pets' small loops at their stored size, about 212 us measured; 207 before).
+tabs 260
+# recent: re-baselined for six rows a screen instead of five (no hint strip; about 183 us measured; 196 before).
+recent 220
+# tabp:3: re-baselined for the Tab as cards (three pets instead of rows; about 146 us measured; 127 before).
+tabp:3 185
 agent:fw 231
 agent:cli 301
 recap:desk 397

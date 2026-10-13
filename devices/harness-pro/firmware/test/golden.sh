@@ -31,7 +31,8 @@ fi
 cc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -O1 -g -DHT_FACE_PX=720 -I"$disp" -I"$fw/main" -I"$here/host_stubs" \
    -o "$out/pod_render" "$here/pod_render.c" "$fw"/main/pod/*.c "$fw"/main/pod/classic/*.c "$fw"/main/pod/console/*.c "$disp/pro_canvas.c" "$disp/terminal.c" "$out/pro_fonts.c"
 
-screens=(agent:fw:steps6 agent:cli:qresume tabs tabs:1 tabs:mock default default:tab default:talk recent chrome chrome:talk tab:{0..5} ota:0 ota:42 ota:100 ota:restart notice:updated notice:failed)
+screens=(agent:fw:steps6 agent:cli:qresume tabs tabs:9 tabs:2+3 tabs:linkdown agent:fw:linkdown tab:empty default default:tab default:talk recent chrome chrome:talk tab:{0..5}
+    inbox inbox:ask banner:done@0 banner:done@3000 banner:done@5900 banner:failed@0 talk:listen talk:send ota:0 ota:42 ota:100 ota:restart notice:updated notice:failed)
 for k in agent recap talk; do
     for id in fw ota be cli web desk docs vault site cur notes2 kilo; do screens+=("$k:$id"); done
 done

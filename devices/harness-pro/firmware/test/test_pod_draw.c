@@ -1,6 +1,7 @@
 // Task 3: Pod's cell sprite, ring arc and gradient runs.
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "pod/pod_draw.h"
 #include "pro_canvas.h"
@@ -227,6 +228,60 @@ static void draw_test_grad(void)
 }
 
 
+// Classic's grey gradient: every pixel neutral (r = b, g = 2r + 1), so no pink band; dithered, so it has more than a few flat steps.
+static void draw_test_grad_gray(void)
+{
+    ht_scene_t s; ht_scene_clear(&s, 0);
+    pod_grad_gray(&s, 0, 0, 20, 60, ht_rgb(0xf8f9f7), ht_rgb(0xe9eae5));
+    CHECK(s.count == 1);
+    draw(&s);
+    int sum_top = 0, sum_bot = 0;
+    for (int y = 0; y < 60; y++)
+        for (int x = 0; x < 20; x++) {
+            uint16_t v = px(x, y);
+            CHECK(((v >> 11) & 31) == (v & 31) && ((v >> 5) & 63) == 2 * (v & 31) + 1);
+            if (y < 10) sum_top += v & 31;
+            if (y >= 50) sum_bot += v & 31;
+        }
+    CHECK(sum_top > sum_bot && px(20, 0) == 0);   // darker toward the bottom; nothing outside the rect
+    int mixed = 0;
+    for (int y = 0; y < 60; y++) { uint16_t a = px(0, y), b = px(1, y); if (a != b) mixed++; }
+    CHECK(mixed > 0);   // a row between two levels alternates them
+}
+
+static void draw_test_grad_aa_corner(void)
+{
+    const uint16_t ground = 0x2104, ink = ht_rgb(0x2f6df0);
+    static const int rads[] = {7, 13};
+    for (unsigned k = 0; k < 2; k++) {
+        static uint16_t want[W * H];
+        ht_scene_t s; ht_scene_clear(&s, 0);
+        CHECK(ht_pro_rect_aa(&s, 5, 6, 50, 40, rads[k], ink));
+        draw_over(&s, ground);
+        memcpy(want, buf, sizeof want);
+        ht_scene_clear(&s, 0);
+        pod_grad_aa(&s, 5, 6, 50, 40, rads[k], ink, ink);
+        CHECK(s.count == 1);
+        draw_over(&s, ground);
+        CHECK(memcmp(want, buf, sizeof want) == 0);
+    }
+}
+static void draw_test_grad_aa_rows(void)
+{
+    uint16_t top = ht_rgb(0x5ea2f2), bot = ht_rgb(0x1f63d1);
+    static uint16_t big[20 * 100];
+    ht_scene_t s; ht_scene_clear(&s, 0);
+    pod_grad_aa(&s, 0, 0, 20, 100, 7, top, bot);
+    CHECK(s.count == 1);
+    memset(big, 0, sizeof big);
+    ht_rect_t c = {0, 0, 20, 100};
+    ht_pro_raster(&s.runs[0], c, big);
+    uint16_t m = big[50 * 20 + 10];
+    int rr = (top >> 11) + (bot >> 11), gg = ((top >> 5) & 63) + ((bot >> 5) & 63), bb = (top & 31) + (bot & 31);
+    CHECK(abs((m >> 11) - rr / 2) <= 1 && abs(((m >> 5) & 63) - gg / 2) <= 1 && abs((m & 31) - bb / 2) <= 1);
+    CHECK(big[0] == 0 && big[10] == top);
+}
+
 static void draw_test_tri(void)
 {
     ht_scene_t s; ht_scene_clear(&s, 0);
@@ -413,6 +468,129 @@ static void draw_test_rect_aa_stroke(void)
     checks++;
 }
 
+// ---- Face-aware text: a code point is kept only if the face draws it (the face's extras table) ----
+#define FACES(X) \
+    X(ht_pro_24) X(ht_pro_32) X(ht_pro_42) X(ht_pro_56) \
+    X(cs_sb_48) X(cs_sb_34) X(cs_sb_26) X(cs_sb_22) X(cs_rg_24) X(cs_rg_20) X(cs_rg_17) X(cs_mono_26) X(cs_mono_18) \
+    X(cs_mono_15) X(cs_md_28) X(cs_sb_32) X(cs_rg_36) X(cs_rg_27) X(cs_rg_22) X(cs_mono_24) X(cs_mono_22) \
+    X(ci_rg_20) X(ci_rg_22) X(ci_rg_23) X(ci_rg_24) X(ci_rg_25) X(ci_rg_26) X(ci_rg_28) X(ci_rg_30) X(ci_rg_32) \
+    X(ci_rg_33) X(ci_rg_41) X(ci_rg_43) X(ci_rg_48) X(ci_bd_20) X(ci_bd_23) X(ci_bd_24) X(ci_bd_26) X(ci_bd_30) X(ci_bd_45)
+typedef struct { const char *name; const ht_pro_font_t *face; } named_face_t;
+#define ENTRY(f) {#f, &f},
+static const named_face_t all_faces[] = { FACES(ENTRY) };
+#define N_FACES (sizeof all_faces / sizeof all_faces[0])
+
+enum { TW = 400, TH = 96 };
+static uint16_t tbuf[TW * TH];
+// Draw `text` on `face` into tbuf (ground 0, white ink) and return the run's normalized text; *ink counts inked pixels.
+static const char *draw_text(const ht_pro_font_t *face, const char *text, int *ink)
+{
+    static ht_scene_t s;
+    ht_scene_clear(&s, 0);
+    memset(tbuf, 0, sizeof tbuf);
+    CHECK(ht_pro_text(&s, 2, 2, TW - 4, face, 0xffff, text));
+    ht_pro_raster(&s.runs[0], (ht_rect_t){0, 0, TW, TH}, tbuf);
+    int n = 0;
+    for (int i = 0; i < TW * TH; i++) n += tbuf[i] != 0;
+    if (ink) *ink = n;
+    return s.runs[0].text;
+}
+static bool starts_with(const char *s, const char *prefix) { return !strncmp(s, prefix, strlen(prefix)); }
+static bool cut_face(const char *name)   // faces cut to a fixed string (gen_fonts CONSOLE_CUT / CLASSIC_CUT): their extras may be blank
+{
+    return !strcmp(name, "cs_sb_48") || !strcmp(name, "cs_mono_24") || !strcmp(name, "ci_rg_43") ||
+           !strcmp(name, "ci_rg_48") || !strcmp(name, "ci_bd_45");
+}
+static const named_face_t *find_face(const char *name)
+{
+    for (unsigned i = 0; i < N_FACES; i++) if (!strcmp(all_faces[i].name, name)) return &all_faces[i];
+    return NULL;
+}
+
+static void draw_test_marks_follow_the_face(void)
+{
+    const char *input = "a \xe2\x86\x90 b \xe2\x86\x91 c \xe2\x96\xb2";   // a <- b ^ c up-triangle
+    // Classic: none of the arrows is in the face, so each becomes its ASCII fallback, never a '?'.
+    const char *ci = draw_text(find_face("ci_rg_24")->face, input, NULL);
+    CHECK(!strchr(ci, '?'));
+    for (const char *p = ci; *p; p++) CHECK(!((unsigned char)*p & 0x80));
+    CHECK(starts_with(ci, "a ") && strstr(ci, " b ") && strstr(ci, " c "));
+    CHECK(strlen(ci) > strlen("a  b  c "));
+    // Console: the marks are native and kept as they are.
+    const char *cs = draw_text(find_face("cs_rg_24")->face, input, NULL);
+    CHECK(!strcmp(cs, input));
+    // The old faces carry no marks either: a fallback, never '?'.
+    const char *old = draw_text(find_face("ht_pro_24")->face, input, NULL);
+    CHECK(!strchr(old, '?'));
+    for (const char *p = old; *p; p++) CHECK(!((unsigned char)*p & 0x80));
+    // The five marks that always passed through the no-face path still do.
+    char out[64];
+    CHECK(ht_display_text_ex(out, sizeof out, "\xe2\x86\x92", NULL) && !strcmp(out, "\xe2\x86\x92"));
+    // Console's right arrow stays native; Classic's becomes ASCII and does not draw the em dash.
+    CHECK(!strcmp(draw_text(find_face("cs_rg_24")->face, "\xe2\x86\x92", NULL), "\xe2\x86\x92"));
+    CHECK(strcmp(draw_text(find_face("ci_rg_24")->face, "\xe2\x86\x92", NULL), "\xe2\x86\x92") != 0);
+}
+
+static void draw_test_extras_round_trip(void)
+{
+    for (unsigned i = 0; i < N_FACES; i++) {
+        const named_face_t *nf = &all_faces[i];
+        const ht_pro_font_t *f = nf->face;
+        CHECK((f->extras == NULL) == (f->extra_count == 0));
+        CHECK(f->glyph_count == (f->last - f->first + 1) + 102 + f->extra_count);   // the table matches the atlas
+        for (unsigned k = 0; k < f->extra_count; k++) {
+            uint32_t cp = f->extras[k];
+            CHECK(ht_pro_extra_pos(f, cp) == (int)k && ht_pro_can_draw(f, cp));
+            char text[8] = {0};
+            if (cp < 0x800) { text[0] = (char)(0xc0 | cp >> 6); text[1] = (char)(0x80 | (cp & 63)); }
+            else { text[0] = (char)(0xe0 | cp >> 12); text[1] = (char)(0x80 | ((cp >> 6) & 63)); text[2] = (char)(0x80 | (cp & 63)); }
+            int ink;
+            const char *shown = draw_text(f, text, &ink);
+            CHECK(!strcmp(shown, text));   // kept native
+            // A face cut to a fixed string draws only that string's marks (U+2026 on cs_sb_48 / ci_bd_45).
+            if (cut_face(nf->name) && !(cp == 0x2026 && (!strcmp(nf->name, "cs_sb_48") || !strcmp(nf->name, "ci_bd_45")))) continue;
+            if (!ink) fprintf(stderr, "%s U+%04X has no ink\n", nf->name, (unsigned)cp);
+            CHECK(ink > 0);
+        }
+    }
+    // Classic: U+2014 draws the dash itself and U+2192 neither draws it nor falls back onto it.
+    for (unsigned i = 0; i < N_FACES; i++) {
+        const named_face_t *nf = &all_faces[i];
+        if (strncmp(nf->name, "ci_", 3) || cut_face(nf->name)) continue;
+        static uint16_t dash[TW * TH], arrow[TW * TH];
+        int ink;
+        CHECK(!strcmp(draw_text(nf->face, "\xe2\x80\x94", &ink), "\xe2\x80\x94") && ink > 0);
+        memcpy(dash, tbuf, sizeof tbuf);
+        const char *a = draw_text(nf->face, "\xe2\x86\x92", NULL);
+        CHECK(strcmp(a, "\xe2\x86\x92") != 0 && !strchr(a, '?'));
+        memcpy(arrow, tbuf, sizeof tbuf);
+        CHECK(memcmp(dash, arrow, sizeof dash) != 0);
+        draw_text(nf->face, "-", NULL);
+        CHECK(memcmp(dash, tbuf, sizeof dash) != 0);   // the dash is the em dash glyph, not the hyphen
+    }
+}
+
+static void draw_test_update_version_on_ci_bd_45(void)
+{
+    const ht_pro_font_t *f = find_face("ci_bd_45")->face;
+    const char *version = "0.2.0-beta+v";
+    for (const char *c = version; *c; c++) {
+        char one[2] = {*c, 0};
+        int ink;
+        CHECK(!strcmp(draw_text(f, one, &ink), one));
+        if (*c != ' ') { if (!ink) fprintf(stderr, "ci_bd_45 '%c' has no ink\n", *c); CHECK(ink > 0); }
+    }
+    CHECK(!strcmp(draw_text(f, version, NULL), version));
+    int printable = 0;
+    for (int c = 0x21; c < 0x7f; c++) {
+        char one[2] = {(char)c, 0};
+        int ink;
+        draw_text(f, one, &ink);
+        printable += ink > 0;
+    }
+    CHECK(printable == 0x7f - 0x21);
+}
+
 int main(void)
 {
     draw_test_corner_cover_fast_path();
@@ -425,8 +603,14 @@ int main(void)
     draw_test_arc();
     draw_test_damage();
     draw_test_grad();
+    draw_test_grad_gray();
+    draw_test_grad_aa_corner();
+    draw_test_grad_aa_rows();
     draw_test_tri();
     draw_test_tri_seam();
+    draw_test_marks_follow_the_face();
+    draw_test_extras_round_trip();
+    draw_test_update_version_on_ci_bd_45();
     printf("Pod draw: PASS (%d checks)\n", checks);
     return 0;
 }

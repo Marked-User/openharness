@@ -5,20 +5,7 @@
 enum { PRO_TEXT = 1, PRO_RECT, PRO_IMAGE, PRO_RECT_AA, PRO_RECT_AA_STROKE };
 static int min_(int a, int b) { return a < b ? a : b; }
 static int max_(int a, int b) { return a > b ? a : b; }
-static uint16_t over(uint16_t fg, uint16_t bg, unsigned a)
-{
-    if (a == 255) return fg;
-    unsigned b = 255 - a;
-    // Exact rounded division by255 for these bounded channel products. This
-    // avoids the wide multiply used for a constant division on the P4's RV32.
-    unsigned r = (fg >> 11) * a + (bg >> 11) * b + 128;
-    unsigned g = ((fg >> 5) & 63) * a + ((bg >> 5) & 63) * b + 128;
-    unsigned v = (fg & 31) * a + (bg & 31) * b + 128;
-    r = (r + (r >> 8)) >> 8;
-    g = (g + (g >> 8)) >> 8;
-    v = (v + (v >> 8)) >> 8;
-    return (uint16_t)((r << 11) | (g << 5) | v);
-}
+static inline uint16_t over(uint16_t fg, uint16_t bg, unsigned a) { return ht_pro_over(fg, bg, a); }
 
 static void fill_span(uint16_t *dst, int count, uint16_t ink)
 {
@@ -80,8 +67,9 @@ static unsigned code(const ht_pro_font_t *f, uint32_t cp)
     int vietnamese = ht_pro_vietnamese_index(cp);
     if (vietnamese >= 0 && f->last - f->first + 1 + vietnamese < f->glyph_count)
         return f->last + 1 + (unsigned)vietnamese;
-    int extra = ht_pro_extra_index(cp);
-    if (extra >= 0 && f->last - f->first + 1 + extra < f->glyph_count) return f->last + 1 + (unsigned)extra;
+    int extra = ht_pro_extra_pos(f, cp);   // marks the face was baked with, after the Vietnamese entries
+    if (extra >= 0 && f->last - f->first + 1 + 102 + extra < f->glyph_count)
+        return f->last + 1 + 102 + (unsigned)extra;
     if (cp == 0x2018 || cp == 0x2019) cp = '\'';
     if (cp == 0x201c || cp == 0x201d) cp = '"';
     if (cp >= 0x2010 && cp <= 0x2015) cp = '-';
@@ -89,8 +77,6 @@ static unsigned code(const ht_pro_font_t *f, uint32_t cp)
 }
 /* Glyph advances position the next glyph; atlas ink may extend beyond them.
  * Keep that last overhang inside both fit decisions and damage bounds. */
-// A Console face has the extra marks after the Vietnamese entries (see ht_pro_extra_index).
-static bool has_marks(const ht_pro_font_t *f) { return f->last - f->first + 1 + 102 < f->glyph_count; }
 static int visible_width(const ht_pro_font_t *f, const char *text)
 {
     int advance = 0, extent = 0;
@@ -107,7 +93,7 @@ int ht_pro_width(const ht_pro_font_t *f, const char *text)
     // Measurement follows the same display normalization as wrapping/raster:
     // fractions and unsupported characters may expand to several glyphs.
     char visible[4096];
-    ht_display_text_ex(visible, sizeof visible, text, has_marks(f));
+    ht_display_text_ex(visible, sizeof visible, text, f);
     return visible_width(f, visible);
 }
 static ht_run_t *run(ht_scene_t *s, int kind, int x, int y, int w, int h)
@@ -126,7 +112,7 @@ bool ht_pro_text(ht_scene_t *s, int x, int y, int width, const ht_pro_font_t *fo
     if (!r) return false;
     r->pro_font = font; r->fg = ink;
     char normalized[HT_TEXT_BYTES * 4];
-    bool complete = ht_display_text_ex(normalized, sizeof normalized, text, has_marks(font));
+    bool complete = ht_display_text_ex(normalized, sizeof normalized, text, font);
     const char *p = normalized;
     int used = 0, advance = 0, extent = 0;
     while (*p && *p != '\n') {
@@ -192,7 +178,7 @@ int ht_pro_text_rows(const char *text, const ht_pro_font_t *font, int width)
 {
     if (!font || width <= 0 || !text || !*text) return 0;
     char visible[4096], row[HT_TEXT_BYTES];
-    ht_display_text_ex(visible, sizeof visible, text, has_marks(font));
+    ht_display_text_ex(visible, sizeof visible, text, font);
     const char *p = visible; int count = 0;
     while (*p) { line(&p, font, width, row); count++; }
     return count;
@@ -202,7 +188,7 @@ int ht_pro_wrap(ht_scene_t *s, int x, int y, int width, int rows, int skip,
 {
     if (!font || width <= 0 || rows <= 0 || !text) return 0;
     char visible[4096], row[HT_TEXT_BYTES];
-    ht_display_text_ex(visible, sizeof visible, text, has_marks(font));
+    ht_display_text_ex(visible, sizeof visible, text, font);
     const char *p = visible; int shown = 0;
     while (*p && skip-- > 0) line(&p, font, width, row);
     while (*p && shown < rows) {
@@ -242,31 +228,6 @@ bool ht_pro_rect_aa_stroke(ht_scene_t *s, int x, int y, int w, int h, int radius
     memcpy(r->text, &fill, sizeof fill);
     return true;
 }
-static unsigned isqrt_(unsigned n)
-{
-    unsigned r = 0, bit = 1u << 30;
-    while (bit > n) bit >>= 2;
-    for (; bit; bit >>= 2) {
-        if (n >= r + bit) { n -= r + bit; r = (r >> 1) + bit; } else r >>= 1;
-    }
-    return r;
-}
-// The corner circle's coverage of the pixel at (cx, cy) from the corner circle's centre, in sixteenths: the
-// pixel centre's distance from the centre against the radius, a one-pixel linear ramp (as pod_arc's edges).
-static unsigned corner_cover(int rad, int px, int py)
-{
-    int vx = (px*2+1-2*rad)*8, vy = (py*2+1-2*rad)*8;   // 16ths from the circle's centre to the pixel's centre
-    int d2 = vx*vx + vy*vy;
-    // coverage = rad*16 + 8 - floor(sqrt(d2)), clamped to 0..16. Only the one-pixel edge ring needs the square root: floor(sqrt(d2))
-    // is at most rad*16 - 8 (full) exactly when d2 < (rad*16 - 7)^2, and at least rad*16 + 8 (none) exactly when d2 >= (rad*16 + 8)^2.
-    if (rad > 0) {
-        int lo = rad*16 - 7, hi = rad*16 + 8;
-        if (d2 < lo*lo) return 16;
-        if (d2 >= hi*hi) return 0;
-    }
-    int cov = rad*16 - (int)isqrt_((unsigned)d2) + 8;
-    return cov <= 0 ? 0 : cov >= 16 ? 16 : (unsigned)cov;
-}
 static void rect_aa_raster(const ht_run_t *r, int x0, int y0, int x1, int y1, ht_rect_t clip, uint16_t *out)
 {
     int rad = r->radius;
@@ -277,7 +238,7 @@ static void rect_aa_raster(const ht_run_t *r, int x0, int y0, int x1, int y1, ht
         if (cy < 0) { fill_span(row + x0, x1-x0, r->fg); continue; }
         for (int x = x0; x < x1; x++) {
             int dx = x - r->x, cx = dx < rad ? dx : dx >= r->w-rad ? r->w-1-dx : -1;
-            unsigned cov = cx < 0 ? 16 : corner_cover(rad, cx, cy);
+            unsigned cov = cx < 0 ? 16 : ht_pro_corner_cover(rad, cx, cy);
             if (cov >= 16) row[x] = r->fg;
             else if (cov) row[x] = over(r->fg, row[x], cov*255/16);
         }
@@ -288,7 +249,7 @@ static unsigned rect_cover(int rad, int w, int h, int dx, int dy)
 {
     int cy = dy < rad ? dy : dy >= h-rad ? h-1-dy : -1;
     int cx = dx < rad ? dx : dx >= w-rad ? w-1-dx : -1;
-    return cx < 0 || cy < 0 ? 16 : corner_cover(rad, cx, cy);
+    return cx < 0 || cy < 0 ? 16 : ht_pro_corner_cover(rad, cx, cy);
 }
 static void blend_px(uint16_t *p, uint16_t ink, unsigned cov)
 {

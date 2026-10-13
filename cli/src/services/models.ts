@@ -30,7 +30,7 @@ import { ensureGridInstalled } from '../lib/gridInstall.js'
 import { answerGridLaunch, type GridLaunchOverride } from '../lib/gridLaunch.js'
 import { clearGridMcpUrlCache } from '../lib/gridMcpUrl.js'
 import {
-  forgetGridModels, gridAnnotation, gridInventory, keystrokePrewarm, listAllGridModels, listGridModels, observeMachineList, onGridModelsChanged,
+  forgetGridModels, gridAnnotation, gridInventory, gridServingNodes, keystrokePrewarm, listAllGridModels, listGridModels, observeMachineList, onGridModelsChanged,
   retargetPrewarm, warmGridModels, type GridSection,
 } from '../lib/gridModels.js'
 import { gridModelsPayload } from '../lib/gridModelsPayload.js'
@@ -243,6 +243,7 @@ function modelsRequests(core: CoreApi, grid: GridSetUp, privateGridName: () => P
     stateDir: join(core.dataDir, 'local-models'),
     machineName: () => core.account.machineName(),
     inventory: gridInventory,
+    servingNodes: gridServingNodes,
     onChanged: () => { forgetGridModels(); core.clients.gridModelsChanged() },
     // Models Ollama, LM Studio and llama.cpp downloaded here, found by the Model Manager's own scan (the
     // bundled harness), so the picker and that harness agree on what is here and what starts it.
@@ -274,7 +275,11 @@ function modelsRequests(core: CoreApi, grid: GridSetUp, privateGridName: () => P
         return { ...snapshot, ...(needed ? { gridSetupNeeded: true } : {}), ...(unready ? { gridSetupError: unready } : {}) }
       }
       if (unready) return { error: unready }
-      return { ...await localModels.act(gridName, payload.modelId, type === 'grid_fleet_model_download' ? 'download' : type === 'grid_fleet_model_start' ? 'start' : 'stop') }
+      // A start or stop for the community grid of this computer's OS (`osGrid`): run there, for its members.
+      const community = payload.community === true && type !== 'grid_fleet_model_download'
+      const target = community ? await localModels.communityGrid() : gridName
+      if (community && !target) return { error: 'This computer is in no community grid.' }
+      return { ...await localModels.act(target, payload.modelId, type === 'grid_fleet_model_download' ? 'download' : type === 'grid_fleet_model_start' ? 'start' : 'stop') }
     } catch {
       return { error: 'Models are unavailable. Try again.' }
     }

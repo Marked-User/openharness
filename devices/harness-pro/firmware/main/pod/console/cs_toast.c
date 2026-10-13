@@ -22,7 +22,7 @@ void cs_toast(pod_out_frame_t *f, const pod_model_t *m, const pod_unread_t *u, u
     for (char *c = line; *c; c++) if (*c == '\n' || *c == '\r' || *c == '\t') *c = ' ';
     int n = pod_wrap(line, &cs_rg_20, w - 40, 2, rows);
     const int h = 16 + 30 + 10 + n * 27 + 10 + 18 + 14;
-    ht_pro_rect_aa_stroke(s, x, y, w, h, 18, C(0x2c2e34), C(0x16171b));
+    ht_pro_rect_aa_stroke(s, x, y, w, h, 18, C(CS_EDGE), C(CS_RAISED));
 
     const char *name = a && a->name[0] ? a->name : u->name[0] ? u->name : "Agent";
     cs_logo(s, x + 20, y + 16, 28, a ? a->engine : NULL);
@@ -39,13 +39,13 @@ void cs_toast(pod_out_frame_t *f, const pod_model_t *m, const pod_unread_t *u, u
     int tx = x + 20 + 28 + 12, tw = ht_pro_width(&cs_sb_22, title), room = x + w - 20 - ww - 12 - tx;
     if (tw > room) tw = room;
     cs_text(s, tx, cy, tw, &cs_sb_22, u->kind == POD_UNREAD_FAILED ? CS_FAIL : CS_INK, title);
-    cs_text(s, x + w - 20 - ww, cy, ww, &cs_mono_15, 0x5f646d, when);
-    for (int i = 0; i < n; i++) cs_text(s, x + 20, y + 16 + 30 + 10 + i * 27 + 13, w - 40, &cs_rg_20, 0xc9ccd2, rows[i]);
+    cs_text(s, x + w - 20 - ww, cy, ww, &cs_mono_15, CS_DIM, when);
+    for (int i = 0; i < n; i++) cs_text(s, x + 20, y + 16 + 30 + 10 + i * 27 + 13, w - 40, &cs_rg_20, CS_INK2, rows[i]);
     const int fy = y + h - 14 - 9;
     const char *dismiss = "swipe \xe2\x86\x91 to dismiss";
-    cs_text(s, x + 20, fy, ht_pro_width(&cs_mono_15, "tap to open") + 2, &cs_mono_15, 0x5f646d, "tap to open");
+    cs_text(s, x + 20, fy, ht_pro_width(&cs_mono_15, "tap to open") + 2, &cs_mono_15, CS_DIM, "tap to open");
     int dw = ht_pro_width(&cs_mono_15, dismiss);
-    cs_text(s, x + w - 20 - dw, fy, dw + 2, &cs_mono_15, 0x5f646d, dismiss);
+    cs_text(s, x + w - 20 - dw, fy, dw + 2, &cs_mono_15, CS_DIM, dismiss);
 
     int32_t left = CS_TOAST_MS - (int32_t)(now_ms - u->at_ms);
     left = left < 0 ? 0 : left > CS_TOAST_MS ? CS_TOAST_MS : left;
