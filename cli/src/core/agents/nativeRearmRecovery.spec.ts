@@ -74,7 +74,7 @@ async function fixture(count = 1, permissionMode?: 'full') {
     const promise = read(...args)
     return Object.assign(promise, { settled: promise.then(() => {}, () => {}) })
   }
-  const proof = Object.assign(track(bound), { recover: track(unbound) })
+  const proof = Object.assign(track(bound), { recover: track(unbound), recoverSaved: track(unbound) })
   const commit = vi.fn<NativeRearmRecoveryDeps['registry']['commitNativeReplacement']>((input, native, current) => {
     retained(input).verify(); native.verify(); current()
     events.push('commit')

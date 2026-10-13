@@ -10,7 +10,7 @@ import { nativeTurnTarget } from '../../lib/nativeTurnIntent.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
 import type { ProcessRow } from '../../lib/tmux.js'
 import { NativeEvidenceBudget } from './nativeEvidence.js'
-import { createNativeRearmProof, inspectNativeRearmPane, nativeRearmEngine, readNativeRearmPane } from './nativeRearmProof.js'
+import { createNativeRearmProof, findNativeRearmPane, inspectNativeRearmCandidate, inspectNativeRearmPane, nativeRearmEngine, readNativeRearmPane } from './nativeRearmProof.js'
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }))
 vi.mock('../../lib/engineBin.js', () => ({ enginePathOverride: () => undefined }))
@@ -39,17 +39,18 @@ function fixture() {
   const retained = vi.fn(), local = vi.fn(), receiptProof = vi.fn(), confirmationProof = vi.fn()
   const receipts = { readNativeRelaunchProcess: vi.fn(() => ({ process: { ...witness }, verify: receiptProof,
     verifyConfirmation: confirmationProof })) } satisfies Pick<AgentCreationReceipts, 'readNativeRelaunchProcess'>
-  const pane = vi.fn(async () => ({ rootPid: 10, command: 'original-command' }))
+  const pane = vi.fn<typeof readNativeRearmPane>(async () => ({ rootPid: 10, command: 'original-command' }))
+  const findPane = vi.fn<typeof findNativeRearmPane>(async () => '%2')
   const boot = vi.fn(async () => bootId)
-  const probe = vi.fn(async () => ({ parent: 0, children: [], rows: new Map([...rows].map(([pid, row]) => [pid, structuredClone(row)])) }))
+  const probe = vi.fn<typeof import('../../lib/nativeProcessControl.js').nativeProcessControl>(async () => ({ parent: 0, children: [], rows: new Map([...rows].map(([pid, row]) => [pid, structuredClone(row)])) }))
   const inspect = vi.fn(async (): Promise<ProcessEvidence> => ({
     parent: { pid: 42, parentPid: 10, executable: 'cursor-agent', args: 'cursor-agent', startMarker: 'fixture-birth',
       imagePath: engine.imagePath, nativeBirth: engine.birth, evidence: controlIdentity(engine), controlIdentity: controlIdentity(engine) },
     children: [], verify: async () => {}, verifyDescriptors: async () => {},
   }))
-  const read = createNativeRearmProof({ receipts, owner, pane, boot, inspect, probe })
+  const read = createNativeRearmProof({ receipts, owner, pane, findPane, boot, inspect, probe })
   const fence = { verify: retained, current: local }
-  return { row, request, root, engine, rows, witness, retained, local, receiptProof, confirmationProof, receipts, pane, boot, probe, inspect, read,
+  return { row, request, root, engine, rows, witness, retained, local, receiptProof, confirmationProof, receipts, pane, findPane, boot, probe, inspect, read,
     fence, run: () => read(row, request, fence) }
 }
 
@@ -74,6 +75,97 @@ function reserveRecovery(p: ReturnType<typeof fixture>, source: 'live' | 'saved'
   Object.assign(p.request.request, { source, target })
   return structuredClone(p.row)
 }
+
+function savedRecovery() {
+  const p = fixture(); reserveRecovery(p, 'saved')
+  p.row.nativeControl = { ...p.row.nativeControl!, rearm: { ...p.row.nativeControl!.rearm!, operation: 'resume' } }
+  p.request.request.operation = 'resume'
+  return { ...p, run: () => p.read.recoverSaved(p.row, p.request, p.fence) }
+}
+
+it('finds a saved Resume only through the retained witness parent in one observation', async () => {
+  const p = savedRecovery(), before = structuredClone(p.row), observation = p.run()
+  const proof = await observation
+  await observation.settled
+  expect(proof.pane).toBe('%2'); expect(proof.processIdentity.pid).toBe(42)
+  expect(p.row).toEqual(before)
+  expect(p.probe.mock.calls.map(call => call[0])).toEqual([[42], [10, 42], [10, 42], [10, 42]])
+  expect(p.findPane).toHaveBeenCalledOnce()
+  expect(p.findPane).toHaveBeenCalledWith(10, expect.any(NativeEvidenceBudget))
+  const budget = p.findPane.mock.calls[0]![1]
+  for (const call of p.probe.mock.calls) expect(call[2]).toBe(budget)
+  for (const call of p.pane.mock.calls) expect(call[2]).toBe(budget)
+  expect(p.pane.mock.calls.map(call => call[0])).toEqual(['%2', '%2'])
+})
+
+it.each(['live', 'restart', 'active', 'admitted', 'linked'])('refuses %s sources before saved pane lookup', async change => {
+  const p = savedRecovery()
+  if (change === 'live') p.row.nativeControl = { ...p.row.nativeControl!, rearm: { ...p.row.nativeControl!.rearm!, source: 'live' } }
+  if (change === 'restart') p.row.nativeControl = { ...p.row.nativeControl!, rearm: { ...p.row.nativeControl!.rearm!, operation: 'restart' } }
+  if (change === 'active') p.row.active = true
+  if (change === 'admitted') p.row.nativeControl = { ...p.row.nativeControl!, rearm: { ...p.row.nativeControl!.rearm!,
+    replacement: { processKey: 'older-process', sessionId: p.row.sessionId } } }
+  if (change === 'linked') p.row.nativeArchive = { version: 1, agentId: p.row.agentId, requestId: id, launchToken: token, target }
+  await expect(p.run()).rejects.toThrow('reservation or current binding')
+  expect(p.findPane).not.toHaveBeenCalled(); expect(p.probe).not.toHaveBeenCalled()
+})
+
+it.each(['missing', 'birth', 'orphan', 'self-parent'])('refuses %s witnesses before discovering any pane', async change => {
+  const p = savedRecovery()
+  if (change === 'missing') p.rows.delete(42)
+  if (change === 'birth') p.engine.birth = '4201'
+  if (change === 'orphan') p.engine.parentPid = 1
+  if (change === 'self-parent') p.engine.parentPid = 42
+  await expect(p.run()).rejects.toThrow('witness parent is unavailable')
+  expect(p.findPane).not.toHaveBeenCalled(); expect(p.pane).not.toHaveBeenCalled()
+})
+
+it.each(['root', 'engine', 'birth', 'entry'])('holds a changed %s before saved pane lookup', async change => {
+  const p = savedRecovery(), probe = p.probe.getMockImplementation()!
+  p.probe.mockImplementation(async (...args) => {
+    if (p.probe.mock.calls.length === 2) {
+      if (change === 'root') p.rows.delete(10)
+      if (change === 'engine') p.rows.delete(42)
+      if (change === 'birth') p.engine.birth = '4201'
+      if (change === 'entry') p.engine.directEntryDigest = 'a'.repeat(64)
+    }
+    return probe(...args)
+  })
+  await expect(p.run()).rejects.toThrow('witness parent changed before pane lookup')
+  expect(p.findPane).not.toHaveBeenCalled()
+})
+
+it.each(['root', 'engine', 'entry'])('holds the original %s across saved pane lookup', async change => {
+  const p = savedRecovery()
+  p.findPane.mockImplementationOnce(async () => {
+    if (change === 'root') p.root.birth = '1001'
+    if (change === 'engine') p.engine.command = 'different-command'
+    if (change === 'entry') p.engine.directEntryDigest = 'b'.repeat(64)
+    return '%2'
+  })
+  await expect(p.run()).rejects.toThrow('original witness parent changed during pane lookup')
+  expect(p.inspect).not.toHaveBeenCalled()
+})
+
+it('does not refresh the deadline after saved candidate lookup', async () => {
+  const p = savedRecovery()
+  p.findPane.mockImplementationOnce(async () => { clock.now = 4000; return '%2' })
+  await expect(p.run()).rejects.toThrow('deadline was reached')
+  expect(p.pane).not.toHaveBeenCalled()
+})
+
+it('retains an occupied saved lookup after its reply expires until that lookup actually settles', async () => {
+  vi.useFakeTimers()
+  const p = savedRecovery()
+  let release!: (value: string) => void
+  p.findPane.mockImplementation(() => new Promise(resolve => { release = resolve }))
+  const observation = p.run(), rejected = expect(observation).rejects.toThrow('evidence deadline expired')
+  let settled = false; void observation.settled.then(() => { settled = true })
+  await vi.advanceTimersByTimeAsync(3000); await rejected
+  expect(settled).toBe(false)
+  release('%2'); await observation.settled
+  expect(settled).toBe(true); expect(p.pane).not.toHaveBeenCalled()
+})
 
 it.each(['live', 'saved'] as const)('recovers the original %s witness without first publishing a process or permission change', async source => {
   const p = fixture(), original = reserveRecovery(p, source), pane = source === 'live' ? '%1' : '%2'
@@ -191,7 +283,7 @@ it.each(['pane-root', 'pane-command', 'root-birth', 'engine-birth', 'engine-imag
   p.pane.mockImplementation(async () => ({ rootPid: change === 'pane-root' && p.pane.mock.calls.length === 2 ? 11 : 10,
     command: change === 'pane-command' && p.pane.mock.calls.length === 2 ? 'replaced-command' : 'original-command' }))
   if (change === 'inspection') p.inspect.mockImplementation(async () => ({ parent: null, children: [], verify: async () => {}, verifyDescriptors: async () => {} }))
-  p.probe.mockImplementation(async () => {
+  p.probe.mockImplementation(async (...args) => {
     if (p.probe.mock.calls.length === 2) {
       if (change === 'root-birth') p.root.birth = '1001'
       if (change === 'engine-birth') p.engine.birth = '4201'
@@ -205,7 +297,7 @@ it.each(['pane-root', 'pane-command', 'root-birth', 'engine-birth', 'engine-imag
       if (change === 'deadline') clock.now = 4000
       if (change === 'local') p.local.mockImplementation(() => { throw Error('revoked') })
     }
-    return original()
+    return original(...args)
   })
   await expect(p.run()).rejects.toThrow()
 })
@@ -345,4 +437,33 @@ it.each(['invalid', 'error', 'stderr', 'utf8', 'deadline', 'valid'] as const)('k
     expect(vi.mocked(execFile).mock.calls[0][2]).toMatchObject({ timeout: 3000, maxBuffer: 512 * 1024, killSignal: 'SIGKILL' })
   } else await expect(run()).rejects.toThrow()
   if (scenario === 'invalid') expect(execFile).not.toHaveBeenCalled()
+})
+
+it('selects one exact numeric pane parent from the complete listing', () => {
+  expect(inspectNativeRearmCandidate('%1\t11\n%2\t10\n%3\t12\n', 10)).toBe('%2')
+})
+it.each(['', '%1\t10', '%1\t100', '%1\t10\npartial', '%1 10\n', '%1\t010\n', '%1\t1\n', '%1\t2147483648\n',
+  '%1\t9007199254740992\n', '%1\t10\0\n', '%1\t10\r\n', '%1\t10\n%2\t10\n', '%1\t10\n%1\t11\n', '%1\t11\n',
+  'x'.repeat(512 * 1024) + '\n', Array.from({ length: 8193 }, (_, n) => `%${n}\t10\n`).join('')])(
+  'refuses incomplete, invalid, ambiguous or excessive pane candidates (%#)', output => {
+    expect(() => inspectNativeRearmCandidate(output, 10)).toThrow()
+  })
+it.each([0, 1, -1, 1.5, 0x80000000, Number.NaN])('refuses invalid parent PID %s before pane lookup', async pid => {
+  expect(() => inspectNativeRearmCandidate('%1\t10\n', pid)).toThrow()
+  await expect(findNativeRearmPane(pid, new NativeEvidenceBudget())).rejects.toThrow('pane parent is invalid')
+  expect(execFile).not.toHaveBeenCalled()
+})
+it.each(['error', 'stderr', 'utf8', 'deadline', 'valid'] as const)('keeps saved pane lookup %s bounded and explicit', async scenario => {
+  vi.mocked(execFile).mockImplementation((_file, _argv, _options, callback) => {
+    if (scenario === 'deadline') clock.now = 4000
+    ;(callback as Function)(scenario === 'error' ? Error('unavailable') : null,
+      scenario === 'utf8' ? Buffer.from([255]) : Buffer.from('%2\t10\n'), Buffer.from(scenario === 'stderr' ? 'uncertain' : ''))
+    return {} as never
+  })
+  const run = () => findNativeRearmPane(10, new NativeEvidenceBudget())
+  if (scenario === 'valid') {
+    expect(await run()).toBe('%2')
+    expect(vi.mocked(execFile).mock.calls[0].slice(0, 3)).toEqual(['tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}'],
+      { encoding: 'buffer', timeout: 3000, maxBuffer: 512 * 1024, killSignal: 'SIGKILL' }])
+  } else await expect(run()).rejects.toThrow()
 })

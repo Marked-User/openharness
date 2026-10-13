@@ -97,19 +97,56 @@ export async function readNativeRearmPane(pane: string, token: string, budget: N
   return inspectNativeRearmPane(nativeText(output), pane, token, owner)
 }
 
-export function createNativeRearmProof({ receipts, owner, pane = readNativeRearmPane, boot = kernelBootId,
+/** A complete numeric listing supplies one candidate. Neither its PID nor the
+ * pane's existence authorizes launch or proves the reserved engine. */
+export function inspectNativeRearmCandidate(output: string, parentPid: number): string {
+  if (!Number.isSafeInteger(parentPid) || parentPid <= 1 || parentPid > 0x7fffffff
+    || Buffer.byteLength(output) > 512 * 1024 || !output.endsWith('\n')) return held('pane candidates are incomplete')
+  const lines = output.slice(0, -1).split('\n'), seen = new Set<string>()
+  if (lines.length > 8192) return held('pane candidates exceed their limit')
+  let candidate: string | undefined
+  for (const line of lines) {
+    const match = /^(%\d{1,20})\t([1-9]\d*)$/.exec(line), pid = Number(match?.[2])
+    if (!match || !Number.isSafeInteger(pid) || pid <= 1 || pid > 0x7fffffff || seen.has(match[1])) {
+      return held('pane candidates are invalid')
+    }
+    seen.add(match[1])
+    if (pid === parentPid) {
+      if (candidate) return held('pane candidates are ambiguous')
+      candidate = match[1]
+    }
+  }
+  return candidate ?? held('pane candidate is unavailable')
+}
+
+export async function findNativeRearmPane(parentPid: number, budget: NativeEvidenceBudget): Promise<string> {
+  if (!Number.isSafeInteger(parentPid) || parentPid <= 1 || parentPid > 0x7fffffff) return held('pane parent is invalid')
+  const timeout = budget.probe()
+  const output = await new Promise<Buffer>((resolve, reject) => {
+    execFile('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}'],
+      { encoding: 'buffer', maxBuffer: 512 * 1024, timeout, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
+        if (error || stderr.length) { reject(Error('The original native pane lookup did not complete.')); return }
+        resolve(stdout)
+      })
+  })
+  budget.step(output.length)
+  return inspectNativeRearmCandidate(nativeText(output), parentPid)
+}
+
+export function createNativeRearmProof({ receipts, owner, pane = readNativeRearmPane, findPane = findNativeRearmPane, boot = kernelBootId,
   inspect = readProcessEvidence, probe = nativeProcessControl,
 }: {
   receipts: Pick<AgentCreationReceipts, 'readNativeRelaunchProcess'>
   owner: string
   pane?: typeof readNativeRearmPane
+  findPane?: typeof findNativeRearmPane
   boot?: typeof kernelBootId
   inspect?: typeof readProcessEvidence
   probe?: typeof nativeProcessControl
 }) {
   let running = 0
   const result = async (input: RegisteredSession, request: NativeRelaunchRequest, fence: CreationConfirmationFence,
-    settle: () => void, recoveryPane?: string): Promise<NativeRearmReplacementProof> => {
+    settle: () => void, recoveryPane?: string | null): Promise<NativeRearmReplacementProof> => {
     try {
       if (running >= 8) return held('evidence slots are occupied')
       if (!/^[a-f0-9]{16}$/.test(owner)) return held('daemon pane owner is invalid')
@@ -121,9 +158,12 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
       const observe = async () => {
         try {
           const control = parseNativeTurnIntent(row.nativeControl), rearm = control?.rearm, intent = expected.request
-          const recovering = recoveryPane !== undefined, selectedPane = recoveryPane ?? row.tmuxPane
+          const recovering = recoveryPane !== undefined, discovering = recoveryPane === null
+          let selectedPane = recoveryPane ?? row.tmuxPane
           if (row.engine !== 'cursor' || !row.sessionId || !rearm || rearm.revoked
-            || !/^%\d+$/.test(selectedPane ?? '')
+            || !discovering && !/^%\d+$/.test(selectedPane ?? '')
+            || discovering && (rearm.source !== 'saved' || rearm.operation !== 'resume' || row.active
+              || row.nativeArchive || row.nativeRetirement || rearm.replacement)
             || (recovering ? !rearm.source || nativeTurnTarget(row) !== rearm.target
               || rearm.source === 'live' && selectedPane !== row.tmuxPane : !row.active || !row.processIdentity)
             || (!recovering || rearm.source === 'live') && (row.runtimes.length !== 1 || row.runtimes[0].backend !== 'tmux'
@@ -144,6 +184,23 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
           const bootId = await boot(budget)
           if (bootId !== witness.boot) return held('kernel boot changed')
           current()
+          let originalPair: { root: string; engine: string; entry: string | undefined } | undefined
+          if (discovering) {
+            const first = (await probe([witness.pid], 0, budget, false)).rows.get(witness.pid)
+            current()
+            if (!first || first.birth !== witness.birth || first.parentPid <= 1 || first.parentPid === witness.pid) {
+              return held('witness parent is unavailable')
+            }
+            const pair = await probe([first.parentPid, witness.pid], 0, budget, false)
+            current()
+            const root = pair.rows.get(first.parentPid), engine = pair.rows.get(witness.pid)
+            if (!root || !engine || controlIdentity(engine) !== controlIdentity(first) || engine.directEntryDigest !== first.directEntryDigest) {
+              return held('witness parent changed before pane lookup')
+            }
+            originalPair = { root: controlIdentity(root), engine: controlIdentity(engine), entry: engine.directEntryDigest }
+            selectedPane = await findPane(root.pid, budget)
+            current()
+          }
           const placement = await pane(selectedPane!, rearm.launchToken, budget, owner)
           current()
           const before = await probe([placement.rootPid, witness.pid], 0, budget, false)
@@ -152,6 +209,8 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
           if (!root || !engine || engine.pid === root.pid || engine.parentPid !== root.pid || engine.birth !== witness.birth) {
             return held('engine is not the recorded pane child')
           }
+          if (originalPair && (controlIdentity(root) !== originalPair.root || controlIdentity(engine) !== originalPair.engine
+            || engine.directEntryDigest !== originalPair.entry)) return held('original witness parent changed during pane lookup')
           const rootIdentity = controlIdentity(root), evidence = controlIdentity(engine)
           const observed = (await inspect(witness.pid, budget, undefined, recovering ? undefined : row.processIdentity!)).parent
           current()
@@ -194,7 +253,7 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
     } catch (error) { settle(); throw error }
   }
   const read = (input: RegisteredSession, request: NativeRelaunchRequest, fence: CreationConfirmationFence,
-    recoveryPane?: string): NativeRearmObservation => {
+    recoveryPane?: string | null): NativeRearmObservation => {
     let settle!: () => void
     const settled = new Promise<void>(resolve => { settle = resolve })
     return Object.assign(result(input, request, fence, settle, recoveryPane), { settled })
@@ -205,5 +264,9 @@ export function createNativeRearmProof({ receipts, owner, pane = readNativeRearm
      * A saved source's supplied pane is a candidate, proven by token and witness. */
     recover: (source: RegisteredSession, request: NativeRelaunchRequest, fence: CreationConfirmationFence, pane: string) =>
       read(source, request, fence, pane),
+    /** Find only the recorded exec's original direct parent, inside this same
+     * observation's deadline and actual-I/O slot. The saved pane is historical. */
+    recoverSaved: (source: RegisteredSession, request: NativeRelaunchRequest, fence: CreationConfirmationFence) =>
+      read(source, request, fence, null),
   })
 }

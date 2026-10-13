@@ -452,6 +452,33 @@ link rather than the current rearm request. Confirmed creation remains successfu
 when marker cleanup needs a retry; exact receipt/link evidence can finish that
 metadata work even after the engine exits, without another launch.
 
+Saved allocation lookup now runs inside the existing native proof observation.
+It proves the original witness birth and a paired parent/engine identity before
+reading one complete, bounded numeric tmux listing. The resulting pane is only a
+candidate: the original launch token, both retained process identities and the
+executed Cursor entry must still agree. Discovery and the final paired query
+share the original budget and actual-I/O slot. The saved pane remains history.
+
+Receipt `20261013T181523.019090Z-24166` passes 526 cases in eight files, including
+the installed writer on private tmux with a deliberately stale saved pane, the
+live recovery controller, architecture and current-main model interactions
+(123.7 seconds). That receipt remains failed overall because one typed test mock
+omitted its arguments. Corrected types pass as the first command in
+`20261013T181919.928999Z-36728`; its mutation phase then stopped at an old indentation
+anchor. Receipt `20261013T182214.106026Z-44885` passes the complete corrected proof
+baseline and all 27 TypeScript wiring mutations plus the existing native entry
+alignment mutation (122.9 seconds). Mutation anchors are now checked before the
+baseline. No production change was needed after the first test run.
+
+Independent review approved this lookup scope over `33a234b17`, conditional on
+those completed gates. Implementation/review ran approximately 18:11–18:22 UTC
+October 13, with validation overlapping 18:15–18:24. Merge, publication and
+external waiting remain zero. Marker handling and recovery orchestration remain
+open. The pending Cancel abort needs a persisted retirement subtype bound to the
+prior archive role: without that provenance, a lost normal-return archive could
+be mistaken for an untransferred abort. The final closed receipt can reuse the
+existing version-three saved role.
+
 October 13 recap checkpoint: the recaps port now derives a bounded summary from
 the exact answer retained for an owner and generation. Core copies the input
 before a service wait and checks the reply's generation identity, input digest

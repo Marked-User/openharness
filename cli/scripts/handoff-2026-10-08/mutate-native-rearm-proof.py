@@ -8,6 +8,28 @@ cli = Path(sys.argv[1]).resolve()
 reader = 'src/engines/kit/nativeRearmProof.ts'
 unit = 'src/engines/kit/nativeRearmProof.spec.ts'
 mutations = [
+    ('saved recovery trusts its historical pane', reader,
+     'selectedPane = await findPane(root.pid, budget)',
+     'await findPane(root.pid, budget); selectedPane = row.tmuxPane', 'finds a saved Resume only'),
+    ('saved pane lookup resets the original budget', reader,
+     'selectedPane = await findPane(root.pid, budget)',
+     'selectedPane = await findPane(root.pid, new NativeEvidenceBudget())', 'finds a saved Resume only'),
+    ('lookup ignores original witness birth', reader,
+     'first.birth !== witness.birth || ', '', 'refuses birth witnesses'),
+    ('lookup ignores a changed first pair', reader,
+     ' || controlIdentity(engine) !== controlIdentity(first)', '', 'holds a changed birth before saved pane lookup'),
+    ('lookup ignores changed entry before discovery', reader,
+     ' || engine.directEntryDigest !== first.directEntryDigest', '', 'holds a changed entry before saved pane lookup'),
+    ('lookup adopts a reused pane parent', reader,
+     'controlIdentity(root) !== originalPair.root || ', '', 'holds the original root across saved pane lookup'),
+    ('lookup adopts changed engine identity', reader,
+     'controlIdentity(engine) !== originalPair.engine', 'false', 'holds the original engine across saved pane lookup'),
+    ('lookup adopts changed engine entry', reader,
+     'engine.directEntryDigest !== originalPair.entry', 'false', 'holds the original entry across saved pane lookup'),
+    ('candidate parser accepts a truncated listing', reader,
+     "!output.endsWith('\\n')", 'false', 'refuses incomplete, invalid, ambiguous or excessive'),
+    ('candidate parser chooses an ambiguous parent', reader,
+     "if (candidate) return held('pane candidates are ambiguous')", '', 'refuses incomplete, invalid, ambiguous or excessive'),
     ('kernel boot is ignored', reader, 'if (bootId !== witness.boot)', 'if (false)', 'holds boot evidence'),
     ('direct pane parent is ignored', reader, ' || engine.parentPid !== root.pid', '', 'holds parent evidence'),
     ('engine classification is skipped', reader, '|| !nativeRearmEngine(engine, observed, declared)', '|| false', 'holds image evidence'),
@@ -27,8 +49,8 @@ mutations = [
      "try { held('evidence deadline expired') } catch (error) { reject(error) }", 'void reject', 'bounds a stalled boot reply'),
     ('expired operation frees an occupied slot', reader, 'expired = true', 'expired = true; running--', 'bounds a stalled boot reply'),
     ('expired work retains authority', reader, "if (expired) return held('evidence deadline expired')", '', 'bounds a stalled boot reply'),
-    ('synchronous setup expiry leaks capacity', reader, 'const timeout = budget.remaining()\n    running++',
-     'running++\n    const timeout = budget.remaining()', 'does not reserve an actual read slot'),
+    ('synchronous setup expiry leaks capacity', reader, 'const timeout = budget.remaining()\n      running++',
+     'running++\n      const timeout = budget.remaining()', 'does not reserve an actual read slot'),
     ('older tmux owner wrapper is refused', reader, "const launch = wrapper && command?.startsWith(wrapper) ? command.slice(wrapper.length) : command",
      'const launch = command', "accepts only this daemon"),
     ('foreign daemon wrapper is accepted', reader,
@@ -49,6 +71,8 @@ def run(pattern='.'):
                           text=True, capture_output=True, timeout=30)
 
 
+for label, path, before, _after, _pattern in mutations:
+    assert (cli / path).read_text().count(before) == 1, (label, 'mutation anchor changed')
 result = run()
 if result.returncode:
     raise SystemExit('Baseline failed; no mutants ran.\n' + result.stdout + result.stderr)

@@ -74,17 +74,20 @@ function start(script: string, directory: string, args: string[] = []) {
   children.push({ child, closed })
   return { child, closed, output: () => ({ stdout, stderr, code, signal }) }
 }
-async function fixture(hold = false, spaced = false, originalPane = '%1') {
+async function fixture(hold = false, spaced = false, originalPane = '%1', source: 'live' | 'saved' = 'live') {
   const directory = join(root, `case-${++sequence}${spaced ? ' with spaces' : ''}`); mkdirSync(directory, { mode: 0o700 })
   const id = `private-rearm-request-${sequence}`, agentId = `fixture-agent-${sequence}`, token = `private-launch-token-${sequence}`
-  const saved = { schemaVersion: 3, agentId, registeredAt: 1, engine: 'cursor', sessionId: 'fixture-session', boundAt: 2, active: true,
+  const saved = { schemaVersion: 3, agentId, registeredAt: 1, engine: 'cursor', sessionId: 'fixture-session', boundAt: 2, active: source === 'live',
     processIdentity: { pid: 41, executable: '/fixture/cursor', startMarker: 'fixture-birth' }, runtimes: [{ backend: 'tmux', paneId: originalPane }],
     primaryRuntimeKey: terminalRouteKey({ backend: 'tmux', paneId: originalPane }), tmuxPane: originalPane, cwd: directory, transcriptPath: null } as RegisteredSession
   const target = nativeTurnTarget(saved)
   const control: NativeTurnIntent = { version: 1, cancel: { processKey: null, target, request: {
     requestId: 'original-cancel-request', nonce: 'original-cancel-nonce', agentId, conversationId: saved.sessionId, frontier: { index: -1, digest: null },
-  } }, rearm: { requestId: id, agentId, operation: 'restart', launchToken: token, target, source: 'live' } }
-  writeFileSync(join(directory, 'registry.json'), JSON.stringify([{ ...saved, nativeControl: control }]), { mode: 0o600 })
+  } }, rearm: { requestId: id, agentId, operation: source === 'live' ? 'restart' : 'resume', launchToken: token, target, source } }
+  if (source === 'saved') {
+    mkdirSync(join(directory, 'stopped-agents'), { mode: 0o700 })
+    writeFileSync(join(directory, 'stopped-agents', `${agentId}.json`), JSON.stringify({ version: 1, session: { ...saved, nativeControl: control } }), { mode: 0o600 })
+  } else writeFileSync(join(directory, 'registry.json'), JSON.stringify([{ ...saved, nativeControl: control }]), { mode: 0o600 })
   const request = nativeRearmRequest(control)!, fingerprint = creationFingerprint(request)
   const receipts = new AgentCreationReceipts(join(directory, 'agent-creations'))
   await receipts.runIntent(id, fingerprint, request, { service: 'native', detail: 'fixture' }, async () => async () => ({ state: 'unconfirmed' }))
@@ -100,7 +103,7 @@ async function fixture(hold = false, spaced = false, originalPane = '%1') {
   const proofs: HookPreparationProof[] = []
   const launch: NativeLaunch = { token, executable, opencodeMajor: null, environment: {}, proofs, current: () => executable.current() && proofs.every(p => p.current()),
     ready: () => true, retain: proof => { proofs.push(proof); return true }, prepareHooks: async () => true, permission: async () => 'supported' }
-  const input = { version: 1 as const, dataDir: directory, source: 'live' as const, id, fingerprint, request, control }
+  const input = { version: 1 as const, dataDir: directory, source, id, fingerprint, request, control }
   const command = prepareNativeRearmWitness(launch, input, process.execPath, pathToFileURL(join(root, 'package', 'cli.js')).href)
   const run = (text = nativeRearmExecCommand(command)) => start(`harness_engine_bin=${shellSingleQuote(engine)}\n${text}`, directory, ['literal one', "quote' two"])
   const helpers: NativeControlHelpers = { prepare: async () => {
@@ -181,6 +184,23 @@ it.skipIf(!supported)('recovers the witnessed engine while its source still reco
   expect(proof.key).toContain(`\0${pid}\0`)
   expect(source.processIdentity?.pid).toBe(41)
   expect(readFileSync(file, 'utf8')).toBe(before)
+  proof.verify()
+}, 20000)
+
+it.skipIf(!supported)('finds the original saved Resume allocation without trusting its historical pane', async () => {
+  const p = await fixture(false, false, '%999', 'saved'), pane = await paneLaunch(p, '/bin/sh', true)
+  expect(pane).not.toBe(p.saved.tmuxPane)
+  await vi.waitFor(() => expect(existsSync(p.marker)).toBe(true), { timeout: 8000 })
+  const pid = JSON.parse(readFileSync(p.marker, 'utf8')).pid
+  const file = join(p.directory, 'stopped-agents', `${p.saved.agentId}.json`), before = readFileSync(file, 'utf8')
+  const source = { ...p.saved, nativeControl: p.control }
+  const verify = () => { if (readFileSync(file, 'utf8') !== before) throw Error('original saved source changed') }
+  const read = createNativeRearmProof({ receipts: p.receipts, owner: harnessPaneOwner(p.directory) })
+  const proof = await read.recoverSaved(source, p.input, { verify, current: verify })
+  expect(proof.pane).toBe(pane); expect(proof.processIdentity.pid).toBe(pid)
+  expect(source.processIdentity?.pid).toBe(41)
+  expect(readFileSync(file, 'utf8')).toBe(before)
+  expect(existsSync(join(p.directory, 'registry.json'))).toBe(false)
   proof.verify()
 }, 20000)
 
