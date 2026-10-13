@@ -2,12 +2,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { creationFingerprint } from './agentCreationReceipt.js'
+import { AgentCreationReceipts, creationFingerprint } from './agentCreationReceipt.js'
 import { nativeRearmRequest, nativeTurnAdmitted, nativeTurnTarget, type NativeTurnIntent } from './nativeTurnIntent.js'
 import type { RegisteredSession } from './registry.js'
 import type { StoppedAgentStore } from './stoppedAgents.js'
 import type { NativeArchiveStopProof } from './nativeArchive.js'
 import type { NativeRearmReplacementProof } from '../engines/kit/nativeRearmProof.js'
+import { createNativeRearm, type NativeRearmDeps } from '../core/agents/nativeRearm.js'
 
 const fault = vi.hoisted(() => ({ registry: '', archive: '', phase: '', fail: '',
   published: undefined as ((phase: string) => void) | undefined, opening: undefined as ((path: string) => void) | undefined, phases: [] as string[], closed: undefined as ((path: string) => void) | undefined }))
@@ -376,4 +377,185 @@ it('returns two successive visits without letting the first visit change the sec
   expect(store.nativeReturn(first.agentId)?.link).toEqual(admitted.nativeArchive)
   expect(store.readNativeControl(final).intent).toEqual(second.nativeControl)
   expect(rows()).toEqual([])
+})
+
+async function pendingCancel() {
+  fault.fail = 'pending'; expect(() => commit()).toThrow(); fault.fail = ''; fault.phase = ''
+  await restart()
+  const pending = structuredClone(registry.byAgent(saved.agentId)!), original = store.get(saved.agentId)!
+  const cancelled = store.commitNativeControl(original, { ...original.nativeControl!,
+    cancel: { ...original.nativeControl!.cancel, target: nativeTurnTarget(original),
+      request: { ...original.nativeControl!.cancel.request, requestId: 'saved-cancel-during-resume' } },
+    rearm: { ...original.nativeControl!.rearm!, revoked: true } }, fence)
+  fault.phases = []; fault.phase = ''
+  return { pending, cancelled }
+}
+const abortPending = (pending: RegisteredSession, cancelled: RegisteredSession, proof = stopProof(pending)) =>
+  registry.retirePendingNativeArchive(pending, cancelled, proof, store, () => {})
+
+it('retires a cancelled pending Resume while the saved store continuously owns control', async () => {
+  const { pending, cancelled } = await pendingCancel(), before = readFileSync(fault.archive, 'utf8')
+  expect(() => commit()).toThrow()
+  fault.published = phase => {
+    expect(store.readNativeControl(store.get(saved.agentId)!).intent).toEqual(cancelled.nativeControl)
+    if (phase === 'retirement') expect(readFileSync(fault.archive, 'utf8')).toBe(before)
+  }
+  const retired = abortPending(pending, cancelled)
+  expect(retired.nativeRetirement?.pendingAbort).toEqual({ kind: 'untransferred', priorRole: creationFingerprint(null),
+    pendingControl: creationFingerprint(pending.nativeControl), requestFingerprint: creationFingerprint(nativeRearmRequest(pending.nativeControl!)) })
+  expect(retired.nativeControl).toEqual(cancelled.nativeControl)
+  expect(store.nativeTransfer(saved.agentId)).toBeNull(); expect(store.nativeReturn(saved.agentId)).toBeNull()
+  let result!: RegisteredSession
+  expect(() => { result = finish(retired) }).not.toThrow()
+  expect(result).toEqual(cancelled)
+  expect(fault.phases).toEqual(['retirement', 'saved', 'cleanup'])
+  expect(rows()).toEqual([])
+  expect(store.nativeReturn(saved.agentId)).toMatchObject({ phase: 'saved', link: pending.nativeArchive })
+  expect(store.nativeReturn(saved.agentId)).not.toHaveProperty('pendingAbort')
+})
+
+it.each(['retirement', 'saved', 'cleanup'])('cold-recovers a pending abort after %s confirmation fails', async phase => {
+  const { pending, cancelled } = await pendingCancel()
+  fault.fail = phase
+  let retired: RegisteredSession | undefined
+  expect(() => { retired = abortPending(pending, cancelled); finish(retired) }).toThrow()
+  fault.fail = ''; fault.phase = ''
+  await restart()
+  const remaining = registry.byAgent(pending.agentId)
+  if (remaining) expect(finish(remaining).nativeControl).toEqual(cancelled.nativeControl)
+  expect(store.readNativeControl(store.get(saved.agentId)!).intent).toEqual(cancelled.nativeControl)
+  expect(store.nativeReturn(saved.agentId)?.phase).toBe('saved')
+  expect(rows()).toEqual([])
+})
+
+it('confirms only the original uncertain pending retirement on retry', async () => {
+  const { pending, cancelled } = await pendingCancel()
+  fault.fail = 'retirement'; expect(() => abortPending(pending, cancelled)).toThrow(); fault.fail = ''; fault.phase = ''
+  expect(registry.byAgent(pending.agentId)?.nativeRetirement).toBeUndefined()
+  expect(finish(abortPending(pending, cancelled))).toEqual(cancelled)
+  expect(rows()).toEqual([])
+})
+
+it.each(['old', 'new'])('confirms uncertain pending retirement after newer saved edits using the %s snapshot', async snapshot => {
+  const { pending, cancelled } = await pendingCancel()
+  fault.fail = 'retirement'; expect(() => abortPending(pending, cancelled)).toThrow(); fault.fail = ''; fault.phase = ''
+  const original = diskRow().nativeRetirement
+  const newer = store.commitNativeControl(cancelled, { ...cancelled.nativeControl!, cancel: { ...cancelled.nativeControl!.cancel,
+    request: { ...cancelled.nativeControl!.cancel.request, requestId: 'newer-saved-cancel-request' } } }, fence)
+  store.patch(newer.agentId, { cwd: '/fixture/later-folder' })
+  const edited = store.get(newer.agentId)!, before = readFileSync(fault.archive, 'utf8')
+  let retired!: RegisteredSession
+  expect(() => { retired = abortPending(pending, snapshot === 'old' ? cancelled : edited) }).not.toThrow()
+  expect(retired.nativeRetirement).toEqual(original)
+  expect(readFileSync(fault.archive, 'utf8')).toBe(before)
+  expect(finish(retired)).toEqual(edited)
+  expect(rows()).toEqual([])
+})
+
+it.each(['pending', 'retirement'])('a stale core cannot reserve saved Resume over a peer-only %s row', async phase => {
+  const stale = new (registry.constructor as new () => typeof registry)(); stale.load()
+  const { pending, cancelled } = await pendingCancel()
+  if (phase === 'retirement') abortPending(pending, cancelled)
+  // Allocation accounting can clear the old R before route cleanup finishes.
+  // This grants no permission to miss a peer's remaining durable route.
+  const ready = store.commitNativeControl(cancelled, { version: 1, cancel: cancelled.nativeControl!.cancel }, fence)
+  const prepare = vi.fn<NativeRearmDeps['prepare']>(async () => async guard => { guard.begin() })
+  const controller = createNativeRearm({ registry: stale, saved: store, receipts: new AgentCreationReceipts(join(root, 'receipts')),
+    prepare, held: () => {} })
+  const before = readFileSync(fault.archive, 'utf8')
+  expect(await controller.start({ agentId: ready.agentId, creationId: 'next-saved-resume-request', source: 'saved', operation: 'resume' }))
+    .toMatchObject({ state: 'pending', held: { detail: expect.stringContaining('durable live handoff') } })
+  expect(stale.byAgent(ready.agentId)).toBeUndefined()
+  expect(readFileSync(fault.archive, 'utf8')).toBe(before)
+  expect(prepare).not.toHaveBeenCalled()
+})
+
+it.each(['preparation', 'effect'])('a stale core retains registry absence through saved %s', async phase => {
+  const stale = new (registry.constructor as new () => typeof registry)(); stale.load()
+  const physical = vi.fn()
+  const publish = () => { fault.fail = 'pending'; expect(() => commit()).toThrow(); fault.fail = ''; fault.phase = '' }
+  const prepare = vi.fn<NativeRearmDeps['prepare']>(async () => {
+    if (phase === 'preparation') publish()
+    return async guard => { if (phase === 'effect') publish(); guard.begin(); physical() }
+  })
+  const controller = createNativeRearm({ registry: stale, saved: store, receipts: new AgentCreationReceipts(join(root, 'receipts')),
+    prepare, held: () => {} })
+  expect((await controller.start({ agentId: saved.agentId, creationId: saved.nativeControl!.rearm!.requestId,
+    source: 'saved', operation: 'resume', permissionMode: 'full' })).state).toBe(phase === 'effect' ? 'failed' : 'pending')
+  expect(stale.byAgent(saved.agentId)).toBeUndefined()
+  expect(diskRow().nativeArchive).toBeDefined()
+  expect(physical).not.toHaveBeenCalled()
+})
+
+it.each(['target', 'control', 'unaccounted'])('rejects a pending abort with %s allocation evidence', async change => {
+  const { pending, cancelled } = await pendingCancel(), proof = stopProof(pending), before = readFileSync(fault.registry, 'utf8')
+  const source = { ...proof.source, ...(change === 'target' ? { target: 'f'.repeat(64) }
+    : change === 'control' ? { controlFingerprint: 'f'.repeat(64) } : {}) }
+  if (change === 'unaccounted') proof.verifyStopped = () => { throw Error('original allocation remains unknown') }
+  expect(() => abortPending(pending, cancelled, { ...proof, source })).toThrow()
+  expect(readFileSync(fault.registry, 'utf8')).toBe(before)
+  expect(store.readNativeControl(cancelled).intent).toEqual(cancelled.nativeControl)
+})
+
+it.each(['revocation', 'request', 'permission', 'saved-control', 'pending-control', 'target'])('binds pending retirement to exact %s state', async change => {
+  const { pending, cancelled } = await pendingCancel(), before = readFileSync(fault.registry, 'utf8')
+  let current = structuredClone(cancelled)
+  if (change === 'revocation') current.nativeControl = { ...current.nativeControl!, rearm: { ...current.nativeControl!.rearm!, revoked: undefined } }
+  if (change === 'request') current.nativeControl = { ...current.nativeControl!, rearm: { ...current.nativeControl!.rearm!, requestId: 'different-resume-request' } }
+  if (change === 'permission') current.nativeControl = { ...current.nativeControl!, rearm: { ...current.nativeControl!.rearm!, permissionMode: 'ask' } }
+  if (change === 'saved-control') current.nativeControl = { ...current.nativeControl!, cancel: { ...current.nativeControl!.cancel,
+    request: { ...current.nativeControl!.cancel.request, requestId: 'not-the-saved-cancel' } } }
+  if (change === 'pending-control') registry.byAgent(pending.agentId)!.nativeControl = current.nativeControl
+  if (change === 'target') registry.byAgent(pending.agentId)!.cwd = '/fixture/successor'
+  expect(() => abortPending(pending, current)).toThrow()
+  expect(readFileSync(fault.registry, 'utf8')).toBe(before)
+})
+
+it('rechecks stopped allocation and local owner after pending retirement publication', async () => {
+  const { pending, cancelled } = await pendingCancel(), proof = stopProof(pending)
+  proof.verifyStopped = () => { if (fault.phase === 'retirement') throw Error('allocation proof revoked') }
+  expect(() => abortPending(pending, cancelled, proof)).toThrow('allocation proof revoked')
+  expect(registry.byAgent(pending.agentId)?.nativeRetirement).toBeUndefined()
+})
+
+it('finishes an aborted visit without replaying its saved checkpoint over newer edits', async () => {
+  const { pending, cancelled } = await pendingCancel(), retired = abortPending(pending, cancelled)
+  const newer = store.commitNativeControl(cancelled, { ...cancelled.nativeControl!, cancel: { ...cancelled.nativeControl!.cancel,
+    request: { ...cancelled.nativeControl!.cancel.request, requestId: 'newer-saved-cancel-request' } } }, fence)
+  store.patch(newer.agentId, { cwd: '/fixture/later-folder' })
+  const edited = store.get(newer.agentId)!
+  expect(finish(retired)).toEqual(edited)
+  expect(store.readNativeControl(edited).intent).toEqual(newer.nativeControl)
+})
+
+it('preserves a prior closed visit until the exact next pending abort is closed', async () => {
+  const first = visit(); checkpoint(first); const closed = finish(retire(first)), prior = store.nativeReturn(first.agentId)!
+  saved = store.commitNativeControl(closed, { ...closed.nativeControl!, rearm: {
+    agentId: first.agentId, requestId: 'next-pending-resume-request', launchToken: 'next-pending-launch-token',
+    operation: 'resume', source: 'saved', permissionMode: 'full', target: nativeTurnTarget(closed),
+  } }, fence)
+  const { pending, cancelled } = await pendingCancel(), retired = abortPending(pending, cancelled)
+  expect(retired.nativeRetirement?.pendingAbort?.priorRole).toBe(creationFingerprint(prior))
+  expect(store.nativeReturn(first.agentId)).toEqual(prior)
+  expect(finish(retired)).toEqual(cancelled)
+  expect(store.nativeReturn(first.agentId)?.link).toEqual(pending.nativeArchive)
+})
+
+it('refuses a successor archive role while finishing a pending retirement', async () => {
+  const { pending, cancelled } = await pendingCancel(), retired = abortPending(pending, cancelled)
+  const { pendingAbort: _abort, ...role } = retired.nativeRetirement!
+  writeFileSync(fault.archive, JSON.stringify({ version: 3, session: cancelled, nativeReturn: { ...role, phase: 'saved',
+    link: { ...role.link, requestId: 'successor-resume-request' } } }), { mode: 0o600 })
+  const before = readFileSync(fault.archive, 'utf8')
+  expect(() => finish(retired)).toThrow('untransferred native archive role changed')
+  expect(readFileSync(fault.archive, 'utf8')).toBe(before)
+  expect(registry.byAgent(pending.agentId)?.nativeRetirement).toEqual(retired.nativeRetirement)
+})
+
+it('does not infer an untransferred abort from a lost normal returning archive', () => {
+  const row = visit(); checkpoint(row); const retired = retire(row), snapshot = store.get(row.agentId)!
+  writeFileSync(fault.archive, JSON.stringify({ version: 1, session: snapshot }), { mode: 0o600 })
+  expect(() => finish(retired)).toThrow('archive visit changed')
+  expect(registry.byAgent(row.agentId)?.nativeRetirement?.pendingAbort).toBeUndefined()
+  expect(registry.byAgent(row.agentId)).toBeDefined()
 })

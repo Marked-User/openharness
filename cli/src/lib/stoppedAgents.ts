@@ -9,7 +9,8 @@ import { readPrivateStateFile, secureStateDirectory } from './secureState.js'
 import { sameProcessIdentity } from './terminalRuntime.js'
 import { inspectNativeControlFile } from './nativeControlFile.js'
 import { nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
-import { parseNativeArchiveEnvelope, parseNativeArchiveTransfer, parseNativeArchiveReturn, type NativeArchiveTransfer, type NativeArchiveReturn } from './nativeArchive.js'
+import { parseNativeArchiveEnvelope, parseNativeArchiveTransfer, parseNativeArchiveReturn, parseNativeArchiveRetirement,
+  type NativeArchiveTransfer, type NativeArchiveReturn, type NativeArchiveRetirement } from './nativeArchive.js'
 import { creationFingerprint } from './agentCreationReceipt.js'
 
 const SAFE_ID = /^[a-zA-Z0-9_-]{1,128}$/
@@ -39,7 +40,7 @@ export interface NativeArchiveReturnTransaction {
   verify(): void
   confirm(current: () => void): void
   checkpoint(authority: ArchivePublicationFence): NativeArchiveReturn
-  complete(retirement: NativeArchiveReturn, authority: ArchivePublicationFence): RegisteredSession
+  complete(retirement: NativeArchiveRetirement, authority: ArchivePublicationFence): RegisteredSession
 }
 
 function catalogFingerprint(stat: BigIntStats): string {
@@ -201,7 +202,14 @@ export class StoppedAgentStore {
     const retained = inspectNativeControlFile(join(this.directory, `${original.agentId}.json`), this.directory)
     const record = this.decodeRecord(JSON.parse(retained.content!), original.agentId)
     const owner = record.transfer?.link ?? record.returnRole?.link, pending = this.uncertainTransfers.get(original.agentId)
-    if (creationFingerprint(owner) !== creationFingerprint(original.nativeArchive)) throw Error('The original native archive visit changed.')
+    const retirement = original.nativeRetirement
+    if (retirement?.pendingAbort) {
+      const { pendingAbort, ...role } = retirement, current = creationFingerprint(record.returnRole ?? null)
+      if (record.transfer || record.returnRole?.phase === 'returning'
+        || current !== pendingAbort.priorRole && current !== creationFingerprint({ ...role, phase: 'saved' })) {
+        throw Error('The original untransferred native archive role changed.')
+      }
+    } else if (creationFingerprint(owner ?? null) !== creationFingerprint(original.nativeArchive)) throw Error('The original native archive visit changed.')
     const verify = () => {
       retained.verify()
       if (pending) {
@@ -217,7 +225,8 @@ export class StoppedAgentStore {
    * remains live-owned until an exact durable retirement confirms its return. */
   withNativeReturn<T>(input: RegisteredSession, apply: (archive: NativeArchiveReturnTransaction) => T): T {
     const original = structuredClone(input), link = original.nativeArchive
-    if (!link || original.engine !== 'cursor' || !original.nativeControl || !SAFE_ID.test(original.agentId)) {
+    if (!link || original.engine !== 'cursor' || !original.nativeControl || !SAFE_ID.test(original.agentId)
+      || original.nativeRetirement && !parseNativeArchiveRetirement(original.nativeRetirement)) {
       throw Error('The original native archive visit is unavailable.')
     }
     return this.write(() => {
@@ -266,12 +275,13 @@ export class StoppedAgentStore {
         },
         complete: (retirement, authority) => {
           const role = retained.returnRole
-          if (!original.nativeRetirement || !role
+          if (!original.nativeRetirement
             || creationFingerprint(original.nativeRetirement) !== creationFingerprint(retirement)
-            || creationFingerprint({ ...role, phase: 'returning' }) !== creationFingerprint(retirement)) {
+            || !retirement.pendingAbort && (!role || creationFingerprint({ ...role, phase: 'returning' }) !== creationFingerprint(retirement))) {
             throw Error('The native return has no matching durable retirement.')
           }
-          publish(retained.session, { ...role, phase: 'saved' }, authority)
+          const { pendingAbort: _abort, ...closing } = retirement
+          publish(retained.session, { ...closing, phase: 'saved' }, authority)
           return structuredClone(retained.session)
         },
       })

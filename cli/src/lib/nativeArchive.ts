@@ -30,6 +30,17 @@ export interface NativeArchiveReturn {
   readonly savedTarget: string
 }
 
+/** A cancelled Resume can retire its pending route before saved ownership ever
+ * transfers. Persist that provenance: a missing normal return is not an abort. */
+export interface NativeArchiveRetirement extends NativeArchiveReturn {
+  readonly pendingAbort?: Readonly<{
+    kind: 'untransferred'
+    priorRole: string
+    pendingControl: string
+    requestFingerprint: string
+  }>
+}
+
 /** Produced after exact engine termination and original allocation accounting.
  * Cancellation or an empty Registry lookup is not a stopped-process proof.
  * Its evidence survives the intentional Registry rename; that source file's
@@ -92,4 +103,16 @@ export function parseNativeArchiveReturn(value: unknown): NativeArchiveReturn | 
     || ![row.sourceTarget, row.controlFingerprint, row.checkpoint, row.savedTarget].every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))) return null
   return Object.freeze({ version: 1, phase: row.phase, link, sourceTarget: row.sourceTarget as string,
     controlFingerprint: row.controlFingerprint as string, checkpoint: row.checkpoint as string, savedTarget: row.savedTarget as string })
+}
+
+export function parseNativeArchiveRetirement(value: unknown): NativeArchiveRetirement | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  if (!Object.hasOwn(value, 'pendingAbort')) return parseNativeArchiveReturn(value)
+  const { pendingAbort, ...rest } = value as Record<string, unknown>, role = parseNativeArchiveReturn(rest)
+  if (!role || role.phase !== 'returning' || !pendingAbort || typeof pendingAbort !== 'object' || Array.isArray(pendingAbort)) return null
+  const abort = pendingAbort as Record<string, unknown>
+  if (Object.keys(abort).sort().join(',') !== 'kind,pendingControl,priorRole,requestFingerprint' || abort.kind !== 'untransferred'
+    || ![abort.priorRole, abort.pendingControl, abort.requestFingerprint].every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))) return null
+  return Object.freeze({ ...role, pendingAbort: Object.freeze({ kind: 'untransferred', priorRole: abort.priorRole as string,
+    pendingControl: abort.pendingControl as string, requestFingerprint: abort.requestFingerprint as string }) })
 }

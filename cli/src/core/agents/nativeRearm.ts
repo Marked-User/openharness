@@ -29,7 +29,7 @@ export interface NativeRearmDispatch {
   current(): boolean
 }
 export interface NativeRearmDeps {
-  registry: Pick<typeof registry, 'byAgent' | 'readNativeControl' | 'commitNativeControl'>
+  registry: Pick<typeof registry, 'byAgent' | 'readNativeAbsence' | 'readNativeControl' | 'commitNativeControl'>
   saved: Pick<StoppedAgentStore, 'get' | 'readNativeControl' | 'commitNativeControl'>
   receipts: Pick<AgentCreationReceipts, 'has' | 'status' | 'runIntent' | 'cancelIntent'>
   /** No signals, history repair, route leases or pane allocation in preparation.
@@ -64,7 +64,7 @@ export function createNativeRearm({ registry, saved, receipts, prepare, held }: 
     && rearm.permissionMode === options.permissionMode
   const local = () => { if (closed) throw Error('the core has stopped') }
 
-  const dispatch = async (options: NativeRearmOptions, row: RegisteredSession): Promise<AgentCreationStatus> => {
+  const dispatch = async (options: NativeRearmOptions, row: RegisteredSession, absence?: { verify(): void }): Promise<AgentCreationStatus> => {
     const control = parseNativeTurnIntent(row.nativeControl), request = control && nativeRearmRequest(control)
     if (!control?.rearm || !request || !matches(options, control.rearm)) return hold(options.agentId, 'the complete original reservation is unavailable')
     if (control.rearm.revoked) return receipts.cancelIntent(options.creationId)
@@ -92,6 +92,8 @@ export function createNativeRearm({ registry, saved, receipts, prepare, held }: 
         const current = () => {
           if (!active()) return false
           try {
+            absence?.verify()
+            if (options.source === 'saved' && registry.byAgent(options.agentId)) return false
             if (!originalAuthority.current()) return false
             const current = get(options.source, options.agentId)
             if (!target(current)) return false
@@ -99,7 +101,9 @@ export function createNativeRearm({ registry, saved, receipts, prepare, held }: 
             if (!originalAuthority.current()) return false
             // Proof callbacks can revoke or change the original row. Finish
             // with the exact target and a final disk-free lifetime check.
+            absence?.verify()
             return target(get(options.source, options.agentId)) && active()
+              && (options.source !== 'saved' || !registry.byAgent(options.agentId)) && active()
           } catch { return false }
         }
         const authority: CreationAuthority = { id: originalAuthority.id, settled: originalAuthority.settled, current,
@@ -136,6 +140,14 @@ export function createNativeRearm({ registry, saved, receipts, prepare, held }: 
         const existing = receipts.has(options.creationId, expected)
         const status = existing ? receipts.status(options.creationId) : undefined
         if (status && status.state !== 'pending' && status.state !== 'unconfirmed') return status
+        const absence = options.source === 'saved' ? registry.readNativeAbsence(options.agentId) : undefined
+        const placement = () => {
+          local()
+          absence?.verify()
+          if (options.source === 'saved' && registry.byAgent(options.agentId)) throw Error('the original live handoff must finish before saved dispatch')
+          local()
+        }
+        placement()
         let row = get(options.source, options.agentId)
         if (!row || row.engine !== 'cursor') return hold(options.agentId, 'the original Cursor agent is unavailable')
         row = structuredClone(row)
@@ -151,7 +163,7 @@ export function createNativeRearm({ registry, saved, receipts, prepare, held }: 
             ...(options.permissionMode === undefined ? {} : { permissionMode: options.permissionMode }),
           } })
           if (!next) return hold(options.agentId, 'the original launch options are invalid')
-          const compatible = () => { local(); receipts.has(options.creationId, expected); local() }
+          const compatible = () => { placement(); receipts.has(options.creationId, expected); placement() }
           // Store methods retain their own exact old row through publication.
           // The receipt compatibility fence survives the intentional row write.
           row = options.source === 'live' ? registry.commitNativeControl(row, next, compatible)
@@ -159,8 +171,8 @@ export function createNativeRearm({ registry, saved, receipts, prepare, held }: 
         }
         row = structuredClone(row)
         original = row
-        read(options.source, row).verify(); local()
-        return await dispatch(options, row)
+        read(options.source, row).verify(); placement()
+        return await dispatch(options, row, absence)
       } catch (error) {
         let unchanged = false
         try {

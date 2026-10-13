@@ -1,10 +1,27 @@
 import { expect, it } from 'vitest'
-import { parseNativeArchiveLink, parseNativeArchiveTransfer, parseNativeArchiveReturn, parseNativeArchiveEnvelope } from './nativeArchive.js'
+import { parseNativeArchiveLink, parseNativeArchiveTransfer, parseNativeArchiveReturn, parseNativeArchiveRetirement, parseNativeArchiveEnvelope } from './nativeArchive.js'
 
 const link = { version: 1, agentId: 'original-agent', requestId: 'original-resume-request', launchToken: 'original-launch-token', target: 'a'.repeat(64) }
 const transfer = { version: 1, link, pendingTarget: 'b'.repeat(64), processKey: 'boot\0cursor\0process\0birth', pane: '%1' }
 const returning = { version: 1, phase: 'returning', link, sourceTarget: 'b'.repeat(64), controlFingerprint: 'c'.repeat(64),
   checkpoint: 'd'.repeat(64), savedTarget: 'e'.repeat(64) }
+const aborting = { ...returning, pendingAbort: { kind: 'untransferred', priorRole: 'f'.repeat(64), pendingControl: '1'.repeat(64), requestFingerprint: '2'.repeat(64) } }
+
+it('retains explicit abort provenance only on the Registry retirement', () => {
+  const parsed = parseNativeArchiveRetirement(aborting)!
+  expect(parsed).toEqual(aborting); expect(Object.isFrozen(parsed.pendingAbort)).toBe(true)
+  expect(parseNativeArchiveRetirement(returning)).toEqual(returning)
+  expect(parseNativeArchiveReturn(aborting)).toBeNull()
+  expect(parseNativeArchiveEnvelope({ version: 3, session: {}, nativeReturn: aborting })).toBeNull()
+})
+
+it.each([null, [], 'retirement', { ...aborting, phase: 'saved' }, { ...aborting, extra: true },
+  ...[null, undefined, [], {}, { ...aborting.pendingAbort, extra: true }, { ...aborting.pendingAbort, kind: 'transferred' },
+    ...['priorRole', 'pendingControl', 'requestFingerprint'].flatMap(field => [null, 'bad'].map(value => ({ ...aborting.pendingAbort, [field]: value })))
+  ].map(pendingAbort => ({ ...aborting, pendingAbort })),
+])('refuses malformed pending retirement provenance: %#', value => {
+  expect(parseNativeArchiveRetirement(value)).toBeNull()
+})
 
 it.each([{ version: 1, session: {} }, { version: 2, session: {}, nativeTransfer: transfer },
   { version: 3, session: {}, nativeReturn: returning }])('parses the shared envelope without granting session authority: %j', value => {

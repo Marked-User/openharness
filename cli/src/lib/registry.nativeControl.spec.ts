@@ -80,6 +80,30 @@ function archivedVisit() {
   return { saved: registry.byAgent(saved.agentId)!, link }
 }
 
+it.each(['missing', 'malformed', 'root', 'unknown-row', 'permissions'])('does not grant saved dispatch from %s registry evidence', change => {
+  if (change === 'missing') rmSync(file)
+  if (change === 'malformed') writeFileSync(file, '{', { mode: 0o600 })
+  if (change === 'root') writeFileSync(file, '{}', { mode: 0o600 })
+  if (change === 'unknown-row') writeFileSync(file, '[{"schemaVersion":99}]', { mode: 0o600 })
+  if (change === 'permissions') chmodSync(file, 0o644)
+  expect(() => registry.readNativeAbsence('absent-agent')).toThrow()
+})
+
+it('pins the exact confirmed registry absence instead of adopting an equal replacement file', () => {
+  const proof = registry.readNativeAbsence('absent-agent')
+  proof.verify()
+  const replacement = `${file}.replacement`
+  writeFileSync(replacement, readFileSync(file), { mode: 0o600 }); renameSync(replacement, file)
+  expect(() => proof.verify()).toThrow()
+  expect(() => registry.readNativeAbsence('absent-agent').verify()).not.toThrow()
+})
+
+it('requires durable confirmation of registry absence and refuses a local owner', () => {
+  expect(() => registry.readNativeAbsence(row.agentId)).toThrow('live handoff')
+  fault.directory = true; fault.renamed = true
+  expect(() => registry.readNativeAbsence('absent-agent')).toThrow('directory sync')
+})
+
 it('retains the original archive epoch through load, registration and a later native reservation', () => {
   const { saved, link } = archivedVisit(), without = { ...saved }; delete without.nativeArchive
   expect(nativeTurnTarget(saved)).not.toBe(nativeTurnTarget(without))

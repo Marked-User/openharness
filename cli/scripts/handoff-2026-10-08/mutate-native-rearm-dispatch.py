@@ -14,7 +14,7 @@ mutations = [
         'row = structuredClone(row)')], 'reserves complete'),
     ('existing semantic conflict ignored', [(
         'const existing = receipts.has(options.creationId, expected)', 'const existing = false'), (
-        'local(); receipts.has(options.creationId, expected); local()', 'local(); local()')],
+        'placement(); receipts.has(options.creationId, expected); placement()', 'placement(); placement()')],
         'refuses an existing conflicting'),
     ('revoked missing receipt is not tombstoned', [(
         'if (control.rearm.revoked) return receipts.cancelIntent(options.creationId)',
@@ -48,6 +48,12 @@ mutations = [
     ('effect callback declares unproven success', [(
         "return began ? { state: 'unconfirmed' } : notDispatched",
         "return began ? { state: 'created', agentId: options.agentId, resumed: true } : notDispatched")], 'reserves complete'),
+    ('saved dispatch uses only local Registry absence', [(
+        "const absence = options.source === 'saved' ? registry.readNativeAbsence(options.agentId) : undefined",
+        'const absence = undefined')], 'retains durable absence'),
+    ('final absence proof changes the saved target unnoticed', [(
+        'return target(get(options.source, options.agentId)) && active()',
+        'return active()')], 'after the final retained absence proof'),
 ]
 environment = {**os.environ, 'TZ': 'UTC', 'TMPDIR': '/tmp'}
 for key in list(environment):
@@ -59,7 +65,7 @@ assert Path(environment.get('TMUX_TMPDIR', '/missing')).is_dir(), 'Private TMUX_
 def run(pattern='.'):
     return subprocess.run(['node', 'node_modules/vitest/vitest.mjs', 'run', spec,
                            '--maxWorkers=1', '-t', pattern], cwd=cli, env=environment,
-                          text=True, capture_output=True, timeout=60)
+                          text=True, capture_output=True, timeout=120)
 
 
 result = run()

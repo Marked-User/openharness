@@ -479,6 +479,46 @@ prior archive role: without that provenance, a lost normal-return archive could
 be mistaken for an untransferred abort. The final closed receipt can reuse the
 existing version-three saved role.
 
+The pending-abort protocol is now implemented. A distinct Registry retirement
+records that ownership never transferred, the exact prior archive role, original
+pending control and complete request fingerprint. A fresh stopped-allocation
+proof is still required. Saved Cancel remains authoritative throughout; cleanup
+closes only that visit and preserves newer saved Cancel and folder edits. A lost
+normal Stop checkpoint cannot be interpreted as an untransferred abort.
+
+Independent review found two additional races. Saved dispatch now confirms and
+retains actual private Registry absence instead of trusting one core's stale
+memory. Separate Registry instances exercise peer publication before reservation,
+during preparation and at physical dispatch. An uncertain retirement retry now
+confirms its exact original publisher and immutable tombstone even if the saved
+store accepted later edits; it never rewrites those edits. Final dispatch checks
+recheck saved target/control after the absence proof and end with local lifetime.
+
+Receipt `20261013T184410.430562Z-14950` passes types and 284 cases in four affected
+files (108.2 and 112.8 seconds), with 100% Resume controller coverage. Final
+ordering and both causal regressions pass types and all 56 controller cases at
+100% statements, branches, functions and lines in
+`20261013T184746.977009Z-27726` (17.0 and 11.1 seconds). Receipt
+`20261013T184841.406434Z-31226` passes all complete baselines and 56 assertion
+mutations: 17 archive return, 16 dispatch, 11 forward handoff and 12 live
+replacement faults (449.0 seconds). The earlier 357-pass/10-fail run remains
+failed: it found a normalized launch-token hint, an outdated fixture Cancel
+target and an undefined missing-role digest; each was corrected explicitly.
+
+Independent review approved this pending-abort/storage/dispatch slice over
+`5d8dfe12b`, conditional on the now-completed final ordering regression and gates.
+Implementation/review ran approximately 18:24–18:48 UTC October 13; validation
+overlapped 18:33–18:56. Merge, publication and external waiting remain zero.
+Physical proof producers, marker cleanup, orchestration, activation and full-PR
+acceptance remain excluded from this scoped approval.
+
+Before activation, native marker cleanup also needs an explicit early-Cancel
+path: an exact durable cancel claim or on-disk known-not-dispatched result,
+retained absence of process/confirmation evidence, the original revoked saved R
+and confirmed Registry absence. Publish the full native intent before its marker,
+finish cleanup before clearing R, and keep delayed preparation revoked. Missing
+markers and request-less tombstones cannot supply that full-request proof.
+
 October 13 recap checkpoint: the recaps port now derives a bounded summary from
 the exact answer retained for an owner and generation. Core copies the input
 before a service wait and checks the reply's generation identity, input digest

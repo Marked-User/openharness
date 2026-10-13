@@ -61,7 +61,8 @@ import { externalReservations, externalResumePending, externalResumeIds, parseEx
 import type { StartedBy } from './agentAttribution.js'
 import { nativeRearmRequest, nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
 import { inspectNativeControlFile } from './nativeControlFile.js'
-import { parseNativeArchiveLink, parseNativeArchiveReturn, type NativeArchiveLink, type NativeArchiveTransfer, type NativeArchiveReturn, type NativeArchiveStopProof } from './nativeArchive.js'
+import { parseNativeArchiveLink, parseNativeArchiveReturn, parseNativeArchiveRetirement, type NativeArchiveLink, type NativeArchiveTransfer,
+  type NativeArchiveReturn, type NativeArchiveRetirement, type NativeArchiveStopProof } from './nativeArchive.js'
 import type { NativeArchiveTransaction, NativeArchiveReturnTransaction, StoppedAgentStore } from './stoppedAgents.js'
 import type { NativeRearmReplacementProof } from '../engines/kit/nativeRearmProof.js'
 import { creationFingerprint } from './agentCreationReceipt.js'
@@ -102,7 +103,7 @@ export interface RegisteredSession {
    * creates or retires it; later live cancellation and restart retain it. */
   nativeArchive?: NativeArchiveLink
   /** Exact non-admitting retirement; only its two-store handoff can remove it. */
-  nativeRetirement?: NativeArchiveReturn
+  nativeRetirement?: NativeArchiveRetirement
   /** Whether the supported engine process is currently identified; terminal liveness is tracked separately. */
   active: boolean
   /** Harness-created panes can be rendered before their engine process exists. Absent on legacy rows. */
@@ -636,14 +637,19 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
   const externalResume = row.externalResume === undefined ? undefined : parseExternalResume(row.externalResume)
   const nativeControl = row.nativeControl === undefined ? undefined : parseNativeTurnIntent(row.nativeControl)
   const nativeArchive = row.nativeArchive === undefined ? undefined : parseNativeArchiveLink(row.nativeArchive)
-  const nativeRetirement = row.nativeRetirement === undefined ? undefined : parseNativeArchiveReturn(row.nativeRetirement)
+  const nativeRetirement = row.nativeRetirement === undefined ? undefined : parseNativeArchiveRetirement(row.nativeRetirement)
   if ((row.schemaVersion !== 2 && row.schemaVersion !== 3)
     || (row.schemaVersion === 3) !== (nativeControl !== undefined) || nativeControl === null
     || nativeArchive === null || nativeArchive && (!nativeControl || row.engine !== 'cursor' || nativeArchive.agentId !== row.agentId)
     || nativeRetirement === null || nativeRetirement && (nativeRetirement.phase !== 'returning' || !nativeArchive
       || rowFingerprint(nativeRetirement.link) !== rowFingerprint(nativeArchive) || active || row.processIdentity !== null
       || !nativeControl || nativeControl.rearm && !nativeControl.rearm.revoked || launch?.state !== 'held' || launch.service !== 'native'
-      || nativeRetirement.controlFingerprint !== creationFingerprint(nativeControl))
+      || nativeRetirement.controlFingerprint !== creationFingerprint(nativeControl)
+      || nativeRetirement.pendingAbort && (!nativeControl.rearm?.revoked || nativeControl.rearm.source !== 'saved'
+        || nativeControl.rearm.operation !== 'resume' || nativeControl.rearm.replacement
+        || nativeControl.rearm.requestId !== nativeArchive.requestId || nativeControl.rearm.launchToken !== nativeArchive.launchToken
+        || nativeControl.rearm.target !== nativeArchive.target
+        || nativeRetirement.pendingAbort.requestFingerprint !== creationFingerprint(nativeRearmRequest(nativeControl))))
     || typeof row.active !== 'boolean'
     || externalResume === null || externalResume && externalResume.request.engine !== row.engine
     || externalResume && externalResumePending(externalResume) && (row.sessionId !== '' || row.processIdentity !== null || launch?.state !== 'held')
@@ -1369,7 +1375,7 @@ class Registry {
           schemaVersion: raw.schemaVersion === 3 ? 3 : 2,
           ...(raw.nativeControl ? { nativeControl: parseNativeTurnIntent(raw.nativeControl)! } : {}),
           ...(raw.nativeArchive ? { nativeArchive: parseNativeArchiveLink(raw.nativeArchive)! } : {}),
-          ...(raw.nativeRetirement ? { nativeRetirement: parseNativeArchiveReturn(raw.nativeRetirement)! } : {}),
+          ...(raw.nativeRetirement ? { nativeRetirement: parseNativeArchiveRetirement(raw.nativeRetirement)! } : {}),
           active,
           ...(launch ? { launch } : {}),
           ...(raw.resumeOnly === true ? { resumeOnly: true } : {}),
@@ -2427,6 +2433,29 @@ class Registry {
     return entry
   }
 
+  /** A saved launch cannot rely on this core's last observation of absence.
+   * A peer may have published a pending route or retired visit since load. */
+  readNativeAbsence(agentId: string): { verify(): void } {
+    const local = () => {
+      if (this.writeBlocked || this.unconfirmedBinding?.affected.has(agentId) || this.byAgent(agentId)) {
+        throw new IdentityReadUnavailable('the original live handoff must finish before saved dispatch')
+      }
+    }
+    local()
+    const retained = inspectNativeControlFile(FILE, env.ADAPTER_DATA_DIR)
+    const values: unknown = retained.content === null ? null : JSON.parse(retained.content)
+    const rows = Array.isArray(values) ? validatedRows(values) : null
+    if (!rows || rows.some(row => row.agentId === agentId)) {
+      throw new IdentityReadUnavailable('the durable live handoff must finish before saved dispatch')
+    }
+    const verify = () => { retained.verify(); local() }
+    // A peer's cleanup rename grants absence only after its exact file and
+    // original parent have been confirmed. Keep this image through dispatch.
+    retained.confirm(verify)
+    verify()
+    return { verify }
+  }
+
   /** A fresh bounded disk proof, not the row last observed in memory. Retain it
    * across every source read and check it at the actual physical boundary. */
   readNativeControl(input: RegisteredSession): { intent: NativeTurnIntent | undefined; verify(): void } {
@@ -2761,6 +2790,78 @@ class Registry {
         const written = inspectNativeControlFile(FILE, env.ADAPTER_DATA_DIR)
         if (written.content !== contents) throw new IdentityReadUnavailable('the published native retirement bytes changed')
         written.confirm(() => { verifyPublished(); source.verifyDirectory(); checkpoint(); verifyStopped(); current() })
+      },
+    })
+    this.terminalAvailableAgents.delete(original.agentId)
+    return this.byAgent(original.agentId)!
+  }
+
+  /** Saved Cancel can win after the held route exists but before transfer.
+   * Retire only that exact pending allocation; the saved store keeps control
+   * throughout. A durable subtype distinguishes this from a lost Stop archive. */
+  retirePendingNativeArchive(input: RegisteredSession, saved: RegisteredSession, proof: NativeArchiveStopProof,
+    stopped: Pick<StoppedAgentStore, 'nativeReturn' | 'withNativeReturn'>, fence: () => void): RegisteredSession {
+    const original = strictPersistedRow(structuredClone(input)), snapshot = strictPersistedRow(structuredClone(saved))
+    const reserved = original?.nativeControl?.rearm, cancelled = snapshot?.nativeControl?.rearm, link = original?.nativeArchive
+    if (!original || !snapshot || !link || original.nativeRetirement || original.engine !== 'cursor' || original.active
+      || original.processIdentity !== null || original.resumeOnly !== true || original.launch?.state !== 'held'
+      || original.launch.service !== 'native'
+      || !reserved || reserved.revoked || reserved.replacement || reserved.source !== 'saved' || reserved.operation !== 'resume'
+      || reserved.requestId !== link.requestId || reserved.launchToken !== link.launchToken || reserved.target !== link.target
+      || snapshot.engine !== 'cursor' || snapshot.active || snapshot.nativeArchive || snapshot.nativeRetirement
+      || snapshot.agentId !== original.agentId || snapshot.sessionId !== original.sessionId || !cancelled?.revoked || cancelled.replacement
+      || creationFingerprint(nativeRearmRequest(original.nativeControl!)) !== creationFingerprint(nativeRearmRequest(snapshot.nativeControl!))) {
+      throw new IdentityReadUnavailable('the exact cancelled pending Resume is unavailable')
+    }
+    const target = nativeTurnTarget(original), controlFingerprint = creationFingerprint(original.nativeControl)
+    const binding = { ...proof.source }, { verifyStopped, current: stoppedCurrent } = proof
+    if (binding.target !== target || binding.controlFingerprint !== controlFingerprint) {
+      throw new IdentityReadUnavailable('the stopped allocation proof belongs to a different pending Resume')
+    }
+    if (this.usedNativeStops.has(proof)) throw new IdentityReadUnavailable('a pending retirement retry needs fresh stopped-process evidence')
+    this.usedNativeStops.add(proof)
+    const unconfirmed = this.unconfirmedBinding?.agentId === original.agentId ? this.unconfirmedBinding : null
+    const retained = unconfirmed ? strictPersistedRow(unconfirmed.image.find(row => row.agentId === original.agentId)) : null
+    if (unconfirmed && (!unconfirmed.sticky || !retained?.nativeRetirement?.pendingAbort
+      || retained.nativeRetirement.sourceTarget !== target
+      || creationFingerprint(retained.nativeArchive) !== creationFingerprint(link)
+      || retained.nativeRetirement.pendingAbort.pendingControl !== controlFingerprint
+      || retained.nativeRetirement.pendingAbort.requestFingerprint !== creationFingerprint(nativeRearmRequest(original.nativeControl!)))) {
+      throw new IdentityReadUnavailable('the original pending retirement image is unavailable')
+    }
+    const role: NativeArchiveRetirement = retained?.nativeRetirement ?? { version: 1, phase: 'returning', link, sourceTarget: target,
+      controlFingerprint: creationFingerprint(snapshot.nativeControl), checkpoint: creationFingerprint(snapshot), savedTarget: nativeTurnTarget(snapshot),
+      pendingAbort: { kind: 'untransferred', priorRole: creationFingerprint(stopped.nativeReturn(original.agentId)),
+        pendingControl: controlFingerprint, requestFingerprint: creationFingerprint(nativeRearmRequest(original.nativeControl!)) } }
+    const candidate: RegisteredSession = retained ?? { ...original, nativeControl: snapshot.nativeControl, nativeRetirement: role }
+    delete candidate.closePlan
+    const source = this.readNativeReplacementSource(original)
+    let archive: NativeArchiveReturnTransaction
+    const archiveLock = (apply: () => void) => stopped.withNativeReturn(candidate, retained => { archive = retained; apply() })
+    const unchanged = () => {
+      const row = this.byAgent(original.agentId)
+      if (!row || nativeTurnTarget(row) !== target || creationFingerprint(row.nativeControl) !== controlFingerprint) {
+        throw new IdentityReadUnavailable('the original pending Resume owner changed')
+      }
+    }
+    const pendingCurrent = () => { unchanged(); fence(); stoppedCurrent(); unchanged() }
+    const savedCheckpoint = () => {
+      archive.verify()
+      // Only our exact already-published tombstone can outlive saved edits.
+      // Confirm its first image, then finish metadata from the fresh archive.
+      if (!retained && creationFingerprint(archive.session) !== role.checkpoint
+        || creationFingerprint(archive.role ?? null) !== role.pendingAbort!.priorRole) {
+        throw new IdentityReadUnavailable('the saved Cancel or prior archive role changed before pending retirement')
+      }
+    }
+    const verify = () => { source.verify(); savedCheckpoint(); verifyStopped(); pendingCurrent() }
+    this.save(true, false, undefined, { agentId: original.agentId, candidate, verify, sticky: true, replaceLive: true,
+      archiveLock, archiveRetirement: role, replacement: { target, controlFingerprint, verifyDirectory: source.verifyDirectory },
+      prepare: () => archive.confirm(verify),
+      confirm: (verifyPublished, contents) => {
+        const written = inspectNativeControlFile(FILE, env.ADAPTER_DATA_DIR)
+        if (written.content !== contents) throw new IdentityReadUnavailable('the published pending retirement bytes changed')
+        written.confirm(() => { verifyPublished(); source.verifyDirectory(); savedCheckpoint(); verifyStopped(); pendingCurrent() })
       },
     })
     this.terminalAvailableAgents.delete(original.agentId)
@@ -3153,7 +3254,7 @@ class Registry {
       displaced?: { agentId: string; candidate: RegisteredSession | null }; sticky?: boolean;
       archiveAdmission?: NativeArchiveLink; archiveLock?: (apply: () => void) => void; prepare?: () => void;
       archivePending?: { verifyDirectory(): void };
-      archiveRetirement?: NativeArchiveReturn; retire?: true;
+      archiveRetirement?: NativeArchiveRetirement; retire?: true;
       replacement?: { target: string; controlFingerprint: string; verifyDirectory(): void };
       confirm?: (verifyPublished: () => void, contents: string) => void },
     mutationAgentId = externalAgentId ?? bindingCommit?.agentId): void {

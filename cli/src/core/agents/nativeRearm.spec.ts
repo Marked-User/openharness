@@ -23,14 +23,16 @@ function session(agentId: string, active: boolean): RegisteredSession {
   } } }
   return row
 }
-function fixture() {
+function fixture(source: 'live' | 'saved' = 'live') {
   const root = mkdtempSync(join(tmpdir(), 'native-rearm-')); roots.push(root)
   const receipts = new AgentCreationReceipts(join(root, 'receipts'))
+  const occupied = new Set<string>()
   const rows = { live: new Map<string, RegisteredSession>(), saved: new Map<string, RegisteredSession>() }
   for (let n = 0; n < 8; n++) {
     rows.live.set(`agent-${n}`, session(`agent-${n}`, true))
     rows.saved.set(`agent-${n}`, session(`agent-${n}`, false))
   }
+  if (source === 'saved') rows.live.clear()
   const proof = (source: 'live' | 'saved', input: RegisteredSession) => {
     const original = structuredClone(input)
     const verify = () => {
@@ -52,6 +54,10 @@ function fixture() {
   const deps: NativeRearmDeps = {
     registry: {
       byAgent: id => rows.live.get(id), readNativeControl: row => proof('live', row),
+      readNativeAbsence: id => {
+        const verify = () => { if (occupied.has(id)) throw Error('durable handoff changed') }
+        verify(); return { verify }
+      },
       commitNativeControl: (row, next, fence) => commit('live', row, next, fence),
     },
     saved: {
@@ -62,11 +68,11 @@ function fixture() {
   }
   const controller = createNativeRearm(deps)
   const current = (source: 'live' | 'saved' = 'live', n = 0) => rows[source].get(`agent-${n}`)!
-  return { root, rows, receipts, deps, prepare, held, controller, current }
+  return { root, rows, occupied, receipts, deps, prepare, held, controller, current }
 }
 
 it.each(['live', 'saved'] as const)('reserves complete %s control before dependencies and executes only the claimed operation', async source => {
-  const p = fixture(), input = { ...request(source), ...(source === 'saved' ? { permissionMode: 'full' as const } : {}) }
+  const p = fixture(source), input = { ...request(source), ...(source === 'saved' ? { permissionMode: 'full' as const } : {}) }
   const effect = vi.fn(async (guard: NativeRearmDispatch) => { expect(guard.current()).toBe(true); guard.begin() })
   p.prepare.mockImplementation(async supplied => {
     expect(supplied.source).toBe(source)
@@ -107,7 +113,7 @@ it.each([false, true])('reserves before receipt publication so a later Cancel to
 })
 
 it('recovers the exact reserved request after a crash before its receipt without new defaults', async () => {
-  const p = fixture(), input = { ...request('saved'), permissionMode: 'full' as const }
+  const p = fixture('saved'), input = { ...request('saved'), permissionMode: 'full' as const }
   const original = p.receipts.runIntent.bind(p.receipts)
   const run = vi.spyOn(p.receipts, 'runIntent').mockImplementationOnce(() => { throw Error('Crash') })
   await p.controller.start(input)
@@ -220,7 +226,7 @@ it.each(['first', 'last'])('refuses a peer cancellation before the %s receipt pr
 })
 
 it.each(['live', 'saved'] as const)('retains an immutable %s reservation when a delayed receipt failure follows an in-place successor', async source => {
-  const p = fixture(), input = request(source)
+  const p = fixture(source), input = request(source)
   let reject!: (error: Error) => void
   vi.spyOn(p.receipts, 'runIntent').mockImplementation(() => new Promise((_, fail) => { reject = fail }))
   const pending = p.controller.start(input)
@@ -231,6 +237,93 @@ it.each(['live', 'saved'] as const)('retains an immutable %s reservation when a 
   reject(Error('Original receipt unavailable'))
   expect(await pending).toMatchObject({ state: 'pending', held: { detail: expect.stringContaining('Original receipt unavailable') } })
   expect(p.held).not.toHaveBeenCalled(); expect(p.prepare).not.toHaveBeenCalled()
+})
+
+it('does not reserve or prepare another saved Resume while a live handoff remains', async () => {
+  const p = fixture('saved'), input = request('saved'), before = structuredClone(p.current('saved'))
+  p.rows.live.set(input.agentId, session(input.agentId, false))
+  expect(await p.controller.start(input)).toMatchObject({ state: 'pending', held: { detail: expect.stringContaining('live handoff must finish') } })
+  expect(p.current('saved')).toEqual(before); expect(p.prepare).not.toHaveBeenCalled()
+})
+
+it.each(['preparation', 'effect', 'final-control'])('revokes saved dispatch when a live retirement appears during %s', async phase => {
+  const p = fixture('saved'), input = request('saved'), physical = vi.fn()
+  const occupy = () => p.rows.live.set(input.agentId, session(input.agentId, false))
+  let armed = false
+  if (phase === 'final-control') {
+    const get = p.deps.saved.get
+    p.deps.saved.get = id => {
+      const saved = get(id)
+      if (armed) occupy()
+      return saved
+    }
+  }
+  p.prepare.mockImplementation(async () => {
+    if (phase === 'preparation') occupy()
+    return async guard => {
+      if (phase === 'effect') occupy()
+      if (phase === 'final-control') armed = true
+      expect(guard.current()).toBe(false)
+      expect(() => guard.begin()).toThrow()
+      if (guard.current()) physical()
+    }
+  })
+  expect((await p.controller.start(input)).state).not.toBe('created')
+  expect(physical).not.toHaveBeenCalled()
+})
+
+it.each(['reservation', 'preparation', 'effect', 'final-control'])('retains durable absence through saved %s', async phase => {
+  const p = fixture('saved'), input = request('saved'), physical = vi.fn()
+  const occupy = () => p.occupied.add(input.agentId)
+  if (phase === 'reservation') {
+    const commit = p.deps.saved.commitNativeControl
+    p.deps.saved.commitNativeControl = (row, next, fence) => { occupy(); return commit(row, next, fence) }
+  }
+  let armed = false
+  if (phase === 'final-control') {
+    const get = p.deps.saved.get
+    p.deps.saved.get = id => { const row = get(id); if (armed) occupy(); return row }
+  }
+  p.prepare.mockImplementation(async () => {
+    if (phase === 'preparation') occupy()
+    return async guard => {
+      if (phase === 'effect') occupy()
+      if (phase === 'final-control') armed = true
+      guard.begin(); physical()
+    }
+  })
+  const status = await p.controller.start(input)
+  expect(status.state).toBe(phase === 'effect' || phase === 'final-control' ? 'failed' : 'pending')
+  expect(p.rows.live.has(input.agentId)).toBe(false)
+  expect(physical).not.toHaveBeenCalled()
+  if (phase === 'reservation') expect(p.current('saved').nativeControl?.rearm).toBeUndefined()
+})
+
+it.each(['control', 'target'])('rechecks saved %s after the final retained absence proof', async changed => {
+  const p = fixture('saved'), input = request('saved'), physical = vi.fn()
+  const absent = p.deps.registry.readNativeAbsence
+  let armed = false, reads = 0
+  p.deps.registry.readNativeAbsence = id => {
+    const proof = absent(id)
+    return { verify: () => {
+      proof.verify()
+      if (armed && ++reads === 2) {
+        if (changed === 'target') p.current('saved').cwd = '/fixture/changed'
+        else p.current('saved').nativeControl = { ...p.current('saved').nativeControl!,
+          rearm: { ...p.current('saved').nativeControl!.rearm!, revoked: true } }
+      }
+    } }
+  }
+  const results: boolean[] = []
+  p.prepare.mockResolvedValue(async guard => {
+    armed = true
+    results.push(guard.current())
+    if (guard.current()) { guard.begin(); physical() }
+  })
+  expect((await p.controller.start(input)).state).toBe('failed')
+  expect(results).toEqual([false])
+  expect(p.rows.live.has(input.agentId)).toBe(false)
+  expect(physical).not.toHaveBeenCalled()
 })
 
 it('refuses receipt bytes which disagree with the durable reservation even when their semantic fingerprint matches', async () => {

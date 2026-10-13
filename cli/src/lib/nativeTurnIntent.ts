@@ -84,6 +84,8 @@ export function nativeTurnTarget(row: RegisteredSession): string {
     row.nativeArchive.requestId, row.nativeArchive.launchToken, row.nativeArchive.target])
   if (row.nativeRetirement) identity.push(['native-retirement', row.nativeRetirement.sourceTarget,
     row.nativeRetirement.controlFingerprint, row.nativeRetirement.checkpoint, row.nativeRetirement.savedTarget])
+  if (row.nativeRetirement?.pendingAbort) identity.push(['native-pending-abort', row.nativeRetirement.pendingAbort.priorRole,
+    row.nativeRetirement.pendingAbort.pendingControl, row.nativeRetirement.pendingAbort.requestFingerprint])
   return createHash('sha256').update(JSON.stringify(identity)).digest('hex')
 }
 
