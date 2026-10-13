@@ -7,6 +7,7 @@ import { nativeRearmRequest, nativeTurnTarget } from '../../lib/nativeTurnIntent
 import type { NativeArchiveTransfer } from '../../lib/nativeArchive.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
+import { appendNativeAllocation } from '../../lib/nativeAllocation.js'
 import { createNativeRearmProof, type NativeRearmReplacementProof } from '../../engines/kit/nativeRearmProof.js'
 import { createNativeRearmRecovery, type NativeRearmRecoveryDeps } from './nativeRearmRecovery.js'
 
@@ -86,6 +87,10 @@ async function fixture(count = 1, permissionMode?: 'full', placement: 'live' | '
     const route = { nativeArchive: link, runtimes: [{ backend: 'tmux' as const, paneId: native.pane }],
       primaryRuntimeKey: `tmux\0${native.pane}`, tmuxPane: native.pane }
     const result: RegisteredSession = { ...structuredClone(input), ...(placement === 'saved' ? route : {}), processIdentity: { ...native.processIdentity }, active: true, launch: { state: 'ready' },
+      schemaVersion: 4, nativeAllocation: appendNativeAllocation(input.nativeAllocation, {
+        fingerprint: creationFingerprint({ kind: 'native-rearm', agentId: input.agentId, operation: 'resume', source: placement,
+          ...(permissionMode ? { permissionMode } : {}) }), request: nativeRearmRequest(input.nativeControl!)!,
+      }),
       ...(permissionMode ? { permissionMode, bypassPermission: true } : {}),
       nativeControl: { ...input.nativeControl!, rearm: { ...input.nativeControl!.rearm!,
         replacement: { processKey: native.key, sessionId: input.sessionId } } },

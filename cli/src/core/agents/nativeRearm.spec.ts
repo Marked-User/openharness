@@ -6,6 +6,7 @@ import { AgentCreationReceipts, creationFingerprint, type CreationAuthority } fr
 import { nativeRearmRequest, nativeTurnTarget, nativeTurnTransition, type NativeTurnIntent } from '../../lib/nativeTurnIntent.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
+import { appendNativeAllocation } from '../../lib/nativeAllocation.js'
 import { createNativeRearm, type NativeRearmDeps, type NativeRearmDispatch, type NativeRearmOptions } from './nativeRearm.js'
 
 const roots: string[] = []
@@ -70,6 +71,41 @@ function fixture(source: 'live' | 'saved' = 'live') {
   const current = (source: 'live' | 'saved' = 'live', n = 0) => rows[source].get(`agent-${n}`)!
   return { root, rows, occupied, receipts, deps, prepare, held, controller, current }
 }
+
+it.each(['live', 'saved'] as const)('holds full %s allocation history before reservation, preparation or dispatch', async source => {
+  const p = fixture(source), input = request(source), row = p.current(source)
+  const choice = { kind: 'native-rearm', agentId: row.agentId, operation: 'resume', source }
+  for (let n = 0; n < 4; n++) row.nativeAllocation = appendNativeAllocation(row.nativeAllocation, {
+    fingerprint: creationFingerprint(choice), request: { ...choice, creationId: `prior-request-id-${n}`,
+      launchToken: `prior-launch-token-${n}`, target: 'a'.repeat(64), sourceProcess: { processKey: null } },
+  })
+  row.schemaVersion = 4
+  const original = structuredClone(row)
+  expect(await p.controller.start(input)).toMatchObject({ state: 'pending', held: { detail: expect.stringContaining('physical accounting') } })
+  expect(p.current(source)).toEqual(original); expect(p.prepare).not.toHaveBeenCalled()
+  expect(p.receipts.status(input.creationId)).toEqual({ state: 'missing' })
+  // A malformed imported R must not bypass the effect-side capacity fence.
+  row.nativeControl = { ...row.nativeControl!, rearm: { requestId: input.creationId, agentId: row.agentId, source,
+    operation: input.operation, target: nativeTurnTarget(row), launchToken: 'fresh-original-launch-token', sourceProcess: { processKey: null } } }
+  expect(await createNativeRearm(p.deps).start(input)).toMatchObject({ state: 'pending', held: { detail: expect.stringContaining('physical accounting') } })
+  expect(p.prepare).not.toHaveBeenCalled(); expect(p.receipts.status(input.creationId)).toEqual({ state: 'missing' })
+})
+
+it.each(['live', 'saved'] as const)('holds a persisted %s R which reuses an earlier pane token before preparation or receipt claim', async source => {
+  const p = fixture(source), input = request(source), row = p.current(source)
+  const choice = { kind: 'native-rearm', agentId: row.agentId, operation: 'resume', source }
+  const token = 'retained-original-launch-token'
+  row.nativeAllocation = appendNativeAllocation(undefined, { fingerprint: creationFingerprint(choice), request: {
+    ...choice, creationId: 'earlier-creation-request', launchToken: token, target: 'a'.repeat(64), sourceProcess: { processKey: null },
+  } })
+  row.schemaVersion = 4
+  row.nativeControl = { ...row.nativeControl!, rearm: { requestId: input.creationId, agentId: row.agentId, source,
+    operation: input.operation, target: nativeTurnTarget(row), launchToken: token, sourceProcess: { processKey: null } } }
+  const before = structuredClone(row)
+  expect(await p.controller.start(input)).toMatchObject({ state: 'pending', held: { detail: expect.stringContaining('physical accounting') } })
+  expect(p.prepare).not.toHaveBeenCalled(); expect(p.receipts.status(input.creationId)).toEqual({ state: 'missing' })
+  expect(p.current(source)).toEqual(before)
+})
 
 it.each(['live', 'saved'] as const)('reserves complete %s control before dependencies and executes only the claimed operation', async source => {
   const p = fixture(source), input = { ...request(source), ...(source === 'saved' ? { permissionMode: 'full' as const } : {}) }

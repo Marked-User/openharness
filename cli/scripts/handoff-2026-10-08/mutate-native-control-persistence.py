@@ -24,7 +24,7 @@ mutations = [
      'if (unconfirmed?.sticky && (!confirming || peerChanged))', 'if (false)', unit,
      'never rolls an uncertain Cancel'),
     ('stale peer deletes Cancel', registry,
-     'if (latest.get(baselineId)?.nativeControl && baselines.get(baselineId) !== rowFingerprint(latest.get(baselineId)))',
+     'if ((latest.get(baselineId)?.nativeControl || latest.get(baselineId)?.nativeAllocation)\n        && baselines.get(baselineId) !== rowFingerprint(latest.get(baselineId)))',
      'if (false)', unit, 'does not let a stale peer remove'),
     ('fresh read ignores saved binding', registry,
      ' || nativeTurnTarget(saved) !== target || rowFingerprint(saved.nativeControl) !== rowFingerprint(original.nativeControl)',
@@ -52,7 +52,7 @@ mutations = [
      "    this.writeBlocked = false\n    console.error(`[registry] registry ${reason}; preserving saved state and refusing to overwrite it`)", unit,
      'a fresh daemon never replaces truncated state'),
     ('native client drops schema three', 'src/engines/kit/nativeNotifyCursor.ts',
-     'row?.schemaVersion === 3 && parseNativeTurnIntent(row.nativeControl) !== null', 'false',
+     "row?.schemaVersion === 3 && !Object.hasOwn(row, 'nativeAllocation') && parseNativeTurnIntent(row.nativeControl) !== null", 'false',
      'src/engines/kit/nativeNotifyCursor.spec.ts', 'keeps delivering native evidence'),
 ]
 environment = {**os.environ, 'TZ': 'UTC', 'TMPDIR': '/tmp'}
@@ -68,8 +68,13 @@ def run(file, pattern='.'):
                           text=True, capture_output=True, timeout=60)
 
 
+selected = set(sys.argv[2:])
+if selected:
+    assert selected <= {row[0] for row in mutations}, 'Unknown mutation label'
+    mutations = [row for row in mutations if row[0] in selected]
 for file in dict.fromkeys(mutation[4] for mutation in mutations):
-    result = run(file)
+    pattern = '|'.join(row[5] for row in mutations if row[4] == file) if selected else '.'
+    result = run(file, pattern)
     if result.returncode:
         raise SystemExit('Baseline failed; no mutants ran.\n' + result.stdout + result.stderr)
 print('Native cancellation persistence baselines passed', flush=True)

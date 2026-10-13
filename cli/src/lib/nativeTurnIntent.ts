@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto'
 import { validNativeGenerationCancellation, type NativeGenerationCancellation } from '../engines/kit/nativeGenerationCancellation.js'
 import { validNativeHookWriter, type NativeHookWriter } from '../engines/kit/nativeHookWriter.js'
 import type { RegisteredSession } from './registry.js'
+import { creationFingerprint } from './agentCreationReceipt.js'
+import { nativeAllocationCanReserve } from './nativeAllocation.js'
 
 export interface NativeTurnProcessReference {
   readonly processKey: string | null
@@ -125,6 +127,7 @@ export function nativeTurnTarget(row: RegisteredSession): string {
     row.nativeRetirement.controlFingerprint, row.nativeRetirement.checkpoint, row.nativeRetirement.savedTarget])
   if (row.nativeRetirement?.pendingAbort) identity.push(['native-pending-abort', row.nativeRetirement.pendingAbort.priorRole,
     row.nativeRetirement.pendingAbort.pendingControl, row.nativeRetirement.pendingAbort.requestFingerprint])
+  if (row.nativeAllocation) identity.push(['native-allocation', creationFingerprint(row.nativeAllocation)])
   return createHash('sha256').update(JSON.stringify(identity)).digest('hex')
 }
 
@@ -169,7 +172,8 @@ export function nativeTurnTransition(row: RegisteredSession, next: NativeTurnInt
     return !next.rearm && (next.cancel.processKey === null || next.cancel.processKey === previous.rearm.replacement.processKey)
   }
   const reserved = previous.rearm, proposed = next.rearm
-  if (!reserved) return !proposed || !proposed.replacement && !proposed.revoked && proposed.agentId === row.agentId
+  if (!reserved) return !proposed || nativeAllocationCanReserve(row.nativeAllocation, proposed.requestId, proposed.launchToken)
+    && !proposed.replacement && !proposed.revoked && proposed.agentId === row.agentId
     && proposed.target === nativeTurnTarget(row)
     && proposed.sourceProcess !== undefined && same(source(proposed.sourceProcess), source(previous.cancel))
   // The caller must account for the old sourceProcess and the new allocation.

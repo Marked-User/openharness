@@ -6,6 +6,7 @@ import { creationFingerprint, validCreationId, type AgentCreationOutcome, type A
 import { nativeRearmRequest, nativeTurnTarget, parseNativeTurnIntent, type NativeTurnIntent } from '../../lib/nativeTurnIntent.js'
 import type { RegisteredSession, registry } from '../../lib/registry.js'
 import type { StoppedAgentStore } from '../../lib/stoppedAgents.js'
+import { nativeAllocationCanReserve } from '../../lib/nativeAllocation.js'
 
 type Source = 'live' | 'saved'
 type Rearm = NonNullable<NativeTurnIntent['rearm']>
@@ -69,6 +70,9 @@ export function createNativeRearm({ registry, saved, receipts, prepare, held }: 
     if (!control?.rearm || !request || !matches(options, control.rearm)) return hold(options.agentId, 'the complete original reservation is unavailable')
     if (control.rearm.revoked) return receipts.cancelIntent(options.creationId)
     if (control.rearm.replacement) return hold(options.agentId, 'the original replacement needs receipt reconciliation')
+    if (!nativeAllocationCanReserve(row.nativeAllocation, control.rearm.requestId, control.rearm.launchToken)) {
+      return hold(options.agentId, 'the retained original allocations need physical accounting before another launch')
+    }
     const receipt = { fingerprint: fingerprint(options), request }
     return receipts.runIntent(options.creationId, receipt.fingerprint, request,
       { service: 'native', detail: 'Waiting for the original native launch dependencies.' }, async (recorded, originalAuthority) => {
@@ -158,6 +162,9 @@ export function createNativeRearm({ registry, saved, receipts, prepare, held }: 
           if (!matches(options, control.rearm)) return hold(options.agentId, 'a different original launch must be reconciled first')
         } else {
           if (existing) return hold(options.agentId, 'the original reservation is missing')
+          if (!nativeAllocationCanReserve(row.nativeAllocation, options.creationId)) {
+            return hold(options.agentId, 'the retained original allocations need physical accounting before another launch')
+          }
           const next = parseNativeTurnIntent({ ...control, rearm: { requestId: options.creationId, agentId: row.agentId,
             operation: options.operation, source: options.source, target: nativeTurnTarget(row), launchToken: randomUUID(),
             sourceProcess: { processKey: control.cancel.processKey,

@@ -379,6 +379,139 @@ function replacementProof(reserved = registry.byAgent(row.agentId)!): NativeRear
       controlFingerprint: creationFingerprint(reserved.nativeControl), requestFingerprint: creationFingerprint(replacementRequest(reserved)) } }
 }
 
+function allocationVisit() {
+  const reserved = liveReservation()
+  return { reserved, admitted: registry.commitNativeReplacement(reserved, replacementProof(reserved), () => {}) }
+}
+
+it('generic control cannot admit a replacement without retaining its proven allocation', () => {
+  const reserved = liveReservation(), before = readFileSync(file, 'utf8')
+  const next = { ...reserved.nativeControl!, rearm: { ...reserved.nativeControl!.rearm!,
+    replacement: { processKey: replacementProof(reserved).key, sessionId: reserved.sessionId } } }
+  expect(() => registry.commitNativeControl(reserved, next, () => {})).toThrow('proven allocation')
+  expect(readFileSync(file, 'utf8')).toBe(before)
+  expect(registry.byAgent(reserved.agentId)).toEqual(reserved)
+  const admitted = registry.commitNativeReplacement(reserved, replacementProof(reserved), () => {})
+  expect(registry.commitNativeControl(admitted, admitted.nativeControl!, () => {}).nativeAllocation).toEqual(admitted.nativeAllocation)
+})
+
+it('rejects a fresh reservation ID which reuses a retained pane token before publication', () => {
+  const { admitted } = allocationVisit(), cancelled = laterAllocationCancel(admitted), before = readFileSync(file, 'utf8')
+  expect(() => registry.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: {
+    requestId: 'different-original-request', agentId: cancelled.agentId, operation: 'restart', source: 'live',
+    target: nativeTurnTarget(cancelled), launchToken: admitted.nativeAllocation!.receipts[0].request.launchToken as string,
+    sourceProcess: { processKey: cancelled.nativeControl!.cancel.processKey },
+  } }, () => {})).toThrow('transition')
+  expect(readFileSync(file, 'utf8')).toBe(before)
+})
+
+it('invalidates retained live evidence when the permanent allocation reference changes', () => {
+  const { admitted } = allocationVisit(), proof = registry.readNativeControl(admitted)
+  const first = admitted.nativeAllocation!.receipts[0]
+  admitted.nativeAllocation = { version: 1, receipts: [{ ...first, request: { ...first.request, target: 'f'.repeat(64) } }] }
+  expect(proof.verify).toThrow('changed')
+})
+function laterAllocationCancel(admitted: RegisteredSession, n = 1) {
+  return registry.commitNativeControl(admitted, { version: 1, cancel: {
+    processKey: admitted.nativeControl!.rearm!.replacement!.processKey, target: nativeTurnTarget(admitted),
+    request: { ...admitted.nativeControl!.cancel.request, requestId: `later-cancel-request-${n}`, nonce: `later-cancel-nonce-${n}` },
+  } }, () => {})
+}
+
+it('retains the exact original allocation through Cancel, registration and a cold reload', () => {
+  const { admitted, reserved } = allocationVisit(), original = replacementRequest(reserved)
+  expect(admitted.schemaVersion).toBe(4)
+  expect(admitted.nativeAllocation).toEqual({ version: 1, receipts: [original] })
+  expect(original.request.target).toBe(nativeTurnTarget(reserved))
+  expect(nativeTurnTarget(admitted)).not.toBe(original.request.target)
+  const cancelled = laterAllocationCancel(admitted)
+  expect(cancelled.nativeControl!.rearm).toBeUndefined()
+  expect(cancelled.nativeAllocation).toEqual(admitted.nativeAllocation)
+  expect(() => registry.register({ ...input(), processIdentity: admitted.processIdentity!, sessionId: admitted.sessionId })).not.toThrow()
+  const registered = registry.byAgent(admitted.agentId)!
+  expect(registered.schemaVersion).toBe(4); expect(registered.nativeAllocation).toEqual(admitted.nativeAllocation)
+  registry.load()
+  const recovered = registry.byAgent(admitted.agentId)!
+  expect(recovered).toBeDefined()
+  expect(recovered.schemaVersion).toBe(4); expect(recovered.nativeAllocation).toEqual(admitted.nativeAllocation)
+  expect(recovered.nativeControl).toEqual(cancelled.nativeControl)
+  expect(registry.readNativeControl(recovered).verify).not.toThrow()
+})
+
+it('retains all prior allocations, reserves before launch and holds a fifth reservation without writes', () => {
+  let { admitted } = allocationVisit()
+  const requests = [...admitted.nativeAllocation!.receipts]
+  for (let n = 1; n < 4; n++) {
+    const cancelled = laterAllocationCancel(admitted, n)
+    const reserved = registry.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: {
+      requestId: `later-rearm-request-${n}`, agentId: cancelled.agentId, operation: 'restart', source: 'live',
+      target: nativeTurnTarget(cancelled), launchToken: `later-launch-token-${n}`,
+      sourceProcess: { processKey: cancelled.nativeControl!.cancel.processKey },
+    } }, () => {})
+    expect(reserved.nativeAllocation!.receipts).toEqual(requests)
+    const proof = replacementProof(reserved), pid = 43 + n
+    admitted = registry.commitNativeReplacement(reserved, { ...proof, key: `fixture-boot\0cursor\0${pid}\0precise-birth`,
+      processIdentity: { ...proof.processIdentity, pid } }, () => {})
+    requests.push(replacementRequest(reserved))
+    expect(admitted.nativeAllocation!.receipts).toEqual(requests)
+  }
+  const cancelled = laterAllocationCancel(admitted, 5), before = readFileSync(file, 'utf8')
+  expect(() => registry.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: {
+    requestId: 'fifth-rearm-request', agentId: cancelled.agentId, operation: 'restart', source: 'live',
+    target: nativeTurnTarget(cancelled), launchToken: 'fifth-launch-token',
+    sourceProcess: { processKey: cancelled.nativeControl!.cancel.processKey },
+  } }, () => {})).toThrow('transition')
+  expect(readFileSync(file, 'utf8')).toBe(before)
+  expect(registry.byAgent(cancelled.agentId)?.nativeAllocation!.receipts).toEqual(requests)
+})
+
+it.each(['remove', 'remove-agent', 'unbind', 'shell', 'separate-shell', 'resume', 'discover', 'register'])
+  ('ordinary %s cannot replace or forget an unaccounted allocation', operation => {
+    const { admitted } = allocationVisit(), before = readFileSync(file, 'utf8'), original = structuredClone(admitted)
+    const next = { pid: 44, executable: '<cursor>', startMarker: 'next-engine' }
+    if (operation === 'resume') expect(registry.resumePendingAgent({ ...admitted, agentId: 'different-agent' }, [{ backend: 'tmux', paneId: '%2' }])).toBeNull()
+    else if (operation === 'discover') expect(registry.openProcessAgent({ ...input(), processIdentity: next })).toBeNull()
+    else expect(() => {
+      if (operation === 'remove') return registry.remove(admitted.sessionId)
+      if (operation === 'remove-agent') return registry.removeAgent(admitted.agentId)
+      if (operation === 'unbind') return registry.unbindSession(admitted.sessionId)
+      if (operation === 'register') return registry.register({ ...input(), processIdentity: next, sessionId: admitted.sessionId })
+      return registry.releaseEngine(admitted.agentId, operation === 'separate-shell')
+    }).toThrow('native allocation')
+    expect(readFileSync(file, 'utf8')).toBe(before); expect(registry.byAgent(admitted.agentId)).toEqual(original)
+  })
+
+it.each(['drop', 'replace', 'append'])('ordinary flush cannot %s original allocation references', change => {
+  const { admitted } = allocationVisit(), before = readFileSync(file, 'utf8')
+  const live = registry.byAgent(admitted.agentId)!
+  if (change === 'drop') { delete live.nativeAllocation; live.schemaVersion = 3 }
+  else {
+    const original = live.nativeAllocation!.receipts[0]
+    const changed = { ...original, request: { ...original.request, creationId: 'another-creation-request', launchToken: 'another-launch-token' } }
+    live.nativeAllocation = { version: 1, receipts: change === 'append' ? [original, changed] : [changed] }
+  }
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+  registry.flush()
+  expect(error).toHaveBeenCalled(); expect(readFileSync(file, 'utf8')).toBe(before)
+})
+
+it.each(['missing', 'missing-control', 'schema2', 'schema3', 'foreign-agent', 'invalid', 'retired-runtime'])
+  ('blocks all writes when a saved allocation has %s corruption', change => {
+    const { admitted } = allocationVisit(), candidate = structuredClone(admitted)
+    if (change === 'missing') delete candidate.nativeAllocation
+    if (change === 'missing-control') delete candidate.nativeControl
+    if (change === 'schema2') candidate.schemaVersion = 2
+    if (change === 'schema3') candidate.schemaVersion = 3
+    if (change === 'foreign-agent') candidate.agentId = 'foreign-agent'
+    if (change === 'invalid') candidate.nativeAllocation = { version: 1, receipts: [] }
+    if (change === 'retired-runtime') Object.assign(candidate, { runtimes: [{ backend: 'herdr', paneId: 'old' }], primaryRuntimeKey: 'herdr\0old', tmuxPane: undefined })
+    writeFileSync(file, JSON.stringify([candidate]), { mode: 0o600 })
+    const before = readFileSync(file, 'utf8')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    registry.load(); registry.flush()
+    expect(registry.list()).toEqual([]); expect(readFileSync(file, 'utf8')).toBe(before)
+  })
+
 async function recoveryFixture(reserved: RegisteredSession) {
   const { AgentCreationReceipts } = await import('./agentCreationReceipt.js')
   const { createNativeRearmProof } = await import('../engines/kit/nativeRearmProof.js')
@@ -408,8 +541,20 @@ async function recoveryFixture(reserved: RegisteredSession) {
     }
   }
   const fresh = () => reader.recover(reserved, request, { verify: registry.readNativeReplacementSource(reserved).verify, current }, '%1')
-  return { fresh, dispatch, probe, revoke: () => { revoked = true }, receipts, request }
+  return { fresh, dispatch, probe, revoke: () => { revoked = true }, receipts, request, reader }
 }
+
+it('confirms live recovery on its first call with the real Registry and original receipt', async () => {
+  const reserved = liveReservation('full'), p = await recoveryFixture(reserved)
+  const { createNativeRearmRecovery } = await import('../core/agents/nativeRearmRecovery.js')
+  const held = vi.fn(), controller = createNativeRearmRecovery({ registry, saved: new StoppedAgentStore(join(data, 'stopped-agents')),
+    receipts: p.receipts, proof: p.reader, held })
+  expect(await controller.recover(reserved)).toMatchObject({ state: 'created', agentId: reserved.agentId, resumed: true })
+  expect(registry.byAgent(reserved.agentId)?.nativeAllocation?.receipts).toEqual([p.request])
+  expect(held).not.toHaveBeenCalled(); expect(p.dispatch).toHaveBeenCalledOnce()
+  expect(await controller.recover(reserved)).toMatchObject({ state: 'created' })
+  expect(p.dispatch).toHaveBeenCalledOnce()
+})
 
 it('reproves the original real receipt after uncertain sync without redispatch or provisional binding', async () => {
   const reserved = liveReservation('full'), original = structuredClone(reserved), p = await recoveryFixture(reserved)
@@ -639,32 +784,20 @@ it.each(['missing', 'saved', 'revoked', 'target', 'pane', 'pid', 'key', 'mode', 
 })
 
 it('requires a recovered enabling image to confirm file and directory durability before admission', () => {
-  const cancelled = commit()
-  const reserved = registry.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: {
-    requestId: 'original-rearm-request', agentId: row.agentId, operation: 'restart', target: nativeTurnTarget(cancelled), launchToken: 'original-launch-token', sourceProcess: { processKey: cancelled.nativeControl!.cancel.processKey },
-  } }, () => {})
-  registry.updateProcessIdentity(row.agentId, { ...input().processIdentity, pid: 43 })
-  const candidate = registry.byAgent(row.agentId)!
-  const next: NativeTurnIntent = { ...reserved.nativeControl!, rearm: { ...reserved.nativeControl!.rearm!,
-    replacement: { processKey: 'replacement-native-process', sessionId: row.sessionId } } }
+  const reserved = liveReservation(), replacement = replacementProof(reserved)
   fault.directory = true; fault.renamed = false
-  expect(() => registry.commitNativeControl(candidate, next, () => {})).toThrow('directory sync')
+  expect(() => registry.commitNativeReplacement(reserved, replacement, () => {})).toThrow('directory sync')
   const peer = new (registry.constructor as new () => typeof registry)()
   peer.load()
   expect(() => peer.readNativeControl(peer.byAgent(row.agentId)!)).toThrow('directory sync')
   fault.directory = false
   const proof = peer.readNativeControl(peer.byAgent(row.agentId)!)
-  expect(nativeTurnAdmitted(proof.intent, { agentId: row.agentId, sessionId: row.sessionId, processKey: 'replacement-native-process' })).toBe(true)
+  expect(nativeTurnAdmitted(proof.intent, { agentId: row.agentId, sessionId: row.sessionId, processKey: replacement.key })).toBe(true)
   proof.verify()
 })
 
 it.each(['file', 'directory'] as const)('never syncs a substitute %s descriptor after a temporary route change', kind => {
-  const cancelled = commit()
-  const reserved = registry.commitNativeControl(cancelled, { ...cancelled.nativeControl!, rearm: {
-    requestId: 'original-rearm-request', agentId: row.agentId, operation: 'restart', target: nativeTurnTarget(cancelled), launchToken: 'original-launch-token', sourceProcess: { processKey: cancelled.nativeControl!.cancel.processKey },
-  } }, () => {})
-  const ready = registry.commitNativeControl(reserved, { ...reserved.nativeControl!, rearm: { ...reserved.nativeControl!.rearm!,
-    replacement: { processKey: 'replacement-native-process', sessionId: row.sessionId } } }, () => {})
+  const { admitted: ready } = allocationVisit()
   const path = kind === 'file' ? file : data, bytes = readFileSync(file)
   let reads = 0, swapped = false
   fault.opening = candidate => {

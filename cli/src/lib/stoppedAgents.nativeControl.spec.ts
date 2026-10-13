@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { nativeTurnTarget, type NativeTurnIntent } from './nativeTurnIntent.js'
 import type { RegisteredSession } from './registry.js'
+import { creationFingerprint } from './agentCreationReceipt.js'
+import { appendNativeAllocation } from './nativeAllocation.js'
 
 const fault = vi.hoisted(() => ({ file: '', renamed: false, failDirectory: false, beforeRename: undefined as (() => void) | undefined, inspected: undefined as ((path: string) => void) | undefined, synced: undefined as (() => void) | undefined, fileSynced: undefined as (() => void) | undefined }))
 vi.mock('node:fs', async original => {
@@ -54,6 +56,53 @@ beforeEach(async () => {
 })
 afterEach(() => { fault.file = ''; fault.failDirectory = false; fault.beforeRename = undefined; fault.inspected = undefined; fault.synced = undefined; fault.fileSynced = undefined
   vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.resetModules(); rmSync(root, { recursive: true, force: true }) })
+
+function savedAllocation() {
+  const choice = { kind: 'native-rearm', agentId: row.agentId, source: 'live', operation: 'restart' }
+  const nativeAllocation = appendNativeAllocation(undefined, { fingerprint: creationFingerprint(choice), request: {
+    ...choice, creationId: 'earlier-creation-request', launchToken: 'earlier-launch-token', target: 'a'.repeat(64), sourceProcess: { processKey: null },
+  } })
+  const saved: RegisteredSession = { ...row, schemaVersion: 4, nativeAllocation }
+  writeFileSync(file, JSON.stringify({ version: 1, session: saved }), { mode: 0o600 })
+  return store.get(row.agentId)!
+}
+
+it('generic saved control cannot introduce replacement admission or lose its original request', () => {
+  const reserved = commit(row, reservation(row), () => {}), before = bytes()
+  const next = { ...reserved.nativeControl!, rearm: { ...reserved.nativeControl!.rearm!,
+    replacement: { processKey: 'unproven-native-process', sessionId: reserved.sessionId } } }
+  expect(() => store.commitNativeControl(reserved, next, fence())).toThrow('proven allocation')
+  expect(bytes()).toBe(before); expect(store.get(reserved.agentId)).toEqual(reserved)
+})
+
+it('preserves permanent allocation references through saved edits, control publication and a cold reader', async () => {
+  const saved = savedAllocation(), original = saved.nativeAllocation
+  store.save(saved); store.patch(saved.agentId, { cwd: '/fixture/edited' })
+  const current = store.get(saved.agentId)!, next = reservation(current)
+  const reserved = store.commitNativeControl(current, next, fence())
+  expect(reserved.schemaVersion).toBe(4); expect(reserved.nativeAllocation).toEqual(original)
+  const { StoppedAgentStore } = await import('./stoppedAgents.js')
+  const recovered = new StoppedAgentStore(directory).get(row.agentId)!
+  expect(recovered.nativeAllocation).toEqual(original); expect(recovered.schemaVersion).toBe(4)
+  expect(recovered.nativeControl).toEqual(next)
+})
+
+it.each(['drop', 'replace', 'append', 'remove', 'supersede', 'begin'])('ordinary saved %s cannot forget or add allocation authority', change => {
+  const saved = savedAllocation(), before = bytes()
+  expect(() => {
+    if (change === 'remove') return store.remove(saved.agentId)
+    if (change === 'supersede') return store.supersede(saved.agentId)
+    if (change === 'begin') return store.beginResume(saved.agentId)
+    const candidate = structuredClone(saved), first = candidate.nativeAllocation!.receipts[0]
+    if (change === 'drop') { delete candidate.nativeAllocation; candidate.schemaVersion = 3 }
+    else {
+      const changed = { ...first, request: { ...first.request, creationId: 'other-creation-request', launchToken: 'other-launch-token' } }
+      candidate.nativeAllocation = { version: 1, receipts: change === 'append' ? [first, changed] : [changed] }
+    }
+    return store.save(candidate)
+  }).toThrow()
+  expect(bytes()).toBe(before)
+})
 
 it('reserves under the saved-store lock and grants only a fresh exact durable proof', () => {
   const next = reservation(row), saved = commit(row, next, () => {

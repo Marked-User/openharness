@@ -780,6 +780,53 @@ launches and activation remain excluded. Implementation/review ran approximately
 21:33–21:56 UTC October 13, with overlapping validation through 21:57. Merge,
 publication and external waiting remain zero.
 
+Admitted native replacements now retain an ordered, immutable `nativeAllocation`
+list on row schema 4. Each entry is the complete original creation request and
+its semantic fingerprint, including the pre-admission target and any recorded
+source process. Cancel may clear R without erasing these physical obligations.
+Registry registration, stale merges, archive/return, saved edits and cold reads
+preserve the list. Only the proven replacement admission appends; generic control
+publication cannot introduce a replacement. Ordinary removal, unbinding or
+process adoption cannot discard or reinterpret allocation authority.
+
+The four-entry bound is reserved before preparation or dispatch. Reused request
+IDs and launch tokens hold before effects. This is a storage/preservation slice,
+not the final physical selector: the oldest source process can add a fifth engine
+obligation. Exact accounting and proof-backed compaction must be composed before
+activation; reaching four healthy cycles must not become permanent exhaustion.
+Schema 4 currently describes rearm receipts and requires native control. Initial
+creation still needs its own explicit request variant. Missing or downgraded
+authority holds the complete file instead of being normalized away.
+
+The former row-persistence golden was recorded separately in `53e34eadf` before
+the move, with pinned platform/time, placeholder paths and no host subprocesses.
+Its clean baseline and types pass (`20261013T220504.581892Z-84135`); the two earlier
+typed-fixture/recording receipts remain failed. The first implementation lane
+passed 664 of 667 cases and types but exposed the recovery owner's missing
+allocation append (`20261013T221218.911348Z-16179`). The corrected nine complete
+files pass all 539 cases with types and 100% statements, branches, functions and
+lines for both changed core controllers (`20261013T221945.065874Z-49362`,
+24.7/147.5 seconds). The other complete files in the first lane passed installed
+writer/private tmux, notify, witness and architecture checks; that aggregate is
+still failed evidence.
+
+Healthy mutation baselines pass. Nineteen allocation faults fail assertions in
+`20261013T222424.319027Z-69240`; the remaining fault initially caused a missing-row
+exception. Its explicit existence assertion now fails causally. The corrected
+fault, four affected older persistence faults, types, unchanged golden and
+architecture pass in `20261013T222614.793869Z-76813` (23.8 seconds). All twenty
+allocation variants are caught against unchanged runtime source. That final
+receipt also bundles the actual former Registry from `53e34eadf` and confirms
+that it refuses mixed schema-2/schema-4 writes while retaining the original
+bytes; this is former-writer compatibility, not full installed-client acceptance.
+
+Independent review corrected recovery's expected post-admission image, retained
+token reuse, and generic replacement publication. Its scoped approval excludes
+initial creation, physical selection/counting/compaction and activation.
+Implementation/review ran approximately 22:00–22:26 UTC October 13, with
+overlapping validation through 22:27. Merge, publication and external waiting
+remain zero. No compatibility golden was changed by the implementation.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R

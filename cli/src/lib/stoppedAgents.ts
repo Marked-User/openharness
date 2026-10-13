@@ -392,6 +392,9 @@ export class StoppedAgentStore {
     if (previous?.nativeControl && JSON.stringify(previous.nativeControl) !== JSON.stringify(session.nativeControl)) {
       throw Error('Waiting to preserve the original saved native cancellation.')
     }
+    if (creationFingerprint(previous?.nativeAllocation ?? null) !== creationFingerprint(session.nativeAllocation ?? null)) {
+      throw Error('Waiting for the proven native allocation handoff before saving this visit.')
+    }
     if (isTerminalEngine(session.engine) && previous) return
     // A temporarily unbound observation of the SAME process cannot erase a known conversation.
     // A replacement process must earn its own binding; never carry history across PID reuse.
@@ -531,6 +534,7 @@ export class StoppedAgentStore {
     if (!SAFE_ID.test(agentId)) throw new Error('Invalid saved harness identity.')
     const record = this.readRecord(agentId)
     if (record?.transfer || record?.returnRole?.phase === 'returning') throw Error('The original native resume belongs to its live handoff.')
+    if (record?.session.nativeAllocation) throw Error('The retained native allocation requires its original Resume reservation.')
     secureStateDirectory(dirname(this.directory))
     secureStateDirectory(this.directory)
     const file = join(this.directory, `${agentId}.resume`)
@@ -579,12 +583,12 @@ export class StoppedAgentStore {
     const saved = this.get(agentId)
     let value: unknown
     try { value = JSON.parse(marker.content!) }
-    catch (error) { if (!saved || saved.nativeControl || token !== undefined) throw error }
+    catch (error) { if (!saved || saved.nativeControl || saved.nativeAllocation || token !== undefined) throw error }
     if (value && typeof value === 'object' && Object.hasOwn(value, 'nativeArchive')) {
       throw Error('The native Resume marker requires its original receipt and archive link.')
     }
     if (token !== undefined && (value as { token?: unknown } | null)?.token !== token) return
-    if (this.uncertain.has(agentId) || saved?.nativeControl && !authority) {
+    if (this.uncertain.has(agentId) || (saved?.nativeControl || saved?.nativeAllocation) && !authority) {
       throw Error('Waiting to confirm the exact native resume handoff before clearing its reservation.')
     }
     const retained = saved ? this.inspectControl(saved) : undefined
@@ -610,7 +614,7 @@ export class StoppedAgentStore {
     if (!SAFE_ID.test(agentId)) throw new Error('Invalid stopped harness identity.')
     const record = this.readRecord(agentId)
     if (!record) return
-    if (record.transfer || record.returnRole || record.session.nativeArchive) throw Error('Waiting for the exact native archive handoff before removing this visit.')
+    if (record.transfer || record.returnRole || record.session.nativeArchive || record.session.nativeAllocation) throw Error('Waiting for the exact native archive handoff before removing this visit.')
     unlinkSync(join(this.directory, `${agentId}.json`))
     this.forgetCatalogRecord(agentId)
     this.syncDirectory()
@@ -630,7 +634,7 @@ export class StoppedAgentStore {
     if (!SAFE_ID.test(agentId)) return null
     const saved = this.get(agentId)
     if (!saved) return null
-    if (saved.nativeControl || this.uncertain.has(agentId)) throw Error('A native cancellation cannot be superseded automatically.')
+    if (saved.nativeControl || saved.nativeAllocation || this.uncertain.has(agentId)) throw Error('A native cancellation cannot be superseded automatically.')
     const aside = join(this.directory, 'superseded')
     secureStateDirectory(aside)
     renameSync(join(this.directory, `${agentId}.json`), join(aside, `${agentId}.json`))
@@ -667,6 +671,10 @@ export class StoppedAgentStore {
   commitNativeControl(input: RegisteredSession, value: NativeTurnIntent, authority: SavedNativeControlFence): RegisteredSession {
     const original = structuredClone(input), next = parseNativeTurnIntent(value)
     if (!next || !nativeTurnTransition(original, next)) throw Error('Invalid saved native control transition.')
+    if (next.rearm?.replacement && creationFingerprint(next.rearm.replacement)
+      !== creationFingerprint(original.nativeControl?.rearm?.replacement ?? null)) {
+      throw Error('Native replacement requires proven allocation admission.')
+    }
     return this.write(() => {
       this.requireSavedOwner(original.agentId)
       const file = join(this.directory, `${original.agentId}.json`)
@@ -689,7 +697,7 @@ export class StoppedAgentStore {
           || JSON.stringify(saved.nativeControl) !== JSON.stringify(original.nativeControl)
             && JSON.stringify(saved.nativeControl) !== JSON.stringify(next)) throw Error('The original saved native control owner changed.')
         if (this.uncertain.size >= 256) throw Error('Waiting for saved native control confirmation capacity.')
-        const candidate = { ...saved, schemaVersion: 3 as const, nativeControl: next }
+        const candidate = { ...saved, schemaVersion: saved.nativeAllocation ? 4 as const : 3 as const, nativeControl: next }
         pending = { before: retained.content!, candidate, returnRole: record.returnRole,
           bytes: JSON.stringify(this.savedImage(candidate, record.returnRole), null, 2),
           verifyDirectory: retained.verifyDirectory }

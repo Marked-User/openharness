@@ -124,7 +124,7 @@ async function reserveMarker(dispatch = true, permissionMode: 'full' | 'ask' | u
     outcome: { state: 'created', agentId: saved.agentId, resumed: true } }, fence) }
 }
 
-it.each(['pending', 'transfer', 'admission'])('the recovery controller cold-confirms the original saved Resume after uncertain %s', async phase => {
+it.each(['initial', 'pending', 'transfer', 'admission'])('the recovery controller confirms the original saved Resume at %s publication', async phase => {
   const p = await reserveMarker(), original = structuredClone(saved), reads = vi.fn()
   const observe = ((_row, _request, fence) => {
     reads()
@@ -135,6 +135,12 @@ it.each(['pending', 'transfer', 'admission'])('the recovery controller cold-conf
   }) as NativeRearmRecoveryDeps['proof']
   Object.assign(observe, { recover: observe, recoverSaved: observe })
   const recovering = (receipts = p.receipts) => createNativeRearmRecovery({ registry, saved: store, receipts, proof: observe, held: () => {} })
+  if (phase === 'initial') {
+    expect(await recovering().recover(original)).toMatchObject({ state: 'created', agentId: original.agentId, resumed: true })
+    expect(registry.byAgent(original.agentId)?.nativeAllocation?.receipts).toHaveLength(1)
+    expect(p.receipts.status(original.nativeControl!.rearm!.requestId).state).toBe('created')
+    return
+  }
   fault.fail = phase
   expect(await recovering().recover(original)).toMatchObject({ state: 'pending' })
   expect(p.receipts.status(original.nativeControl!.rearm!.requestId).state).toBe('unconfirmed')

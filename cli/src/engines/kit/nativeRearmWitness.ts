@@ -6,6 +6,7 @@ import { AgentCreationReceipts, creationFingerprint, validCreationId, type Nativ
 import { inspectNativeControlFile } from '../../lib/nativeControlFile.js'
 import { parseNativeArchiveEnvelope } from '../../lib/nativeArchive.js'
 import { nativeTurnTarget, parseNativeTurnIntent, type NativeTurnIntent } from '../../lib/nativeTurnIntent.js'
+import { parseNativeAllocation } from '../../lib/nativeAllocation.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { prepareProcessImageHelper, type ProcessImageArtifact } from '../../lib/nativeProcessImageArtifact.js'
 import { controlIdentity, probeNativeProcessControl, type NativeControlHelpers, type NativeControlSnapshot } from '../../lib/nativeProcessControlProbe.js'
@@ -72,7 +73,10 @@ function readControl(input: NativeRearmWitnessRequest, budget: NativeEvidenceBud
   const rows = input.source === 'live' ? value : savedOwner ? [saved] : null
   if (!Array.isArray(rows) || rows.length > 4096) return held('saved control is incomplete')
   const selected = rows.filter(row => object(row) && row.agentId === input.control.rearm!.agentId)
-  if (selected.length !== 1 || !object(selected[0]) || selected[0].schemaVersion !== 3 || selected[0].engine !== 'cursor'
+  const allocation = selected[0]?.schemaVersion === 4 ? parseNativeAllocation(selected[0].nativeAllocation) : undefined
+  if (selected.length !== 1 || !object(selected[0]) || ![3, 4].includes(selected[0].schemaVersion as number) || selected[0].engine !== 'cursor'
+    || selected[0].schemaVersion === 4 && (!allocation || allocation.receipts.some(value => value.request.agentId !== selected[0].agentId))
+    || selected[0].schemaVersion === 3 && Object.hasOwn(selected[0], 'nativeAllocation')
     || creationFingerprint(selected[0].nativeControl ?? null) !== creationFingerprint(input.control)
     || nativeTurnTarget(selected[0] as unknown as RegisteredSession) !== input.control.rearm!.target) return held('saved reservation changed')
   const verify = () => { proof.verify(); budget.step() }

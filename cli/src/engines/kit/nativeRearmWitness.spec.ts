@@ -15,6 +15,7 @@ import { inspectHookFile, type HookPreparationProof } from './nativeHookFiles.js
 import { NativePaths } from './nativePaths.js'
 import { NativeEvidenceBudget } from './nativeEvidence.js'
 import type { NativeHookScope } from './nativeHookScope.js'
+import { appendNativeAllocation, type NativeAllocation } from '../../lib/nativeAllocation.js'
 
 const clock = vi.hoisted(() => ({ now: 0 }))
 vi.mock('node:perf_hooks', () => ({ performance: { now: () => clock.now } }))
@@ -25,7 +26,8 @@ const row = (pid: number, parentPid: number): NativeControlRow => ({ pid, parent
   command: pid === 42 ? 'sh' : 'node', imagePath: pid === 42 ? realpathSync(process.platform === 'darwin' ? '/bin/bash' : '/bin/sh') : '/fixture/node', argv: ['fixture'], fds: [] })
 beforeEach(() => { clock.now = 0; root = realpathSync(mkdtempSync(join(tmpdir(), 'rearm-writer-'))) })
 afterEach(() => { vi.restoreAllMocks(); rmSync(root, { recursive: true, force: true }) })
-async function fixture(source: 'live' | 'saved' = 'live', options?: Pick<NonNullable<NativeTurnIntent['rearm']>, 'permissionMode' | 'sourceProcess'>) {
+async function fixture(source: 'live' | 'saved' = 'live', options?: Pick<NonNullable<NativeTurnIntent['rearm']>, 'permissionMode' | 'sourceProcess'>,
+  nativeAllocation?: NativeAllocation) {
   const engine = join(root, 'engine'), settings = join(root, 'settings')
   writeFileSync(engine, '#!/bin/sh\nexit 0\n', { mode: 0o700 }); writeFileSync(settings, 'original hooks', { mode: 0o600 })
   const executable = executableSnapshot(nativeVersionProbe({ args: [], output: /^$/, timeoutMs: 100 }, () => engine))!
@@ -38,6 +40,7 @@ async function fixture(source: 'live' | 'saved' = 'live', options?: Pick<NonNull
   const session = { schemaVersion: 3, agentId, registeredAt: 1, engine: 'cursor', sessionId: 'fixture-session', boundAt: 2, active: source === 'live',
     processIdentity: { pid: 41, executable: '/fixture/cursor', startMarker: 'fixture-birth' }, runtimes: [{ backend: 'tmux', paneId: '%1' }],
     primaryRuntimeKey: 'tmux:%1', tmuxPane: '%1', cwd: '/fixture/project', transcriptPath: null } as RegisteredSession
+  if (nativeAllocation) { session.schemaVersion = 4; session.nativeAllocation = nativeAllocation }
   const target = nativeTurnTarget(session)
   const control: NativeTurnIntent = { version: 1 as const, cancel: { processKey: null, target, request: {
     requestId: 'original-cancel-request', nonce: 'original-cancel-nonce', agentId, conversationId: 'fixture-session', frontier: { index: -1, digest: null },
@@ -65,6 +68,18 @@ async function fixture(source: 'live' | 'saved' = 'live', options?: Pick<NonNull
   const witness = join(root, 'agent-creations', `${id}.json.process`)
   return { input, receipts, processes, probe, write, file, witness, engine, settings, launch, scope, scopes }
 }
+
+it.each(['live', 'saved'] as const)('proves a later %s reservation without erasing its permanent allocation history', async source => {
+  const choice = { kind: 'native-rearm', agentId, operation: 'resume', source: 'saved' }
+  const nativeAllocation = appendNativeAllocation(undefined, { fingerprint: creationFingerprint(choice), request: {
+    ...choice, creationId: 'previous-creation-request', launchToken: 'previous-launch-token', target: 'a'.repeat(64), sourceProcess: { processKey: null },
+  } })
+  const p = await fixture(source, { sourceProcess: { processKey: null } }, nativeAllocation)
+  await expect(p.write()).resolves.toBe(true)
+  const stored = JSON.parse(readFileSync(p.file, 'utf8')), saved = source === 'live' ? stored[0] : stored.session
+  expect(saved.nativeAllocation).toEqual(nativeAllocation)
+  expect(p.receipts.readNativeRelaunchProcess(id, p.input).process.pid).toBe(42)
+})
 
 const originalProcess = () => ({ processKey: 'linux:aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa\0cursor\0' + '41\0' + '4100', namespace: 'linux:4:5' })
 

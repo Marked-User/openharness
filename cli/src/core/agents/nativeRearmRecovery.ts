@@ -5,6 +5,7 @@ import type { RegisteredSession, registry } from '../../lib/registry.js'
 import type { StoppedAgentStore } from '../../lib/stoppedAgents.js'
 import { permissionModeApproves } from '../../lib/engineLaunch.js'
 import type { createNativeRearmProof, NativeRearmReplacementProof } from '../../engines/kit/nativeRearmProof.js'
+import { appendNativeAllocation } from '../../lib/nativeAllocation.js'
 
 export interface NativeRearmRecoveryDeps {
   registry: Pick<typeof registry, 'byAgent' | 'readNativeAbsence' | 'readNativeControl' | 'readNativeReplacementSource' | 'commitNativeReplacement' | 'commitNativeSavedReplacement'>
@@ -88,6 +89,7 @@ export function createNativeRearmRecovery({ registry, saved, receipts, proof, he
       const same = (a: unknown, b: unknown) => creationFingerprint(a) === creationFingerprint(b)
       const committedOwner = (original: RegisteredSession, value: RegisteredSession, replacement: NativeRearmReplacementProof) => {
         const expected: RegisteredSession = { ...original, active: true, processIdentity: { ...replacement.processIdentity },
+          schemaVersion: 4, nativeAllocation: appendNativeAllocation(original.nativeAllocation, receipt),
           ...(fromSaved ? { nativeArchive: link, runtimes: [{ backend: 'tmux', paneId: replacement.pane }],
             primaryRuntimeKey: `tmux\0${replacement.pane}`, tmuxPane: replacement.pane } : {}),
           ...(rearm.permissionMode === undefined ? {} : { permissionMode: rearm.permissionMode, bypassPermission: permissionModeApproves(rearm.permissionMode) }),

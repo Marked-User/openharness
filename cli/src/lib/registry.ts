@@ -67,6 +67,7 @@ import type { NativeArchiveTransaction, NativeArchiveReturnTransaction, StoppedA
 import type { NativeRearmReplacementProof } from '../engines/kit/nativeRearmProof.js'
 import { creationFingerprint } from './agentCreationReceipt.js'
 import { hookPreparationRoutes } from '../engines/kit/nativeHookFiles.js'
+import { appendNativeAllocation, parseNativeAllocation, type NativeAllocation } from './nativeAllocation.js'
 
 export type { ProcessIdentity } from './terminalTypes.js'
 
@@ -95,10 +96,13 @@ export interface RegisteredSession {
   /** An explicit Close-after-task intent. Never inferred from visibility or CPU use. */
   closePlan?: import('./closeAgentService.js').AgentClosePlan
   /** Per-row marker; the top-level array is retained for backward-reader safety. */
-  schemaVersion: 2 | 3
+  schemaVersion: 2 | 3 | 4
   /** Schema 3 makes older writers refuse this row instead of dropping Cancel.
    * This survives process changes, registration and stopped-history storage. */
   nativeControl?: NativeTurnIntent
+  /** Schema 4 prevents older writers from erasing the original allocation
+   * receipts. These survive every Cancel, even when its temporary R is cleared. */
+  nativeAllocation?: NativeAllocation
   /** An archive-to-live ownership epoch. Only an explicit two-store handoff
    * creates or retires it; later live cancellation and restart retain it. */
   nativeArchive?: NativeArchiveLink
@@ -579,6 +583,8 @@ function retiredRuntime(value: unknown): boolean {
 function withoutRetiredRuntimes(value: unknown): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value
   const row = value as Record<string, unknown>
+  // New authority is never normalized away by a retired-terminal migration.
+  if (Object.hasOwn(row, 'nativeAllocation') || row.schemaVersion === 4) return value
   if (!Array.isArray(row.runtimes) || !row.runtimes.some(retiredRuntime)) return value
   const runtimes = row.runtimes.filter((runtime) => !retiredRuntime(runtime))
   const hasLegacyPane = typeof row.tmuxPane === 'string' && PANE_RE.test(row.tmuxPane)
@@ -636,10 +642,13 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
   const launch = normalizedLaunch(row.launch)
   const externalResume = row.externalResume === undefined ? undefined : parseExternalResume(row.externalResume)
   const nativeControl = row.nativeControl === undefined ? undefined : parseNativeTurnIntent(row.nativeControl)
+  const nativeAllocation = Object.hasOwn(row, 'nativeAllocation') ? parseNativeAllocation(row.nativeAllocation) : undefined
   const nativeArchive = row.nativeArchive === undefined ? undefined : parseNativeArchiveLink(row.nativeArchive)
   const nativeRetirement = row.nativeRetirement === undefined ? undefined : parseNativeArchiveRetirement(row.nativeRetirement)
-  if ((row.schemaVersion !== 2 && row.schemaVersion !== 3)
-    || (row.schemaVersion === 3) !== (nativeControl !== undefined) || nativeControl === null
+  if ((row.schemaVersion !== 2 && row.schemaVersion !== 3 && row.schemaVersion !== 4)
+    || (row.schemaVersion !== 2) !== (nativeControl !== undefined) || nativeControl === null
+    || (row.schemaVersion === 4) !== (nativeAllocation !== undefined) || nativeAllocation === null
+    || nativeAllocation && (row.engine !== 'cursor' || nativeAllocation.receipts.some(value => value.request.agentId !== row.agentId))
     || nativeArchive === null || nativeArchive && (!nativeControl || row.engine !== 'cursor' || nativeArchive.agentId !== row.agentId)
     || nativeRetirement === null || nativeRetirement && (nativeRetirement.phase !== 'returning' || !nativeArchive
       || rowFingerprint(nativeRetirement.link) !== rowFingerprint(nativeArchive) || active || row.processIdentity !== null
@@ -670,7 +679,7 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
   // Taken out of the spread and put back only when it is a real moment: the spread would otherwise
   // carry a hand-edited string or a negative number straight into the frame's `toISOString()`.
   // `forkedFrom` is out too, so an invalid one is dropped rather than spread back in as-is.
-  const { identityHold: _identityHold, evidenceRevision: _revision, interpretationHold: _interpretation, admissionHold: _admission, lastOpenedAt: rawOpenedAt, closePlan: rawClosePlan, forkedFrom: rawForkedFrom, scmLaunch: rawScmLaunch, externalResume: _externalResume, nativeControl: _nativeControl, nativeArchive: _nativeArchive, nativeRetirement: _nativeRetirement, startedBy: rawStartedBy, parentAgentId: rawParentAgentId, ...rest } = row
+  const { identityHold: _identityHold, evidenceRevision: _revision, interpretationHold: _interpretation, admissionHold: _admission, lastOpenedAt: rawOpenedAt, closePlan: rawClosePlan, forkedFrom: rawForkedFrom, scmLaunch: rawScmLaunch, externalResume: _externalResume, nativeControl: _nativeControl, nativeAllocation: _nativeAllocation, nativeArchive: _nativeArchive, nativeRetirement: _nativeRetirement, startedBy: rawStartedBy, parentAgentId: rawParentAgentId, ...rest } = row
   const lastOpenedAt = normalizedOpenedAt(rawOpenedAt)
   // Out of the spread for the same reason: a half-formed record is dropped, never relaunched with.
   const scmLaunch = parseScmLaunchRecord(rawScmLaunch)
@@ -678,6 +687,7 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
     ...rest,
     ...(externalResume ? { externalResume } : {}),
     ...(nativeControl ? { nativeControl } : {}),
+    ...(nativeAllocation ? { nativeAllocation } : {}),
     ...(nativeArchive ? { nativeArchive } : {}),
     ...(nativeRetirement ? { nativeRetirement } : {}),
     ...(scmLaunch ? { scmLaunch } : {}),
@@ -833,7 +843,7 @@ function validatedRows(values: readonly unknown[]): RegisteredSession[] | null {
 function hasUnknownRowSchema(value: unknown): boolean {
   return !!value && typeof value === 'object'
     && Object.hasOwn(value, 'schemaVersion')
-    && ![2, 3].includes((value as { schemaVersion?: unknown }).schemaVersion as number)
+    && ![2, 3, 4].includes((value as { schemaVersion?: unknown }).schemaVersion as number)
 }
 
 function validLegacyRegistryRow(value: unknown): boolean {
@@ -963,10 +973,11 @@ export function mergedForSave(
   // A stale scanner can have removed its old row before it discovers a peer's
   // Cancel. Keep that row in the ownership index until replacement checks finish;
   // otherwise its local deletion would hide the durable cancellation barrier.
-  const protectedOwners = new MergeIdentities(new Map([...latest].filter(([, row]) => !!row.nativeControl)))
+  const protectedOwners = new MergeIdentities(new Map([...latest].filter(([, row]) => !!row.nativeControl || !!row.nativeAllocation)))
   for (const baselineId of baselines.keys()) {
     if (!currentRows.has(baselineId)) {
-      if (latest.get(baselineId)?.nativeControl && baselines.get(baselineId) !== rowFingerprint(latest.get(baselineId))) {
+      if ((latest.get(baselineId)?.nativeControl || latest.get(baselineId)?.nativeAllocation)
+        && baselines.get(baselineId) !== rowFingerprint(latest.get(baselineId))) {
         throw new IdentityReadUnavailable('native cancellation changed before the original row could be removed')
       }
       merged.delete(baselineId)
@@ -1003,7 +1014,7 @@ export function mergedForSave(
       const sameRoute = otherRow.runtimes.some((runtime) => routes.has(terminalRouteKey(runtime)))
       // Sharing a pid is not yet the same process: the engine and the start must match too.
       if (!sameProcess && !sameSession && !sameRoute) continue
-      if (otherRow.nativeControl) throw new IdentityReadUnavailable('native cancellation prevents automatic ownership replacement')
+      if (otherRow.nativeControl || otherRow.nativeAllocation) throw new IdentityReadUnavailable('native cancellation prevents automatic ownership replacement')
       // A daemon-down hook may bind a session while startup discovery is opening the same process.
       // Preserve that binding, then let the scanner-owned agent id/runtime state win deterministically.
       if (sameProcess && !candidate.sessionId && otherRow.sessionId) {
@@ -1238,8 +1249,8 @@ class Registry {
       const { rows: parsed, dropped, changed: strippedRetired } = withoutRetiredRows(stored)
       if (dropped) console.log(`[registry] dropped ${dropped} agent(s) that lived only in a retired Herdr terminal`)
       if (parsed.some(hasUnknownRowSchema) || parsed.some(value => !!value && typeof value === 'object'
-        && (Object.hasOwn(value, 'externalResume') || Object.hasOwn(value, 'nativeControl')
-          || (value as { schemaVersion?: unknown }).schemaVersion === 3) && !strictPersistedRow(value))) {
+        && (Object.hasOwn(value, 'externalResume') || Object.hasOwn(value, 'nativeControl') || Object.hasOwn(value, 'nativeAllocation')
+          || [3, 4].includes((value as { schemaVersion?: unknown }).schemaVersion as number)) && !strictPersistedRow(value))) {
         this.writeBlocked = true
         console.error('[registry] registry contains an unknown row schema; refusing to overwrite it')
         return
@@ -1250,7 +1261,7 @@ class Registry {
         return
       }
       const v2Rows = parsed.filter((row) => !!row && typeof row === 'object'
-        && [2, 3].includes((row as { schemaVersion?: unknown }).schemaVersion as number))
+        && [2, 3, 4].includes((row as { schemaVersion?: unknown }).schemaVersion as number))
       if (v2Rows.length && !validatedRows(v2Rows)) {
         this.quarantine('contains a malformed v2 row')
         return
@@ -1261,7 +1272,7 @@ class Registry {
         if (id) this.persistedBaseline.set(id, rowFingerprint(row))
       }
       // The rollback copy is the file as found, retired runtimes and all — not the cleaned rows.
-      if (arr.some((row) => row.schemaVersion !== 2 && row.schemaVersion !== 3)) {
+      if (arr.some((row) => row.schemaVersion !== 2 && row.schemaVersion !== 3 && row.schemaVersion !== 4)) {
         atomicWriteJson(PRE_V2_BACKUP_FILE, stored, true)
       }
       let changed = strippedRetired
@@ -1372,7 +1383,8 @@ class Registry {
         const active = !rebooted && raw.active !== false
         const launch = normalizedLaunch(raw.launch)
         const s: RegisteredSession = {
-          schemaVersion: raw.schemaVersion === 3 ? 3 : 2,
+          schemaVersion: raw.schemaVersion === 4 ? 4 : raw.schemaVersion === 3 ? 3 : 2,
+          ...(raw.nativeAllocation ? { nativeAllocation: parseNativeAllocation(raw.nativeAllocation)! } : {}),
           ...(raw.nativeControl ? { nativeControl: parseNativeTurnIntent(raw.nativeControl)! } : {}),
           ...(raw.nativeArchive ? { nativeArchive: parseNativeArchiveLink(raw.nativeArchive)! } : {}),
           ...(raw.nativeRetirement ? { nativeRetirement: parseNativeArchiveRetirement(raw.nativeRetirement)! } : {}),
@@ -1578,6 +1590,7 @@ class Registry {
       ))
     const existing = processAgent ?? routeAgent
     if (existing) {
+      if (existing.nativeAllocation && !sameProcessIdentity(existing.processIdentity, processIdentity)) return null
       const before = rowFingerprint(persistedRow(existing))
       this.drop(existing)
       existing.runtimes = mergeTerminalRuntimes(existing.runtimes, runtimes)
@@ -1618,8 +1631,8 @@ class Registry {
 
     // A new PID discovered in the same pane must not mint a clean successor to
     // a cancelled agent. Explicit restart updates the original row after proof.
-    if (this.agents.get(agentId)?.nativeControl || runtimes.some(runtime =>
-      this.agents.get(this.runtimeIndex.get(terminalRouteKey(runtime)) ?? '')?.nativeControl)) return null
+    const protectedOwner = (id: string) => this.agents.get(id)?.nativeControl || this.agents.get(id)?.nativeAllocation
+    if (protectedOwner(agentId) || runtimes.some(runtime => protectedOwner(this.runtimeIndex.get(terminalRouteKey(runtime)) ?? ''))) return null
 
     for (const runtime of runtimes) {
       const otherId = this.runtimeIndex.get(terminalRouteKey(runtime))
@@ -1777,7 +1790,7 @@ class Registry {
   /** A stopped agent gets a new terminal route while keeping its saved conversation and identity.
    * Archived routes/processes are evidence only: none of them may be indexed or signalled here. */
   resumePendingAgent(saved: RegisteredSession, runtimes: TerminalRuntimeRef[], nativeToken?: string): RegisteredSession | null {
-    if (this.writeBlocked || saved.nativeArchive || this.agents.has(saved.agentId)
+    if (this.writeBlocked || saved.nativeArchive || saved.nativeAllocation || this.agents.has(saved.agentId)
       || (saved.sessionId && this.bySession(saved.sessionId))) return null
     const routes = normalizedRuntimes(runtimes)
     if (!routes.length || routes.some(route => this.runtimeIndex.has(terminalRouteKey(route)))) return null
@@ -1949,6 +1962,9 @@ class Registry {
 
     const now = Date.now()
     const existing = this.agents.get(agentId)
+    if (existing?.nativeAllocation && input.processIdentity && !sameProcessIdentity(existing.processIdentity, input.processIdentity)) {
+      throw new IdentityReadUnavailable('the original native allocation requires proven replacement admission')
+    }
     // `isNew` still means "this SESSION id was not bound here before" — a rotation counts as new, which is
     // what makes the caller announce the newly bound session. The agent itself may be long-lived.
     const isNew = !existing || existing.sessionId !== sessionId
@@ -1962,7 +1978,7 @@ class Registry {
     const stolenFrom = this.bySession(sessionId)
     let displaced: { agentId: string; candidate: RegisteredSession | null } | undefined
     if (stolenFrom && stolenFrom.agentId !== agentId) {
-      if (stolenFrom.nativeControl) throw new IdentityReadUnavailable('native cancellation prevents automatic conversation transfer')
+      if (stolenFrom.nativeControl || stolenFrom.nativeAllocation) throw new IdentityReadUnavailable('native cancellation prevents automatic conversation transfer')
       const released = { ...stolenFrom, sessionId: '', boundAt: null, transcriptPath: null,
         source: null, lastTranscriptAt: now }
       delete released.externalResume; delete released.resumeOnly
@@ -2062,7 +2078,8 @@ class Registry {
       : baseCwd
     const retainEvidence = sameSession && existing.engine === engine && existing.transcriptPath === effectiveTranscriptPath
     const entry: RegisteredSession = {
-      schemaVersion: existing?.nativeControl ? 3 : 2,
+      schemaVersion: existing?.nativeAllocation ? 4 : existing?.nativeControl ? 3 : 2,
+      ...(existing?.nativeAllocation ? { nativeAllocation: existing.nativeAllocation } : {}),
       ...(existing?.nativeControl ? { nativeControl: existing.nativeControl } : {}),
       ...(existing?.nativeArchive ? { nativeArchive: existing.nativeArchive } : {}),
       ...(existing?.nativeRetirement ? { nativeRetirement: existing.nativeRetirement } : {}),
@@ -2165,6 +2182,7 @@ class Registry {
   remove(sessionId: string): boolean {
     const entry = this.bySession(sessionId)
     if (!entry) return false
+    if (entry.nativeAllocation) throw new IdentityReadUnavailable('the original native allocations still need physical accounting')
     if (entry.nativeArchive) throw new IdentityReadUnavailable('the native archive still owns this live visit')
     this.drop(entry)
     this.terminalAvailableAgents.delete(entry.agentId)
@@ -2176,6 +2194,7 @@ class Registry {
   unbindSession(sessionId: string): boolean {
     const entry = this.bySession(sessionId)
     if (!entry) return false
+    if (entry.nativeAllocation) throw new IdentityReadUnavailable('the original native allocations still need physical accounting')
     if (entry.nativeArchive) throw new IdentityReadUnavailable('the native archive still owns this conversation')
     this.releaseBinding(entry)
     entry.touchedAt = Date.now()
@@ -2187,6 +2206,7 @@ class Registry {
   removeAgent(agentId: string): boolean {
     const entry = this.agents.get(agentId)
     if (!entry) return false
+    if (entry.nativeAllocation) throw new IdentityReadUnavailable('the original native allocations still need physical accounting')
     if (entry.nativeArchive) throw new IdentityReadUnavailable('the native archive still owns this live visit')
     this.drop(entry)
     this.terminalAvailableAgents.delete(agentId)
@@ -2274,6 +2294,7 @@ class Registry {
   releaseEngine(agentId: string, separateShell = false): RegisteredSession | null {
     const original = this.agents.get(agentId)
     if (!original || (isTerminalEngine(original.engine) && !separateShell)) return null
+    if (original.nativeAllocation) throw new IdentityReadUnavailable('the original native allocations still need physical accounting')
     if (original.nativeArchive) throw new IdentityReadUnavailable('the native archive still owns this live visit')
     this.drop(original)
     this.terminalAvailableAgents.delete(agentId)
@@ -2530,6 +2551,9 @@ class Registry {
   commitNativeControl(input: RegisteredSession, value: NativeTurnIntent, fence: () => void): RegisteredSession {
     const original = structuredClone(input), next = parseNativeTurnIntent(value)
     if (!next || !nativeTurnTransition(original, next)) throw new IdentityReadUnavailable('the proposed native control transition is invalid')
+    if (next.rearm?.replacement && rowFingerprint(next.rearm.replacement) !== rowFingerprint(original.nativeControl?.rearm?.replacement)) {
+      throw new IdentityReadUnavailable('native replacement requires proven allocation admission')
+    }
     const target = nativeTurnTarget(original), before = rowFingerprint(original.nativeControl)
     const unchanged = () => {
       const current = this.byAgent(original.agentId)
@@ -2540,7 +2564,7 @@ class Registry {
     const verify = () => { unchanged(); fence(); unchanged() }
     verify()
     const current = this.byAgent(original.agentId)!
-    const candidate = { ...structuredClone(current), schemaVersion: 3 as const, nativeControl: next }
+    const candidate = { ...structuredClone(current), schemaVersion: current.nativeAllocation ? 4 as const : 3 as const, nativeControl: next }
     this.save(true, false, undefined, { agentId: original.agentId, candidate, verify, sticky: true, replaceLive: true })
     const committed = this.byAgent(original.agentId)!
     this.readNativeControl(committed).verify()
@@ -2589,12 +2613,14 @@ class Registry {
     const verify = () => { source.verify(); verifyReplacement(); current() }
     verify()
     const owner = this.byAgent(original.agentId)!
-    const candidate: RegisteredSession = { ...structuredClone(owner), schemaVersion: 3, nativeControl: next,
+    const nativeAllocation = appendNativeAllocation(original.nativeAllocation, { fingerprint, request: request! })
+    const candidate: RegisteredSession = { ...structuredClone(owner), schemaVersion: 4, nativeControl: next, nativeAllocation,
       processIdentity, active: true, launch: { state: 'ready' },
       ...(rearm.permissionMode === undefined ? {} : { permissionMode: rearm.permissionMode,
         bypassPermission: permissionModeApproves(rearm.permissionMode) }),
     }
     this.save(true, false, undefined, { agentId: original.agentId, candidate, verify, sticky: true, replaceLive: true,
+      allocationAdmission: nativeAllocation,
       replacement: { target, controlFingerprint: binding.controlFingerprint, verifyDirectory: source.verifyDirectory },
       confirm: (verifyPublished, contents) => {
         const written = inspectNativeControlFile(FILE, env.ADAPTER_DATA_DIR)
@@ -2633,7 +2659,8 @@ class Registry {
     this.usedNativeReplacements.add(replacement)
     const link = parseNativeArchiveLink({ version: 1, agentId: original.agentId, requestId: rearm.requestId,
       launchToken: rearm.launchToken, target })!
-    const pending: RegisteredSession = { ...original, schemaVersion: 3, nativeArchive: link, resumeOnly: true,
+    const nativeAllocation = appendNativeAllocation(original.nativeAllocation, { fingerprint, request: request! })
+    const pending: RegisteredSession = { ...original, schemaVersion: original.nativeAllocation ? 4 : 3, nativeArchive: link, resumeOnly: true,
       lastHookAt: 0, active: false, processIdentity: null, runtimes: [{ backend: 'tmux', paneId: pane }],
       primaryRuntimeKey: `tmux\0${pane}`, tmuxPane: pane,
       launch: { state: 'held', service: 'native', detail: 'Waiting to confirm the original saved Resume.', nativeToken: rearm.launchToken },
@@ -2656,6 +2683,7 @@ class Registry {
         if (archive.transfer) throw new IdentityReadUnavailable('the original native archive destination is missing')
       }
       this.save(true, false, undefined, { agentId: original.agentId, candidate: pending, sticky: true,
+        allocationAdmission: original.nativeAllocation,
         archiveAdmission: link, archivePending: { verifyDirectory }, archiveLock,
         verify: () => {
           if (prior) {
@@ -2675,7 +2703,7 @@ class Registry {
     }
     const owner = structuredClone(this.byAgent(original.agentId)!)
     const next = parseNativeTurnIntent({ ...control, rearm: { ...rearm, replacement: { processKey: key, sessionId: original.sessionId } } })!
-    const candidate: RegisteredSession = { ...pending, nativeControl: next, processIdentity, active: true, launch: { state: 'ready' },
+    const candidate: RegisteredSession = { ...pending, schemaVersion: 4, nativeControl: next, nativeAllocation, processIdentity, active: true, launch: { state: 'ready' },
       ...(rearm.permissionMode === undefined ? {} : { permissionMode: rearm.permissionMode, bypassPermission: permissionModeApproves(rearm.permissionMode) }),
     }
     // A crash after admission only needs confirmation of that same destination.
@@ -2716,6 +2744,7 @@ class Registry {
     let moved = false
     const verify = () => { pendingPublication?.(); source.verify(); archive.verify(); if (moved) verifyExecution(); else verifyReplacement(); unchanged() }
     this.save(true, false, undefined, { agentId: original.agentId, candidate: { ...owner, ...candidate }, sticky: true, replaceLive: true,
+      allocationAdmission: nativeAllocation,
       archiveLock, verify,
       prepare: () => {
         if (!archive.transfer) {
@@ -3253,6 +3282,7 @@ class Registry {
     bindingCommit?: { agentId: string; candidate: RegisteredSession; verify: () => void; replaceLive?: boolean;
       displaced?: { agentId: string; candidate: RegisteredSession | null }; sticky?: boolean;
       archiveAdmission?: NativeArchiveLink; archiveLock?: (apply: () => void) => void; prepare?: () => void;
+      allocationAdmission?: NativeAllocation;
       archivePending?: { verifyDirectory(): void };
       archiveRetirement?: NativeArchiveRetirement; retire?: true;
       replacement?: { target: string; controlFingerprint: string; verifyDirectory(): void };
@@ -3319,8 +3349,8 @@ class Registry {
           if (!Array.isArray(stored)) throw new Error('registry root changed to a non-array value')
           const parsed = withoutRetiredRows(stored).rows
           if (parsed.some(hasUnknownRowSchema) || parsed.some(value => !!value && typeof value === 'object'
-        && (Object.hasOwn(value, 'externalResume') || Object.hasOwn(value, 'nativeControl')
-          || (value as { schemaVersion?: unknown }).schemaVersion === 3) && !strictPersistedRow(value))) {
+        && (Object.hasOwn(value, 'externalResume') || Object.hasOwn(value, 'nativeControl') || Object.hasOwn(value, 'nativeAllocation')
+          || [3, 4].includes((value as { schemaVersion?: unknown }).schemaVersion as number)) && !strictPersistedRow(value))) {
             throw new Error('registry contains an unknown row schema')
           }
           const legacyRows = parsed.filter((row) => !row || typeof row !== 'object' || !Object.hasOwn(row, 'schemaVersion'))
@@ -3328,7 +3358,7 @@ class Registry {
             throw new Error('registry contains a malformed legacy row')
           }
           const v2Rows = parsed.filter((row) => !!row && typeof row === 'object'
-            && [2, 3].includes((row as { schemaVersion?: unknown }).schemaVersion as number))
+            && [2, 3, 4].includes((row as { schemaVersion?: unknown }).schemaVersion as number))
           if (v2Rows.length && !validatedRows(v2Rows)) throw new Error('registry contains a malformed v2 row')
           return parsed
         })()
@@ -3449,6 +3479,17 @@ class Registry {
         }
         const merged = [...mergedForSave(latest, currentRows, this.persistedBaseline, this.intended).values()]
         const mergedRows = new Map(merged.map(row => [rowId(row), row]))
+        // Only proven admission appends allocation references. An ordinary
+        // scanner, hook or stale peer cannot erase, reorder or invent them.
+        for (const id of new Set([...latest.keys(), ...mergedRows.keys()])) {
+          const before = latest.get(id)?.nativeAllocation, after = mergedRows.get(id)?.nativeAllocation
+          if (rowFingerprint(before) === rowFingerprint(after)) continue
+          if (bindingCommit?.agentId === id && bindingCommit.allocationAdmission
+            && rowFingerprint(after) === rowFingerprint(bindingCommit.allocationAdmission)) continue
+          if (bindingCommit?.agentId === id && bindingCommit.retire && before && after === undefined
+            && rowFingerprint(before) === rowFingerprint(bindingCommit.candidate.nativeAllocation) && bindingCommit.candidate.nativeRetirement) continue
+          throw new IdentityReadUnavailable('the original native allocations changed outside proven admission or retirement')
+        }
         // Ordinary registration, observation and stale peer saves retain this
         // visit's archive lineage. Only the dedicated admission can add it.
         for (const id of new Set([...latest.keys(), ...mergedRows.keys()])) {

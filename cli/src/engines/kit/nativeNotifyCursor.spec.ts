@@ -10,6 +10,8 @@ import { openNativeHookStorage } from './nativeHookStorage.js'
 import { sendNativeHookRequest } from './nativeHookTransport.js'
 import { probeNativeProcessControl } from '../../lib/nativeProcessControlProbe.js'
 import { prepareProcessImageHelper } from '../../lib/nativeProcessImageArtifact.js'
+import { creationFingerprint } from '../../lib/agentCreationReceipt.js'
+import { appendNativeAllocation } from '../../lib/nativeAllocation.js'
 
 vi.mock('./nativeHookClient.js', () => ({ deliverNativeHookClient: vi.fn() }))
 vi.mock('./nativeHookOrigin.js', () => ({ captureNativeHookClientOrigin: vi.fn() }))
@@ -159,8 +161,18 @@ it('keeps delivering native evidence for a cancelled row while refusing malforme
   } } }
   writeFileSync(path, JSON.stringify([{ ...row, schemaVersion: 3, nativeControl }]), { mode: 0o600 })
   expect(nativeNotifyRuntime(root, '%1')?.agentId).toBe(row.agentId)
+  const choice = { kind: 'native-rearm', agentId: row.agentId, operation: 'restart', source: 'live' }
+  const nativeAllocation = appendNativeAllocation(undefined, { fingerprint: creationFingerprint(choice), request: {
+    ...choice, creationId: 'original-creation-request', launchToken: 'original-launch-token', target: 'a'.repeat(64), sourceProcess: { processKey: null },
+  } })
+  writeFileSync(path, JSON.stringify([{ ...row, schemaVersion: 4, nativeControl, nativeAllocation }]))
+  expect(nativeNotifyRuntime(root, '%1')?.agentId).toBe(row.agentId)
   for (const candidate of [{ ...row, nativeControl }, { ...row, schemaVersion: 3 },
-    { ...row, schemaVersion: 3, nativeControl: { ...nativeControl, version: 2 } }]) {
+    { ...row, schemaVersion: 3, nativeControl: { ...nativeControl, version: 2 } },
+    { ...row, nativeAllocation }, { ...row, schemaVersion: 3, nativeControl, nativeAllocation },
+    { ...row, schemaVersion: 4, nativeControl }, { ...row, schemaVersion: 4, nativeAllocation },
+    { ...row, schemaVersion: 4, nativeControl, nativeAllocation, agentId: 'foreign-agent' },
+    { ...row, schemaVersion: 4, nativeControl, nativeAllocation: { version: 1, receipts: [] } }]) {
     writeFileSync(path, JSON.stringify([candidate]))
     expect(nativeNotifyRuntime(root, '%1')).toBeUndefined()
   }

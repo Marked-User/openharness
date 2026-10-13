@@ -7,6 +7,7 @@ import { prepareProcessImageHelper, type ProcessImageArtifact } from '../../lib/
 import { probeNativeProcessControl, type NativeControlHelpers } from '../../lib/nativeProcessControlProbe.js'
 import { secureStateDirectory } from '../../lib/secureState.js'
 import { parseNativeTurnIntent } from '../../lib/nativeTurnIntent.js'
+import { parseNativeAllocation } from '../../lib/nativeAllocation.js'
 import { NativeEvidenceBudget } from './nativeEvidence.js'
 import { validNativeHookBody } from './nativeHookBody.js'
 import { deliverNativeHookClient } from './nativeHookClient.js'
@@ -36,8 +37,10 @@ export function nativeNotifyRuntime(dataDir: string, pane: string): NativeNotify
     if (used > 4 * 1024 * 1024 || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) return
     const rows: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, used)))
     if (!Array.isArray(rows) || rows.length > 4096) return
-    const candidates = rows.filter((row): row is NativeNotifyRuntime => (row?.schemaVersion === 2 && row.nativeControl === undefined
-      || row?.schemaVersion === 3 && parseNativeTurnIntent(row.nativeControl) !== null) && row.engine === 'cursor'
+    const candidates = rows.filter((row): row is NativeNotifyRuntime => (row?.schemaVersion === 2 && row.nativeControl === undefined && !Object.hasOwn(row, 'nativeAllocation')
+      || row?.schemaVersion === 3 && !Object.hasOwn(row, 'nativeAllocation') && parseNativeTurnIntent(row.nativeControl) !== null
+      || row?.schemaVersion === 4 && parseNativeTurnIntent(row.nativeControl) !== null
+        && parseNativeAllocation(row.nativeAllocation)?.receipts.every(value => value.request.agentId === row.agentId)) && row.engine === 'cursor'
       && row.active === true && identifier(row.agentId) && row.processIdentity
       && Number.isSafeInteger(row.processIdentity.pid) && row.processIdentity.pid > 0
       && Array.isArray(row.runtimes) && row.runtimes.length <= 4
