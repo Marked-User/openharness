@@ -350,7 +350,9 @@ export class AgentCreationReceipts {
   /** Recovery can prove the original allocation, never repeat it. Keep this
    * immutable completion beside the original result so later Cancel/rearm cannot
    * turn an acknowledged success back into an uncertain launch. */
-  confirmNativeRelaunch(id: string, input: NativeRelaunchConfirmation, authority: CreationConfirmationFence): AgentCreationStatus {
+  confirmNativeRelaunch(id: string, input: NativeRelaunchConfirmation, authority: CreationConfirmationFence,
+    retain?: (proof: { verify(): void }) => void,
+  ): AgentCreationStatus {
     const expected = structuredClone(input)
     if (!nativeRelaunchRequest(id, expected.request) || expected.outcome.state !== 'created'
       || expected.outcome.agentId !== expected.request.agentId || typeof expected.outcome.resumed !== 'boolean'
@@ -383,17 +385,20 @@ export class AgentCreationReceipts {
     const retained = () => { original.verify(); claimed.verify(); result.verify(); process.verify(); routes.verify() }
     const fence = () => { authority.verify(); retained(); before.verify(); authority.current() }
     fence()
-    if (before.content === null) this.publish(file, completed, true, fence)
+    let publication = before.content === null ? undefined : before
+    if (before.content === null) this.publish(file, completed, true, fence, proof => { publication = proof })
+    if (!publication) throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
     // An identical part left by a failed parent fsync needs real confirmation,
     // not another publication or a successful pathname comparison.
-    retained()
+    retained(); publication.verify()
     const published = inspectNativeControlFile(file, this.directory)
     if (!same(published.content, completed)) throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
-    published.confirm(() => { authority.verify(); retained(); authority.current() })
+    published.confirm(() => { authority.verify(); retained(); publication!.verify(); authority.current() })
     const final = this.read(id)
     if (final?.version !== 2) throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
     const answer = this.intentStatus(id, final, false)
-    published.verify(); retained(); authority.current()
+    const verify = () => { authority.verify(); published.verify(); publication!.verify(); retained(); authority.current() }
+    verify(); retain?.({ verify }); verify()
     return answer
   }
 
@@ -423,7 +428,12 @@ export class AgentCreationReceipts {
 
   /** A witness proves which process was handed the command, not that exec or
    * startup completed. Recovery must separately prove its current native image. */
-  readNativeRelaunchProcess(id: string, input: NativeRelaunchRequest): { process: NativeRelaunchProcess; verify(): void } {
+  readNativeRelaunchProcess(id: string, input: NativeRelaunchRequest): {
+    process: NativeRelaunchProcess; verify(): void
+    /** Only inside confirmNativeRelaunch, which retains its own exact published
+     * confirmation. Every original execution part remains pinned. */
+    verifyConfirmation(): void
+  } {
     const source = this.nativeRelaunchDispatch(id, input)
     const part = this.readIntentPart<IntentProcess>(this.intentFile(id, 'process'))
     if (!part || part.fingerprint !== source.claim.fingerprint || part.token !== source.claim.token || !validIntentProcess(part)) {
@@ -434,7 +444,8 @@ export class AgentCreationReceipts {
     proof.confirm(source.verify)
     const verify = () => { source.verify(); proof.verify() }
     verify()
-    return { process: Object.freeze({ ...part.process }), verify }
+    const verifyConfirmation = () => { source.verifyConfirmation(); proof.verify() }
+    return { process: Object.freeze({ ...part.process }), verify, verifyConfirmation }
   }
 
   private nativeRelaunchDispatch(id: string, input: NativeRelaunchRequest) {
@@ -455,7 +466,8 @@ export class AgentCreationReceipts {
       || creationFingerprint(JSON.parse(claimed.content!)) !== creationFingerprint(claim)) throw new AgentCreationReceiptError('CREATION_STORAGE_FAILED')
     const verify = () => { primary.verify(); claimed.verify(); result.verify(); confirmation.verify(); this.intentStatus(id, receipt, false) }
     verify()
-    return { receipt, claim, status: this.intentStatus(id, receipt, false), verify }
+    const verifyConfirmation = () => { primary.verify(); claimed.verify(); result.verify(); this.intentStatus(id, receipt, false) }
+    return { receipt, claim, status: this.intentStatus(id, receipt, false), verify, verifyConfirmation }
   }
 
   /** Streaming recovery never loads an unbounded directory into the core. Old

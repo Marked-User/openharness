@@ -243,6 +243,48 @@ it('only the original witness publisher may continue to exec, while recovery get
   expect(() => receipts.readNativeRelaunchProcess(id, { fingerprint: 'b'.repeat(64), request })).toThrow('CREATION_CONFLICT')
 })
 
+it('confirms its original witnessed execution without treating its own confirmation as foreign storage', async () => {
+  const { receipts } = await uncertain()
+  receipts.recordNativeRelaunchProcess(id, { fingerprint, request }, processOwner, fence())
+  const original = receipts.readNativeRelaunchProcess(id, { fingerprint, request })
+  original.verify()
+  let retained: { verify(): void } | undefined
+  expect(receipts.confirmNativeRelaunch(id, { fingerprint, request, outcome },
+    { verify: original.verifyConfirmation, current() {} }, proof => { retained = proof })).toEqual(outcome)
+  expect(original.verify).toThrow()
+  expect(retained!.verify).not.toThrow()
+  expect(receipts.confirmNativeRelaunch(id, { fingerprint, request, outcome },
+    { verify: original.verifyConfirmation, current() {} })).toEqual(outcome)
+})
+
+it.each(['intent', 'claim', 'result', 'process', 'confirmation'])('retains the original %s inode through the confirmation handoff', async kind => {
+  const { receipts, file } = await uncertain()
+  receipts.recordNativeRelaunchProcess(id, { fingerprint, request }, processOwner, fence())
+  const original = receipts.readNativeRelaunchProcess(id, { fingerprint, request })
+  let retained: { verify(): void } | undefined
+  receipts.confirmNativeRelaunch(id, { fingerprint, request, outcome },
+    { verify: original.verifyConfirmation, current() {} }, proof => { retained = proof })
+  const path = file(kind === 'intent' ? '' : kind), bytes = readFileSync(path)
+  renameSync(path, `${path}.previous`); writeFileSync(path, bytes, { mode: 0o600 })
+  if (kind !== 'confirmation') expect(original.verifyConfirmation).toThrow()
+  expect(retained!.verify).toThrow()
+})
+
+it('retains its own actual confirmation inode before directory durability', async () => {
+  const { receipts, file } = await uncertain()
+  receipts.recordNativeRelaunchProcess(id, { fingerprint, request }, processOwner, fence())
+  const original = receipts.readNativeRelaunchProcess(id, { fingerprint, request })
+  faults.linked = false
+  faults.directorySync = () => {
+    if (!faults.linked) return
+    faults.directorySync = undefined
+    const path = file('confirmation'), bytes = readFileSync(path)
+    renameSync(path, file('previous')); writeFileSync(path, bytes, { mode: 0o600 })
+  }
+  expect(() => receipts.confirmNativeRelaunch(id, { fingerprint, request, outcome },
+    { verify: original.verifyConfirmation, current() {} })).toThrow()
+})
+
 it('a failed witness sync cannot become execution authority even for the exact original process', async () => {
   const { receipts, file } = await uncertain(), expected = { fingerprint, request }
   faults.failDirectory = true

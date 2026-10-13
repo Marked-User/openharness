@@ -240,7 +240,7 @@ function replacementRequest(reserved: RegisteredSession) {
 function replacementProof(reserved = registry.byAgent(row.agentId)!): NativeRearmReplacementProof {
   return { key: `fixture-boot\0cursor\0${43}\0precise-birth`, evidence: 'original-exec', pane: '%1',
     processIdentity: { pid: 43, executable: '<cursor>', startMarker: 'replacement-start', startTicks: 43 }, verify: vi.fn(),
-    verifyExecution: vi.fn(), current: vi.fn(), source: { target: nativeTurnTarget(reserved),
+    verifyExecution: vi.fn(), verifyConfirmation: vi.fn(), current: vi.fn(), source: { target: nativeTurnTarget(reserved),
       controlFingerprint: creationFingerprint(reserved.nativeControl), requestFingerprint: creationFingerprint(replacementRequest(reserved)) } }
 }
 

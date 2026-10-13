@@ -36,8 +36,9 @@ function fixture() {
     argv: ['cursor-agent'], fds: [] }
   const rows = new Map([[10, root], [42, engine]])
   const witness = { boot: bootId, pid: 42, birth: '4200' }
-  const retained = vi.fn(), local = vi.fn(), receiptProof = vi.fn()
-  const receipts = { readNativeRelaunchProcess: vi.fn(() => ({ process: { ...witness }, verify: receiptProof })) } satisfies Pick<AgentCreationReceipts, 'readNativeRelaunchProcess'>
+  const retained = vi.fn(), local = vi.fn(), receiptProof = vi.fn(), confirmationProof = vi.fn()
+  const receipts = { readNativeRelaunchProcess: vi.fn(() => ({ process: { ...witness }, verify: receiptProof,
+    verifyConfirmation: confirmationProof })) } satisfies Pick<AgentCreationReceipts, 'readNativeRelaunchProcess'>
   const pane = vi.fn(async () => ({ rootPid: 10, command: 'original-command' }))
   const boot = vi.fn(async () => bootId)
   const probe = vi.fn(async () => ({ parent: 0, children: [], rows: new Map([...rows].map(([pid, row]) => [pid, structuredClone(row)])) }))
@@ -48,7 +49,7 @@ function fixture() {
   }))
   const read = createNativeRearmProof({ receipts, owner, pane, boot, inspect, probe })
   const fence = { verify: retained, current: local }
-  return { row, request, root, engine, rows, witness, retained, local, receiptProof, receipts, pane, boot, probe, inspect, read,
+  return { row, request, root, engine, rows, witness, retained, local, receiptProof, confirmationProof, receipts, pane, boot, probe, inspect, read,
     fence, run: () => read(row, request, fence) }
 }
 
@@ -115,10 +116,16 @@ it('separates the consumed source leaf from retained execution authority without
   expect(proof.verifyExecution).not.toThrow()
   p.receiptProof.mockImplementation(() => { throw Error('original receipt changed') })
   expect(proof.verifyExecution).toThrow('original receipt changed')
+  expect(proof.verifyConfirmation).not.toThrow()
+  expect(p.confirmationProof).toHaveBeenCalledOnce()
+  p.confirmationProof.mockImplementation(() => { throw Error('original witness changed') })
+  expect(proof.verifyConfirmation).toThrow('original witness changed')
+  p.confirmationProof.mockImplementation(() => {})
   p.receiptProof.mockImplementation(() => {})
   clock.now = 4000
   expect(proof.current).toThrow('deadline was reached')
   expect(proof.verifyExecution).toThrow('deadline was reached')
+  expect(proof.verifyConfirmation).toThrow('deadline was reached')
 })
 
 it.each(['same', 'source', 'permission', 'omitted'] as const)('proves replacement only for %s reserved launch options', async change => {

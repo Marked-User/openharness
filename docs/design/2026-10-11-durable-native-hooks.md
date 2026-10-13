@@ -296,6 +296,68 @@ Saved-to-live handoff, reconciliation orchestration, physical adapters, public
 held-state mapping and production activation are still required; this is not
 whole-PR approval.
 
+The next live recovery checkpoint connects the original native observation,
+the atomic replacement image and the existing creation receipt. Recovery has
+no launch callback. A crash after the Registry commit is resolved by proving
+that admitted replacement and confirming its original receipt, without another
+Registry replacement or process launch. Cancel, shutdown and the original
+absolute deadline revoke the attempt; its status callback cannot overwrite a
+successor or strand the reply when presentation fails.
+
+Four recovery slots follow actual native observation settlement. The reader's
+three-second reply can expire while a probe is still occupied; neither that
+reply nor the controller's five-second reply releases the underlying slot.
+The composition test uses the real reader with a stalled injected probe and
+asserts that a fifth observation cannot begin before an original one settles.
+
+First confirmation exposed an integration gap: the process proof retained the
+former absence of the confirmation file and rejected its own new confirmation.
+Only the confirmation publisher may replace that absence proof. It retains
+its actual written inode through directory durability and supplies its exact
+final verifier to recovery. The original intent, dispatch claim, result,
+process witness, routes and native deadline remain pinned throughout. Equal
+bytes in another inode do not inherit the original publication's authority.
+
+Receipt `20261013T162901.683429Z-30687` passes types (5.1 seconds) and 392
+cases in ten affected files (138.9 seconds), including unchanged launch and
+admission goldens, architecture and the installed writer's private process
+acceptance. The new core recovery module has 100% statements, branches,
+functions and lines. Receipt `20261013T163151.138877Z-44430` passes the full
+reader/receipt/controller baseline and all eleven assertion mutations (51.3
+seconds). Earlier failed receipts retain a fixture with an invalid kernel
+witness, the real confirmation integration failure and an uncovered defensive
+branch; none is reported as passing. Independent review approved this live
+recovery scope over `724074128`, conditional on these completed checks. It
+found the actual-read lifetime, late revoked status and throwing-presentation
+issues described above. Implementation and review ran approximately
+16:07–16:35 UTC October 13, with validation overlapping. Merge, publication
+and external waiting remain zero for this checkpoint.
+
+Saved Resume still needs an explicit two-store ownership handoff. The reviewed
+protocol keeps one bounded transfer role in the archive envelope, tied to the
+existing reservation and exact destination. It does not add another launch
+claim or treat `.resume` as independent execution authority. Registry then
+archive is the fixed lock order; no lock may span a native probe or tmux wait.
+
+Before transfer, a pending live route remains inadmissible and the saved
+reservation owns Cancel. Under both locks, the exact saved reservation and
+pending live row must agree before a durable archive role transfers control
+to that live row. Refreshed proofs of both stores then guard one Registry
+commit of the replacement process, permissions and admission. Cancel after
+transfer belongs to the live row and defeats that commit. The original
+creation receipt must confirm before clearing the matching `.resume` marker.
+
+A crash after transfer never makes the older archive authoritative again.
+A missing or unreadable destination holds the original handoff; it cannot
+permit another launch. Later Stop requires the reverse transfer: checkpoint
+the latest live control while retaining its live-owned role, account for the
+exact process and allocation, then publish the final saved snapshot and
+strictly retire the exact live row under the same lock order. Until retirement
+is durable, live control wins and a concurrent Cancel requires a fresh saved
+snapshot. Ordinary archive save, generic Registry removal and an old marker's
+age cannot substitute for this protocol. This handoff and production
+activation are not implemented by the live recovery checkpoint.
+
 October 13 recap checkpoint: the recaps port now derives a bounded summary from
 the exact answer retained for an owner and generation. Core copies the input
 before a service wait and checks the reply's generation identity, input digest
