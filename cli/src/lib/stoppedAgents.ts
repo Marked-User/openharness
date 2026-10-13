@@ -9,7 +9,8 @@ import { readPrivateStateFile, secureStateDirectory } from './secureState.js'
 import { sameProcessIdentity } from './terminalRuntime.js'
 import { inspectNativeControlFile } from './nativeControlFile.js'
 import { nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
-import { parseNativeArchiveTransfer, type NativeArchiveTransfer } from './nativeArchive.js'
+import { parseNativeArchiveEnvelope, parseNativeArchiveTransfer, parseNativeArchiveReturn, type NativeArchiveTransfer, type NativeArchiveReturn } from './nativeArchive.js'
+import { creationFingerprint } from './agentCreationReceipt.js'
 
 const SAFE_ID = /^[a-zA-Z0-9_-]{1,128}$/
 const CATALOG_CACHE_RECORDS = 2048
@@ -30,6 +31,17 @@ export interface NativeArchiveTransaction {
   }): void
 }
 
+interface SavedArchiveRecord { session: RegisteredSession; transfer?: NativeArchiveTransfer; returnRole?: NativeArchiveReturn }
+interface ArchivePublicationFence { verifyBefore(): void; verifyAfter(): void; current(): void }
+export interface NativeArchiveReturnTransaction {
+  readonly role: NativeArchiveReturn | undefined
+  readonly session: RegisteredSession
+  verify(): void
+  confirm(current: () => void): void
+  checkpoint(authority: ArchivePublicationFence): NativeArchiveReturn
+  complete(retirement: NativeArchiveReturn, authority: ArchivePublicationFence): RegisteredSession
+}
+
 function catalogFingerprint(stat: BigIntStats): string {
   // ctime catches in-place edits even if a writer restores mtime. Inode/device
   // distinguish atomic replacements; mode/owner/type changes must miss too.
@@ -40,7 +52,8 @@ function catalogFingerprint(stat: BigIntStats): string {
 export class StoppedAgentStore {
   private readonly catalogCache = new Map<string, { fingerprint: string; bytes: number; at: number; session: RegisteredSession }>()
   private catalogCacheBytes = 0
-  private readonly uncertain = new Map<string, { before: string; bytes: string; candidate: RegisteredSession; verifyDirectory(): void }>()
+  private readonly uncertain = new Map<string, { before: string; bytes: string; candidate: RegisteredSession;
+    returnRole?: NativeArchiveReturn; verifyDirectory(): void }>()
   private readonly uncertainTransfers = new Map<string, { bytes: string; verifyPublished(): void; verifyDirectory(): void }>()
 
   constructor(private readonly directory = join(env.ADAPTER_DATA_DIR, 'stopped-agents')) {}
@@ -49,7 +62,7 @@ export class StoppedAgentStore {
     return this.readRecord(agentId)?.session ?? null
   }
 
-  private readRecord(agentId: string): { session: RegisteredSession; transfer?: NativeArchiveTransfer } | null {
+  private readRecord(agentId: string): SavedArchiveRecord | null {
     if (!SAFE_ID.test(agentId)) return null
     try {
       secureStateDirectory(this.directory, false)
@@ -61,12 +74,13 @@ export class StoppedAgentStore {
     }
   }
 
-  private decodeRecord(raw: Record<string, unknown>, agentId: string): { session: RegisteredSession; transfer?: NativeArchiveTransfer } {
-    const transfer = raw.version === 2 ? parseNativeArchiveTransfer(raw.nativeTransfer) : undefined
-    if (raw.version !== 1 && raw.version !== 2 || raw.version === 1 && Object.hasOwn(raw, 'nativeTransfer')
-      || raw.version === 2 && (!transfer || Object.keys(raw).sort().join(',') !== 'nativeTransfer,session,version')) throw Error('Unknown saved state')
-    const session = strictPersistedRow(raw.session)
-    if (!session || session.agentId !== agentId || session.nativeArchive) throw Error('Invalid saved state')
+  private decodeRecord(raw: Record<string, unknown>, agentId: string): SavedArchiveRecord {
+    const envelope = parseNativeArchiveEnvelope(raw)
+    if (!envelope) throw Error('Unknown saved state')
+    const transfer = envelope.version === 2 ? envelope.nativeTransfer : undefined
+    const returnRole = envelope.version === 3 ? envelope.nativeReturn : undefined
+    const session = strictPersistedRow(envelope.session)
+    if (!session || session.agentId !== agentId || session.nativeArchive || session.nativeRetirement) throw Error('Invalid saved state')
     if (transfer) {
       const reserved = session.nativeControl?.rearm, link = transfer.link
       if (!reserved || reserved.source !== 'saved' || reserved.revoked || reserved.replacement || session.nativeArchive
@@ -75,13 +89,24 @@ export class StoppedAgentStore {
         throw Error('Invalid saved transfer')
       }
     }
-    return { session, ...(transfer ? { transfer } : {}) }
+    if (returnRole && (session.active || session.engine !== 'cursor' || !session.sessionId || !session.nativeControl
+      || returnRole.link.agentId !== agentId || returnRole.phase === 'returning' && (
+        returnRole.savedTarget !== nativeTurnTarget(session) || returnRole.checkpoint !== creationFingerprint(session)
+        || returnRole.controlFingerprint !== creationFingerprint(session.nativeControl)
+        || ![false, true].some(active => nativeTurnTarget({ ...session, active, nativeArchive: returnRole.link }) === returnRole.sourceTarget)))) {
+      throw Error('Invalid native return checkpoint')
+    }
+    return { session, ...(transfer ? { transfer } : {}), ...(returnRole ? { returnRole } : {}) }
   }
 
   /** Routing metadata only. A transferred archive never grants saved control,
    * including after the Registry disappears or another daemon starts. */
   nativeTransfer(agentId: string): NativeArchiveTransfer | null {
     return this.readRecord(agentId)?.transfer ?? null
+  }
+
+  nativeReturn(agentId: string): NativeArchiveReturn | null {
+    return this.readRecord(agentId)?.returnRole ?? null
   }
 
   /** Read-only recovery of the original Resume. This is never saved Cancel or
@@ -101,7 +126,7 @@ export class StoppedAgentStore {
     }
     const retained = inspectNativeControlFile(join(this.directory, `${input.agentId}.json`), this.directory)
     const record = this.decodeRecord(JSON.parse(retained.content!), input.agentId)
-    if (!record || nativeTurnTarget(record.session) !== nativeTurnTarget(input)
+    if (record.returnRole?.phase === 'returning' || nativeTurnTarget(record.session) !== nativeTurnTarget(input)
       || JSON.stringify(record.session.nativeControl) !== JSON.stringify(input.nativeControl)) {
       throw Error('The original saved Resume owner changed.')
     }
@@ -169,6 +194,87 @@ export class StoppedAgentStore {
         },
       }
       return apply(archive)
+    })
+  }
+
+  private inspectReturnSource(original: RegisteredSession) {
+    const retained = inspectNativeControlFile(join(this.directory, `${original.agentId}.json`), this.directory)
+    const record = this.decodeRecord(JSON.parse(retained.content!), original.agentId)
+    const owner = record.transfer?.link ?? record.returnRole?.link, pending = this.uncertainTransfers.get(original.agentId)
+    if (creationFingerprint(owner) !== creationFingerprint(original.nativeArchive)) throw Error('The original native archive visit changed.')
+    const verify = () => {
+      retained.verify()
+      if (pending) {
+        if (retained.content !== pending.bytes) throw Error('The original native return image changed.')
+        pending.verifyDirectory(); pending.verifyPublished()
+      }
+    }
+    verify()
+    return { ...retained, ...record, verify, confirm: (current: () => void) => retained.confirm(() => { verify(); current() }) }
+  }
+
+  /** Called only under the outer Registry lock. The existing archive role
+   * remains live-owned until an exact durable retirement confirms its return. */
+  withNativeReturn<T>(input: RegisteredSession, apply: (archive: NativeArchiveReturnTransaction) => T): T {
+    const original = structuredClone(input), link = original.nativeArchive
+    if (!link || original.engine !== 'cursor' || !original.nativeControl || !SAFE_ID.test(original.agentId)) {
+      throw Error('The original native archive visit is unavailable.')
+    }
+    return this.write(() => {
+      if (this.uncertain.has(original.agentId)) throw Error('Waiting for the original saved native control publication.')
+      const file = join(this.directory, `${original.agentId}.json`)
+      let retained = this.inspectReturnSource(original)
+      const publish = (session: RegisteredSession, role: NativeArchiveReturn, authority: ArchivePublicationFence) => {
+        const before = retained, image = { version: 3, session, nativeReturn: role }, bytes = JSON.stringify(image, null, 2)
+        if (before.content === bytes) {
+          authority.verifyBefore(); before.confirm(() => { authority.verifyAfter(); authority.current() })
+        } else {
+          if (!this.uncertainTransfers.has(original.agentId) && this.uncertainTransfers.size >= 256) throw Error('Waiting for native archive return confirmation capacity.')
+          let publication: (() => void) | undefined
+          try {
+            atomicWriteJson(file, image, false, () => { authority.verifyBefore(); before.verify(); authority.current() }, (verifyPublished, contents) => {
+              const written = inspectNativeControlFile(file, this.directory)
+              if (written.content !== contents) throw Error('The published native return bytes changed.')
+              written.confirm(() => { verifyPublished(); before.verifyDirectory(); authority.verifyAfter(); authority.current() })
+              publication = () => { verifyPublished(); before.verifyDirectory(); written.verify() }
+            })
+          } catch (error) {
+            if (error instanceof AtomicWriteUnconfirmed) this.uncertainTransfers.set(original.agentId, { bytes,
+              verifyPublished: error.verifyPublished ?? (() => { throw Error('The original native return publisher is unavailable.') }),
+              verifyDirectory: before.verifyDirectory })
+            throw error
+          }
+          this.uncertainTransfers.set(original.agentId, { bytes, verifyPublished: publication!, verifyDirectory: before.verifyDirectory })
+          retained = this.inspectReturnSource(original)
+        }
+        retained.verify(); authority.current()
+        this.uncertainTransfers.delete(original.agentId); this.forgetCatalogRecord(original.agentId)
+      }
+      return apply({
+        get role() { return retained.returnRole }, get session() { return structuredClone(retained.session) }, verify: () => retained.verify(),
+        confirm: current => retained.confirm(current),
+        checkpoint: authority => {
+          if (original.nativeRetirement || retained.returnRole?.phase === 'saved') throw Error('This native visit already retired its live authority.')
+          const snapshot = { ...original, active: false, launch: { state: 'ready' as const } }
+          delete snapshot.nativeArchive; delete snapshot.closePlan
+          delete snapshot.identityHold; delete snapshot.interpretationHold; delete snapshot.admissionHold; delete snapshot.evidenceRevision
+          const session = strictPersistedRow(snapshot)!
+          const role = parseNativeArchiveReturn({ version: 1, phase: 'returning', link, sourceTarget: nativeTurnTarget(original),
+            controlFingerprint: creationFingerprint(original.nativeControl), checkpoint: creationFingerprint(session), savedTarget: nativeTurnTarget(session) })!
+          publish(session, role, authority)
+          return role
+        },
+        complete: (retirement, authority) => {
+          const role = retained.returnRole
+          if (!original.nativeRetirement || !role
+            || creationFingerprint(original.nativeRetirement) !== creationFingerprint(retirement)
+            || creationFingerprint({ ...role, phase: 'returning' }) !== creationFingerprint(retirement)) {
+            throw Error('The native return has no matching durable retirement.')
+          }
+          publish(retained.session, { ...role, phase: 'saved' }, authority)
+          return structuredClone(retained.session)
+        },
+      })
     })
   }
 
@@ -249,6 +355,10 @@ export class StoppedAgentStore {
     if (this.uncertainTransfers.has(agentId)) throw Error('Waiting for the original native transfer publication.')
   }
 
+  private savedImage(session: RegisteredSession, returnRole?: NativeArchiveReturn) {
+    return returnRole ? { version: 3, session, nativeReturn: returnRole } : { version: 1, session }
+  }
+
   /** Ordinary snapshots cannot erase or replace an archived control reservation.
    * Control changes require the original saved row's explicit strict transition. */
   save(session: RegisteredSession): void {
@@ -262,7 +372,9 @@ export class StoppedAgentStore {
     // An exited engine leaves its pane as a shell. Stopping that shell must keep
     // the conversation saved before releaseEngine cleared its binding/profile.
     const record = this.readRecord(session.agentId), previous = record?.session
-    if (record?.transfer || session.nativeArchive) throw Error('Waiting for the exact native archive handoff before saving this visit.')
+    if (record?.transfer || record?.returnRole?.phase === 'returning' || session.nativeArchive || session.nativeRetirement) {
+      throw Error('Waiting for the exact native archive handoff before saving this visit.')
+    }
     if (previous?.nativeControl && JSON.stringify(previous.nativeControl) !== JSON.stringify(session.nativeControl)) {
       throw Error('Waiting to preserve the original saved native cancellation.')
     }
@@ -295,7 +407,7 @@ export class StoppedAgentStore {
     const snapshot = {
       ...session,
       active: false,
-      launch: { state: 'ready' },
+      launch: { state: 'ready' as const },
       defaultName: projectDisplayName(session),
       touchedAt: Date.now(),
     }
@@ -309,7 +421,7 @@ export class StoppedAgentStore {
     // A snapshot without a tmux pane omits the legacy alias just like registry persistence.
     if (!snapshot.tmuxPane) delete (snapshot as Partial<RegisteredSession>).tmuxPane
     const retained = previous ? this.inspectControl(previous) : undefined
-    atomicWriteJson(join(this.directory, `${session.agentId}.json`), { version: 1, session: snapshot }, false, () => {
+    atomicWriteJson(join(this.directory, `${session.agentId}.json`), this.savedImage(snapshot, record?.returnRole), false, () => {
       retained?.verify()
     })
     this.forgetCatalogRecord(session.agentId)
@@ -330,7 +442,7 @@ export class StoppedAgentStore {
     const retained = this.inspectControl(saved)
     secureStateDirectory(dirname(this.directory))
     secureStateDirectory(this.directory)
-    atomicWriteJson(join(this.directory, `${agentId}.json`), { version: 1, session: { ...saved, ...patch } }, false, retained.verify)
+    atomicWriteJson(join(this.directory, `${agentId}.json`), this.savedImage({ ...saved, ...patch }, retained.returnRole), false, retained.verify)
     this.forgetCatalogRecord(agentId)
     return true
   }
@@ -344,7 +456,8 @@ export class StoppedAgentStore {
   private beginResumeUnlocked(agentId: string): string | null {
     this.requireSavedOwner(agentId)
     if (!SAFE_ID.test(agentId)) throw new Error('Invalid saved harness identity.')
-    if (this.readRecord(agentId)?.transfer) throw Error('The original native resume belongs to its live handoff.')
+    const record = this.readRecord(agentId)
+    if (record?.transfer || record?.returnRole?.phase === 'returning') throw Error('The original native resume belongs to its live handoff.')
     secureStateDirectory(dirname(this.directory))
     secureStateDirectory(this.directory)
     const file = join(this.directory, `${agentId}.resume`)
@@ -420,7 +533,7 @@ export class StoppedAgentStore {
     if (!SAFE_ID.test(agentId)) throw new Error('Invalid stopped harness identity.')
     const record = this.readRecord(agentId)
     if (!record) return
-    if (record.transfer || record.session.nativeArchive) throw Error('Waiting for the exact native archive handoff before removing this visit.')
+    if (record.transfer || record.returnRole || record.session.nativeArchive) throw Error('Waiting for the exact native archive handoff before removing this visit.')
     unlinkSync(join(this.directory, `${agentId}.json`))
     this.forgetCatalogRecord(agentId)
     this.syncDirectory()
@@ -465,13 +578,13 @@ export class StoppedAgentStore {
     const original = structuredClone(input), file = join(this.directory, `${original.agentId}.json`)
     const retained = inspectNativeControlFile(file, this.directory)
     const record = this.decodeRecord(JSON.parse(retained.content!), original.agentId), saved = record.session
-    if (record.transfer) throw Error('The original native resume belongs to its live handoff.')
+    if (record.transfer || record.returnRole?.phase === 'returning') throw Error('The original native resume belongs to its live handoff.')
     if (!saved || nativeTurnTarget(saved) !== nativeTurnTarget(original)
       || JSON.stringify(saved.nativeControl) !== JSON.stringify(original.nativeControl)) {
       throw Error('The original saved native control owner changed.')
     }
     retained.verify()
-    return { ...retained, intent: saved.nativeControl, saved }
+    return { ...retained, intent: saved.nativeControl, saved, returnRole: record.returnRole }
   }
 
   commitNativeControl(input: RegisteredSession, value: NativeTurnIntent, authority: SavedNativeControlFence): RegisteredSession {
@@ -494,19 +607,20 @@ export class StoppedAgentStore {
         // A retry in a new core may see its prior publication. The exact request
         // still has to confirm that image before obtaining launch authority.
         const record = this.decodeRecord(JSON.parse(retained.content!), original.agentId), saved = record.session
-        if (record.transfer) throw Error('The original native resume belongs to its live handoff.')
+        if (record.transfer || record.returnRole?.phase === 'returning') throw Error('The original native resume belongs to its live handoff.')
         if (!saved || nativeTurnTarget(saved) !== nativeTurnTarget(original)
           || JSON.stringify(saved.nativeControl) !== JSON.stringify(original.nativeControl)
             && JSON.stringify(saved.nativeControl) !== JSON.stringify(next)) throw Error('The original saved native control owner changed.')
         if (this.uncertain.size >= 256) throw Error('Waiting for saved native control confirmation capacity.')
         const candidate = { ...saved, schemaVersion: 3 as const, nativeControl: next }
-        pending = { before: retained.content!, candidate, bytes: JSON.stringify({ version: 1, session: candidate }, null, 2),
+        pending = { before: retained.content!, candidate, returnRole: record.returnRole,
+          bytes: JSON.stringify(this.savedImage(candidate, record.returnRole), null, 2),
           verifyDirectory: retained.verifyDirectory }
         this.uncertain.set(original.agentId, pending)
       }
       const beforeCommit = () => { authority.verify(); pending.verifyDirectory(); retained.verify(); authority.current() }
       beforeCommit()
-      if (retained.content !== pending.bytes) atomicWriteJson(file, { version: 1, session: pending.candidate }, false, beforeCommit)
+      if (retained.content !== pending.bytes) atomicWriteJson(file, this.savedImage(pending.candidate, pending.returnRole), false, beforeCommit)
       pending.verifyDirectory()
       const committed = this.inspectControl(pending.candidate)
       committed.confirm(() => { authority.verify(); pending.verifyDirectory(); authority.current() })

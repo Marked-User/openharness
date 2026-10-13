@@ -18,6 +18,51 @@ export interface NativeArchiveTransfer {
   readonly pane: string
 }
 
+/** `returning` is still live-owned. `saved` is the durable receipt for that
+ * closed visit, retained while later saved edits change the session itself. */
+export interface NativeArchiveReturn {
+  readonly version: 1
+  readonly phase: 'returning' | 'saved'
+  readonly link: NativeArchiveLink
+  readonly sourceTarget: string
+  readonly controlFingerprint: string
+  readonly checkpoint: string
+  readonly savedTarget: string
+}
+
+/** Produced after exact engine termination and original allocation accounting.
+ * Cancellation or an empty Registry lookup is not a stopped-process proof.
+ * Its evidence survives the intentional Registry rename; that source file's
+ * separate proof belongs to Registry, not to verifyStopped. */
+export interface NativeArchiveStopProof {
+  readonly source: Readonly<{ target: string; controlFingerprint: string }>
+  verifyStopped(): void
+  current(): void
+}
+
+export type NativeArchiveEnvelope = { version: 1; session: unknown }
+  | { version: 2; session: unknown; nativeTransfer: NativeArchiveTransfer }
+  | { version: 3; session: unknown; nativeReturn: NativeArchiveReturn }
+
+/** Both the daemon and the pre-exec witness read these roles. An older version
+ * must never turn transferred or returning history into saved authority. */
+export function parseNativeArchiveEnvelope(value: unknown): NativeArchiveEnvelope | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  if (raw.version === 1 && !Object.hasOwn(raw, 'nativeTransfer') && !Object.hasOwn(raw, 'nativeReturn')) {
+    return { version: 1, session: raw.session }
+  }
+  if (raw.version === 2 && Object.keys(raw).sort().join(',') === 'nativeTransfer,session,version') {
+    const nativeTransfer = parseNativeArchiveTransfer(raw.nativeTransfer)
+    if (nativeTransfer) return { version: 2, session: raw.session, nativeTransfer }
+  }
+  if (raw.version === 3 && Object.keys(raw).sort().join(',') === 'nativeReturn,session,version') {
+    const nativeReturn = parseNativeArchiveReturn(raw.nativeReturn)
+    if (nativeReturn) return { version: 3, session: raw.session, nativeReturn }
+  }
+  return null
+}
+
 export function parseNativeArchiveLink(value: unknown): NativeArchiveLink | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const row = value as Record<string, unknown>
@@ -37,4 +82,14 @@ export function parseNativeArchiveTransfer(value: unknown): NativeArchiveTransfe
     || typeof row.processKey !== 'string' || !row.processKey || row.processKey.length > 512
     || typeof row.pane !== 'string' || !/^%\d{1,20}$/.test(row.pane)) return null
   return Object.freeze({ version: 1, link, pendingTarget: row.pendingTarget, processKey: row.processKey, pane: row.pane })
+}
+
+export function parseNativeArchiveReturn(value: unknown): NativeArchiveReturn | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const row = value as Record<string, unknown>, link = parseNativeArchiveLink(row.link)
+  if (Object.keys(row).sort().join(',') !== 'checkpoint,controlFingerprint,link,phase,savedTarget,sourceTarget,version'
+    || row.version !== 1 || (row.phase !== 'returning' && row.phase !== 'saved') || !link
+    || ![row.sourceTarget, row.controlFingerprint, row.checkpoint, row.savedTarget].every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))) return null
+  return Object.freeze({ version: 1, phase: row.phase, link, sourceTarget: row.sourceTarget as string,
+    controlFingerprint: row.controlFingerprint as string, checkpoint: row.checkpoint as string, savedTarget: row.savedTarget as string })
 }

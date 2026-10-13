@@ -4,6 +4,7 @@ import { realpathSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { AgentCreationReceipts, creationFingerprint, validCreationId, type NativeRelaunchRequest } from '../../lib/agentCreationReceipt.js'
 import { inspectNativeControlFile } from '../../lib/nativeControlFile.js'
+import { parseNativeArchiveEnvelope } from '../../lib/nativeArchive.js'
 import { nativeTurnTarget, parseNativeTurnIntent, type NativeTurnIntent } from '../../lib/nativeTurnIntent.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { prepareProcessImageHelper, type ProcessImageArtifact } from '../../lib/nativeProcessImageArtifact.js'
@@ -61,7 +62,12 @@ function readControl(input: NativeRearmWitnessRequest, budget: NativeEvidenceBud
   const file = join(directory, input.source === 'live' ? 'registry.json' : `${input.control.rearm!.agentId}.json`)
   const proof = inspectNativeControlFile(file, directory)
   const value: unknown = JSON.parse(proof.content!)
-  const rows = input.source === 'live' ? value : object(value) && value.version === 1 ? [value.session] : null
+  const archive = input.source === 'saved' ? parseNativeArchiveEnvelope(value) : null
+  const saved = archive?.session
+  const savedOwner = archive && (archive.version === 1 || archive.version === 3 && archive.nativeReturn.phase === 'saved')
+    && object(saved) && saved.active === false && !Object.hasOwn(saved, 'nativeArchive') && !Object.hasOwn(saved, 'nativeRetirement')
+    && (archive.version !== 3 || archive.nativeReturn.link.agentId === saved.agentId)
+  const rows = input.source === 'live' ? value : savedOwner ? [saved] : null
   if (!Array.isArray(rows) || rows.length > 4096) return held('saved control is incomplete')
   const selected = rows.filter(row => object(row) && row.agentId === input.control.rearm!.agentId)
   if (selected.length !== 1 || !object(selected[0]) || selected[0].schemaVersion !== 3 || selected[0].engine !== 'cursor'

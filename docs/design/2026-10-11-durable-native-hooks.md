@@ -407,6 +407,51 @@ retirement, a concurrent live Cancel invalidates the checkpoint; afterward,
 finish the metadata handoff before routing new control to saved state. No
 third journal or inference from row absence is part of this protocol.
 
+October 13 reverse Stop checkpoint: that protocol is now implemented in Registry
+and the saved Store. The archive preserves the latest cancelled live snapshot;
+retirement requires the exact stopped-process and original-allocation proof.
+Its durable tombstone blocks discovery, rebinding and ordinary control writes.
+After saved ownership is confirmed, cleanup preserves newer saved Cancel and
+folder edits, and the next Resume consumes only its own closed visit. Tests cover
+two complete visits and stale work from the first visit against the second.
+
+The archive parser is shared with the pre-exec witness. A version-three saved
+record can authorize its own new reservation; returning, transferred, malformed,
+foreign-agent and version-downgraded records cannot. Both directions retain the
+actual publisher through the first subsequent inspection and uncertain retries.
+A replaced file with identical bytes does not inherit publication authority.
+
+Receipt `20261013T175142.971421Z-33157` passes types and 393 cases in nine files,
+including the unchanged admission golden and architecture (146.1 and 152.1
+seconds on the loaded host). Receipt `20261013T180401.043628Z-74958` passes the
+complete affected baselines and all 35 assertion mutations: twelve reverse and
+witness faults, eleven forward-transfer faults and twelve live-replacement
+faults (313.9 seconds). Final types after the retained-read extraction pass in
+`20261013T180959.220099Z-1521` (25.0 seconds). Earlier failed receipts retain the
+fixture request-ID/type errors, one typecheck timeout, and two mutation-oracle
+errors. The corrected substitution oracle now replaces the file precisely before
+reinspection; the former descriptor-close injection faulted an earlier verifier
+and did not demonstrate the required publisher guard.
+
+Independent review approved this reverse-storage and witness-consumer delta over
+`f01172974`, including its successor tests and corrected mutation oracles, after
+the completed gates. Review found and corrected discovery's in-memory reopening
+of a retirement and required the witness's version-three consumer. Implementation
+and review ran approximately 17:20–18:10 UTC October 13; validation overlapped
+17:36–18:10. Merge, publication and external waiting remain zero. This is scoped
+approval: physical Stop evidence, saved Resume orchestration and marker cleanup,
+production activation and full-PR acceptance remain open.
+
+Saved Resume integration must also handle Cancel between pending Registry
+publication and archive transfer. Under Registry then archive locks, an exact
+pending-handoff abort must preserve saved control, account for the original
+allocation or prove it never dispatched, and retire only the matching pending
+row and marker. After transfer, Cancel and Stop belong to the live visit. Native
+markers bind the full permanent archive link, and later cleanup follows that
+link rather than the current rearm request. Confirmed creation remains successful
+when marker cleanup needs a retry; exact receipt/link evidence can finish that
+metadata work even after the engine exits, without another launch.
+
 October 13 recap checkpoint: the recaps port now derives a bounded summary from
 the exact answer retained for an owner and generation. Core copies the input
 before a service wait and checks the reply's generation identity, input digest

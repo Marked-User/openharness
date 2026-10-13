@@ -77,6 +77,41 @@ it.each([undefined, 'ask', 'auto', 'plan', 'full'] as const)('retains a saved pe
   expect(p.input.request).toEqual(nativeRearmRequest(p.input.control))
 })
 
+it('the next saved Resume can execute while retaining the previous closed visit receipt', async () => {
+  const p = await fixture('saved', { permissionMode: 'full' }), value = JSON.parse(readFileSync(p.file, 'utf8'))
+  const nativeReturn = { version: 1, phase: 'saved', link: { version: 1, agentId, requestId: 'previous-resume-request',
+    launchToken: 'previous-launch-token', target: 'a'.repeat(64) }, sourceTarget: 'b'.repeat(64),
+    controlFingerprint: 'c'.repeat(64), checkpoint: 'd'.repeat(64), savedTarget: 'e'.repeat(64) }
+  writeFileSync(p.file, JSON.stringify({ version: 3, session: value.session, nativeReturn }), { mode: 0o600 })
+  const before = readFileSync(p.file, 'utf8')
+  expect(await p.write()).toBe(true)
+  expect(readFileSync(p.file, 'utf8')).toBe(before)
+  expect(p.receipts.readNativeRelaunchProcess(id, p.input).process.pid).toBe(42)
+})
+
+it.each(['returning', 'transferred', 'legacy-return', 'legacy-transfer', 'extra', 'malformed', 'foreign', 'active', 'live-link', 'retirement'])('the saved witness refuses %s ownership before any process probe', async change => {
+  const p = await fixture('saved'), value = JSON.parse(readFileSync(p.file, 'utf8'))
+  const link = { version: 1, agentId, requestId: 'previous-resume-request', launchToken: 'previous-launch-token', target: 'a'.repeat(64) }
+  const record: Record<string, any> = { version: 3, session: value.session, nativeReturn: { version: 1, phase: 'saved', link,
+    sourceTarget: 'b'.repeat(64), controlFingerprint: 'c'.repeat(64), checkpoint: 'd'.repeat(64), savedTarget: 'e'.repeat(64) } }
+  if (change === 'returning') record.nativeReturn.phase = 'returning'
+  if (change === 'transferred' || change === 'legacy-transfer') {
+    record.version = change === 'transferred' ? 2 : 1
+    record.nativeTransfer = { version: 1, link, pendingTarget: 'b'.repeat(64), processKey: 'original-process', pane: '%1' }
+    delete record.nativeReturn
+  }
+  if (change === 'legacy-return') record.version = 1
+  if (change === 'extra') record.extra = true
+  if (change === 'malformed') record.nativeReturn.checkpoint = 'bad'
+  if (change === 'foreign') record.nativeReturn.link.agentId = 'another-agent'
+  if (change === 'active') record.session.active = true
+  if (change === 'live-link') { record.version = 1; delete record.nativeReturn; record.session.nativeArchive = link }
+  if (change === 'retirement') record.session.nativeRetirement = record.nativeReturn
+  writeFileSync(p.file, JSON.stringify(record), { mode: 0o600 })
+  await expect(p.write()).rejects.toThrow('saved control is incomplete')
+  expect(p.probe).not.toHaveBeenCalled(); expect(existsSync(p.witness)).toBe(false)
+})
+
 it.each(['source', 'outer-source', 'permission', 'omission', 'saved-mode', 'saved-bypass'] as const)('holds a %s change to the original reserved launch options', async change => {
   const p = await fixture('saved', { permissionMode: 'full' })
   p.input.request = { ...p.input.request }

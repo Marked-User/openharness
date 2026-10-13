@@ -61,8 +61,8 @@ import { externalReservations, externalResumePending, externalResumeIds, parseEx
 import type { StartedBy } from './agentAttribution.js'
 import { nativeRearmRequest, nativeTurnTarget, nativeTurnTransition, parseNativeTurnIntent, type NativeTurnIntent } from './nativeTurnIntent.js'
 import { inspectNativeControlFile } from './nativeControlFile.js'
-import { parseNativeArchiveLink, type NativeArchiveLink, type NativeArchiveTransfer } from './nativeArchive.js'
-import type { NativeArchiveTransaction, StoppedAgentStore } from './stoppedAgents.js'
+import { parseNativeArchiveLink, parseNativeArchiveReturn, type NativeArchiveLink, type NativeArchiveTransfer, type NativeArchiveReturn, type NativeArchiveStopProof } from './nativeArchive.js'
+import type { NativeArchiveTransaction, NativeArchiveReturnTransaction, StoppedAgentStore } from './stoppedAgents.js'
 import type { NativeRearmReplacementProof } from '../engines/kit/nativeRearmProof.js'
 import { creationFingerprint } from './agentCreationReceipt.js'
 import { hookPreparationRoutes } from '../engines/kit/nativeHookFiles.js'
@@ -101,6 +101,8 @@ export interface RegisteredSession {
   /** An archive-to-live ownership epoch. Only an explicit two-store handoff
    * creates or retires it; later live cancellation and restart retain it. */
   nativeArchive?: NativeArchiveLink
+  /** Exact non-admitting retirement; only its two-store handoff can remove it. */
+  nativeRetirement?: NativeArchiveReturn
   /** Whether the supported engine process is currently identified; terminal liveness is tracked separately. */
   active: boolean
   /** Harness-created panes can be rendered before their engine process exists. Absent on legacy rows. */
@@ -634,9 +636,14 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
   const externalResume = row.externalResume === undefined ? undefined : parseExternalResume(row.externalResume)
   const nativeControl = row.nativeControl === undefined ? undefined : parseNativeTurnIntent(row.nativeControl)
   const nativeArchive = row.nativeArchive === undefined ? undefined : parseNativeArchiveLink(row.nativeArchive)
+  const nativeRetirement = row.nativeRetirement === undefined ? undefined : parseNativeArchiveReturn(row.nativeRetirement)
   if ((row.schemaVersion !== 2 && row.schemaVersion !== 3)
     || (row.schemaVersion === 3) !== (nativeControl !== undefined) || nativeControl === null
     || nativeArchive === null || nativeArchive && (!nativeControl || row.engine !== 'cursor' || nativeArchive.agentId !== row.agentId)
+    || nativeRetirement === null || nativeRetirement && (nativeRetirement.phase !== 'returning' || !nativeArchive
+      || rowFingerprint(nativeRetirement.link) !== rowFingerprint(nativeArchive) || active || row.processIdentity !== null
+      || !nativeControl || nativeControl.rearm && !nativeControl.rearm.revoked || launch?.state !== 'held' || launch.service !== 'native'
+      || nativeRetirement.controlFingerprint !== creationFingerprint(nativeControl))
     || typeof row.active !== 'boolean'
     || externalResume === null || externalResume && externalResume.request.engine !== row.engine
     || externalResume && externalResumePending(externalResume) && (row.sessionId !== '' || row.processIdentity !== null || launch?.state !== 'held')
@@ -657,7 +664,7 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
   // Taken out of the spread and put back only when it is a real moment: the spread would otherwise
   // carry a hand-edited string or a negative number straight into the frame's `toISOString()`.
   // `forkedFrom` is out too, so an invalid one is dropped rather than spread back in as-is.
-  const { identityHold: _identityHold, evidenceRevision: _revision, interpretationHold: _interpretation, admissionHold: _admission, lastOpenedAt: rawOpenedAt, closePlan: rawClosePlan, forkedFrom: rawForkedFrom, scmLaunch: rawScmLaunch, externalResume: _externalResume, nativeControl: _nativeControl, nativeArchive: _nativeArchive, startedBy: rawStartedBy, parentAgentId: rawParentAgentId, ...rest } = row
+  const { identityHold: _identityHold, evidenceRevision: _revision, interpretationHold: _interpretation, admissionHold: _admission, lastOpenedAt: rawOpenedAt, closePlan: rawClosePlan, forkedFrom: rawForkedFrom, scmLaunch: rawScmLaunch, externalResume: _externalResume, nativeControl: _nativeControl, nativeArchive: _nativeArchive, nativeRetirement: _nativeRetirement, startedBy: rawStartedBy, parentAgentId: rawParentAgentId, ...rest } = row
   const lastOpenedAt = normalizedOpenedAt(rawOpenedAt)
   // Out of the spread for the same reason: a half-formed record is dropped, never relaunched with.
   const scmLaunch = parseScmLaunchRecord(rawScmLaunch)
@@ -666,6 +673,7 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
     ...(externalResume ? { externalResume } : {}),
     ...(nativeControl ? { nativeControl } : {}),
     ...(nativeArchive ? { nativeArchive } : {}),
+    ...(nativeRetirement ? { nativeRetirement } : {}),
     ...(scmLaunch ? { scmLaunch } : {}),
     ...(normalizedClosePlan(rawClosePlan) ? { closePlan: normalizedClosePlan(rawClosePlan)! } : {}),
     schemaVersion: row.schemaVersion,
@@ -1121,6 +1129,7 @@ class Registry {
     archivePending?: { verifyDirectory(): void; verifyPublished?: () => void };
     replacement?: { target: string; controlFingerprint: string; verifyDirectory(): void; verifyPublished?: () => void } } | null = null
   private usedNativeReplacements = new WeakSet<NativeRearmReplacementProof>()
+  private usedNativeStops = new WeakSet<NativeArchiveStopProof>()
   /**
    * Fields a caller set on purpose since the last save, by agent: written as they are now, whatever the
    * file says. The merge alone keeps the file's value wherever this view matches what it last saved, so
@@ -1292,6 +1301,13 @@ class Registry {
         row.evidenceRevision = ++this.evidenceRevision
       }
       for (const raw of Array.isArray(arr) ? arr : []) {
+        // A retirement is a control receipt, not a discoverable process. Repair
+        // cannot change the checkpoint it names, even after a machine reboot.
+        if (raw.nativeRetirement) {
+          const retired = strictPersistedRow(raw)!
+          staged.set(retired.agentId, retired)
+          continue
+        }
         const engine = normalizedAgentEngine(raw?.engine)
         const runtimes = normalizedRuntimes(raw?.runtimes, raw?.tmuxPane)
         const pane = tmuxProjection(runtimes)
@@ -1353,6 +1369,7 @@ class Registry {
           schemaVersion: raw.schemaVersion === 3 ? 3 : 2,
           ...(raw.nativeControl ? { nativeControl: parseNativeTurnIntent(raw.nativeControl)! } : {}),
           ...(raw.nativeArchive ? { nativeArchive: parseNativeArchiveLink(raw.nativeArchive)! } : {}),
+          ...(raw.nativeRetirement ? { nativeRetirement: parseNativeArchiveReturn(raw.nativeRetirement)! } : {}),
           active,
           ...(launch ? { launch } : {}),
           ...(raw.resumeOnly === true ? { resumeOnly: true } : {}),
@@ -1538,6 +1555,8 @@ class Registry {
     const { engine, processIdentity } = input
     const runtimes = normalizedRuntimes(input.runtimes, input.tmuxPane)
     if (!runtimes.length || !validProcessIdentity(processIdentity)) return null
+    if (input.agentId && this.agents.get(input.agentId)?.nativeRetirement || runtimes.some(runtime =>
+      this.agents.get(this.runtimeIndex.get(terminalRouteKey(runtime)) ?? '')?.nativeRetirement)) return null
     if (runtimes.some(runtime => externalResumePending(this.agents.get(this.runtimeIndex.get(terminalRouteKey(runtime)) ?? '')?.externalResume))) return null
     const processAgentId = this.processIndex.get(processIdentityKey(engine, processIdentity))
     const processAgent = processAgentId ? this.agents.get(processAgentId) : undefined
@@ -1821,7 +1840,7 @@ class Registry {
   /** Retry only this saved binding. A failed read leaves all of its prior facts intact. */
   revalidateBinding(agentId: string): RegisteredSession | null {
     const entry = this.agents.get(agentId)
-    if (!entry) return null
+    if (!entry || entry.nativeRetirement) return null
     if (!entry.sessionId || !entry.transcriptPath) return entry
     const proof = savedTranscriptEvidence(entry.engine, entry.sessionId, entry.transcriptPath, entry.codexHome ?? undefined)
     // Stage the change without releasing the live index. A daemon-down hook may have bound another
@@ -1902,6 +1921,7 @@ class Registry {
         .filter((agent): agent is RegisteredSession => !!agent)
         .find((agent): agent is RegisteredSession => !!agent))
     const agentId = processAgent?.agentId ?? ''
+    if (processAgent?.nativeRetirement) return null
     // An inert adoption pane cannot bind a hook before core has admitted its external conversation.
     if (processAgent?.externalResume && processAgent.externalResume.phase !== 'admitted') return null
     const admittedAlias = this.list().find(row => row.agentId !== agentId && row.externalResume?.phase === 'admitted'
@@ -2039,6 +2059,7 @@ class Registry {
       schemaVersion: existing?.nativeControl ? 3 : 2,
       ...(existing?.nativeControl ? { nativeControl: existing.nativeControl } : {}),
       ...(existing?.nativeArchive ? { nativeArchive: existing.nativeArchive } : {}),
+      ...(existing?.nativeRetirement ? { nativeRetirement: existing.nativeRetirement } : {}),
       active: existing && isTerminalEngine(existing.engine) ? true : existing?.active ?? true,
       ...(existing?.evidenceRevision === undefined ? {} : { evidenceRevision: existing.evidenceRevision }),
       ...(retainEvidence && existing.identityHold ? { identityHold: existing.identityHold } : {}),
@@ -2280,7 +2301,7 @@ class Registry {
   updateRuntimes(agentId: string, runtimes: readonly TerminalRuntimeRef[], primaryRuntimeKey?: string): boolean {
     const entry = this.agents.get(agentId)
     const normalized = normalizedRuntimes(runtimes)
-    if (!entry || !normalized.length) return false
+    if (!entry || entry.nativeRetirement || !normalized.length) return false
     const before = rowFingerprint(persistedRow(entry))
     this.drop(entry)
     entry.runtimes = normalized
@@ -2296,6 +2317,7 @@ class Registry {
 
   setActive(agentId: string, active: boolean): boolean {
     const entry = this.agents.get(agentId)
+    if (entry?.nativeRetirement) return false
     if (!entry || entry.active === active) return !!entry
     entry.active = active
     entry.touchedAt = Date.now()
@@ -2321,7 +2343,7 @@ class Registry {
 
   setLaunch(agentId: string, launch: AgentLaunch): RegisteredSession | null {
     const entry = this.agents.get(agentId)
-    if (!entry) return null
+    if (!entry || entry.nativeRetirement) return null
     const before = entry.launch
     entry.launch = normalizedLaunch(launch)
     // A held agent runs no engine yet: it is not active until its launch is.
@@ -2388,7 +2410,7 @@ class Registry {
 
   setClosePlan(agentId: string, plan: RegisteredSession['closePlan'] | null): RegisteredSession | null {
     const entry = this.agents.get(agentId)
-    if (!entry) return null
+    if (!entry || entry.nativeRetirement) return null
     const previous = entry.closePlan
     if (plan) entry.closePlan = normalizedClosePlan(plan)
     else delete entry.closePlan
@@ -2686,6 +2708,112 @@ class Registry {
     return this.byAgent(original.agentId)!
   }
 
+  /** Preserve the latest cancelled visit before any physical Stop. This remains
+   * live-owned: another Cancel invalidates it and requires a fresh checkpoint. */
+  checkpointNativeArchive(input: RegisteredSession, stopped: Pick<StoppedAgentStore, 'withNativeReturn'>,
+    fence: () => void): NativeArchiveReturn {
+    const { original, unchanged } = this.nativeArchiveOwner(input, false)
+    const source = this.readNativeControl(original)
+    const current = () => { unchanged(); fence(); unchanged() }
+    const verify = () => { source.verify(); current() }
+    return withRegistryFileLock(() => stopped.withNativeReturn(original, archive => {
+      verify()
+      const role = archive.checkpoint({ verifyBefore: verify, verifyAfter: verify, current })
+      archive.verify(); verify()
+      return role
+    }))
+  }
+
+  /** Only verified termination may retire this exact live visit. A revoked
+   * launch still needs its original allocation accounted for by the proof.
+   * The archive cannot become saved until this tombstone is durable. */
+  retireNativeArchive(input: RegisteredSession, proof: NativeArchiveStopProof,
+    stopped: Pick<StoppedAgentStore, 'nativeReturn' | 'withNativeReturn'>, fence: () => void): RegisteredSession {
+    const { original, target, controlFingerprint, unchanged } = this.nativeArchiveOwner(input, false)
+    const binding = { ...proof.source }, { verifyStopped, current: stoppedCurrent } = proof
+    if (binding.target !== target || binding.controlFingerprint !== controlFingerprint) {
+      throw new IdentityReadUnavailable('the stopped process proof belongs to a different native visit')
+    }
+    if (this.usedNativeStops.has(proof)) throw new IdentityReadUnavailable('a retirement retry needs fresh stopped-process evidence')
+    this.usedNativeStops.add(proof)
+    const role = parseNativeArchiveReturn(stopped.nativeReturn(original.agentId))
+    if (!role || role.phase !== 'returning' || role.sourceTarget !== target || role.controlFingerprint !== controlFingerprint
+      || rowFingerprint(role.link) !== rowFingerprint(original.nativeArchive)) {
+      throw new IdentityReadUnavailable('the original native Stop checkpoint is unavailable')
+    }
+    const source = this.readNativeReplacementSource(original)
+    const candidate: RegisteredSession = { ...original, nativeRetirement: role, processIdentity: null, active: false,
+      launch: { state: 'held', service: 'native', detail: 'Finishing the saved conversation checkpoint.' } }
+    delete candidate.closePlan
+    let archive: NativeArchiveReturnTransaction
+    const archiveLock = (apply: () => void) => stopped.withNativeReturn(original, retained => { archive = retained; apply() })
+    const current = () => { unchanged(); fence(); stoppedCurrent(); unchanged() }
+    const checkpoint = () => {
+      archive.verify()
+      if (rowFingerprint(archive.role) !== rowFingerprint(role)) throw new IdentityReadUnavailable('the native Stop checkpoint changed')
+    }
+    const verify = () => { source.verify(); checkpoint(); verifyStopped(); current() }
+    this.save(true, false, undefined, { agentId: original.agentId, candidate, verify, sticky: true, replaceLive: true,
+      archiveLock, archiveRetirement: role,
+      replacement: { target, controlFingerprint, verifyDirectory: source.verifyDirectory },
+      prepare: () => archive.confirm(verify),
+      confirm: (verifyPublished, contents) => {
+        const written = inspectNativeControlFile(FILE, env.ADAPTER_DATA_DIR)
+        if (written.content !== contents) throw new IdentityReadUnavailable('the published native retirement bytes changed')
+        written.confirm(() => { verifyPublished(); source.verifyDirectory(); checkpoint(); verifyStopped(); current() })
+      },
+    })
+    this.terminalAvailableAgents.delete(original.agentId)
+    return this.byAgent(original.agentId)!
+  }
+
+  /** Recover metadata only, with no engine signal or launch. The explicit
+   * retirement grants the archive ownership before its live route is removed.
+   * Later saved Cancel/cwd edits retain this closed visit's receipt. */
+  finishNativeArchiveRetirement(input: RegisteredSession, stopped: Pick<StoppedAgentStore, 'withNativeReturn'>,
+    fence: () => void): RegisteredSession {
+    const { original, target, controlFingerprint, unchanged } = this.nativeArchiveOwner(input, true)
+    const source = this.readNativeReplacementSource(original), retirement = original.nativeRetirement!
+    let archive: NativeArchiveReturnTransaction, saved: RegisteredSession
+    const archiveLock = (apply: () => void) => stopped.withNativeReturn(original, retained => { archive = retained; apply() })
+    const current = () => { unchanged(); fence(); unchanged() }
+    const verify = () => { source.verify(); archive.verify(); current() }
+    this.save(true, false, undefined, { agentId: original.agentId, candidate: original, verify, sticky: true, retire: true,
+      archiveLock, replacement: { target, controlFingerprint, verifyDirectory: source.verifyDirectory },
+      prepare: () => {
+        // A new core can observe a retirement rename whose directory never
+        // synced. Confirm its exact file before returning control to the archive.
+        const written = inspectNativeControlFile(FILE, env.ADAPTER_DATA_DIR)
+        written.confirm(verify)
+        saved = archive.complete(retirement, { verifyBefore: verify, verifyAfter: () => { source.verify(); current() }, current })
+      },
+      confirm: (verifyPublished, contents) => {
+        const written = inspectNativeControlFile(FILE, env.ADAPTER_DATA_DIR)
+        if (written.content !== contents) throw new IdentityReadUnavailable('the published native retirement cleanup bytes changed')
+        written.confirm(() => { verifyPublished(); source.verifyDirectory(); archive.verify(); current() })
+      },
+    })
+    this.terminalAvailableAgents.delete(original.agentId)
+    return saved!
+  }
+
+  private nativeArchiveOwner(input: RegisteredSession, retired: boolean) {
+    const original = structuredClone(input), control = original.nativeControl
+    if (!strictPersistedRow(original) || original.engine !== 'cursor' || !original.sessionId || !original.nativeArchive
+      || !control || control.rearm && !control.rearm.revoked || !!original.nativeRetirement !== retired) {
+      throw new IdentityReadUnavailable('the exact cancelled native archive owner is unavailable')
+    }
+    const target = nativeTurnTarget(original), controlFingerprint = creationFingerprint(control)
+    const unchanged = () => {
+      const row = this.byAgent(original.agentId)
+      if (!row || nativeTurnTarget(row) !== target || creationFingerprint(row.nativeControl) !== controlFingerprint) {
+        throw new IdentityReadUnavailable('the original native archive owner changed')
+      }
+    }
+    unchanged()
+    return { original, target, controlFingerprint, unchanged }
+  }
+
   /** Mark whether at least one backend placement was verified by this daemon process. */
   setTerminalAvailable(agentId: string, available: boolean): boolean {
     if (!this.agents.has(agentId)) return false
@@ -2715,7 +2843,7 @@ class Registry {
     grid?: GridAssignment | null,
   ): boolean {
     const session = this.resolve(sessionId)
-    if (!session || !validProcessIdentity(processIdentity)) return false
+    if (!session || session.nativeRetirement || !validProcessIdentity(processIdentity)) return false
     const before = rowFingerprint(persistedRow(session))
     this.drop(session)
     session.processIdentity = processIdentity
@@ -2734,7 +2862,7 @@ class Registry {
   /** Forget the process an agent was last seen as — its pane is gone, so the pid is gone with it. */
   clearProcessIdentity(agentId: string): boolean {
     const session = this.agents.get(agentId)
-    if (!session) return false
+    if (!session || session.nativeRetirement) return false
     if (!session.processIdentity) return true
     this.drop(session)
     session.processIdentity = null
@@ -2746,7 +2874,7 @@ class Registry {
 
   setBypassPermission(agentId: string, bypassPermission: boolean): boolean {
     const session = this.agents.get(agentId)
-    if (!session) return false
+    if (!session || session.nativeRetirement) return false
     if ((session.bypassPermission === true) === bypassPermission) return true
     if (bypassPermission) session.bypassPermission = true
     else delete session.bypassPermission
@@ -2761,7 +2889,7 @@ class Registry {
    *  (the same name again is a no-op). A name that is not a mode is refused, as on load. */
   setPermissionMode(agentId: string, permissionMode: string): boolean {
     const session = this.agents.get(agentId)
-    if (!session || !permissionModeName(permissionMode)) return false
+    if (!session || session.nativeRetirement || !permissionModeName(permissionMode)) return false
     if (session.permissionMode) return session.permissionMode === permissionMode
     session.permissionMode = permissionMode
     session.touchedAt = Date.now()
@@ -2775,7 +2903,7 @@ class Registry {
    *  the caller has already proved the new folder from the transcript. */
   setCwd(agentId: string, cwd: string): boolean {
     const session = this.agents.get(agentId)
-    if (!session || session.cwd === cwd) return false
+    if (!session || session.nativeRetirement || session.cwd === cwd) return false
     session.cwd = cwd
     session.touchedAt = Date.now()
     this.save()
@@ -2786,7 +2914,7 @@ class Registry {
    *  store's `sessions.profile`). Never overwrites. */
   setCodexHome(agentId: string, codexHome: string): boolean {
     const session = this.agents.get(agentId)
-    if (!session || !sessionStoreOf(session.engine)?.sessions.profile || session.codexHome) return false
+    if (!session || session.nativeRetirement || !sessionStoreOf(session.engine)?.sessions.profile || session.codexHome) return false
     session.codexHome = codexHome
     session.touchedAt = Date.now()
     this.save()
@@ -2798,7 +2926,7 @@ class Registry {
    *  homes, and a later probe that could not read the process must not take the answer away. */
   setHermesHome(agentId: string, hermesHome: string): boolean {
     const session = this.agents.get(agentId)
-    if (!session || session.engine !== 'hermes' || session.hermesHome) return false
+    if (!session || session.nativeRetirement || session.engine !== 'hermes' || session.hermesHome) return false
     session.hermesHome = hermesHome
     session.touchedAt = Date.now()
     this.save()
@@ -2809,7 +2937,7 @@ class Registry {
    *  replaces one it already has — the harness is chosen once, at creation. */
   setDsh(agentId: string, dsh: string): boolean {
     const session = this.agents.get(agentId)
-    if (!session || session.dsh || !DSH_ID_RE.test(dsh)) return false
+    if (!session || session.nativeRetirement || session.dsh || !DSH_ID_RE.test(dsh)) return false
     session.dsh = dsh
     session.touchedAt = Date.now()
     this.save()
@@ -2824,7 +2952,7 @@ class Registry {
    */
   setGridLaunch(agentId: string, launch: GridLaunchRecord | null): boolean {
     const session = this.agents.get(agentId)
-    if (!session) return false
+    if (!session || session.nativeRetirement) return false
     session.gridLaunch = launch?.override ?? null
     session.gridWebSearch = launch?.webSearch ?? null
     session.touchedAt = Date.now()
@@ -2836,7 +2964,7 @@ class Registry {
    *  Kept even while the agent is on a grid — it is the only record that the previous choice existed. */
   setSubscriptionModel(agentId: string, model: string | null): boolean {
     const session = this.agents.get(agentId)
-    if (!session) return false
+    if (!session || session.nativeRetirement) return false
     session.subscriptionModel = model
     session.touchedAt = Date.now()
     this.save()
@@ -3025,6 +3153,7 @@ class Registry {
       displaced?: { agentId: string; candidate: RegisteredSession | null }; sticky?: boolean;
       archiveAdmission?: NativeArchiveLink; archiveLock?: (apply: () => void) => void; prepare?: () => void;
       archivePending?: { verifyDirectory(): void };
+      archiveRetirement?: NativeArchiveReturn; retire?: true;
       replacement?: { target: string; controlFingerprint: string; verifyDirectory(): void };
       confirm?: (verifyPublished: () => void, contents: string) => void },
     mutationAgentId = externalAgentId ?? bindingCommit?.agentId): void {
@@ -3058,7 +3187,8 @@ class Registry {
           || unconfirmed!.sticky && id === unconfirmed!.agentId && !!beforeCommit.get(id) && !!unconfirmed!.before.get(id)
             && controlFingerprint(JSON.parse(beforeCommit.get(id)!)) === controlFingerprint(JSON.parse(unconfirmed!.before.get(id)!)))
       if (bindingCommit) {
-        currentRows.set(bindingCommit.agentId, persistedRow(bindingCommit.candidate) as unknown as Record<string, unknown>)
+        if (bindingCommit.retire) currentRows.delete(bindingCommit.agentId)
+        else currentRows.set(bindingCommit.agentId, persistedRow(bindingCommit.candidate) as unknown as Record<string, unknown>)
         const displaced = bindingCommit.displaced
         if (displaced?.candidate) currentRows.set(displaced.agentId, persistedRow(displaced.candidate) as unknown as Record<string, unknown>)
         else if (displaced) currentRows.delete(displaced.agentId)
@@ -3225,7 +3355,24 @@ class Registry {
           if (rowFingerprint(before) === rowFingerprint(after)) continue
           if (bindingCommit?.agentId === id && bindingCommit.archiveAdmission && !before
             && rowFingerprint(after) === rowFingerprint(bindingCommit.archiveAdmission)) continue
+          if (bindingCommit?.agentId === id && bindingCommit.retire && before && after === undefined
+            && rowFingerprint(before) === rowFingerprint(bindingCommit.candidate.nativeArchive) && bindingCommit.candidate.nativeRetirement) continue
           throw new IdentityReadUnavailable('the native archive ownership epoch changed outside its handoff')
+        }
+        for (const id of new Set([...latest.keys(), ...mergedRows.keys()])) {
+          const before = latest.get(id)?.nativeRetirement, after = mergedRows.get(id)?.nativeRetirement
+          if (rowFingerprint(before) === rowFingerprint(after)) {
+            if (before && nativeTurnTarget(latest.get(id) as unknown as RegisteredSession)
+              !== nativeTurnTarget(mergedRows.get(id) as unknown as RegisteredSession)) {
+              throw new IdentityReadUnavailable('the retired native visit changed outside its handoff')
+            }
+            continue
+          }
+          if (bindingCommit?.agentId === id && bindingCommit.archiveRetirement && !before
+            && rowFingerprint(after) === rowFingerprint(bindingCommit.archiveRetirement)) continue
+          if (bindingCommit?.agentId === id && bindingCommit.retire && before && after === undefined
+            && rowFingerprint(before) === rowFingerprint(bindingCommit.candidate.nativeRetirement)) continue
+          throw new IdentityReadUnavailable('the native retirement changed outside its handoff')
         }
         const rows = validatedRows(merged)
         if (!rows) throw new Error('registry transaction would violate global identity invariants')

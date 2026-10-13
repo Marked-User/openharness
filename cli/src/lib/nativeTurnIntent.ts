@@ -82,6 +82,8 @@ export function nativeTurnTarget(row: RegisteredSession): string {
   // pins its original archive link, which later Cancel and Restart preserve.
   if (row.nativeArchive) identity.push(['native-archive', row.nativeArchive.version, row.nativeArchive.agentId,
     row.nativeArchive.requestId, row.nativeArchive.launchToken, row.nativeArchive.target])
+  if (row.nativeRetirement) identity.push(['native-retirement', row.nativeRetirement.sourceTarget,
+    row.nativeRetirement.controlFingerprint, row.nativeRetirement.checkpoint, row.nativeRetirement.savedTarget])
   return createHash('sha256').update(JSON.stringify(identity)).digest('hex')
 }
 
@@ -106,6 +108,7 @@ export function nativeTurnAdmitted(intent: NativeTurnIntent | undefined, owner: 
 /** A proof supplied by a caller can confirm native facts, but cannot skip the
  * durable reservation or replace its original Cancel/launch identity. */
 export function nativeTurnTransition(row: RegisteredSession, next: NativeTurnIntent): boolean {
+  if (row.nativeRetirement) return false
   const previous = row.nativeControl
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
   const cancel = () => next.cancel.target === nativeTurnTarget(row)
