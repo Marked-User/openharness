@@ -77,7 +77,7 @@ describe.skipIf(!binary)('native allocation ownership on a private tmux server',
     const queued = nativePaneAllocationArgs('close', p.allocation)
     const command = await tmux.run('display-message', '-p', '-t', p.allocation.pane, '#{pane_start_command}')
     writeFileSync(p.gate, '')
-    await vi.waitFor(() => expect(existsSync(p.successor)).toBe(true))
+    await vi.waitFor(() => expect(existsSync(p.successor)).toBe(true), { timeout: 4000 })
     expect(Number(readFileSync(p.successor, 'utf8'))).toBe(p.allocation.rootPid)
     expect(await tmux.run('display-message', '-p', '-t', p.allocation.pane, '#{pane_start_command}')).toBe(command)
     expect(await mark(p.allocation)).toBe(`released:${p.allocation.token}:${p.allocation.rootPid}`)

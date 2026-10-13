@@ -26,6 +26,7 @@ import { nativeHookScope } from './nativeHookScope.js'
 import type { HookPreparationProof } from './nativeHookFiles.js'
 import { nativeRearmExecCommand, prepareNativeRearmWitness, type NativeRearmWitnessCommand } from './nativeRearmWitness.js'
 import { createNativeRearmProof } from './nativeRearmProof.js'
+import { closeNativeStopPane, createNativePhysicalStop, type NativePhysicalStopOwner } from './nativePhysicalStop.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
 import { executableSnapshot, nativeVersionProbe } from './nativeVersion.js'
 import { shellSingleQuote } from '../../lib/shellQuote.js'
@@ -37,6 +38,7 @@ const originalData = env.ADAPTER_DATA_DIR
 let root: string, artifact: string, images: ProcessImageArtifact | undefined, tmux: IsolatedTmux | undefined
 const children: Array<{ child: ReturnType<typeof spawn>; closed: Promise<void> }> = []
 let sequence = 0
+const lifetimes: Array<{ path: string; marker: string }> = []
 beforeAll(async () => {
   if (process.platform === 'darwin' && process.env.HARNESS_REQUIRE_PROCESS_IMAGES === '1' && !artifactPath) throw Error('Pinned process image artifact required')
   root = realpathSync(mkdtempSync(join(tmpdir(), 'native-rearm-process-')))
@@ -47,16 +49,39 @@ beforeAll(async () => {
   artifact = join(root, 'package', 'notify.mjs')
 })
 afterEach(async () => {
-  await tmux?.close(); tmux = undefined
-  for (const { child, closed } of children.splice(0)) {
-    if (child.pid && child.exitCode === null && child.signalCode === null) {
-      try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
-    }
-    await closed
+  // A failed assertion must not skip other fixture cleanup. Remove every owned
+  // lifetime first, then always close the private server and direct children.
+  const failures: unknown[] = [], pending = lifetimes.splice(0)
+  const pids: number[] = []
+  for (const lifetime of pending) {
+    try { if (existsSync(lifetime.marker)) pids.push(JSON.parse(readFileSync(lifetime.marker, 'utf8')).pid) }
+    catch (error) { failures.push(error) }
+    try { rmSync(lifetime.path, { force: true }) } catch (error) { failures.push(error) }
   }
-  vi.unstubAllEnvs()
-  vi.unstubAllGlobals(); env.ADAPTER_RUNTIME_DIR = originalRuntime; env.ADAPTER_DATA_DIR = originalData
+  try {
+    for (const pid of pids) {
+      try { await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), { timeout: 5000 }) }
+      catch (error) { failures.push(error) }
+    }
+  } finally {
+    try { await tmux?.close() } catch (error) { failures.push(error) }
+    finally {
+      tmux = undefined
+      for (const { child, closed } of children.splice(0)) {
+        try {
+          if (child.pid && child.exitCode === null && child.signalCode === null) {
+            try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
+          }
+          await closed
+        } catch (error) { failures.push(error) }
+      }
+      vi.unstubAllEnvs(); vi.unstubAllGlobals()
+      env.ADAPTER_RUNTIME_DIR = originalRuntime; env.ADAPTER_DATA_DIR = originalData
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, 'Private native fixture cleanup failed')
 })
+
 afterAll(() => rmSync(root, { recursive: true, force: true }))
 function environment(directory: string) {
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: join(root, 'home'), ZDOTDIR: join(root, 'home'), ADAPTER_DATA_DIR: directory,
@@ -77,7 +102,7 @@ function start(script: string, directory: string, args: string[] = []) {
   children.push({ child, closed })
   return { child, closed, output: () => ({ stdout, stderr, code, signal }) }
 }
-async function fixture(hold = false, spaced = false, originalPane = '%1', source: 'live' | 'saved' = 'live') {
+async function fixture(hold = false, spaced = false, originalPane = '%1', source: 'live' | 'saved' = 'live', exitsWithTerminal = false) {
   const directory = join(root, `case-${++sequence}${spaced ? ' with spaces' : ''}`); mkdirSync(directory, { mode: 0o700 })
   const id = `private-rearm-request-${sequence}`, agentId = `fixture-agent-${sequence}`, token = `private-launch-token-${sequence}`
   const saved = { schemaVersion: 3, agentId, registeredAt: 1, engine: 'cursor', sessionId: 'fixture-session', boundAt: 2, active: source === 'live',
@@ -96,10 +121,11 @@ async function fixture(hold = false, spaced = false, originalPane = '%1', source
   const receipts = new AgentCreationReceipts(join(directory, 'agent-creations'))
   await receipts.runIntent(id, fingerprint, request, { service: 'native', detail: 'fixture' }, async () => async () => ({ state: 'unconfirmed' }))
   const marker = join(directory, 'engine.json'), resumed = join(directory, 'continued'), engine = join(directory, 'cursor-agent')
-  const gate = join(directory, 'exec-allowed'), waiting = join(directory, 'waiting')
+  const gate = join(directory, 'exec-allowed'), waiting = join(directory, 'waiting'), alive = join(directory, 'fixture-alive')
+  writeFileSync(alive, 'alive'); lifetimes.push({ path: alive, marker })
   const main = hold ? join(directory, 'cursor-agent-package', 'cursor-agent', 'versions', '1', 'index.js') : engine
   if (hold) mkdirSync(join(directory, 'cursor-agent-package', 'cursor-agent', 'versions', '1'), { recursive: true })
-  writeFileSync(main, `#!${process.execPath}\nconst fs=require('node:fs');fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({pid:process.pid,args:process.argv.slice(2)}));process.on('SIGCONT',()=>fs.writeFileSync(${JSON.stringify(resumed)},'continued'));setInterval(()=>{},1000);\n`, { mode: 0o700 })
+  writeFileSync(main, `#!${process.execPath}\nconst fs=require('node:fs');fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({pid:process.pid,args:process.argv.slice(2)}));process.on('SIGCONT',()=>fs.writeFileSync(${JSON.stringify(resumed)},'continued'));${exitsWithTerminal ? "process.on('SIGHUP',()=>process.exit(0));process.stdin.on('end',()=>process.exit(0));process.stdin.on('error',()=>process.exit(0));process.stdin.resume();" : "process.on('SIGHUP',()=>{});"}setInterval(()=>{if(!fs.existsSync(${JSON.stringify(alive)}))process.exit(0)},50);\n`, { mode: 0o700 })
   if (hold) writeFileSync(engine, '#!/bin/bash -p\n' + `printf '%s' $$ > ${shellSingleQuote(waiting)}\n`
     + `while [ ! -f ${shellSingleQuote(gate)} ]; do /bin/sleep 0.05; done\n`
     + `exec ${shellSingleQuote(process.execPath)} ${shellSingleQuote(main)} "$@"\n`, { mode: 0o700 })
@@ -180,6 +206,81 @@ it.skipIf(!supported)('the existing top-level wrapper resumes the witnessed engi
   expect(JSON.parse(readFileSync(p.marker, 'utf8')).pid).toBe(pid)
   expect((await candidate.prove()).key).toContain(`\0${pid}\0`)
 }, 20000)
+
+for (const mode of ['active', 'released', 'lost-close-reply', 'detached-survivor'] as const) {
+  it.skipIf(!supported)(`physical Stop accounts the original witnessed engine and ${mode} allocation on a private server`, async () => {
+    const p = await fixture(false, false, '%1', 'live', mode !== 'detached-survivor'), pane = await paneLaunch(p)
+    await vi.waitFor(() => expect(existsSync(p.marker)).toBe(true), { timeout: 8000 })
+    const receipt = p.receipts.readNativeRelaunchProcess(p.input.id, p.input), witness = receipt.process
+    expect(witness.namespace).toBeTypeOf('string')
+    const rootPid = Number(await tmux!.run('display-message', '-p', '-t', pane, '#{pane_pid}'))
+    const serverPid = Number(await tmux!.run('display-message', '-p', '#{pid}'))
+    const server = (await probeNativeProcessControl([serverPid], 0, new NativeEvidenceBudget(), false, p.helpers)).rows.get(serverPid)!
+    const endpoint = { binary: resolveBinaryOnPath('tmux')!, socket: tmux!.socket,
+      server: { boot: witness.boot, namespace: witness.namespace!, pid: serverPid, birth: server.birth } }
+    const row = { ...p.saved, nativeControl: { ...p.control, rearm: { ...p.control.rearm!, revoked: true as const } } }
+    const file = join(p.directory, 'registry.json'), image = JSON.stringify([row])
+    writeFileSync(file, image, { mode: 0o600 })
+    const owner: NativePhysicalStopOwner = {
+      source: { target: nativeTurnTarget(row), controlFingerprint: creationFingerprint(row.nativeControl) },
+      engines: [{ ...witness, namespace: witness.namespace! }],
+      allocations: [{ pane, rootPid, token: p.launch.token!, owner: harnessPaneOwner(p.directory), endpoint }],
+      verify: () => { if (readFileSync(file, 'utf8') !== image) throw Error('original Stop source changed') },
+      verifyAllocations: receipt.verify, current: () => {},
+    }
+    if (mode === 'released') {
+      process.kill(witness.pid, 'SIGTERM')
+      await vi.waitFor(async () => expect(await tmux!.run('display-message', '-p', '-t', pane,
+        `#{${NATIVE_PANE_ALLOCATION_OPTION}}`)).toBe(`released:${p.launch.token}:${rootPid}`), { timeout: 4000 })
+    }
+    const observedPane = (await tmux!.run('display-message', '-p', '-t', pane,
+      `#{pid}\n#{pane_id}\n#{pane_pid}\n#{${HARNESS_OWNER_OPTION}}\n#{${NATIVE_PANE_ALLOCATION_OPTION}}\n#{pane_start_command}`)).split('\n')
+    expect(observedPane.slice(0, 5)).toEqual([String(serverPid), pane, String(rootPid), harnessPaneOwner(p.directory),
+      `${mode === 'released' ? 'released' : 'active'}:${p.launch.token}:${rootPid}`])
+    expect(observedPane.slice(5).join('\n').startsWith(`/usr/bin/env HARNESS_NATIVE_LAUNCH_TOKEN=${p.launch.token} `)).toBe(true)
+    let lostReply = mode === 'lost-close-reply'
+    const closePane = vi.fn(async (...args: Parameters<typeof closeNativeStopPane>) => {
+      await closeNativeStopPane(...args)
+      if (lostReply) { lostReply = false; throw Error('fixture lost close reply') }
+    })
+    const stop = createNativePhysicalStop({ roots: [p.directory, join(p.directory, 'agent-creations')], helpers: p.helpers, closePane })
+    const consume = vi.fn(proof => {
+      proof.verifyStopped()
+      // The real Registry owns this intentional leaf transition separately.
+      // Physical receipt/scope authority must remain valid across it.
+      writeFileSync(file, '[]', { mode: 0o600 })
+      proof.verifyStopped(); proof.current()
+      return 'retired'
+    })
+    const first = await stop(owner, consume).then(value => value, error => error as Error)
+    if (mode === 'lost-close-reply') {
+      expect(first).toBeInstanceOf(Error); expect((first as Error).message).toContain('fixture lost close reply')
+      expect(consume).not.toHaveBeenCalled()
+    } else if (first instanceof Error) {
+      // tmux may acknowledge its close before the child actually exits. That
+      // outcome must remain held, then acquire fresh evidence on a later request.
+      expect(first.message).toContain('original engine is still running')
+      expect(consume).not.toHaveBeenCalled()
+    }
+    if (mode === 'detached-survivor') {
+      expect(first).toBeInstanceOf(Error); expect((first as Error).message).toContain('original engine is still running')
+      expect(consume).not.toHaveBeenCalled(); expect(closePane).toHaveBeenCalledOnce()
+      expect(() => process.kill(witness.pid, 0)).not.toThrow()
+      expect(readFileSync(file, 'utf8')).toBe(image)
+      stop.close(); return
+    }
+    await vi.waitFor(() => expect(() => process.kill(witness.pid, 0)).toThrow(), { timeout: 5000 })
+    if (first instanceof Error) await expect(stop(owner, consume)).resolves.toBe('retired')
+    else expect(first).toBe('retired')
+    expect(consume).toHaveBeenCalledOnce()
+    expect(closePane).toHaveBeenCalledTimes(mode === 'released' ? 0 : 1)
+    if (mode === 'released') {
+      expect(await tmux!.run('display-message', '-p', '-t', pane, '#{pane_pid}')).toBe(String(rootPid))
+      expect(() => process.kill(rootPid, 0)).not.toThrow()
+    }
+    stop.close()
+  }, 20000)
+}
 
 it.skipIf(!supported)('recovers the witnessed engine while its source still records the old process', async () => {
   const p = await fixture(false, false, '%0'), pane = await paneLaunch(p)

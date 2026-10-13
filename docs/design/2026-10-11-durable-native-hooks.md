@@ -734,6 +734,52 @@ weaken claim to overwrite a successor. Implementation/review ran approximately
 21:15–21:28 UTC October 13, with validation overlapping through 21:29. Merge,
 publication and external waiting remain zero.
 
+The physical Stop producer now uses guarded tmux closure as its only destructive
+operation, then independently proves every retained engine incarnation dead.
+Numeric PID signals are not incarnation-bound and are not used. A released
+allocation preserves the manual fallback; a detached surviving engine holds
+retirement. The caller must supply a durable exact allocation association: every
+tmux read and close uses its original explicit binary/socket and server
+boot/PID/birth/namespace. An unrelated inventory or a missing socket while that
+server lives cannot prove absence.
+
+Independent filesystem scopes and receipt proofs stay alive through synchronous
+Registry retirement. Only the consumed Registry source leaf is excluded from the
+returned physical proof. Original ownership is checked after independent proofs,
+and cheap lifetime/deadline checks run last, including after descriptor cleanup.
+Four actual operations remain bounded even after their replies expire. Darwin's
+maximum admitted four-allocation/four-engine/two-root path needs 228 subprocess
+probes; this caller permits at most 256 under the unchanged three-second deadline.
+Other native readers retain their 64-probe default. Async retirement callbacks
+are rejected and later rejection is contained.
+
+Types and 151 cases in five complete files pass, including real installed-writer
+and private-tmux closure, released fallback, lost close reply, detached survivor,
+architecture and the default native evidence limits
+(`20261013T215231.275871Z-20187`, 5.0/47.4 seconds). Complete healthy mutation
+baselines pass and sixteen faults fail assertions
+(`20261013T215434.253806Z-33383`, 50.1 seconds). The seventeenth test revoked at
+the first rather than final callback; its corrected complete 79-case file and
+types pass (`20261013T215614.837438Z-45817`, 4.9/0.8 seconds), and its healthy
+case plus mutant pass (`20261013T215648.168975Z-47884`, 1.5 seconds). All seventeen
+faults now fail assertions against unchanged runtime source.
+
+Earlier failed receipts remain failed: the initial fixture/type mistakes, tmux
+format delimiters replaced under the C locale, and a fake engine surviving pane
+closure. The latter confirmed the required hold behavior and exposed fixture
+cleanup that assumed tmux killed its children. Fixtures now have their own
+lifetime files and unconditional teardown; 24 survivors from the three exact
+failed-run roots were terminated and audited absent. The two completed corrected
+fixture roots also have no remaining engines. No owner daemon, home or server was
+used, and no golden was changed.
+
+Independent review approved the producer source after endpoint, final-fence,
+async-rejection and probe-budget corrections, conditional on these completed
+gates. Durable allocation selection, public lifecycle composition, initial
+launches and activation remain excluded. Implementation/review ran approximately
+21:33–21:56 UTC October 13, with overlapping validation through 21:57. Merge,
+publication and external waiting remain zero.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R
