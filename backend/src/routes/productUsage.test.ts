@@ -1,4 +1,5 @@
 import Fastify, { type FastifyRequest } from 'fastify'
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 const methods = vi.hoisted(() => ({ ingestProductUsage: vi.fn(), ingestSetupUsage: vi.fn(), productUsageChoice: vi.fn(), setProductUsageChoice: vi.fn() }))
 vi.mock('../lib/productUsage.js', () => methods)
@@ -38,6 +39,21 @@ it('does not reflect a database error or report contents', async () => {
   const response = await submit(good)
   expect(response.statusCode).toBe(503)
   expect(response.body).not.toContain('PRIVATE_CANARY')
+})
+it.each([['P2034', 'USAGE_WRITE_CONFLICT'], ['P2002', 'USAGE_WRITE_CONFLICT'],
+  ['P2028', 'USAGE_TRANSACTION_FAILED'], ['PRIVATE_CANARY', 'USAGE_UNAVAILABLE']])(
+  'returns only the fixed delivery category for storage error %s', async (code, expected) => {
+    methods.ingestProductUsage.mockRejectedValue(Object.assign(new Error('PRIVATE_CANARY'), { code, meta: 'PRIVATE_CANARY' }))
+    const response = await submit(good)
+    expect(response.statusCode).toBe(503)
+    expect(response.json().error.code).toBe(expected)
+    expect(response.body).not.toContain('PRIVATE_CANARY')
+  },
+)
+it('accepts the same native Desktop report exercised through the real daemon proxy', async () => {
+  const report = JSON.parse(readFileSync(new URL('../../../tests/fixtures/desktop-product-usage-report.json', import.meta.url), 'utf8'))
+  expect((await submit(report)).statusCode).toBe(200)
+  expect(methods.ingestProductUsage).toHaveBeenCalledExactlyOnceWith('account', report)
 })
 it('also sanitizes malformed JSON and oversized bodies before schema validation', async () => {
   for (const payload of ['{"prompt":"PRIVATE_CANARY', JSON.stringify({ prompt: 'PRIVATE_CANARY'.repeat(1000) })]) {

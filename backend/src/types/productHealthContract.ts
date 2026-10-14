@@ -24,7 +24,12 @@ export const HEALTH_MEASURES = [
   'interactive_work_days', 'first_interactive_work', 'first_work_d1_return', 'first_work_d7_return', 'first_work_d28_return',
   'week_worked_1day', 'week_worked_2to3days', 'week_worked_4to5days', 'week_worked_6to7days',
 ] as const
+// Delivery attempts, including retries; separate from the cross-surface app measures.
+export const CLI_REPORT_FAILURES = ['invalid', 'too_large', 'auth', 'rate_limited', 'timeout', 'unreachable',
+  'write_conflict', 'transaction', 'server', 'other'] as const
+export type CliReportFailure = typeof CLI_REPORT_FAILURES[number]
 export const PRODUCT_HEALTH_METRICS = [
+  ...CLI_REPORT_FAILURES.map(reason => `health_cli_report_failure_${reason}` as const),
   ...(['cli', 'desktop'] as const).flatMap(surface => HEALTH_MEASURES.map(m => `health_${surface}_${m}` as const)),
   ...HEALTH_SOURCES.flatMap(source => HEALTH_ACTIONS.flatMap(action => [
     ...HEALTH_RESULTS.map(result => `request_${source}_${action}_${result}` as const),

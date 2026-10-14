@@ -1,5 +1,6 @@
 import { cleanUsageContext, type ProductUsageContext } from '../lib/productHealthContract.js'
 import { cleanHealthState, createProductHealth, type HealthState } from './productHealth.js'
+import { reportFailure } from './reportFailure.js'
 import { readFileSync, statSync } from 'node:fs'
 import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
@@ -254,6 +255,7 @@ export function createProductUsage(deps: ProductUsageDeps) {
       else if (result?.reason === 'EXPIRED') { state.pending = null; add('health_cli_report_expired'); await persist() }
       else {
         add('health_cli_report_rejected')
+        add(`health_cli_report_failure_${reportFailure(answer)}`)
         // A permanently invalid packet must not block every future report behind it.
         if (answer.status === 400 || answer.status === 413) { state.pending = null; await persist() }
       }

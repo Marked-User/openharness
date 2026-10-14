@@ -76,6 +76,12 @@ export async function productUsageRoutes(app: FastifyInstance): Promise<void> {
     // Never reflect rejected fields, values or raw validation errors into logs or responses.
     if (!parsed.success) return sendError(reply, 'Invalid usage report', 'INVALID_USAGE_REPORT', 400)
     try { return sendSuccess(reply, await ingestProductUsage(req.user.sub, parsed.data)) }
-    catch { return sendError(reply, 'Usage report unavailable', 'USAGE_UNAVAILABLE', 503) }
+    catch (error) {
+      // A fixed category can diagnose delivery without exposing database errors or report contents.
+      const storageCode = (error as { code?: unknown } | null)?.code
+      const code = storageCode === 'P2034' || storageCode === 'P2002' ? 'USAGE_WRITE_CONFLICT'
+        : storageCode === 'P2028' ? 'USAGE_TRANSACTION_FAILED' : 'USAGE_UNAVAILABLE'
+      return sendError(reply, 'Usage report unavailable', code, 503)
+    }
   })
 }

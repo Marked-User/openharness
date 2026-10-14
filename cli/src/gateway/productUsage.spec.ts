@@ -94,6 +94,26 @@ it('discards a permanently invalid packet so later reports and loss counts can r
   expect(JSON.parse(readFileSync(file, 'utf8')).pending).toBeNull()
   await usage.sync()
   expect(totals().health_cli_report_rejected).toBe(1)
+  expect(totals().health_cli_report_failure_invalid).toBe(1)
+})
+
+it.each([
+  [503, 'USAGE_WRITE_CONFLICT', 'write_conflict'], [503, 'USAGE_TRANSACTION_FAILED', 'transaction'],
+  [504, 'BACKEND_TIMEOUT', 'timeout'], [502, 'BACKEND_UNREACHABLE', 'unreachable'],
+  [429, 'PRIVATE_CANARY', 'rate_limited'], [502, 'AUTH_UNAVAILABLE', 'auth'],
+])('retains an immutable report on %i and queues only its fixed %s category', async (status, code, category) => {
+  await usage.sync(); usage.counter('search_requests')
+  request.mockResolvedValueOnce({ status: 200, body: { data: { enabled: true, revision: 0 } } })
+    .mockResolvedValueOnce({ status: status as number, body: { error: { code, message: 'PRIVATE_CANARY' } } })
+  await usage.sync()
+  const pending = JSON.parse(readFileSync(file, 'utf8')).pending
+  expect(pending.counters.search_requests).toBe(1)
+  await usage.sync(); await usage.sync()
+  expect(sent[0]).toEqual(pending)
+  expect(totals()[`health_cli_report_failure_${category}`]).toBe(1)
+  expect(totals().health_cli_report_rejected).toBe(1)
+  expect(JSON.stringify(sent)).not.toContain('PRIVATE_CANARY')
+  expect(readFileSync(file, 'utf8')).not.toContain('PRIVATE_CANARY')
 })
 
 it('reduces turns locally, excludes replay, and never persists or uploads agent identity', async () => {

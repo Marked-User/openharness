@@ -90,6 +90,15 @@ and stay below 8 KiB. One sync runs at a time, with five-second network deadline
 report interval. Unknown or failed preference checks stop collection. Slow or failed reporting can
 lose counts and cannot become a product dependency. A failed disk write also disables collection.
 
+`health_cli_report_rejected` counts unsuccessful delivery attempts, including retries; it is not
+a count of lost reports. New `health_cli_report_failure_*` counters split those attempts into fixed
+invalid, too-large, authentication, rate-limit, timeout, unreachable, write-conflict, transaction,
+server and other categories. A transaction failure does not by itself prove a timeout. No raw error
+message, database detail, URL or unknown error code is collected. These diagnostics share the same
+privacy choice and bounded queue, so a delivery outage can delay its own diagnostic counters.
+The local app proxy accepts only bounded UI counts, or Desktop health/UI counts with the exact
+public release, OS and channel context. It does not accept daemon counters or arbitrary context.
+
 Desktop and phone collectors keep only fixed counters in RAM, at most 64 in-flight observations,
 with at most 32 counters per report, one pending report per channel and one flush at a time.
 Callbacks from product actions never await measurement I/O. Reports retry no faster than once per
