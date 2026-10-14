@@ -1,4 +1,5 @@
 import 'core/app_version.dart';
+import 'measurement/setup_usage_choice.dart';
 
 import 'dart:async';
 import 'dart:ui' show AppExitResponse;
@@ -414,6 +415,13 @@ class _RootShellState extends ConsumerState<RootShell>
             if (app.deviceConflict != null && deviceBands)
               DeviceConflictNoticeBand(notifier: app),
             Expanded(child: framed),
+            if (!kIsWeb &&
+                !home &&
+                (touring ||
+                    signInStep ||
+                    app.status == AppStatus.preparingEnvironment ||
+                    app.status == AppStatus.unauthenticated))
+              SetupUsageChoice(measurement: app.productMeasurement),
           ],
         );
       },

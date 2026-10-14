@@ -12,7 +12,7 @@ const db = vi.hoisted(() => ({
   $transaction: vi.fn(), $runCommandRaw: vi.fn(),
 }))
 vi.mock('./prisma.js', () => ({ prisma: db }))
-import { deleteLegacyProductUsage, ensureProductUsageExpiry, ingestProductUsage, productUsageChoice, recordRelayUsage, setProductUsageChoice } from './productUsage.js'
+import { deleteLegacyProductUsage, ensureProductUsageExpiry, ingestProductUsage, ingestSetupUsage, productUsageChoice, recordRelayUsage, setProductUsageChoice } from './productUsage.js'
 import type { ProductUsageReport } from '../types/productUsage.js'
 
 const report: ProductUsageReport = { schemaVersion: 1, revision: 0, id: 'cf1c5a03-388c-4265-b5fb-a4c3d47e407f', day: '2026-10-13', counters: { turns_started: 4, turns_ended: 3 } }
@@ -116,4 +116,14 @@ it('installs database expiry for receipts, totals and every linked daily history
   expect(db.$runCommandRaw).toHaveBeenCalledTimes(10)
   expect(db.$runCommandRaw.mock.calls[0][0]).toMatchObject({ createIndexes: 'product_usage_receipts', indexes: [{ expireAfterSeconds: 0 }] })
   expect(db.$runCommandRaw.mock.calls[2][0]).toMatchObject({ createIndexes: 'user_daily_presence', indexes: [{ expireAfterSeconds: 35 * 86400 }] })
+})
+
+it('setup ingestion never reads an account and expires after yesterday', async () => {
+  const setup = { id: report.id, day: report.day, counters: { setup_desktop_sign_in_ok: 1 } }
+  expect(await ingestSetupUsage(setup, now)).toEqual({ accepted: true })
+  expect(db.productUsagePreference.findUnique).not.toHaveBeenCalled()
+  expect(db.analyticsMachineState.findFirst).not.toHaveBeenCalled()
+  expect(JSON.stringify(db.productUsageReceipt.create.mock.calls)).not.toContain('setup_desktop')
+  expect(await ingestSetupUsage({ ...setup, day: '2026-10-11' }, now)).toMatchObject({ reason: 'EXPIRED' })
+  expect(await ingestSetupUsage({ ...setup, day: '2026-10-12' }, now)).toMatchObject({ accepted: true })
 })

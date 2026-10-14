@@ -358,6 +358,28 @@ describe('account Experimental settings proxy', () => {
     expect((await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) })).status).toBe(200)
     expect(send).toHaveBeenCalledExactlyOnceWith(body)
   })
+  it('accepts only bounded fixed app counts through the local gateway proxy', async () => {
+    const send = vi.fn(async () => ({ status: 200, body: { success: true, data: { accepted: true } } }))
+    const { base } = await start({ onProductUsageReport: send })
+    const body = { schemaVersion: 1, revision: 0, id: '12345678-1234-4234-8234-123456789012', day: '2026-10-14', counters: { ui_desktop_sign_in_ok: 1 } }
+    const headers = { 'x-adapter-local': '1', 'content-type': 'application/json' }
+    const post = (value: unknown, h = headers) => fetch(`${base}/api/product-usage/report`, { method: 'POST', headers: h, body: JSON.stringify(value) })
+    expect((await post(body, { ...headers, origin: 'https://untrusted.example' } as typeof headers)).status).toBe(403)
+    for (const bad of [{ ...body, prompt: 'PRIVATE_CANARY' }, { ...body, counters: { turns_started: 1 } },
+      { ...body, counters: { ui_desktop_sign_in_ok: -1 } }, { ...body, counters: { ui_desktop_sign_in_ok: 'PRIVATE_CANARY' } },
+      { ...body, counters: { 'PRIVATE_CANARY': 1 } }, { ...body, prompt: 'PRIVATE_CANARY'.repeat(1000) }]) {
+      const response = await post(bad)
+      expect(response.status).toBe(400)
+      expect(await response.text()).not.toContain('PRIVATE_CANARY')
+    }
+    expect(send).not.toHaveBeenCalled()
+    expect((await post(body)).status).toBe(200)
+    expect(send).toHaveBeenCalledExactlyOnceWith(body)
+    send.mockRejectedValueOnce(new Error('PRIVATE_CANARY'))
+    const failed = await post(body)
+    expect(failed.status).toBe(502)
+    expect(await failed.text()).not.toContain('PRIVATE_CANARY')
+  })
   it('serves the Privacy switch and rejects cross-origin, extra-field and malformed writes', async () => {
     const write = vi.fn(async () => ({ status: 200, body: { success: true, data: { enabled: false, revision: 1 } } }))
     const { base } = await start({ onProductUsageRead: async () => ({ status: 200, body: { success: true, data: { enabled: true, revision: 0 } } }), onProductUsageWrite: write })

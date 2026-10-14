@@ -9,7 +9,8 @@ import '../core/test_run.dart';
 import '../logging/http_log.dart';
 import '../viewer/device_ack.dart';
 import '../viewer/device_log.dart';
-import '../viewer/device_log_sync.dart' show DeviceLogAppendAnswer, DeviceLogFetched;
+import '../viewer/device_log_sync.dart'
+    show DeviceLogAppendAnswer, DeviceLogFetched;
 import '../ws/local_daemon_transport.dart';
 import 'access_token_source.dart';
 import 'bearer_auth_interceptor.dart';
@@ -107,6 +108,21 @@ class ApiClient {
   }
 
   // -- auth (proxied by the local CLI — no credential on this leg) --
+  Future<Map<String, dynamic>> productUsageReport(
+    Map<String, dynamic> report,
+  ) async {
+    final response = await _dio.post(
+      '/api/product-usage/report',
+      data: report,
+      options: Options(
+        headers: {'x-adapter-local': '1'},
+        receiveTimeout: const Duration(seconds: 5),
+        sendTimeout: const Duration(seconds: 5),
+      ),
+    );
+    return Map<String, dynamic>.from(unwrapApiResponse(response) as Map);
+  }
+
   Future<void> productUsageFeedback(String answer, String receipt) async {
     final response = await _dio.post(
       '/api/product-usage/feedback',
@@ -121,9 +137,15 @@ class ApiClient {
 
   Future<Map<String, dynamic>> productUsageSettings({bool? enabled}) async {
     final response = enabled == null
-        ? await _dio.get('/api/product-usage/settings')
-        : await _dio.post('/api/product-usage/settings', data: {'enabled': enabled},
-            options: Options(headers: {'x-adapter-local': '1'}));
+        ? await _dio.get(
+            '/api/product-usage/settings',
+            options: Options(receiveTimeout: const Duration(seconds: 5)),
+          )
+        : await _dio.post(
+            '/api/product-usage/settings',
+            data: {'enabled': enabled},
+            options: Options(headers: {'x-adapter-local': '1'}),
+          );
     return Map<String, dynamic>.from(unwrapApiResponse(response) as Map);
   }
 
@@ -290,11 +312,16 @@ class ApiClient {
   /// [self]: this app's own key, which the backend counts as used just now (an older one ignores it).
   Future<DeviceLogFetched?> deviceKeys(int since, {String? self}) async {
     try {
-      final res = await _dio.get('/api/device-keys', queryParameters: {'since': since, 'self': ?self});
+      final res = await _dio.get(
+        '/api/device-keys',
+        queryParameters: {'since': since, 'self': ?self},
+      );
       if (res.statusCode != 200) return null;
       final data = unwrapApiResponse(res);
       if (data is! Map) return null;
-      final acct = data['acct'], head = DevLogHead.fromJson(data['head']), entries = data['entries'];
+      final acct = data['acct'],
+          head = DevLogHead.fromJson(data['head']),
+          entries = data['entries'];
       if (acct is! String || head == null || entries is! List) return null;
       return (acct: acct, head: head, entries: entries.cast<Object?>());
     } catch (_) {
@@ -306,14 +333,19 @@ class ApiClient {
   /// reached; a refusal comes back as its code (`STALE_HEAD` with the current head).
   Future<DeviceLogAppendAnswer?> appendDeviceKey(DevLogEntry entry) async {
     try {
-      final res = await _dio.post('/api/device-keys', data: {'entry': entry.toJson()});
+      final res = await _dio.post(
+        '/api/device-keys',
+        data: {'entry': entry.toJson()},
+      );
       final body = res.data;
       if (body is! Map) return null;
       final data = body['data'];
       final head = data is Map ? DevLogHead.fromJson(data['head']) : null;
       if (res.statusCode == 200) return (head: head, error: null);
       final error = body['error'];
-      final code = error is Map && error['code'] is String ? error['code'] as String : 'HTTP_${res.statusCode}';
+      final code = error is Map && error['code'] is String
+          ? error['code'] as String
+          : 'HTTP_${res.statusCode}';
       return (head: head, error: code);
     } catch (_) {
       return null;
@@ -344,7 +376,10 @@ class ApiClient {
   /// devices. False when the backend did not keep it (or predates it).
   Future<bool> postDeviceAck(DevAck ack) async {
     try {
-      final res = await _dio.post('/api/device-keys/acks', data: {'ack': ack.toJson()});
+      final res = await _dio.post(
+        '/api/device-keys/acks',
+        data: {'ack': ack.toJson()},
+      );
       return res.statusCode == 200;
     } catch (_) {
       return false;
@@ -362,7 +397,8 @@ class ApiClient {
       return {
         if (seen is Map)
           for (final e in seen.entries)
-            if (e.key is String && e.value is int) e.key as String: e.value as int,
+            if (e.key is String && e.value is int)
+              e.key as String: e.value as int,
       };
     } catch (_) {
       return const {};
@@ -377,7 +413,9 @@ class ApiClient {
     try {
       final res = await _dio.get('/api/devices');
       final data = res.data;
-      return res.statusCode == 200 && data is Map<String, dynamic> ? data : null;
+      return res.statusCode == 200 && data is Map<String, dynamic>
+          ? data
+          : null;
     } catch (_) {
       return null;
     }
@@ -394,7 +432,9 @@ class ApiClient {
       );
       if (res.statusCode == 200) return null;
       final data = res.data;
-      return data is Map && data['error'] is String ? data['error'] as String : 'HTTP_${res.statusCode}';
+      return data is Map && data['error'] is String
+          ? data['error'] as String
+          : 'HTTP_${res.statusCode}';
     } catch (_) {
       return 'UNAVAILABLE';
     }
@@ -418,11 +458,21 @@ class ApiClient {
   /// list. [confirm]: "It's mine" for the one device named — the daemon shares it with the account's
   /// other devices (one that predates it ignores the field and only marks it seen). False when the
   /// daemon predates the route (an old one answers a `pubs` body with an error).
-  Future<bool> daemonDismissDevices({String? pub, List<String>? pubs, bool baseline = false, bool confirm = false}) async {
+  Future<bool> daemonDismissDevices({
+    String? pub,
+    List<String>? pubs,
+    bool baseline = false,
+    bool confirm = false,
+  }) async {
     try {
       final res = await _dio.post(
         '/api/devices/dismiss',
-        data: {'pub': ?pub, 'pubs': ?pubs, if (baseline) 'baseline': true, if (confirm) 'confirm': true},
+        data: {
+          'pub': ?pub,
+          'pubs': ?pubs,
+          if (baseline) 'baseline': true,
+          if (confirm) 'confirm': true,
+        },
         options: Options(headers: {'x-adapter-local': '1'}),
       );
       return res.statusCode == 200;
@@ -435,7 +485,10 @@ class ApiClient {
   /// does it, for the list whose [head] (`{seq, hash}`) the preview showed. Null when the daemon could
   /// not read a valid list; `{'error': 'LOG_CHANGED'}` when the list is not the one that was previewed;
   /// `{'error': 'OTHER_ACCOUNT'}` when it is another account's than the one this computer is signed in to.
-  Future<Map<String, dynamic>?> daemonRebaselineDevices({required bool confirm, Map<String, Object?>? head}) async {
+  Future<Map<String, dynamic>?> daemonRebaselineDevices({
+    required bool confirm,
+    Map<String, Object?>? head,
+  }) async {
     try {
       final res = await _dio.post(
         '/api/devices/rebaseline',
@@ -444,9 +497,15 @@ class ApiClient {
       );
       final data = res.data;
       if (res.statusCode == 409) {
-        return {'error': data is Map && data['error'] == 'OTHER_ACCOUNT' ? 'OTHER_ACCOUNT' : 'LOG_CHANGED'};
+        return {
+          'error': data is Map && data['error'] == 'OTHER_ACCOUNT'
+              ? 'OTHER_ACCOUNT'
+              : 'LOG_CHANGED',
+        };
       }
-      return res.statusCode == 200 && data is Map<String, dynamic> ? data : null;
+      return res.statusCode == 200 && data is Map<String, dynamic>
+          ? data
+          : null;
     } catch (_) {
       return null;
     }
@@ -661,4 +720,3 @@ String describeApiError(Object error) {
   }
   return '$error';
 }
-

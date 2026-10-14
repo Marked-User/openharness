@@ -29,3 +29,17 @@ it('reduces durable launch statuses to fixed categories without forwarding error
   expect(emit.mock.calls.flat()).toEqual([{ id, phase: 'start' }, { id, phase: 'pending', wait: 'install' }, { id, phase: 'failed', failure: 'other' }])
   expect(JSON.stringify(emit.mock.calls)).not.toContain('PRIVATE_CANARY')
 })
+
+
+it('observes Store, search and model operations without their arguments and rejects explicit false outcomes', () => {
+  const emit = vi.fn()
+  productUsageRequest('dsh_install', emit)(undefined, undefined, false, false)
+  productUsageRequest('session_search', emit)(undefined, undefined, false)
+  productUsageRequest('grid_fleet_model_download', emit)('TIMEOUT', undefined, false)
+  expect(emit.mock.calls.flat()).toEqual(expect.arrayContaining([
+    'store_install_requests', 'store_install_failed', 'search_ok', 'model_download_error_unavailable',
+  ]))
+  const clock = vi.fn()
+  productUsageRequest('terminal_input', emit, clock)
+  expect(clock).not.toHaveBeenCalled()
+})

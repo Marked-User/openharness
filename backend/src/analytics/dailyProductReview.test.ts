@@ -44,3 +44,22 @@ it('compares first-launch installation cohorts only after every 24-hour window c
   expect(r.firstLaunchCohorts.cohorts.some(c => c.day === '2026-10-12')).toBe(false)
   expect(r.firstLaunchCohorts.cohorts[0].observedResponsePercent).toBeNull()
 })
+
+it('keeps feedback denominators and setup coverage separate from daemon participation', () => {
+  const r = dailyProductReview([
+    row('2026-10-12', 'feedback_useful', 2), row('2026-10-12', 'feedback_completed', 3), row('2026-10-12', 'feedback_not_completed', 1),
+    row('2026-10-12', 'setup_desktop_sign_in_started', 5), row('2026-10-12', 'setup_desktop_sign_in_ok', 2),
+  ], new Date('2026-10-13'))
+  expect(r.comparisons.find(c => c.name.startsWith('Useful'))?.current.denominator).toBe(2)
+  expect(r.comparisons.find(c => c.name.startsWith('Completed'))?.current).toMatchObject({ denominator: 4, percent: 75 })
+  expect(r.recent.observedDays).toBe(0)
+  expect(r.flows.find(f => f.channel === 'setup' && f.surface === 'desktop' && f.flow === 'sign_in')).toMatchObject({ started: 5, unmatchedStarts: 3 })
+  expect(r.flows.find(f => f.channel === 'ui' && f.flow === 'update_stage')?.started).toBeNull()
+})
+it('uses complete calendar months rather than adding daily installations into MAU', () => {
+  const r = dailyProductReview([
+    row('2026-08-12', 'monthly_working_installations', 10), row('2026-09-12', 'monthly_working_installations', 8),
+    row('2026-09-12', 'monthly_returning_installations', 6), row('2026-10-12', 'monthly_returning_installations', 99),
+  ], new Date('2026-10-13'))
+  expect(r.monthlyRetention).toMatchObject({ from: '2026-09-01', untilExclusive: '2026-10-01', percent: 60 })
+})

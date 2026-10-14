@@ -371,6 +371,8 @@ final harnessCommands = <HarnessCommand>[
     ],
   ),
   const HarnessCommand('agent.stop', 'Stop Harness', ShortcutGroup.actions),
+  const HarnessCommand('app.product_feedback', 'Rate task outcome', ShortcutGroup.actions,
+    keywords: ['feedback', 'completed', 'useful', 'problem']),
   const HarnessCommand('agent.fork', 'Fork Harness', ShortcutGroup.actions),
   const HarnessCommand(
     'agent.share',

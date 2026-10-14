@@ -1,7 +1,7 @@
-import { PRODUCT_USAGE_METRICS } from '../types/productUsage.js'
+import { PRODUCT_USAGE_METRICS, PRODUCT_USAGE_SETUP_METRICS } from '../types/productUsage.js'
 
 const DAY = 86_400_000
-export const DAILY_PRODUCT_METRICS = [...PRODUCT_USAGE_METRICS,
+export const DAILY_PRODUCT_METRICS = [...PRODUCT_USAGE_METRICS, ...PRODUCT_USAGE_SETUP_METRICS,
   'relay_desktop_opens', 'relay_tui_opens', 'relay_mobile_opens', 'relay_web_opens',
   'relay_harness-os_opens', 'relay_harness-os-pi_opens',
   'relay_device_connections', 'relay_machine_connections', 'relay_remote_sessions', 'relay_turns_started',

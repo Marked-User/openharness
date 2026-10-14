@@ -8,17 +8,17 @@ const db = new PrismaClient()
 try {
   const today = Math.floor(Date.now() / 86400000) * 86400000
   const rows = await db.productUsageTotal.findMany({
-    // Retention always needs the two preceding complete weeks, even for a one-day daily view.
-    where: { dayUtc: { gte: new Date(today - Math.max(days - 1, 21) * 86400000), lt: new Date(today + 86400000) }, metric: { in: [...DAILY_PRODUCT_METRICS] } },
-    select: { dayUtc: true, metric: true, value: true }, orderBy: [{ dayUtc: 'asc' }, { metric: 'asc' }], take: Math.max(days, 22) * DAILY_PRODUCT_METRICS.length,
+    // Four-week cohorts need their full follow-up; calendar-month comparisons need both prior months.
+    where: { dayUtc: { gte: new Date(today - 92 * 86400000), lt: new Date(today + 86400000) }, metric: { in: [...DAILY_PRODUCT_METRICS] } },
+    select: { dayUtc: true, metric: true, value: true }, orderBy: [{ dayUtc: 'asc' }, { metric: 'asc' }], take: 93 * DAILY_PRODUCT_METRICS.length,
   })
   console.log(JSON.stringify({ generatedAt: new Date().toISOString(), timezone: 'UTC',
     definitions: {
-      population: 'Reporting signed-in computers, including staff and both service environments; opted-out accounts excluded. Not unique people.',
+      population: 'Daemon counts cover participating signed-in installations, including staff and both service environments. App flows and optional signed-out setup counts are separate populations, never unique people.',
       active: 'An attached desktop/terminal window or a reported agent turn; background presence can count.',
       working: 'At least one new observed agent turn; human and automated work are combined.',
       first: 'First measured work since the current preference generation, not account signup or task success.',
-      activation: 'No signup-to-value activation rate is inferred from first measured work. This report has no signup denominator or task-success signal.',
+      activation: 'No signup-to-value activation rate is inferred from first measured work. This report has no unique signup denominator; task outcomes are optional self-reports, not an objective success measure.',
       weekly: 'Monday–Sunday UTC; compare weekly_returning_installations in a complete week with weekly_working_installations in the preceding complete week.',
       outcomes: 'Matched observed turn ends and interruptions, not task success. Missing or interrupted telemetry is not a failed task.',
       relay: 'Legacy relay event totals are separate; never add them to the client counters.',

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { ingestProductUsage, productUsageChoice, setProductUsageChoice } from '../lib/productUsage.js'
-import { PRODUCT_FEEDBACK, PRODUCT_USAGE_MAX_COUNT, PRODUCT_USAGE_METRICS } from '../types/productUsage.js'
+import { ingestProductUsage, ingestSetupUsage, productUsageChoice, setProductUsageChoice } from '../lib/productUsage.js'
+import { PRODUCT_FEEDBACK, PRODUCT_USAGE_MAX_COUNT, PRODUCT_USAGE_METRICS, PRODUCT_USAGE_SETUP_METRICS } from '../types/productUsage.js'
 import { sendError, sendSuccess } from '../utils/response.js'
 
 export const productUsageReportSchema = z.strictObject({
@@ -11,14 +11,35 @@ export const productUsageReportSchema = z.strictObject({
 })
 const feedbackSchema = z.strictObject({ id: z.uuid(), answer: z.enum(PRODUCT_FEEDBACK) })
 const choiceSchema = z.strictObject({ enabled: z.boolean() })
+export const setupUsageSchema = z.strictObject({
+  schemaVersion: z.literal(1), consent: z.literal(true), id: z.uuid(),
+  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  counters: z.partialRecord(z.enum(PRODUCT_USAGE_SETUP_METRICS), z.number().int().min(1).max(1000))
+    .refine(c => Object.keys(c).length > 0 && Object.keys(c).length <= 32),
+})
 
 export async function productUsageRoutes(app: FastifyInstance): Promise<void> {
+  // A process-wide budget bounds untrusted pre-sign-in counts without collecting IPs or cookies.
+  // Exhaustion loses measurement only; it never shares a gate with sign-in or product traffic.
+  let setupWindow = 0, setupRequests = 0, setupInFlight = 0
   // Parser errors can contain a piece of malformed JSON. Keep this plugin's errors out of the
   // generic logger/response handler, including failures before the route's schema check runs.
   app.setErrorHandler((error, _req, reply) => {
     const code = (error as { statusCode?: number } | null)?.statusCode
     const status = code && code >= 400 && code < 500 ? code : 503
     return sendError(reply, 'Product usage request unavailable', 'USAGE_UNAVAILABLE', status)
+  })
+  app.post('/api/product-usage/setup', { bodyLimit: 4096 }, async (req, reply) => {
+    if (req.headers.authorization || req.headers.cookie) return sendError(reply, 'Setup reports must omit credentials', 'INVALID_SETUP_REPORT', 400)
+    const parsed = setupUsageSchema.safeParse(req.body)
+    if (!parsed.success) return sendError(reply, 'Invalid setup report', 'INVALID_SETUP_REPORT', 400)
+    const minute = Math.floor(Date.now() / 60_000)
+    if (minute !== setupWindow) { setupWindow = minute; setupRequests = 0 }
+    if (setupRequests >= 120 || setupInFlight >= 4) return sendError(reply, 'Setup measurement busy', 'USAGE_UNAVAILABLE', 429)
+    setupRequests++; setupInFlight++
+    try { return sendSuccess(reply, await ingestSetupUsage(parsed.data)) }
+    catch { return sendError(reply, 'Setup measurement unavailable', 'USAGE_UNAVAILABLE', 503) }
+    finally { setupInFlight-- }
   })
   app.get('/api/product-usage/settings', async (req, reply) => {
     if (!req.user?.sub) return sendError(reply, 'Unauthorized', 'UNAUTHORIZED', 401)
