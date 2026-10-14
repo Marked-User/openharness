@@ -19,6 +19,9 @@ http = 'src/lib/registry.admission.spec.ts'
 turn_spec = 'src/core/turns/turnHooks.spec.ts'
 tasks = 'src/core/engines/cursorTasks.spec.ts'
 mutations = [
+    ('original-turn Stop wiring disconnected', 'src/core/main.ts',
+     'captureTurnStop: (entry, body) => turnHooks.captureStop(entry, body, attach.captureAdmissionStop(entry)),',
+     '', 'e2e/hookclient.e2e.ts', 'completes a Cursor Stop.*running.*unmarked'),
     ('Stop callback entry treated as completion', server,
      'stopOutcome = await stopEffect({ current, verify: () => claim!.verify() })',
      "stopOutcome = 'completed'", http, 'concurrent confirmations pending'),
@@ -48,8 +51,9 @@ mutations = [
 
 
 def run(spec, pattern):
+    lane = ['--config', 'vitest.e2e.config.ts'] if spec.startswith('e2e/') else []
     return subprocess.run(['node', 'node_modules/vitest/vitest.mjs', 'run', spec,
-                           '--maxWorkers=1', '-t', pattern], cwd=cli, env=environment,
+                           *lane, '--maxWorkers=1', '-t', pattern], cwd=cli, env=environment,
                           text=True, capture_output=True, timeout=90)
 
 

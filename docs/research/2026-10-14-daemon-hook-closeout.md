@@ -94,14 +94,38 @@ per covered file (175.1 seconds). Main subsequently advanced to `17ee12593`;
 its reporting-route overlap and changed gateway counter boundary require combined
 validation before merge. Its unrelated product work does not expand this scope.
 
+The combined-main gate `20261014T013717.105031Z-14571` passes full core/service
+coverage (2,752 tests, 170.1 seconds), master coverage (273 passed, one existing
+platform skip, 22.7 seconds), and the native helper protocol (3.4 seconds). Both
+coverage gates remain 100% per file across all measures. The touched-spec check
+in that aggregate failed: 969 tests passed, and two failed during initial setup.
+The unchanged catalog suite passes alone, all 83 cases, in
+`20261014T015525.878232Z-5667` (76.2 seconds). Its failed observation saw ancestor
+directory stamps change before the test deleted any authority; no production
+fence or corruption assertion was weakened.
+
+The versioned receipt fixture had deferred recovery without starting it. An
+interruption after allocation could leave its initial namespace unsealed, which
+receipt-only lookup correctly refuses to repair. The ordinary ready-core case
+now starts the existing recovery loop. A controlled interruption proves that
+receipt retries leave that namespace untouched and original-owner recovery then
+completes exactly one intake. Independent review caught a test spy dropping the
+read-only snapshot argument; it now forwards that argument unchanged. Final types
+and all 19 protocol cases pass in `20261014T015750.448086Z-15668` (4.6/42.2 seconds).
+These corrections change fixtures only, so the completed production coverage
+and native checks remain applicable. The Stop notification assertion retains its
+original condition and 20-second deadline. The wiring mutant will require an
+assertion failure when the composition root's captured-Stop wiring is removed.
+
 Earlier diagnostic aggregates failed and are not passing evidence. The unbundled
 run lacked the macOS helper; a later fixture needed to wait for its fake process
 record before registration. Concurrent HTTP/coverage/e2e checks then exceeded
 fixture or native storage deadlines. Separate runs above passed with the original
 deadlines. The capacity regression's first assertion also incorrectly expected a
 secondary hold reason to override an existing active hold; it now verifies actual
-queue refusal and eventual completion. Full required suites, mutations, runtime
-cost, final independent head/base review and CI remain pending.
+queue refusal and eventual completion. Remaining gates are full affected
+end-to-end lanes, causal mutations, runtime cost, final independent head/base
+review and ready-state CI.
 
 The working target given to the owner is one to two focused days including
 validation and review, not a guaranteed completion date. The earlier two-to-three

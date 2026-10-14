@@ -346,8 +346,8 @@ setInterval(() => {
       // A native marker can finish before durable registration catches up.
       // Observe admission too, so a later unmatched-Stop hold cannot turn an
       // early completion into a false passing result.
-      await until('the Stop registration to reach its core notification', () =>
-        d.log().includes(`[hooks] ${sessionId.slice(0, 8)} stop · engine=cursor`), 20_000)
+      await expect.poll(() => d.log().includes(`[hooks] ${sessionId.slice(0, 8)} stop · engine=cursor`),
+        { timeout: 20_000, message: 'the Stop registration reaches its core notification' }).toBe(true)
       const completion = await ended
       expect(completion, JSON.stringify({ completion, requests: readRequests(), row: await row(client, agentId) })).toHaveProperty('value')
       if ('value' in completion) {

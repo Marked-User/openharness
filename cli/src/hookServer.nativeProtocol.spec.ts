@@ -11,7 +11,7 @@ import { nativeHookOutboxShard } from './engines/kit/nativeHookOutbox.js'
 import type { HookServerHandlers } from './hookServer.js'
 
 const fault = vi.hoisted(() => ({ unavailable: false, afterRetain: undefined as (() => void) | undefined,
-  afterFinish: undefined as (() => void) | undefined }))
+  afterFinish: undefined as (() => void) | undefined, beforeSnapshot: undefined as (() => void) | undefined }))
 vi.mock('node:fs', async original => ({ ...await original<object>(),
   fsync: (_fd: number, done: (error: Error | null) => void) => queueMicrotask(() => done(fault.unavailable ? Error('fixture confirmation unavailable') : null)),
 }))
@@ -23,7 +23,10 @@ vi.mock('./engines/kit/nativeHookJournal.js', async original => {
   const actual = await original<typeof import('./engines/kit/nativeHookJournal.js')>()
   return { ...actual, createNativeHookJournal: (...args: Parameters<typeof actual.createNativeHookJournal>) => {
     const journal = actual.createNativeHookJournal(...args)
-    return { ...journal, retain: async (...input: Parameters<typeof journal.retain>) => {
+    return { ...journal, snapshot: async (...input: Parameters<typeof journal.snapshot>) => {
+      fault.beforeSnapshot?.(); return journal.snapshot(...input)
+    },
+      retain: async (...input: Parameters<typeof journal.retain>) => {
       const delivery = await journal.retain(...input); fault.afterRetain?.(); return delivery
     }, claim: async (...input: Parameters<typeof journal.claim>) => {
       const claim = await journal.claim(...input)
@@ -58,7 +61,7 @@ async function close() {
   server = undefined
 }
 beforeEach(async () => {
-  live = true; fault.unavailable = false; fault.afterRetain = undefined; fault.afterFinish = undefined
+  live = true; fault.unavailable = false; fault.afterRetain = undefined; fault.afterFinish = undefined; fault.beforeSnapshot = undefined
   root = realpathSync(mkdtempSync(join(tmpdir(), 'native-protocol-http-')))
   for (const [name, value] of Object.entries({ HOME: join(root, 'home'), ADAPTER_DATA_DIR: join(root, 'data'),
     ADAPTER_RUNTIME_DIR: join(root, 'runtime'), CODEX_HOME: join(root, 'codex'), CLAUDE_CONFIG_DIR: join(root, 'claude') })) {
@@ -111,6 +114,9 @@ async function fixture(overrides: Partial<HookServerHandlers> = {}, capacity = 6
 
 it('confirms exact retained wire identity and recovers a lost completed reply after engine exit and row removal', async () => {
   const f = await fixture(), raw = JSON.stringify(body())
+  // This is a ready core. Its live-owner recovery repairs interrupted namespace
+  // initialization; the receipt-only reader must never acquire that authority.
+  f.started.startRecovery()
   await f.settle(raw)
   expect(f.registered).toHaveBeenCalledOnce(); expect(f.capture).not.toHaveBeenCalled()
   const retained = records().find(record => record.event.kind === 'intake').event.intake
@@ -122,6 +128,28 @@ it('confirms exact retained wire identity and recovers a lost completed reply af
   expect(restarted.registered).not.toHaveBeenCalled()
   expect(await restarted.post(raw + ' ')).toMatchObject({ status: 409, body: { error: 'HOOK_DELIVERY_CONFLICT' } })
   expect(records().filter(record => record.event.kind === 'intake')).toHaveLength(1)
+}, 20_000)
+
+it('holds an interrupted namespace until live-owner recovery seals it, then completes the original delivery once', async () => {
+  const f = await fixture(), raw = JSON.stringify(body())
+  fault.beforeSnapshot = () => {
+    fault.beforeSnapshot = undefined
+    throw Error('fixture initialization interrupted after allocation')
+  }
+  expect(await f.post(raw)).toMatchObject({ status: 202, body: { retry: true,
+    detail: expect.stringContaining('fixture initialization interrupted after allocation') } })
+  const before = readdirSync(directory(), { recursive: true }).map(String).sort()
+  expect(before.filter(name => /^\.native-hook-effects-\d{3}\.allocation\.witness$/.test(name))).toHaveLength(1)
+  expect(before.filter(name => /^\.native-hook-effects-\d{3}\.seal(?:\.witness)?$/.test(name))).toEqual([])
+  expect(await f.post(raw)).toMatchObject({ status: 202, body: { retry: true,
+    detail: expect.stringContaining('the receipt namespace is not sealed') } })
+  expect(readdirSync(directory(), { recursive: true }).map(String).sort()).toEqual(before)
+  expect(f.registered).not.toHaveBeenCalled()
+  f.started.startRecovery()
+  await f.settle(raw)
+  expect(f.registered).toHaveBeenCalledOnce()
+  expect(records().filter(record => record.event.kind === 'intake')).toHaveLength(1)
+  expect(f.capture).not.toHaveBeenCalled()
 }, 20_000)
 
 it('starts retained client replay only after readiness and recovers a held registration across core restart', async () => {
