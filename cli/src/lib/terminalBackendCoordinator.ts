@@ -1,5 +1,6 @@
+import type { AgentEngine } from '../engines/types.js'
 import type { RegisteredSession } from './registry.js'
-import type { TerminalBackend } from './terminalBackend.js'
+import type { TerminalBackend, TerminalBackendPrepared } from './terminalBackend.js'
 import { processIdentityKey, terminalInstanceId, terminalPlacementKey, terminalRouteKey } from './terminalRuntime.js'
 import {
   terminalActionNotStarted,
@@ -9,11 +10,34 @@ import {
   type TerminalCaptureOptions,
   type TerminalLogicalKey,
   type TerminalReadResult,
+  type TerminalBackendName,
   type TerminalRuntimeRef,
   type TerminalStreamHandle,
   type TerminalStreamSink,
   type TerminalStreamSize,
 } from './terminalTypes.js'
+
+/** The code a backend that could not be readied answers creates, restores and resumes with. */
+const UNAVAILABLE_CODE: Record<TerminalBackendName, string> = { tmux: 'TMUX_UNAVAILABLE', ptyhost: 'PTY_HOST_UNAVAILABLE' }
+
+/**
+ * Ready every configured backend at once (`TerminalBackend.prepare`), each handed its own panes. One whose prepare
+ * throws is unavailable, as one that says so is: a backend that cannot start never stops the daemon or the others.
+ */
+export function prepareTerminalBackends<B extends TerminalBackend>(
+  backends: readonly B[],
+  ownedPanes: (backend: B) => ReadonlyMap<string, AgentEngine>,
+): Promise<Array<{ backend: B; result: TerminalBackendPrepared }>> {
+  return Promise.all(backends.map(async (backend) => {
+    try {
+      return { backend, result: await backend.prepare({ ownedPanes: ownedPanes(backend) }) }
+    } catch (error) {
+      const reason = `could not prepare ${backend.name}: ${error instanceof Error ? error.message : String(error)}`
+      console.error(`[terminal] ${backend.name}: ${reason}`)
+      return { backend, result: { state: 'unavailable' as const, code: UNAVAILABLE_CODE[backend.name], reason } }
+    }
+  }))
+}
 
 export interface TerminalControlLease {
   agentId: string

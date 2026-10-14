@@ -98,6 +98,11 @@ async function connected(options: FakeHostOptions = {}) {
 }
 
 describe('PtyHostClient.connect', () => {
+  it('knows the pid of the host it reached, from its discovery file', async () => {
+    const { fake, client } = await connected()
+    expect(client.pid).toBe(fake.discovery.pid)
+  })
+
   it('says hello with the token, the protocol and the control role', async () => {
     const { fake, client } = await connected()
     expect(client.instance).toBe('p1')
@@ -338,6 +343,20 @@ describe('PtyHostClient events', () => {
     expect(result.state).toBe('unknown')
     await new Promise(resolve => setImmediate(resolve))
     expect(events).toEqual([{ event: 'exit', pane: '%1', status: 1 }])
+  })
+
+  it('drops the notices it held once close() ends the connection', async () => {
+    const { client } = await connected({
+      onRequest: (r, s) => { if (r.op === 'create') line(s, { event: 'exit', pane: '%1', status: 0 }) },
+    })
+    const events: PtyEvent[] = []
+    client.onEvent(e => events.push(e))
+    const created = client.call({ op: 'create', command: ['true'], cols: 80, rows: 24, owner: 'o', hold: false })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    client.close()
+    expect((await created).state).toBe('unknown')
+    await new Promise(resolve => setImmediate(resolve))
+    expect(events).toEqual([])
   })
 
   it('keeps delivering to other listeners when one throws', async () => {

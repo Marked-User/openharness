@@ -34,6 +34,7 @@ PR CI is deliberately fast. Each changed component runs only its own Linux suite
 | `cli/`, `tests/` | `cli-typecheck` and `cli-tests` (default Vitest suite, four shards) | 3–5 min |
 | `desktop/` | `desktop-tests` (VM suite, four Linux shards) | 5–7 min |
 | `tui/` | `tui-test` (`cargo test`) | a few minutes |
+| `pty/`, `term/`, `tui/vendor/`, the CLI's ptyhost backend (`cli/src/lib/ptyHost/`, `ptyHostBackend*`, `terminalBackend.contract.ts`) | `pty-checks` (`cargo test` for `term` and `pty`, then the ptyhost terminal contract against the built host) | a few minutes |
 | `backend/`, `companions/`, `website/`, `os/`, `provider/`, `mobile/`, `daemons/` | that component's one check | 1–4 min |
 | `devices/` | `firmware-checks` | 1–2 min |
 | anything else (docs, workflows, scripts, store) | `process-checks` only | about 1.5 min |

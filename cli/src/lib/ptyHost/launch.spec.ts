@@ -3,9 +3,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PtyHostClient } from './client.js'
-import { ensurePtyHost, ptyHostBinary, readDiscovery } from './launch.js'
+import { ensurePtyHost, ptyHostBinary, reachable, readDiscovery } from './launch.js'
 import { PTY_PROTOCOL } from './protocol.js'
 
 const exe = process.platform === 'win32' ? 'harness-pty.exe' : 'harness-pty'
@@ -96,7 +96,7 @@ describe('readDiscovery', () => {
  * `<home>/spawns`, then serves (writing its discovery file once it listens), fails, or exits
  * at once as a host that found another one serving does.
  */
-function fakeBinary(mode: 'serve' | 'fail' | 'quiet'): string {
+function fakeBinary(mode: 'serve' | 'fail' | 'quiet' | 'deaf'): string {
   const dir = tempDir('bin-')
   return executable(path.join(dir, exe), `#!${process.execPath}
 import fs from 'node:fs'
@@ -110,6 +110,12 @@ if (${JSON.stringify(mode)} === 'fail') process.exit(4)
 if (${JSON.stringify(mode)} === 'quiet') process.exit(0)
 const endpoint = path.join(run, 'h.sock')
 fs.rmSync(endpoint, { force: true })
+if (${JSON.stringify(mode)} === 'deaf') {
+  // A discovery file naming an endpoint nothing listens at, from a host that then stays up.
+  const file = path.join(run, 'pty-host-${PTY_PROTOCOL}.json')
+  fs.writeFileSync(file, JSON.stringify({ protocol: ${PTY_PROTOCOL}, instance: 'p1', endpoint, pid: process.pid, version: 'fake', token: 'fake-token' }))
+  setInterval(() => {}, 1000)
+} else {
 const server = net.createServer(socket => {
   socket.on('error', () => {})
   let pending = ''
@@ -130,6 +136,7 @@ server.listen(endpoint, () => {
   fs.writeFileSync(file + '.tmp', JSON.stringify({ protocol: ${PTY_PROTOCOL}, instance: 'p1', endpoint, pid: process.pid, version: 'fake', token: 'fake-token' }))
   fs.renameSync(file + '.tmp', file)
 })
+}
 `)
 }
 
@@ -214,6 +221,13 @@ describe.skipIf(process.platform === 'win32')('ensurePtyHost', () => {
     expect(result).toEqual({ unavailable: expect.stringContaining('300 ms'), code: 'PTY_HOST_UNAVAILABLE' })
   })
 
+  it('is unavailable, saying so, when the endpoint a new discovery file names refuses connections', async () => {
+    const result = await ensurePtyHost(home(), { binary: fakeBinary('deaf') })
+    expect(result).toEqual({
+      unavailable: 'no harness-pty answers at the endpoint its discovery file names', code: 'PTY_HOST_UNAVAILABLE',
+    })
+  })
+
   it('reports a host that refuses this daemon as incompatible, without starting another', async () => {
     const dir = home()
     const endpoint = path.join(dir, 'r.sock')
@@ -251,6 +265,31 @@ describe.skipIf(process.platform === 'win32')('ensurePtyHost', () => {
     writeDiscovery(dir, { ...live, endpoint, token: 'old', pid: 1 })
     const client = await clientOf(await ensurePtyHost(dir, { binary: null }))
     expect(await client.call({ op: 'inventory' })).toMatchObject({ state: 'ok' })
+  })
+})
+
+describe('reachable', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('gives up on a connection that is never accepted, after its timeout', async () => {
+    const socket = new net.Socket()
+    const destroy = vi.spyOn(socket, 'destroy')
+    vi.spyOn(net, 'connect').mockReturnValue(socket)
+    const started = Date.now()
+    expect(await reachable('/nowhere', 50)).toBe(false)
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(destroy).toHaveBeenCalled()
+  })
+
+  it.skipIf(process.platform === 'win32')('is true for an endpoint that accepts, and false for one that refuses', async () => {
+    const dir = tempDir('r-')
+    const endpoint = path.join(dir, 'a.sock')
+    const server = net.createServer(socket => socket.on('error', () => {}))
+    server.listen(endpoint)
+    await once(server, 'listening')
+    cleanup.push(() => new Promise(resolve => server.close(resolve)))
+    expect(await reachable(endpoint)).toBe(true)
+    expect(await reachable(path.join(dir, 'none.sock'))).toBe(false)
   })
 })
 

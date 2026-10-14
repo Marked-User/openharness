@@ -39,6 +39,8 @@ interface Received { kind: FrameKind; payload: Buffer }
 async function openFakeStream(options: {
   readOnly?: boolean
   subscribe?: 'ack' | 'refuse' | 'silent'
+  /** What the Subscribe ack says of the pane's size: whether subscribing changed it. */
+  subscribeResized?: boolean
   streamOptions?: PtyHostStreamOptions
 } = {}) {
   const toStream = new PassThrough()
@@ -116,7 +118,7 @@ async function openFakeStream(options: {
   const opening = PtyHostStream.open(connection, RUNTIME, { cols: 80, rows: 24 }, sink, options.readOnly ?? false, options.streamOptions)
   const subscribe = await nextSent(FrameKind.Subscribe)
   if (options.subscribe === 'refuse') json(FrameKind.Ack, { for: FrameKind.Subscribe, ok: false, reason: 'no_pane' })
-  else if (options.subscribe !== 'silent') json(FrameKind.Ack, { for: FrameKind.Subscribe, ok: true })
+  else if (options.subscribe !== 'silent') json(FrameKind.Ack, { for: FrameKind.Subscribe, ok: true, resized: options.subscribeResized ?? false })
   const opened = await opening
   return {
     opened,
@@ -317,11 +319,41 @@ describe('PtyHostStream output and snapshots', () => {
     expect(Buffer.from(taken.value.bytes).toString()).toContain('whole')
   })
 
+  it('a subscription that resized the pane waits for the print that causes, as a resize does', async () => {
+    const { stream, host } = await openFakeStream({ subscribeResized: true })
+    stream.beginSnapshot()
+    const pending = stream.snapshot({ repaint: { clears: '\u001b[2J', ends: 'END', withinMs: 5_000 } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(host.sent.some((frame) => frame.kind === FrameKind.Snapshot)).toBe(false)
+    await host.output(1, '\u001b[2Jnew screenEND')
+    await host.snapshotReply({ seq: 1, capture: 'new screen\n', history: '', meta: META })
+    expect((await pending).state).toBe('succeeded')
+  })
+
+  it('a subscription or resize that changed no size waits for no print', async () => {
+    const { stream, host } = await openFakeStream({ subscribeResized: false })
+    const repaint = { clears: '\u001b[2J', ends: 'END', withinMs: 5_000 }
+    stream.beginSnapshot()
+    const first = stream.snapshot({ repaint })
+    await host.snapshotReply({ seq: 0, capture: 'screen\n', history: '', meta: META })
+    expect((await first).state).toBe('succeeded')
+    stream.endSnapshot()
+    // The host already had this size (its size was unknown here after a failed resize, say).
+    const resized = stream.resize({ cols: 100, rows: 30 })
+    await host.nextSent(FrameKind.Resize)
+    await host.ack({ for: FrameKind.Resize, ok: true, seq: 0, resized: false })
+    expect((await resized).state).toBe('succeeded')
+    stream.beginSnapshot()
+    const second = stream.snapshot({ repaint })
+    await host.snapshotReply({ seq: 0, capture: 'screen\n', history: '', meta: META })
+    expect((await second).state).toBe('succeeded')
+  })
+
   it('waits for the print a recent resize causes before asking for the snapshot', async () => {
     const { stream, host } = await openFakeStream()
     const resized = stream.resize({ cols: 100, rows: 30 })
     await host.nextSent(FrameKind.Resize)
-    await host.ack({ for: FrameKind.Resize, ok: true, seq: 0 })
+    await host.ack({ for: FrameKind.Resize, ok: true, seq: 0, resized: true })
     await resized
     stream.beginSnapshot()
     const pending = stream.snapshot({ repaint: { clears: '\u001b[2J', ends: 'END', withinMs: 5_000 } })
@@ -449,6 +481,26 @@ describe('PtyHostStream close', () => {
     await closing
     expect(connection.writableEnded || connection.destroyed).toBe(true)
     expect(sink.closes).toEqual(['closed'])
+  })
+
+  it('forwards no output once close has begun', async () => {
+    const { stream, host, sink } = await openFakeStream()
+    await host.output(1, 'before')
+    const closing = stream.close()
+    await host.output(2, 'after')
+    await closing
+    expect(sink.text()).toBe('before')
+    expect(sink.closes).toEqual(['closed'])
+  })
+
+  it('releases no held output once close has begun', async () => {
+    const { stream, host, sink } = await openFakeStream()
+    stream.beginSnapshot()
+    await host.output(1, 'held')
+    const closing = stream.close()
+    stream.endSnapshot()
+    await closing
+    expect(sink.text()).toBe('')
   })
 
   it('a connection error closes the stream once, without throwing', async () => {

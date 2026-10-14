@@ -16,6 +16,8 @@ const BINARY = process.platform === 'win32' ? 'harness-pty.exe' : 'harness-pty'
 /** How long a host we started has to publish its discovery file. */
 const START_WAIT_MS = 5_000
 const POLL_MS = 25
+/** How long a connection may take to be accepted: as long as `PtyHostClient.connect` gives a hello. */
+const CONNECT_TIMEOUT_MS = 5_000
 
 function runnable(file: string): boolean {
   try {
@@ -125,12 +127,22 @@ async function connectExisting(home: string): Promise<{ client: PtyHostClient } 
   return { incompatible: result.incompatible }
 }
 
-/** Whether something accepts a connection at `endpoint`; it is closed without a hello. */
-function reachable(endpoint: string): Promise<boolean> {
+/**
+ * Whether something accepts a connection at `endpoint` within `timeoutMs` (the hello's own limit); it is closed
+ * without a hello. A connection never accepted (a stopped host's full backlog) counts as nothing there, and must not
+ * hold the shared start for this home.
+ */
+export function reachable(endpoint: string, timeoutMs = CONNECT_TIMEOUT_MS): Promise<boolean> {
   return new Promise(resolve => {
     const socket = net.connect(endpoint)
-    socket.once('connect', () => { socket.destroy(); resolve(true) })
-    socket.once('error', () => resolve(false))
+    const finish = (accepted: boolean) => {
+      clearTimeout(timer)
+      socket.destroy()
+      resolve(accepted)
+    }
+    const timer = setTimeout(() => finish(false), timeoutMs)
+    socket.once('connect', () => finish(true))
+    socket.once('error', () => finish(false))
   })
 }
 
@@ -191,5 +203,6 @@ export async function ensurePtyHost(home: string, options: EnsurePtyHostOptions 
   const binary = options.binary !== undefined ? options.binary : ptyHostBinary()
   const failed = await startHost(home, binary, options.waitMs ?? START_WAIT_MS)
   if (failed) return failed
-  return (await connectExisting(home)) ?? unavailable('harness-pty started, but its endpoint refuses connections')
+  // The host this start found or made published a discovery file, but nothing answers where it says.
+  return (await connectExisting(home)) ?? unavailable('no harness-pty answers at the endpoint its discovery file names')
 }

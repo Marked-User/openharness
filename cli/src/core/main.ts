@@ -70,6 +70,7 @@ import { findLiveSession, findResumedTranscript } from '../lib/sessionRepair.js'
 import { processSessionOf } from '../engines/sessionStores.js'
 import { createHandoffDependencies } from './handoffDependencies.js'
 import { TmuxBackend } from '../lib/tmuxBackend.js'
+import { PtyHostBackend } from '../lib/ptyHostBackend.js'
 import { DEFAULT_HOST_THEME, loadHostTheme, saveHostTheme, type HostTheme } from '../lib/hostTheme.js'
 import { restoreAgents, tmuxSurvey, type RestoreAgentsDeps, type RestoreSummary } from '../lib/restoreAgents.js'
 import { createRetainExitedSession } from '../lib/retainExitedSession.js'
@@ -96,7 +97,7 @@ import { sessionStoreContracts } from '../engines/sessionStoreContracts.js'
 import { lookupPaneEngineProcess, resolvePaneEngineProcess } from '../lib/paneEngineProcess.js'
 import { argvTokens, processRows } from '../lib/processTable.js'
 import { defaultTerminalBackends } from '../config/terminalConfig.js'
-import { TerminalBackendCoordinator } from '../lib/terminalBackendCoordinator.js'
+import { prepareTerminalBackends, TerminalBackendCoordinator } from '../lib/terminalBackendCoordinator.js'
 import type { TerminalBackend } from '../lib/terminalBackend.js'
 import type { TerminalRuntimeRef } from '../lib/terminalTypes.js'
 import { TerminalStreamManager } from '../lib/terminalStreamManager.js'
@@ -534,11 +535,12 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // local socket and the backend link, leaves for an update, and says what is missing.
   const candidates: TerminalBackend[] = []
   if (terminalConfig.backends.includes('tmux')) candidates.push(new TmuxBackend(() => hostTheme))
+  // The Harness PTY host (pty/): reached, or started detached so its panes outlive this daemon.
+  const ptyHostBackend = terminalConfig.backends.includes('ptyhost') ? new PtyHostBackend({ home: env.HARNESS_PTY_DIR }) : null
+  if (ptyHostBackend) candidates.push(ptyHostBackend)
   // Each is handed the registry's panes on it, and only those, for adopting what an older build left
-  // (tmux's legacy session names): pane ids are per backend.
-  const preparing = Promise.all(candidates.map(async (backend) => ({
-    backend, result: await backend.prepare({ ownedPanes: ownedPanesOf(registry.list(), backend.name) }),
-  })))
+  // (tmux's legacy session names): pane ids are per backend. One whose prepare throws is unavailable.
+  const preparing = prepareTerminalBackends(candidates, (backend) => ownedPanesOf(registry.list(), backend.name))
   // Started while the backends prepare, which ask a login shell too (tmux: where it is installed): two
   // independent login-shell spawns whose wall-clock cost overlaps instead of adding up.
   // `loginShellEnvPromise` is awaited later, near the existing `[env]` log line.
@@ -1702,6 +1704,15 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       discoveryError = status.error
     },
   })
+  // A PTY host that died took its panes with it: the reconnected (new) host lists none of them, and a pass
+  // now marks their agents gone, which the resume path takes from there, rather than at the next tick.
+  if (ptyHostBackend) {
+    ptyHostBackend.onHostReplaced = () => {
+      void agentReconciler.trigger().catch((error) => {
+        console.error('[terminal] ptyhost: reconcile after host restart failed:', error instanceof Error ? error.message : error)
+      })
+    }
+  }
 
   // Account HTTP and the persistent machine cache belong to the gateway. The core routes the request
   // and keeps only state reported by that service, so a backend outage cannot stall an agent's loop.
@@ -2643,6 +2654,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   const updateTeardown = (): TeardownStep[] => { heldLaunches.close(); installedHooks?.close(); externalResumes?.stop(); launches.stop(); return [
     ['the registry', () => registry.flush({ exiting: true })], ['the updater', () => daemonBoot.updaterBeside?.()],
     ['the reconciler', () => agentReconciler.stop()],
+    // The connection alone: the host and its panes stay up for the successor to reattach.
+    ['the pty host connection', () => ptyHostBackend?.dispose()],
     ['the timers', () => { clearInterval(logTrimTimer); clearInterval(runtimeReconcileTimer); clearInterval(paneTitleSyncTimer) }],
     ['the question watchers', () => questionWatcher.stopAll()],
     ['the turn heartbeats', () => { for (const t of heartbeats.values()) clearInterval(t); heartbeats.clear() }],
@@ -2701,6 +2714,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     void ports.devices?.stop()
     daemonBoot.updaterBeside?.()
     agentReconciler.stop()
+    ptyHostBackend?.dispose()
     clearInterval(logTrimTimer)
     clearInterval(runtimeReconcileTimer)
     clearInterval(paneTitleSyncTimer)

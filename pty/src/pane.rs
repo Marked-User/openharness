@@ -379,27 +379,24 @@ impl Pane {
         self.attachment().send(Msg::Input(bytes.to_vec()))
     }
 
-    /// Resize the grid, then tell the child. Returns the sequence number of the last output drawn
-    /// at the old size: every later output reaches the grid at the new one. (A resize does not
-    /// take a sequence number of its own.)
-    pub fn resize(&self, cols: u16, rows: u16) -> u64 {
+    /// Resize the grid, then tell the child, unless the grid already has this size (as tmux skips
+    /// a same-size resize: no SIGWINCH, so a TUI does not print again). Returns the sequence number
+    /// of the last output drawn at the old size, so every later output reaches the grid at the new
+    /// one (a resize does not take a sequence number of its own), and whether the size changed.
+    pub fn resize(&self, cols: u16, rows: u16) -> (u64, bool) {
         let (cols, rows) = (cols.max(1), rows.max(1));
         let seq = {
             let mut screen = lock(&self.screen);
+            let same = screen.term.columns() == cols as usize
+                && screen.term.screen_lines() == rows as usize;
+            if same {
+                return (screen.seq, false);
+            }
             screen.term.resize(Size { cols, rows });
             screen.seq
         };
         let _ = self.attachment().send(Msg::Resize(window_size(cols, rows)));
-        seq
-    }
-
-    /// The grid's size, as (cols, rows).
-    pub fn size(&self) -> (u16, u16) {
-        let screen = lock(&self.screen);
-        (
-            screen.term.columns() as u16,
-            screen.term.screen_lines() as u16,
-        )
+        (seq, true)
     }
 
     /// Under one lock: the grid's capture and the sequence number of the last output it contains.

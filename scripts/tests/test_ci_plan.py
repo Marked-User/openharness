@@ -27,6 +27,18 @@ class SelectionTests(unittest.TestCase):
             "provider/spec.md": {"provider"}, "devices/harness-device/firmware/main/main.c": {"firmware"},
             "devices/harness-pro/firmware/main/app/pro_app.c": {"firmware"},
             "mobile/pubspec.lock": {"mobile"}, "daemons/tools/card.mjs": {"daemons"},
+            "pty/src/stream.rs": {"pty"}, "term/src/capture.rs": {"pty"},
+        }.items():
+            with self.subTest(path=path):
+                self.assertEqual(planner.select([path])[0], expected)
+
+    def test_the_cli_ptyhost_backend_and_the_vendored_terminal_also_select_the_pty_suite(self):
+        for path, expected in {
+            "cli/src/lib/ptyHost/stream.ts": {"cli", "pty"}, "cli/src/lib/ptyHostBackend.ts": {"cli", "pty"},
+            "cli/src/lib/ptyHostBackend.contract.spec.ts": {"cli", "pty"},
+            "cli/src/lib/terminalBackend.contract.ts": {"cli", "pty"},
+            "tui/vendor/alacritty_terminal/src/term/mod.rs": {"tui", "pty"},
+            "cli/src/lib/ptyHostile.ts": {"cli"}, "cli/src/lib/tmuxBackend.ts": {"cli"},
         }.items():
             with self.subTest(path=path):
                 self.assertEqual(planner.select([path])[0], expected)

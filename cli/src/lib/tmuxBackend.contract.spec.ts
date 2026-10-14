@@ -12,7 +12,16 @@ const enabled = process.env.RUN_TERMINAL_CONTRACT === '1' && process.platform !=
   vi.stubEnv('TMUX', undefined)
   vi.stubEnv('TMUX_PANE', undefined)
   vi.stubEnv('TMUX_TMPDIR', server.root)
+  const cleanup = async () => { await server.close(); vi.unstubAllEnvs() }
   const backend = new TmuxBackend(() => DEFAULT_HOST_THEME)
-  await backend.prepare({ ownedPanes: new Map() })
-  return { backend, cleanup: async () => { await server.close(); vi.unstubAllEnvs() } }
+  // A backend that cannot be readied fails the suite saying why, and leaves no server or stubbed environment.
+  const prepared = await backend.prepare({ ownedPanes: new Map() }).catch(async (error: unknown) => {
+    await cleanup()
+    throw new Error(`tmux contract: prepare threw: ${error instanceof Error ? error.message : String(error)}`)
+  })
+  if (prepared.state !== 'ready') {
+    await cleanup()
+    throw new Error(`tmux contract: tmux is unavailable (${prepared.code}): ${prepared.reason}`)
+  }
+  return { backend, cleanup }
 })

@@ -130,9 +130,9 @@ export class PtyHostStream implements TerminalStreamHandle<PtyRuntimeRef> {
     if (outcome !== 'timeout' && outcome !== 'closed' && outcome.ok) {
       if (!readOnly) {
         stream.size = bounded
-        // The subscription resized the pane unless it already had this size, which cannot be told from here: an
-        // engine that prints again after a resize is waited for as if it had (`snapshot`'s `repaint`).
-        stream.resizedAt = Date.now()
+        // An engine prints again after a resize, and `snapshot`'s `repaint` waits for that print: not when the host
+        // says the subscription left the pane's size as it was (it skips a size the pane has, as tmux does).
+        if (outcome.resized !== false) stream.resizedAt = Date.now()
       }
       return { state: 'succeeded', value: stream }
     }
@@ -208,6 +208,8 @@ export class PtyHostStream implements TerminalStreamHandle<PtyRuntimeRef> {
   }
 
   private onData(chunk: Buffer): void {
+    // Once the stream is closing or closed nothing more reaches the sink, and nothing waits for a reply.
+    if (this.closed) return
     let frames: Frame[]
     try {
       frames = this.reader.push(chunk)
@@ -216,7 +218,7 @@ export class PtyHostStream implements TerminalStreamHandle<PtyRuntimeRef> {
       return
     }
     for (const frame of frames) {
-      if (this.closeNotified) return
+      if (this.closed) return
       try {
         this.onFrame(frame)
       } catch (error) {
@@ -329,7 +331,10 @@ export class PtyHostStream implements TerminalStreamHandle<PtyRuntimeRef> {
   }
 
   private async action(kind: FrameKind, payload: Uint8Array, what: string): Promise<TerminalActionResult> {
-    const outcome = await this.sendForAck(kind, payload)
+    return this.actionResult(await this.sendForAck(kind, payload), what)
+  }
+
+  private actionResult(outcome: AckOutcome, what: string): TerminalActionResult {
     if (outcome === 'timeout') return terminalActionPossiblyExecuted(`pty host did not acknowledge the ${what}`)
     if (outcome === 'closed') return terminalActionPossiblyExecuted('pty host stream closed')
     return outcome.ok ? TERMINAL_ACTION_SUCCEEDED : refusal(outcome.reason)
@@ -483,7 +488,7 @@ export class PtyHostStream implements TerminalStreamHandle<PtyRuntimeRef> {
     // The sink can begin the next snapshot from what is released here (as tmuxStream.ts `endSnapshot`): what is left
     // is then held behind that one.
     held.forEach((bytes, index) => {
-      if (seqs[index] > this.cut && !this.closeNotified) this.deliver(seqs[index], bytes)
+      if (seqs[index] > this.cut && !this.closed) this.deliver(seqs[index], bytes)
     })
   }
 
@@ -535,10 +540,12 @@ export class PtyHostStream implements TerminalStreamHandle<PtyRuntimeRef> {
       const size = boundedSize(requested)
       // As tmux: a repeated open or focus asks for the size in use, and a TUI may print again on any resize.
       if (this.size && this.size.cols === size.cols && this.size.rows === size.rows) return TERMINAL_ACTION_SUCCEEDED
-      this.resizedAt = Date.now()
-      const result = await this.action(FrameKind.Resize, Buffer.from(JSON.stringify(size)), 'resize')
-      if (result.state === 'succeeded') this.size = size
-      else this.size = null
+      const outcome = await this.sendForAck(FrameKind.Resize, Buffer.from(JSON.stringify(size)))
+      // A resize the host says changed nothing (the pane had this size) makes no print to wait for; one that may
+      // have happened is taken to have.
+      if (outcome === 'timeout' || outcome === 'closed' || !outcome.ok || outcome.resized !== false) this.resizedAt = Date.now()
+      const result = this.actionResult(outcome, 'resize')
+      this.size = result.state === 'succeeded' ? size : null
       return result
     })
   }

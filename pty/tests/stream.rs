@@ -305,7 +305,7 @@ fn read_only_subscribers_cannot_type_paste_or_resize() {
     let ack = subscribe_with(&mut s, &pane, 120, 40, true);
     assert_eq!(
         ack,
-        serde_json::json!({"for": Kind::Subscribe as u8, "ok": true})
+        serde_json::json!({"for": Kind::Subscribe as u8, "ok": true, "resized": false})
     );
     for (kind, payload) in [
         (Kind::Input, b"x".to_vec()),
@@ -339,7 +339,10 @@ fn subscribing_resizes_and_input_and_paste_reach_the_pane() {
     );
     let mut s = stream(&disc);
     let ack = subscribe_with(&mut s, &pane, 100, 30, false);
-    assert_eq!(ack["ok"], true);
+    assert_eq!(
+        ack,
+        serde_json::json!({"for": Kind::Subscribe as u8, "ok": true, "resized": true})
+    );
     read_until(&mut s, |t| t.contains("ready"));
     write_frame(&mut s, Kind::Input, b"abc\r").unwrap();
     let (k, v) = next_reply(&mut s);
@@ -409,6 +412,58 @@ fn resize_is_acked_once_applied() {
     // The child is told as well.
     let (_, text) = read_until(&mut s, |t| t.contains("size-40x100"));
     assert!(text.contains("size-40x100"), "{text}");
+}
+
+#[test]
+fn same_size_subscribe_and_resize_change_nothing_and_say_so() {
+    let (_h, disc) = start();
+    let (mut w, mut r) = connect(&disc);
+    let pane = create(
+        &mut w,
+        &mut r,
+        "trap 'echo size-$(stty size | tr \" \" x)' WINCH; echo ready; while :; do sleep 0.1; done",
+        false,
+    );
+    let mut s = stream(&disc);
+    // Created 80x24: subscribing at that size resizes nothing.
+    let ack = subscribe_with(&mut s, &pane, 80, 24, false);
+    assert_eq!(
+        ack,
+        serde_json::json!({"for": Kind::Subscribe as u8, "ok": true, "resized": false})
+    );
+    read_until(&mut s, |t| t.contains("ready"));
+    write_frame(&mut s, Kind::Resize, br#"{"cols":80,"rows":24}"#).unwrap();
+    let (k, ack) = next_reply(&mut s);
+    assert_eq!(k, Kind::Ack);
+    assert_eq!(
+        (
+            ack["for"].clone(),
+            ack["ok"].clone(),
+            ack["resized"].clone()
+        ),
+        (
+            serde_json::json!(Kind::Resize as u8),
+            serde_json::json!(true),
+            serde_json::json!(false)
+        )
+    );
+    assert!(ack["seq"].is_u64(), "{ack}");
+    // The child is not told of a size it already has: no SIGWINCH, so nothing printed.
+    s.set_read_timeout(Some(Duration::from_millis(600)))
+        .unwrap();
+    let (_, quiet) = read_until(&mut s, |_| false);
+    assert!(!quiet.contains("size-"), "{quiet}");
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write_frame(&mut s, Kind::Resize, br#"{"cols":90,"rows":20}"#).unwrap();
+    let (frames, text) = read_until(&mut s, |t| t.contains("size-20x90"));
+    let acks: Vec<_> = frames
+        .iter()
+        .filter(|(k, _)| *k == Kind::Ack)
+        .map(|(_, p)| json(p))
+        .collect();
+    assert_eq!(acks.len(), 1, "{acks:?}");
+    assert_eq!(acks[0]["resized"], true, "{acks:?}");
+    assert!(text.contains("size-20x90"), "{text}");
 }
 
 #[test]

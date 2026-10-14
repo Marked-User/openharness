@@ -258,10 +258,12 @@ export type StreamSnapshotReply =
   | { id: number; ok: false; reason: 'not_subscribed' | 'no_pane' | 'bad_request' }
 /**
  * `FrameKind.Ack`, one per Subscribe, Input, Paste and Resize, in order; `for` is the acknowledged
- * frame's kind. A Resize ack's `seq` is the last output drawn at the old size.
+ * frame's kind. A Resize ack's `seq` is the last output drawn at the old size. A Subscribe or Resize
+ * ack says whether the pane's size changed (`resized`): not for a read-only subscriber, nor for a
+ * size the pane already had (the host skips it, as tmux does, and the child gets no SIGWINCH).
  */
 export type StreamAck =
-  | { for: FrameKind; ok: true; seq?: number }
+  | { for: FrameKind; ok: true; seq?: number; resized?: boolean }
   | {
       for: FrameKind
       ok: false

@@ -217,6 +217,10 @@ const fields = {
   // `app-*.log`/`cli-*.log`, so one directory holds everything a bug report needs. Not the data dir:
   // `harness.log` there is the daemon's console, and `harness reset` wipes it.
   HARNESS_LOGS_DIR: text(join(adapterRootDir, 'logs')),
+  // The Harness PTY host's `--home` (the `ptyhost` terminal backend, pty/): it writes `run/` (its discovery
+  // file and endpoint) and `logs/pty-host.log` under it. Product-root state like the logs: the host outlives
+  // a daemon restart, and the next daemon finds it here.
+  HARNESS_PTY_DIR: text(join(adapterRootDir, 'pty')),
   // The dials' own product-root state: `pets/` holds the custom pet packs and which pack stands for what.
   // Not daemon data (`harness reset` must not lose a user's pets), and shared by this user's daemons.
   HARNESS_DEVICES_DIR: text(join(adapterRootDir, 'devices')),

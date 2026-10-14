@@ -5,6 +5,11 @@
  *
  * Its streams (`openStream`) are `PtyHostStream`s (ptyHost/stream.ts), one stream connection each, whose keyframes
  * are tmux's.
+ *
+ * The connection: when the host ends it (it exited, or dropped this daemon), the backend is unavailable (`inventory`
+ * says so, and never lists nothing) and reconnects, through `ensurePtyHost`, after 1 s, then 2 s, 4 s … at most 30 s
+ * apart. A host with another pid is another host: its predecessor's panes are gone, and `onHostReplaced` says so,
+ * so the reconciler sees them absent and the resume path takes over. `dispose` drops the connection alone.
  */
 import { env } from '../config/env.js'
 import type { AgentEngine } from '../engines/types.js'
@@ -50,6 +55,9 @@ const CREATE_COLS = 200
 const CREATE_ROWS = 50
 /** How long a killed pane's process group is given after SIGHUP before the host escalates. */
 const KILL_GRACE_MS = 2000
+/** The first reconnect after the host connection ended, doubled after each failed one up to the last. */
+const RECONNECT_FIRST_MS = 1_000
+const RECONNECT_MAX_MS = 30_000
 
 export interface PtyHostBackendOptions {
   /** The host's `--home` (`HARNESS_PTY_DIR`): its discovery file and logs live there. */
@@ -103,6 +111,16 @@ export class PtyHostBackend implements TerminalBackend<PtyRuntimeRef> {
   private client: PtyHostClient | null = null
   private instance: string | null = null
   private readonly panes = new Map<string, PtyPaneRecord>()
+  /** The current client's event and close subscriptions. */
+  private subscriptions: Array<() => void> = []
+  /** The pid of the last host reached: a reconnect to another is a host that died and was started again. */
+  private hostPid: number | null = null
+  private reconnectTimer: NodeJS.Timeout | null = null
+  private reconnectDelay = RECONNECT_FIRST_MS
+  private disposed = false
+
+  /** Called when a reconnect reached another host than before: every pane of the old one is gone. */
+  onHostReplaced?: () => void
 
   constructor(options: PtyHostBackendOptions) {
     this.home = options.home
@@ -117,6 +135,8 @@ export class PtyHostBackend implements TerminalBackend<PtyRuntimeRef> {
 
   async prepare(context: { ownedPanes: ReadonlyMap<string, AgentEngine> }): Promise<TerminalBackendPrepared> {
     void context
+    this.disposed = false
+    this.cancelReconnect()
     const reached = await this.launch(this.home)
     if ('incompatible' in reached) {
       console.error(`[terminal] ptyhost: unavailable (${reached.incompatible})`)
@@ -126,11 +146,90 @@ export class PtyHostBackend implements TerminalBackend<PtyRuntimeRef> {
       console.error(`[terminal] ptyhost: unavailable (${reached.unavailable})`)
       return { state: 'unavailable', code: reached.code, reason: reached.unavailable }
     }
-    this.client = reached.client
-    this.instance = reached.client.instance
-    reached.client.onEvent((event) => this.onEvent(event))
+    this.attach(reached.client)
     console.log(`[terminal] ptyhost: available (${this.instance})`)
     return { state: 'ready' }
+  }
+
+  /**
+   * Close the connection to the host, as a daemon exiting does: the host and its panes are left running, for the
+   * next daemon to reattach. No reconnect follows.
+   */
+  dispose(): void {
+    this.disposed = true
+    this.cancelReconnect()
+    const client = this.client
+    this.detach()
+    client?.close()
+  }
+
+  /** Make [client] this backend's connection, in place of any other. Whether it is another host than the last. */
+  private attach(client: PtyHostClient): boolean {
+    const previous = this.client
+    this.detach()
+    if (previous && previous !== client) previous.close()
+    this.client = client
+    this.instance = client.instance
+    const replaced = this.hostPid !== null && this.hostPid !== client.pid
+    this.hostPid = client.pid
+    // The panes recorded were the old host's.
+    if (replaced) this.panes.clear()
+    this.subscriptions.push(client.onEvent((event) => this.onEvent(event)))
+    this.subscriptions.push(client.onClose(() => this.onConnectionLost(client)))
+    return replaced
+  }
+
+  /** Forget the current client: its listeners are removed, and nothing is asked of it any more. */
+  private detach(): void {
+    for (const unsubscribe of this.subscriptions.splice(0)) unsubscribe()
+    this.client = null
+  }
+
+  private onConnectionLost(client: PtyHostClient): void {
+    if (client !== this.client) return
+    this.detach()
+    console.error('[terminal] ptyhost: lost the connection to the host; reconnecting')
+    this.reconnectDelay = RECONNECT_FIRST_MS
+    this.scheduleReconnect()
+  }
+
+  private scheduleReconnect(): void {
+    if (this.disposed || this.reconnectTimer) return
+    const delay = this.reconnectDelay
+    this.reconnectDelay = Math.min(delay * 2, RECONNECT_MAX_MS)
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      void this.reconnect()
+    }, delay)
+    this.reconnectTimer.unref?.()
+  }
+
+  private cancelReconnect(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = null
+  }
+
+  /** One attempt: the host this home has, started again if it is not running (`ensurePtyHost`). */
+  private async reconnect(): Promise<void> {
+    let reached: EnsurePtyHostResult
+    try {
+      reached = await this.launch(this.home)
+    } catch (error) {
+      reached = { unavailable: (error as Error).message, code: 'PTY_HOST_UNAVAILABLE' }
+    }
+    if (!('client' in reached)) {
+      console.error(`[terminal] ptyhost: reconnect failed (${'incompatible' in reached ? reached.incompatible : reached.unavailable})`)
+      this.scheduleReconnect()
+      return
+    }
+    // Disposed meanwhile, or connected again by a `prepare`: this one is not needed.
+    if (this.disposed || this.client) {
+      reached.client.close()
+      return
+    }
+    const replaced = this.attach(reached.client)
+    console.log(`[terminal] ptyhost: reconnected (${this.instance}${replaced ? ', a new host: its panes are gone' : ''})`)
+    if (replaced) this.onHostReplaced?.()
   }
 
   /** What this backend knows of [runtime]'s pane, for the host-death handling and its tests. */

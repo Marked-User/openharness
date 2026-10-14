@@ -510,3 +510,154 @@ describe('PtyHostBackend openStream', () => {
     }
   })
 })
+
+/** A stub client whose connection the test ends, from a host with [pid]. */
+function hostClient(pid: number, inventory: unknown = { state: 'ok', value: { panes: [] } }) {
+  const events = new Set<(event: PtyEvent) => void>()
+  const closes = new Set<() => void>()
+  const client = {
+    instance: 'p1',
+    pid,
+    closed: false,
+    call: async (op: PtyOp) => (op.op === 'inventory' ? inventory : op.op === 'create' ? { state: 'ok', value: { pane: '%1' } } : { state: 'ok', value: {} }),
+    onEvent: (listener: (event: PtyEvent) => void) => { events.add(listener); return () => { events.delete(listener) } },
+    onClose: (listener: () => void) => { closes.add(listener); return () => { closes.delete(listener) } },
+    close() { client.closed = true },
+    openStream: async () => null,
+    /** The host ended the connection. */
+    lose() { for (const listener of [...closes]) listener() },
+    emit(event: PtyEvent) { for (const listener of [...events]) listener(event) },
+    events,
+    closes,
+  }
+  return client
+}
+type HostClient = ReturnType<typeof hostClient>
+
+/** A backend whose launches answer from [results] in turn (a client, or unavailable), then unavailable. */
+function reconnecting(results: Array<HostClient | 'down' | Error>) {
+  const launches: number[] = []
+  const launch = vi.fn(async (): Promise<EnsurePtyHostResult> => {
+    launches.push(Date.now())
+    const next = results.shift() ?? 'down'
+    if (next instanceof Error) throw next
+    if (next === 'down') return { unavailable: 'harness-pty did not publish its discovery file within 5000 ms', code: 'PTY_HOST_UNAVAILABLE' }
+    return { client: next as unknown as PtyHostClient }
+  })
+  const backend = new PtyHostBackend({ home: '/tmp/h', launch, owner: () => 'me' })
+  return { backend, launch, launches }
+}
+
+describe('PtyHostBackend host connection', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('a second prepare replaces the first connection and its listeners', async () => {
+    const first = hostClient(10)
+    const second = hostClient(10)
+    const { backend } = reconnecting([first, second])
+    await backend.prepare({ ownedPanes: new Map() })
+    await backend.prepare({ ownedPanes: new Map() })
+    expect(first.events.size + first.closes.size).toBe(0)
+    expect(first.closed).toBe(true)
+    expect(second.events.size).toBe(1)
+    expect(second.closes.size).toBe(1)
+    // The first connection ending later is not this backend's concern any more.
+    first.lose()
+    expect((await backend.inventory()).state).toBe('available')
+  })
+
+  it('is unavailable while disconnected, and reconnects after 1 s, then 2 s, 4 s … at most 30 s apart', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    const first = hostClient(10)
+    const again = hostClient(10)
+    const { backend, launch, launches } = reconnecting([first, 'down', new Error('spawn EAGAIN'), 'down', 'down', 'down', 'down', 'down', 'down', again])
+    await backend.prepare({ ownedPanes: new Map() })
+    const start = Date.now()
+    first.lose()
+    expect(await backend.inventory()).toEqual({ state: 'unavailable', reason: 'pty host is unavailable' })
+    expect(await backend.create({ command: ['sh'] })).toMatchObject({ state: 'failed', dispatch: 'not_started' })
+    expect(launch).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1_000 + 2_000 + 4_000 + 8_000 + 16_000 + 30_000 + 30_000 + 30_000 + 30_000)
+    expect(launches.slice(1).map((at) => at - start)).toEqual([
+      1_000, 3_000, 7_000, 15_000, 31_000, 61_000, 91_000, 121_000, 151_000,
+    ])
+    expect(await backend.inventory()).toEqual({ state: 'available', roots: [] })
+    expect(again.events.size).toBe(1)
+    // A later loss starts again from 1 s.
+    again.lose()
+    await vi.advanceTimersByTimeAsync(999)
+    expect(launch).toHaveBeenCalledTimes(10)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(launch).toHaveBeenCalledTimes(11)
+  })
+
+  it('says the host was replaced when the one it reconnects to has another pid, and forgets its panes', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    const first = hostClient(10)
+    const same = hostClient(10)
+    const other = hostClient(11)
+    const { backend } = reconnecting([first, same, other])
+    const replaced = vi.fn()
+    backend.onHostReplaced = replaced
+    await backend.prepare({ ownedPanes: new Map() })
+    const created = await backend.create({ command: ['sh'] })
+    if (created.state !== 'succeeded') throw new Error('create')
+    first.lose()
+    await vi.advanceTimersByTimeAsync(1_000)
+    // The same host, its connection dropped: nothing was lost.
+    expect(replaced).not.toHaveBeenCalled()
+    expect(backend.known(created.runtime)).toEqual({ hold: true })
+    same.lose()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(replaced).toHaveBeenCalledTimes(1)
+    expect(backend.known(created.runtime)).toBeUndefined()
+    expect(other.events.size).toBe(1)
+  })
+
+  it('dispose closes the connection, leaves the host alone and stops reconnecting', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const first = hostClient(10)
+    const { backend, launch } = reconnecting([first])
+    await backend.prepare({ ownedPanes: new Map() })
+    first.lose()
+    backend.dispose()
+    expect(first.events.size + first.closes.size).toBe(0)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(launch).toHaveBeenCalledTimes(1)
+    expect(await backend.inventory()).toMatchObject({ state: 'unavailable' })
+  })
+
+  it('dispose while connected closes the client; one reached after dispose is closed at once', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const first = hostClient(10)
+    const late = hostClient(11)
+    let release: (value: EnsurePtyHostResult) => void = () => {}
+    const launch = vi.fn()
+      .mockResolvedValueOnce({ client: first as unknown as PtyHostClient })
+      .mockReturnValueOnce(new Promise<EnsurePtyHostResult>((resolve) => { release = resolve }))
+    const backend = new PtyHostBackend({ home: '/tmp/h', launch, owner: () => 'me' })
+    const replaced = vi.fn()
+    backend.onHostReplaced = replaced
+    await backend.prepare({ ownedPanes: new Map() })
+    first.lose()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(launch).toHaveBeenCalledTimes(2)
+    backend.dispose()
+    release({ client: late as unknown as PtyHostClient })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(late.closed).toBe(true)
+    expect(replaced).not.toHaveBeenCalled()
+    const connected = hostClient(12)
+    const fresh = new PtyHostBackend({ home: '/tmp/h', launch: async () => ({ client: connected as unknown as PtyHostClient }) })
+    await fresh.prepare({ ownedPanes: new Map() })
+    fresh.dispose()
+    expect(connected.closed).toBe(true)
+    expect(connected.events.size + connected.closes.size).toBe(0)
+  })
+})

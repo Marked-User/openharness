@@ -16,7 +16,7 @@ on:
       scope:
         description: 'Affected component; full for core suites, all for every component'
         type: choice
-        options: [full, cli, tui, backend, desktop, process, all, companions, website, os, provider, firmware, mobile, daemons]
+        options: [full, cli, tui, backend, desktop, process, all, companions, website, os, provider, firmware, mobile, daemons, pty]
         default: full
   workflow_call:
     inputs:
@@ -64,6 +64,7 @@ jobs:
       firmware: ${{ steps.select.outputs.firmware }}
       mobile: ${{ steps.select.outputs.mobile }}
       daemons: ${{ steps.select.outputs.daemons }}
+      pty: ${{ steps.select.outputs.pty }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -513,10 +514,53 @@ jobs:
           node-version: ${{ env.CLI_NODE_VERSION }}
       - run: node --test daemons/tools/card.test.mjs
 
+  # The Harness PTY host (pty/, on term/): its Rust tests, then the CLI's terminal contract for the
+  # ptyhost backend against the host just built (tmux's half needs tmux and runs locally). Selected by
+  # pty/, term/, the vendored terminal and the CLI's ptyhost files (scripts/ci-plan.py ALSO).
+  pty-checks:
+    concurrency:
+      group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}-pty-checks
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    needs: plan
+    if: needs.plan.outputs.ready == 'true' && needs.plan.outputs.pty == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CI_SOURCE_SHA }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            pty
+            term
+          shared-key: pty-pr
+          cache-bin: false
+      - name: Terminal and host unit tests
+        run: |
+          cargo test --locked --manifest-path term/Cargo.toml
+          cargo build --locked --manifest-path pty/Cargo.toml
+          cargo test --locked --manifest-path pty/Cargo.toml
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.CLI_NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: cli
+      - name: ptyhost terminal contract
+        working-directory: cli
+        env:
+          RUN_TERMINAL_CONTRACT: '1'
+          HARNESS_PTY_BIN: ${{ github.workspace }}/pty/target/debug/harness-pty
+        run: npx vitest run src/lib/ptyHostBackend.contract.spec.ts --maxWorkers=1
+
   required:
     name: ci/required
     needs: [plan, process-checks, desktop-tests, companion-subsystems, cli-typecheck, cli-tests, tui-test,
-            backend-desk, website-checks, os-checks, provider-checks, firmware-checks, mobile-checks, daemons-checks]
+            backend-desk, website-checks, os-checks, provider-checks, firmware-checks, mobile-checks, daemons-checks,
+            pty-checks]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 3

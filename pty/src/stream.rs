@@ -9,7 +9,9 @@
 //! `historyJoined` (`-p -e -J`) and `lastContinues`, as `tmuxStream.ts` reads them from tmux.
 //!
 //! Replies: `Subscribe`, `Input`, `Paste` and `Resize` are each answered by one `Ack`
-//! (`{"for":<kind>,"ok":bool,"reason"?}`), in the order they came; `Snapshot` by its
+//! (`{"for":<kind>,"ok":bool,"reason"?}`), in the order they came; a `Subscribe` or `Resize` ack
+//! that is `ok` also says whether the pane's size changed (`"resized":bool`: a read-only
+//! subscriber, or a size the pane already has, changes nothing and the child gets no SIGWINCH); `Snapshot` by its
 //! `SnapshotReply` (by `id`); `Pause` and `Resume` by nothing. Refusals name the reason:
 //! `not_subscribed`, `already_subscribed`, `read_only`, `no_pane`, `exited` (input to a held pane
 //! whose process ended), `bad_request`.
@@ -18,7 +20,7 @@
 //! stream (outputs at or below it may come on either side, as the dispatcher may lag; the client
 //! drops those after the reply).
 //!
-//! Resizes are ordered against outputs by the `Resize` ack (`{"for":4,"ok":true,"seq":S}`): it is
+//! Resizes are ordered against outputs by the `Resize` ack (`{"for":4,"ok":true,"seq":S,"resized":R}`): it is
 //! sent once the grid has the new size, and `S` is the last output drawn at the old size. Outputs
 //! above `S` come after the ack and were drawn at the new size; a snapshot asked for after the ack
 //! has it. (A resize does not take a sequence number.)
@@ -412,12 +414,21 @@ struct Session<'a> {
     read_only: bool,
 }
 
-fn ack(kind: Kind, outcome: Result<Option<u64>, &str>) -> Vec<u8> {
+fn ack(kind: Kind, outcome: Result<(), &str>) -> Vec<u8> {
     let v = match outcome {
-        Ok(None) => json!({"for": kind as u8, "ok": true}),
-        Ok(Some(seq)) => json!({"for": kind as u8, "ok": true, "seq": seq}),
+        Ok(()) => json!({"for": kind as u8, "ok": true}),
         Err(reason) => json!({"for": kind as u8, "ok": false, "reason": reason}),
     };
+    v.to_string().into_bytes()
+}
+
+/// A `Subscribe` or `Resize` ack: whether the pane's size changed, and for a resize the last
+/// output drawn at the old size.
+fn sized_ack(kind: Kind, seq: Option<u64>, resized: bool) -> Vec<u8> {
+    let mut v = json!({"for": kind as u8, "ok": true, "resized": resized});
+    if let Some(seq) = seq {
+        v["seq"] = json!(seq);
+    }
     v.to_string().into_bytes()
 }
 
@@ -484,7 +495,7 @@ impl Session<'_> {
             Kind::Input => {
                 let outcome = self.writable().and_then(|pane| {
                     pane.write(&payload).map_err(|_| "exited")?;
-                    Ok(None)
+                    Ok(())
                 });
                 self.sub.push_reply(Kind::Ack, ack(kind, outcome));
             }
@@ -494,7 +505,7 @@ impl Session<'_> {
                     let mode_on = pane.mode().contains(TermMode::BRACKETED_PASTE);
                     let bytes = harness_term::paste::bytes(text, true, mode_on);
                     pane.write(&bytes).map_err(|_| "exited")?;
-                    Ok(None)
+                    Ok(())
                 });
                 self.sub.push_reply(Kind::Ack, ack(kind, outcome));
             }
@@ -508,7 +519,8 @@ impl Session<'_> {
                     // Cut: every output after the ack whose seq is above the ack's was drawn at
                     // the new size.
                     Ok((pane, req)) => self.sub.push_reply_cut(Kind::Ack, || {
-                        ack(kind, Ok(Some(pane.resize(req.cols, req.rows))))
+                        let (seq, resized) = pane.resize(req.cols, req.rows);
+                        sized_ack(kind, Some(seq), resized)
                     }),
                     Err(reason) => self.sub.push_reply(Kind::Ack, ack(kind, Err(reason))),
                 }
@@ -542,12 +554,10 @@ impl Session<'_> {
         }
         let req: SubscribeRequest = serde_json::from_slice(payload).map_err(|_| "bad_request")?;
         let pane = self.panes.pane(&req.pane).map_err(|_| "no_pane")?;
-        if !req.read_only && pane.size() != (req.cols, req.rows) {
-            pane.resize(req.cols, req.rows);
-        }
+        let resized = !req.read_only && pane.resize(req.cols, req.rows).1;
         let sub = self.sub;
         let added = self.panes.subscribe(&req.pane, sub, || {
-            sub.push_reply_now(Kind::Ack, ack(Kind::Subscribe, Ok(None)))
+            sub.push_reply_now(Kind::Ack, sized_ack(Kind::Subscribe, None, resized))
         });
         if !added {
             return Err("no_pane");

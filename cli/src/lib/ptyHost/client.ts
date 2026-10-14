@@ -168,6 +168,11 @@ export class PtyHostClient {
   }
 
   readonly instance: string
+  /** The host's process, as its discovery file names it: another pid after a reconnect is another host. */
+  get pid(): number {
+    return this.discovery.pid
+  }
+
   private nextId = 1
   private readonly pending = new Map<number, Pending>()
   private readonly eventListeners = new Set<(event: PtyEvent) => void>()
@@ -303,6 +308,11 @@ export class PtyHostClient {
   private releaseHeld(): void {
     // Another create may have started meanwhile; its reply releases them.
     if (this.holding > 0) return
+    // Closed by its owner, who is no longer listening: its notices go with it.
+    if (this.closedByUs) {
+      this.held = []
+      return
+    }
     const held = this.held
     this.held = []
     for (const event of held) this.emit(event)
