@@ -89,6 +89,7 @@ class ProductMeasurement extends ChangeNotifier {
   bool get sharing => _account != null && _enabled == true;
   bool get _setupAllowed =>
       surface != 'web' &&
+      (!healthEnabled || context!.production) &&
       signedOutSharing &&
       (_account == null || _enabled == true);
 

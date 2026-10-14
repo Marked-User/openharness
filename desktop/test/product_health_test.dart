@@ -38,6 +38,15 @@ void main() {
     );
   });
   tearDown(() => usage.dispose());
+  test('development builds do not send anonymous setup counts', () async {
+    usage.account(null);
+    usage.context = ProductUsageContext(release: 'unknown', platform: 'macos', production: false);
+    await usage.setSignedOutSharing(true);
+    usage.begin(ProductFlow.setup)(ProductOutcome.ok);
+    usage.milestone(ProductHealthMeasure.funnelSetupSeen);
+    await usage.flush();
+    expect(setup, isEmpty);
+  });
   Map<String, int> totals() {
     final all = <String, int>{};
     for (final report in [...reports, ...setup]) {

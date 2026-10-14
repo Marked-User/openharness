@@ -3316,6 +3316,12 @@ class AppNotifier extends ChangeNotifier {
   }
 
   void _syncProductMeasurement() {
+    final context = productMeasurement.context;
+    final production = kReleaseMode && _autonomousEnv == 'prod';
+    if (context != null && context.production != production) {
+      productMeasurement.context = ProductUsageContext(release: context.release,
+        platform: context.platform, production: production);
+    }
     final scope =
         signedIn &&
             !signingIn &&
