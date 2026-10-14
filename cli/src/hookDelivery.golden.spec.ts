@@ -1,5 +1,5 @@
 /** Stable native delivery acknowledgement recorded from main before crash-persistent intake. */
-import type { Server } from 'node:http'
+import { request, type Server } from 'node:http'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -13,6 +13,11 @@ vi.mock('node:child_process', () => {
     spawn: forbidden, spawnSync: forbidden, fork: forbidden }
 })
 vi.mock('node:perf_hooks', async original => ({ ...await original<object>(), performance: { now: () => 0 } }))
+// Healthy disk confirmation is deterministic; host fsync latency is tested in
+// private integration fixtures, never used to select a golden reply.
+vi.mock('node:fs', async original => ({ ...await original<object>(),
+  fsync: (_fd: number, done: (error: Error | null) => void) => queueMicrotask(() => done(null)),
+}))
 vi.mock('./lib/loginShellEnv.js', () => ({ loginShellEnvironment: () => ({}) }))
 vi.mock('./lib/bootId.js', async original => ({ ...await original<object>(), currentBootId: () => 'fixture-boot', bootChanged: () => false }))
 vi.mock('./lib/processLiveness.js', async original => ({ ...await original<object>(),
@@ -48,7 +53,10 @@ it.each(['linux', 'darwin'])('preserves stable delivery acknowledgement and prom
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
   try {
     Object.defineProperty(process, 'platform', { ...originalPlatform, value: platform })
-    vi.useFakeTimers({ toFake: ['Date'], now: Date.parse('2026-10-10T00:00:00Z') })
+    // Healthy acknowledgements must not turn into the 100ms pending response
+    // merely because this host delayed a filesystem callback. No fault or wait
+    // is driven in this golden; those clocks belong to the failure regressions.
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'], now: Date.parse('2026-10-10T00:00:00Z') })
     for (const name of ['HOME', 'ADAPTER_DATA_DIR', 'ADAPTER_RUNTIME_DIR', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR',
       'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'HARNESS_HOOK_ROUTES_DIR']) {
       mkdirSync(path(name), { recursive: true, mode: 0o700 }); vi.stubEnv(name, path(name))
@@ -82,16 +90,25 @@ it.each(['linux', 'darwin'])('preserves stable delivery acknowledgement and prom
       onTurnStop: value => { turns.push({ stop: value }) },
       onToolStart: value => { turns.push({ tool: value }) },
       onSessionEnd: (sessionId, reason) => { ends.push({ sessionId, reason }) },
-    })
+    }, { deferNativeRecovery: true })
     server = started.server
-    const send = async (endpoint: string, body: Record<string, unknown>, id?: string, firedAt = '1791590400123') => {
-      const response = await fetch(`http://127.0.0.1:${started.port}/api/hook/${endpoint}`, {
+    const send = (endpoint: string, body: Record<string, unknown>, id?: string, firedAt = '1791590400123') => new Promise((resolve, reject) => {
+      // Node HTTP needs no advancing client clock; fetch's connection scheduling
+      // would share and wait on the intentionally frozen admission deadline.
+      const req = request(`http://127.0.0.1:${started.port}/api/hook/${endpoint}`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-harness-hook-fired-at': firedAt, 'x-harness-hook-token': readHookCredential(path('ADAPTER_DATA_DIR'))!,
           ...(id ? { 'x-harness-hook-delivery-id': id } : {}) },
-        body: JSON.stringify(body),
+      }, response => {
+        let data = ''
+        response.setEncoding('utf8')
+        response.on('data', chunk => { data += chunk })
+        response.on('error', reject)
+        response.on('end', () => {
+          try { resolve({ status: response.statusCode, body: JSON.parse(data) }) } catch (error) { reject(error) }
+        })
       })
-      return { status: response.status, body: await response.json() }
-    }
+      req.on('error', reject); req.end(JSON.stringify(body))
+    })
     const claudeBody = { engine: 'claude', tmuxPane: '%1', sessionId: A, transcriptPath: claude, cwd: root, source: 'fixture' }
     const codexBody = { engine: 'codex', tmuxPane: '%2', sessionId: B, transcriptPath: codex, cwd: root, source: 'fixture' }
     const start = { ...claudeBody, hookEvent: 'SessionStart' }
@@ -125,3 +142,8 @@ afterAll(() => {
   if (RECORD) writeFileSync(GOLDEN, JSON.stringify(captured, null, 2) + '\n')
   else expect(Object.keys(captured).sort()).toEqual(Object.keys(expected).sort())
 })
+
+vi.mock('./engines/kit/nativeHookStorage.js', async original => ({
+  ...await original<object>(),
+  openNativeHookStorage: (await import('./testing/nativeHookAdmissionStorageFixture.js')).fixtureNativeHookAdmissionStorage,
+}))

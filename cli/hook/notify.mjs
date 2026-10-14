@@ -281,7 +281,12 @@ function post(port, path, body, onResponse) {
     const payload = JSON.stringify(body)
     const credential = readHookCredential()
     if (!credential) { resolve(false); return }
-    let connected = false
+    let connected = false, settled = false, deadline
+    const finish = value => {
+      if (settled) return
+      settled = true; clearTimeout(deadline); resolve(value)
+    }
+    const timeout = Math.max(1, Math.min(500, remainingBudget()))
     const req = http.request(
       {
         host: '127.0.0.1',
@@ -297,23 +302,47 @@ function post(port, path, body, onResponse) {
           'X-Harness-Hook-Fired-At': String(FIRED_AT),
           'X-Harness-Hook-Delivery-Id': DELIVERY_ID,
         },
-        timeout: Math.max(1, Math.min(500, remainingBudget())),
+        timeout,
       },
       (res) => {
-        let response = ''
+        connected = true
+        let response = '', responseBytes = 0
         res.setEncoding('utf8')
-        res.on('data', (chunk) => { if (response.length < 16_384) response += chunk })
+        res.on('data', chunk => {
+          if (settled || responseBytes > 16_384) return
+          responseBytes += Buffer.byteLength(chunk)
+          if (responseBytes <= 16_384) response += chunk
+        })
+        res.on('aborted', () => finish('late'))
+        res.on('error', () => finish('late'))
+        res.on('close', () => finish('late'))
         res.on('end', () => {
+          if (settled) return
           const ok = (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300
           let reply
-          try { if (response.length <= 16_384) reply = JSON.parse(response) } catch { /* no structured reply */ }
-          if (res.statusCode === 429 || (res.statusCode === 202 && reply?.retry === true)) { resolve('held'); return }
-          if (path === '/api/hook/turn-stop' && ok && reply?.pending === true) { resolve('held'); return }
-          if (path === '/api/hook/turn-stop' && ok && reply?.duplicate === true) { resolve('duplicate'); return }
-          if (ok && onResponse && response.length <= 16_384) {
-            try { onResponse(JSON.parse(response)) } catch { /* Unavailable context never blocks a turn. */ }
+          try { if (responseBytes <= 16_384) reply = JSON.parse(response) } catch { /* no structured reply */ }
+          // Any HTTP reply proves a live peer, never permission to rewrite its
+          // registry. Success also needs an explicit, complete acknowledgement.
+          if (!ok || !reply || typeof reply !== 'object' || Array.isArray(reply) || 'error' in reply
+            || ['ok', 'pending', 'ignored', 'duplicate', 'retry'].some(key => key in reply && typeof reply[key] !== 'boolean')
+            || reply.retry === true
+            || [reply.ok, reply.pending, reply.ignored].filter(value => value === true).length > 1
+            || reply.duplicate === true && (reply.pending === true || reply.ignored === true || reply.ok === false)) {
+            finish('held'); return
           }
-          resolve(ok)
+          // Registration can retain or ignore a hook. Neither says that a Stop
+          // applied its completion, so it cannot authorize deleting task state.
+          if (path === '/api/hook/session-start') {
+            if (!(reply.ok === true || reply.pending === true || reply.ignored === true)) { finish('held'); return }
+          } else {
+            if (reply.pending === true || reply.ignored === true) { finish('held'); return }
+            if (path === '/api/hook/turn-stop' && reply.duplicate === true) { finish('duplicate'); return }
+            if (reply.ok !== true || reply.duplicate === true) { finish('held'); return }
+          }
+          if (onResponse) {
+            try { onResponse(reply) } catch { /* Unavailable context never blocks a turn. */ }
+          }
+          finish(true)
         })
       }
     )
@@ -321,11 +350,17 @@ function post(port, path, body, onResponse) {
       if (!socket.connecting) connected = true
       else socket.once('connect', () => { connected = true })
     })
-    req.on('error', () => resolve(false))
-    req.on('timeout', () => {
+    // A reset after connection may follow a durable admission whose reply was
+    // lost. It must take the same path as a late reply, never offline fallback.
+    req.on('error', () => finish(connected ? 'late' : false))
+    const expire = () => {
+      finish(connected ? 'late' : false)
       req.destroy()
-      resolve(connected ? 'late' : false)
-    })
+    }
+    req.on('timeout', expire)
+    // Socket inactivity alone is not a deadline: a slow stream can keep it
+    // alive forever and stall the engine's hook command.
+    deadline = setTimeout(expire, timeout)
     req.write(payload)
     req.end()
   })
@@ -1843,7 +1878,7 @@ async function main() {
     ok = await post(port, '/api/hook/session-start', body)
     held ||= ok === 'held'
   }
-  if (held && ok !== true) process.stderr.write('[harness] Hermes admission is held; this delivery could not be confirmed. The current conversation is unchanged.\n')
+  if (held && ok !== true) process.stderr.write('[harness] Hook admission is held; this delivery could not be confirmed. The current conversation is unchanged.\n')
   if (ok === false && !held) await fallbackRegister(input, engine, tmuxPane)
 }
 
