@@ -38,9 +38,11 @@ try {
     if(args.length && !(args.length===1 && args[0]==='--json')) throw new Error('Use: fleet status [--json]');
     console.log(JSON.stringify(await readStatus(workspace),null,2));
   } else if (command === 'doctor') {
-    // The floor setup.sh holds Grid to, read from VERSIONS so the two cannot disagree.
+    // The floor setup.sh holds Grid to, read from VERSIONS so the two cannot disagree — quoted or not, as the
+    // shell that sources it would take it.
     const { readFile } = await import('node:fs/promises');
-    const floor = (await readFile(join(PACKAGE, 'VERSIONS'), 'utf8')).match(/^GRID_MIN_VERSION="(\d+\.\d+\.\d+)"$/m)[1];
+    const floor = (await readFile(join(PACKAGE, 'VERSIONS'), 'utf8')).match(/^GRID_MIN_VERSION=(["']?)(\d+\.\d+\.\d+)\1\s*$/m)?.[2];
+    if (!floor) throw new Error(`${join(PACKAGE, 'VERSIONS')} names no GRID_MIN_VERSION="X.Y.Z", so the Grid floor is unknown. Reinstall this package.`);
     const result = await execute({ transport: 'local' }, ['version']);
     const version = result.stdout.match(/\d+\.\d+\.\d+/)?.[0];
     const [a=0,b=0,c=0] = (version || '').split('.').map(Number), [x,y,z] = floor.split('.').map(Number);

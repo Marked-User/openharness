@@ -3,7 +3,7 @@
 // the last reading on screen, and a hidden page stops listening.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -179,11 +179,14 @@ test('a fresh workspace probes with --no-wake and takes a sleeping own grid as a
 });
 
 /** A package script run as the person's agent runs it, against one fake `grid`, and its exit status. */
-const script=(file,args,grid,dir)=>new Promise(done=>execFile(file,args,{cwd:PACKAGE,env:{...process.env,
+const script=(file,args,grid,dir,root=PACKAGE)=>new Promise(done=>execFile(file,args,{cwd:root,env:{...process.env,
   PATH:`${dirname(process.execPath)}:${process.env.PATH}`,HARNESS_GRID_BIN:grid,ADAPTER_RUNTIME_DIR:join(dir,'runtime')}},
   (error,stdout,stderr)=>done({code:error?error.code:0,out:`${stdout}${stderr}`})));
 
-test('setup and doctor take the first grid that knows --no-wake as the floor, and nothing older',async t=>{
+// setup.sh asks for Node >= 22 first (harness_node 22, the package's engines), on the Node running this test.
+const belowSetupNode=Number(process.versions.node.split('.')[0])<22&&`setup.sh needs Node >= 22; this run is on ${process.versions.node}`;
+
+test('setup and doctor take the first grid that knows --no-wake as the floor, and nothing older',{skip:belowSetupNode},async t=>{
   const dir=await temporary(t),log=join(dir,'calls.json');
   const old=await fakeGrid(dir,'grid-0.3.48',{verbs:{version:{stdout:'grid 0.3.48\n'}}},log);
   const first=await fakeGrid(dir,'grid-0.3.49',{verbs:{version:{stdout:'grid 0.3.49\n'}}},log);
@@ -197,4 +200,17 @@ test('setup and doctor take the first grid that knows --no-wake as the floor, an
   assert.equal(ok.code,0,ok.out);assert.match(ok.out,/^ok {3}grid 0\.3\.49$/m);
   const healthy=await script(process.execPath,['toolchain/fleet.mjs','doctor'],first,dir);
   assert.equal(healthy.code,0,healthy.out);assert.match(healthy.out,/^ok {3}Grid 0\.3\.49$/m);
+});
+
+test('doctor reads the floor however the shell would, and says so when VERSIONS names none',async t=>{
+  const dir=await temporary(t),log=join(dir,'calls.json'),root=join(dir,'package');
+  const grid=await fakeGrid(dir,'grid-0.3.49',{verbs:{version:{stdout:'grid 0.3.49\n'}}},log);
+  for(const part of ['lib','toolchain'])await cp(join(PACKAGE,part),join(root,part),{recursive:true});
+  // Unquoted is the same value to setup.sh, which sources the file.
+  await writeFile(join(root,'VERSIONS'),'GRID_MIN_VERSION=0.3.50\n');
+  const above=await script(process.execPath,['toolchain/fleet.mjs','doctor'],grid,dir,root);
+  assert.equal(above.code,1,above.out);assert.match(above.out,/Grid >= 0\.3\.50 is required/);
+  await writeFile(join(root,'VERSIONS'),'GRID_MIN=0.3.49\n');
+  const none=await script(process.execPath,['toolchain/fleet.mjs','doctor'],grid,dir,root);
+  assert.equal(none.code,1,none.out);assert.match(none.out,/VERSIONS names no GRID_MIN_VERSION/);assert.doesNotMatch(none.out,/TypeError|null/);
 });
