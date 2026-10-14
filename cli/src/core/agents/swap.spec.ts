@@ -7,6 +7,7 @@ import { processRows } from '../../lib/terminalAgentDiscovery.js'
 import { resolvePaneEngineProcess } from '../../lib/paneEngineProcess.js'
 import { bypassPermissionActive } from '../../lib/processTable.js'
 import { AgentRestartCoordinator } from '../../lib/restartAgent.js'
+import { setAgentSignaller } from '../../lib/processSignals.js'
 import { createPaneSwap, SWAP_SETTLE_MS, type PaneSwapDeps } from './swap.js'
 import type { NativeLaunch } from '../../engines/nativeLaunch.js'
 
@@ -119,6 +120,10 @@ describe('the pane-process swap', () => {
     expect(used.checkRuntime).toBe(checkPidRuntime)
     used.kill?.(42, 'SIGTERM')
     expect(kill).toHaveBeenCalledWith(42, 'SIGTERM')
+    const injected = vi.fn()
+    setAgentSignaller(injected)
+    try { used.kill?.(43, 'SIGKILL') } finally { setAgentSignaller(null) }
+    expect(injected).toHaveBeenCalledExactlyOnceWith(43, 'SIGKILL')
     await used.sleep?.(1)
     used.log?.('stopping')
     expect(log).toHaveBeenCalledWith('stopping')

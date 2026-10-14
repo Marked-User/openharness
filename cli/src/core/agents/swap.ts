@@ -15,6 +15,7 @@ import type { TmuxRuntimeRef } from '../../lib/terminalTypes.js'
 import { resolvePaneEngineProcess } from '../../lib/paneEngineProcess.js'
 import { bypassPermissionActive } from '../../lib/processTable.js'
 import { sameProcessIdentity } from '../../lib/terminalRuntime.js'
+import { signalAgentProcess } from '../../lib/processSignals.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
 
 export interface PaneSwapDeps {
@@ -68,7 +69,7 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
     },
     terminate: (checkAfterMs) => terminateDeletedAgent(session, {
       checkRuntime: checkPidRuntime,
-      kill: (pid, signal) => process.kill(pid, signal),
+      kill: signalAgentProcess,
       sleep: (ms) => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.() }),
       log: (message) => console.log(message),
       ...(current ? { current } : {}),

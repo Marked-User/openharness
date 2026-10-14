@@ -3,6 +3,7 @@
 import type { RegisteredSession } from './registry.js'
 import { type RuntimeCheck } from './paneEngineProcess.js'
 import { processRows } from './processTable.js'
+import { type AgentSignal } from './processSignals.js'
 import { sameProcessIdentity } from './terminalRuntime.js'
 
 /** Delete has already removed the UI entry; signal the saved process immediately. */
@@ -49,7 +50,7 @@ export interface TerminateDeps {
   /** Three-valued exact identity check. Probe failure is not evidence that the process is gone. */
   checkRuntime: (session: RegisteredSession) => Promise<RuntimeCheck>
   /** `process.kill`. Throws on EPERM/ESRCH like the real one. */
-  kill: (pid: number, signal: NodeJS.Signals) => void
+  kill: (pid: number, signal: AgentSignal) => void
   sleep: (ms: number) => Promise<void>
   log: (message: string) => void
 }
@@ -86,7 +87,7 @@ export async function terminateDeletedAgent(
   const pid = session.processIdentity?.pid
   if (!pid) return 'not-ours'
 
-  const signal = (sig: NodeJS.Signals): boolean => {
+  const signal = (sig: AgentSignal): boolean => {
     if (deps.current?.() === false) return false
     try { deps.kill(pid, sig); return true } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code

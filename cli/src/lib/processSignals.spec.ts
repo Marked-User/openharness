@@ -1,23 +1,26 @@
-import { describe, expect, it, vi } from 'vitest'
-import { terminateProcess } from './processSignals.js'
-import { setProcessTableSource } from './processTable.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { setAgentSignaller, signalAgentProcess } from './processSignals.js'
 
-describe('terminateProcess (unix)', () => {
-  it('does not signal a pid whose identity changed', async () => {
+afterEach(() => { setAgentSignaller(null); vi.restoreAllMocks() })
+
+describe('signalAgentProcess', () => {
+  it('defaults to process.kill with the same pid and signal, and propagates its throw', () => {
     const kill = vi.spyOn(process, 'kill').mockImplementation(() => true)
-    setProcessTableSource(async () => [{ pid: 50, parentPid: 1, executable: 'x', startMarker: 'NEW', args: 'x' }])
-    try {
-      expect(await terminateProcess({ pid: 50, executable: 'x', startMarker: 'OLD' }, { graceful: true })).toBe('gone')
-      expect(kill).not.toHaveBeenCalled()
-    } finally { setProcessTableSource(null); kill.mockRestore() }
+    signalAgentProcess(50, 'SIGKILL')
+    expect(kill).toHaveBeenCalledExactlyOnceWith(50, 'SIGKILL')
+    kill.mockImplementation(() => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) })
+    expect(() => signalAgentProcess(50, 'SIGTERM')).toThrow(expect.objectContaining({ code: 'ESRCH' }))
   })
 
-  it('sends SIGTERM when graceful and identity matches', async () => {
+  it('uses an injected signaller until it is cleared', () => {
     const kill = vi.spyOn(process, 'kill').mockImplementation(() => true)
-    setProcessTableSource(async () => [{ pid: 51, parentPid: 1, executable: 'x', startMarker: 'S', args: 'x' }])
-    try {
-      expect(await terminateProcess({ pid: 51, executable: 'x', startMarker: 'S' }, { graceful: true })).toBe('signalled')
-      expect(kill).toHaveBeenCalledWith(51, 'SIGTERM')
-    } finally { setProcessTableSource(null); kill.mockRestore() }
+    const injected = vi.fn()
+    setAgentSignaller(injected)
+    signalAgentProcess(51, 'SIGTERM')
+    expect(injected).toHaveBeenCalledExactlyOnceWith(51, 'SIGTERM')
+    expect(kill).not.toHaveBeenCalled()
+    setAgentSignaller(null)
+    signalAgentProcess(51, 'SIGTERM')
+    expect(kill).toHaveBeenCalledExactlyOnceWith(51, 'SIGTERM')
   })
 })

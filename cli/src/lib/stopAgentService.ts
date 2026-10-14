@@ -11,6 +11,7 @@ import type { TerminalBackend } from './terminalBackend.js'
 import type { TmuxRuntimeRef } from './terminalTypes.js'
 import { terminalRouteKey } from './terminalRuntime.js'
 import { checkPidRuntime, terminateDeletedAgent } from './deleteAgentFallback.js'
+import { signalAgentProcess } from './processSignals.js'
 
 export interface StopAgentServiceDeps {
   settlePane?: (agentId: string) => Promise<void>
@@ -150,7 +151,7 @@ export function createStopAgentService(deps: StopAgentServiceDeps) {
             kill: (pid, signal) => {
               verifyTranscript()
               if (!sameTarget() || options.current?.() === false) throw new AgentStopError('The close request was cancelled or changed.')
-              process.kill(pid, signal)
+              signalAgentProcess(pid, signal)
             },
             sleep: ms => new Promise(resolve => { const timer = setTimeout(resolve, ms); timer.unref?.() }),
             log: message => console.log(message),

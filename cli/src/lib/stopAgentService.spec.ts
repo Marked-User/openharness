@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { captureResumeIdentity } from './captureResumeIdentity.js'
 import { createStopAgentService, type StopAgentServiceDeps } from './stopAgentService.js'
 import { registry, type RegisteredSession } from './registry.js'
+import { setAgentSignaller } from './processSignals.js'
 import { stoppedAgents } from './stoppedAgents.js'
 import { AgentRestartCoordinator } from './restartAgent.js'
 import { checkPidRuntime, terminateDeletedAgent } from './deleteAgentFallback.js'
@@ -238,6 +239,12 @@ it.each(['capture', 'termination'] as const)('accepts a hook rebuilding the same
   expect(deps.forgetSession).toHaveBeenCalledExactlyOnceWith(row.agentId, { force: true, captured: expect.objectContaining({ sessionId: 'saved' }) })
   expect(registry.byAgent(row.agentId)).toBeUndefined()
   expect(stoppedAgents.get(row.agentId)?.sessionId).toBe('saved')
+})
+it('routes the stop signal through the agent signaller', async () => {
+  const injected = vi.fn(); setAgentSignaller(injected)
+  vi.mocked(terminateDeletedAgent).mockImplementation(async (entry, actions) => { actions.kill(78, 'SIGKILL'); return 'terminated' })
+  try { await createStopAgentService(deps)(row.agentId) } finally { setAgentSignaller(null) }
+  expect(injected).toHaveBeenCalledExactlyOnceWith(78, 'SIGKILL')
 })
 it('only signals through the validated process deleter and does not erase a newer stop job', async () => {
   const signal = vi.spyOn(process, 'kill').mockReturnValue(true)
