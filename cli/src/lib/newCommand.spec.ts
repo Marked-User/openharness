@@ -373,6 +373,20 @@ describe('harness new: the daemon', () => {
     expect(older.err).toEqual([])
   })
 
+  // Review of #1333: a start left pending on another machine was to be checked with `harness ps`, which lists this one.
+  it('names the machine in what to check, for a start left pending on another one', async () => {
+    const answer = (cancel: Record<string, unknown> | null) => new FakeSocket((frame) =>
+      frame.type === 'agent_create' || frame.type === 'agent_create_status' ? { state: 'pending' }
+        : frame.type === 'agent_create_cancel' ? cancel : null)
+    const older = deps(['codex', '--machine', 'mini'], answer(null), { sleep: async () => {} })
+    expect(await newCommand(older)).toBe(1)
+    expect(older.err.at(-1)).toBe('Harness did not start the harness within a minute. '
+      + 'It is still saved and may start later by itself: check with `harness ps --machine mini` before starting another.')
+    const claimed = deps(['codex', '--machine', 'Mac mini'], answer({ state: 'unconfirmed' }), { sleep: async () => {} })
+    expect(await newCommand(claimed)).toBe(1)
+    expect(claimed.err.at(-1)).toBe('Harness could not confirm the harness started (unconfirmed). Check with `harness ps --machine "Mac mini"` before starting another.')
+  })
+
   it('says why the machine refused an engine that cannot run, in the machine\'s words', async () => {
     const d = deps(['codex'], new FakeSocket((frame) => frame.type === 'agent_create' ? { creationId: 'c1', state: 'failed',
       failure: { code: 'ENGINE_CANNOT_RUN', detail: 'Codex is installed but cannot run: /usr/bin/env: ‘node’: No such file or directory' } } : null))

@@ -17,12 +17,14 @@ The commands an agent uses:
 
 ```
 harness ps [--all]                                  # the harnesses here: state, who started each, what each is about
-harness new [agent] [@machine] [folder | project] --name NAME -- TASK
+harness new [agent] [--machine NAME] [folder | project] --name NAME -- TASK
 harness wait NAME[,NAME…] [--any] [--timeout 30m]   # exits 0 idle, 3 needs the person, 4 stopped or gone, 124 timed out
 harness show NAME [--chars N]                       # its state, the last ask and its answer
 harness send NAME "text"                            # a teammate in this tab, while Agent Messages are on
 harness close NAME [--now]                          # save its screen and stop it; the conversation is kept
 ```
+
+`ps`, `show`, `wait` and `close` take `--machine NAME` too, for a harness on another of the person's machines.
 
 Once Harness runs on a computer, Claude Code and Codex there run these commands and Harness's MCP tools without asking: Harness adds them to their permission rules, and Codex runs them outside its sandbox. Run each `harness` command by itself or join them with `&&`; piped or joined with other commands, the rule no longer matches. Where Harness has not set an agent up, run `harness` outside its sandbox, which cannot reach Harness's local daemon.
 

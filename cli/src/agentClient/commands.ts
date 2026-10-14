@@ -613,6 +613,9 @@ export function waitCommand(argv: readonly string[], deps: ClientDeps = {}): Pro
           continue
         }
         if (!targets.some((x) => x.machineId === t.machineId && x.frame.id === t.frame.id)) targets.push(t)
+        // Two names for one harness on another machine (`a,a`, a name and its prefix): each opened a connection there,
+        // and the one not kept would hold the process open after it printed (review of #1333).
+        else if (t.remote) t.daemon.close()
       }
       /** Asks a creation how it stands: made, it joins the harnesses waited on, recorded as the caller's. */
       const follow = async (a: Asked): Promise<void> => {
@@ -682,7 +685,7 @@ export function waitCommand(argv: readonly string[], deps: ClientDeps = {}): Pro
             throw error
           })
         }
-        // One list per machine a round, however many harnesses are waited on there.
+        // One list per connection a round: every harness on this machine shares one; each named on another has its own.
         const lists = new Map<Daemon, Promise<Frame[]>>()
         for (const t of targets) {
           if (settled.has(t)) continue

@@ -453,6 +453,9 @@ export async function newCommand(deps: NewCommandDeps): Promise<number> {
       machineLabel = machine.current ? 'this computer' : machine.label
       local = machine.current
     }
+    // A start left pending on another machine is looked for there: `harness ps` alone lists this one, which is how
+    // the lamp lost its harness on office (review of #1333).
+    const psThere = local || args.machine === null ? 'harness ps' : `harness ps ${machineOption(args.machine)}`
     if (!machineId) {
       deps.error('This computer is not signed in to Harness. Run `harness login`.')
       return 1
@@ -571,7 +574,7 @@ export async function newCommand(deps: NewCommandDeps): Promise<number> {
         }
         // No answer (a daemon that predates the cancel): the request is still saved, and may start later.
         if (typeof cancelled?.state !== 'string' || cancelled.state === 'pending') {
-          throw new Error(`${why} It is still saved and may start later by itself: check with \`harness ps\` before starting another.`)
+          throw new Error(`${why} It is still saved and may start later by itself: check with \`${psThere}\` before starting another.`)
         }
         // Too late to cancel: what became of it (created, refused, or claimed and starting now) is the answer.
         result = cancelled
@@ -585,7 +588,7 @@ export async function newCommand(deps: NewCommandDeps): Promise<number> {
         throw new Error(result.state === 'failed'
           // A code this has no words for is shown by the daemon's own detail, which names the engine and why.
           ? (ERRORS[code] ? `${ERRORS[code]}${detail ? ` (${detail})` : ''}` : detail || code || 'The harness could not be started.')
-          : `Harness could not confirm the harness started (${String(result.state)}). Check with \`harness ps\` before starting another.`)
+          : `Harness could not confirm the harness started (${String(result.state)}). Check with \`${psThere}\` before starting another.`)
       }
       const agent = (result.agent ?? {}) as Record<string, unknown>
       const warning = await origin?.created(machineId, agent, creationId)

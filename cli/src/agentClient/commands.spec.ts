@@ -1242,6 +1242,23 @@ describe('a harness on another machine, named with --machine', () => {
     expect(spaced.out).toEqual(['gpu: idle · read it: harness show --machine "Mac mini" gpu'])
   })
 
+  // Review of #1333: each name opened its own connection there, and a second name for the same harness was dropped
+  // with its connection still open, holding the process after it printed.
+  it('closes every connection it opens there, a name given twice or by its start included', async () => {
+    const { office, h } = lamp()
+    const opened: Array<{ closed: boolean }> = []
+    const open: ClientDeps['open'] = async (w, machineId) => {
+      if (machineId !== 'office-id') return h.deps.open!(w, machineId)
+      const line = { machineId: 'office-id', closed: false, request: (type: string, payload?: Record<string, unknown>) => office.request(type, payload), close() { this.closed = true } }
+      opened.push(line)
+      return line as unknown as Daemon
+    }
+    expect(await waitCommand(['--machine', 'office', 'lamp-first-task,lamp,lamp-first-task'], { ...h.deps, open })).toBe(EXIT.ok)
+    expect(h.out).toEqual(['lamp-first-task: idle · read it: harness show --machine office lamp-first-task'])
+    expect(opened.length).toBeGreaterThan(1)
+    expect(opened.filter((line) => !line.closed)).toEqual([])
+  })
+
   it('lists that machine\'s harnesses, asking it what each is about', async () => {
     const { d, office, h } = lamp()
     d.frames = [frame('local-one')]
