@@ -12056,17 +12056,17 @@ class AppNotifier extends ChangeNotifier {
     return _createFollowingHold(creation, creation.holdWait, ask);
   }
 
-  /// How often a harness the machine holds is asked after
-  /// ([_createFollowingHold], for an [AgentCreationAttempt.holdWait]): the
-  /// pace `harness new` asks at.
+  /// How often a harness the machine holds or is starting is asked after
+  /// ([_createFollowingHold]): the pace `harness new` asks at.
   @visibleForTesting
   Duration heldCreationInterval = const Duration(seconds: 2);
 
   /// How long a harness the machine has begun starting is asked after, from
   /// when it is first seen starting, before the create answers that it is
-  /// still starting ([AgentCreationAttempt._starting]). A worktree from main took 13 s on
-  /// the office Mac (2026-10-14); a minute covers that several times over
-  /// without holding the form much longer than a lost reply already can.
+  /// still starting ([AgentCreationAttempt._starting]). A worktree from main
+  /// took 13 s on the office Mac (2026-10-14); a minute covers that several
+  /// times over. A form waiting on the create stays busy (it cannot be closed)
+  /// for that long at most.
   @visibleForTesting
   Duration startingCreationWait = const Duration(minutes: 1);
 
@@ -12097,6 +12097,10 @@ class AppNotifier extends ChangeNotifier {
   ) async {
     final began = DateTime.now();
     DateTime? starting;
+    // What an earlier call was told is not this one's to follow: a call that
+    // ends before reaching the machine (its choices changed) would otherwise
+    // wait out the whole start without asking anything.
+    creation._starting = false;
     var answer = await ask();
     while (!_disposed && !creation._finished) {
       final now = DateTime.now();

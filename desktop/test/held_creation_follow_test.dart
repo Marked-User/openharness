@@ -280,6 +280,32 @@ void main() {
       ]);
     });
 
+    test('a later call that never reaches the machine answers at once, not after a start\'s wait', () async {
+      final machine = _Machine()..starts = 1 << 20;
+      final app = _app(machine)
+        ..startingCreationWait = const Duration(milliseconds: 40);
+      final attempt = AgentCreationAttempt();
+      await app.createAgent(
+        'm',
+        engine: 'claude',
+        folder: '/work',
+        attempt: attempt,
+      );
+      app.startingCreationWait = const Duration(minutes: 1);
+      final asked = machine.asked.length;
+      final watch = Stopwatch()..start();
+      // Other choices for the same request: refused before the machine is asked.
+      final error = await app.createAgent(
+        'm',
+        engine: 'codex',
+        folder: '/work',
+        attempt: attempt,
+      );
+      expect(error, 'Check the original request before changing its choices.');
+      expect(watch.elapsed, lessThan(const Duration(seconds: 5)));
+      expect(machine.asked, hasLength(asked));
+    });
+
     test('says it is still starting once the wait has passed, Check status still offered', () async {
       final machine = _Machine()..starts = 1 << 20;
       final app = _app(machine)
