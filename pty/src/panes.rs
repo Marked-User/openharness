@@ -13,8 +13,9 @@
 //! same lock) always finds its entry.
 //!
 //! `respawn` is tmux's `respawn-pane -k`: a child still running is killed first (outside the
-//! lock, the entry marked `respawning` meanwhile), and its exit is absorbed rather than ending
-//! or marking dead the pane that is about to run the next child.
+//! lock), then the next one spawned. Each child of a pane has a generation (`PaneEvent::Exited`),
+//! and an exit applies only while its child is the pane's current one: a replaced child's exit,
+//! however late it is dispatched, neither ends nor marks dead the pane that now runs another.
 //!
 //! Stream subscribers (`stream.rs`) live in `streams`, beside the table: the dispatcher queues
 //! each output there without taking the table lock. A pane that leaves the table closes its
@@ -38,6 +39,10 @@ use crate::stream::{Registry, Subscriber};
 
 /// The longest grace a `kill` gives a child before it is killed outright.
 const MAX_GRACE: Duration = Duration::from_secs(60);
+
+/// How long `respawn` waits, after the kill, for the killed child's exit to be recorded
+/// (`Killing::finish` returns once it is, or at most this long after a SIGKILL).
+const EXIT_REPORT: Duration = Duration::from_secs(1);
 
 /// How long `respawn` gives a running child after SIGHUP before it is killed outright: the
 /// daemon's own kill grace (ptyHostBackend.ts). tmux's `respawn-pane -k` gives none.
@@ -115,11 +120,8 @@ struct PaneEntry {
     /// `expectedHeldToken` is checked against.
     start_command: String,
     hold: bool,
-    /// A `respawn` is killing the running child: its exit is kept in `pending_exit`, not applied.
-    respawning: bool,
-    pending_exit: Option<Option<i32>>,
-    /// Exits of children a `respawn` already replaced, still on their way: ignored.
-    stale_exits: u32,
+    /// The generation of the pane's current (or last) child.
+    generation: u64,
     /// The process exited and the pane is held.
     dead: bool,
     exit_status: Option<i32>,
@@ -200,19 +202,12 @@ impl Panes {
                 pane: id.to_owned(),
                 title: title.clone(),
             }),
-            PaneEvent::Exited { status } => {
+            PaneEvent::Exited { generation, status } => {
                 let removed = {
                     let mut table = lock(&self.table);
                     match table.get_mut(id) {
-                        // The child a respawn is replacing: the pane lives on, nobody is told.
-                        Some(entry) if entry.respawning => {
-                            entry.pending_exit = Some(*status);
-                            return None;
-                        }
-                        Some(entry) if entry.stale_exits > 0 => {
-                            entry.stale_exits -= 1;
-                            return None;
-                        }
+                        // A child a respawn replaced: the pane runs another, nobody is told.
+                        Some(entry) if entry.generation != *generation => return None,
                         Some(entry) if entry.hold => {
                             entry.dead = true;
                             entry.exit_status = *status;
@@ -292,66 +287,90 @@ impl Panes {
         env: HashMap<String, String>,
         expected_held_token: Option<String>,
     ) -> Result<Reply, OpError> {
-        let (handle, running) = {
+        let held = |entry: &PaneEntry| match &expected_held_token {
+            Some(expected) if !held_by(&entry.start_command, expected) => Err(OpError::new(
+                "held_mismatch",
+                format!("pane {pane} is not held under that token"),
+            )),
+            _ => Ok(()),
+        };
+        let (handle, current, running) = {
             let mut table = lock(&self.table);
             let entry = table
                 .get_mut(&pane)
                 .ok_or_else(|| OpError::no_pane(&pane))?;
-            if let Some(expected) = &expected_held_token
-                && !held_by(&entry.start_command, expected)
-            {
-                return Err(OpError::new(
-                    "held_mismatch",
-                    format!("pane {pane} is not held under that token"),
-                ));
-            }
-            if entry.respawning {
+            held(entry)?;
+            let current = entry.pane.generation();
+            // The table already looks past the pane's child: another respawn is replacing it.
+            if entry.generation != current {
                 return Err(OpError::new(
                     "bad_request",
                     format!("pane {pane} is already being respawned"),
                 ));
             }
-            // A pane not yet marked dead has an exit still to come, whether the child runs or
-            // its exit is queued: absorbed, from here.
             let running = !entry.dead;
-            entry.respawning = running;
-            (entry.pane.clone(), running)
+            // The child about to be killed is retired now, before its exit can be dispatched:
+            // from here only the next generation's exit applies, so the pane is neither removed
+            // nor marked dead by the kill.
+            if running {
+                entry.generation = current + 1;
+            }
+            (entry.pane.clone(), current, running)
         };
         // Outside the lock: the grace must not stop every other op.
-        if running && let Some(killing) = handle.start_kill() {
-            killing.finish(RESPAWN_GRACE);
+        if running {
+            if let Some(killing) = handle.start_kill() {
+                killing.finish(RESPAWN_GRACE);
+            }
+            handle.wait_exit(EXIT_REPORT);
         }
         let env = self.child_env(&pane, env);
         let mut table = lock(&self.table);
-        // Killed meanwhile: `kill` took the entry, and announced its exit.
+        // Killed meanwhile: `kill` took the entry, and its exit is announced.
         let entry = table
             .get_mut(&pane)
             .filter(|e| Arc::ptr_eq(&e.pane, &handle))
             .ok_or_else(|| OpError::no_pane(&pane))?;
-        entry.respawning = false;
-        let pending = entry.pending_exit.take();
-        match handle.respawn(spec(command.clone(), cwd, env, 0, 0)) {
-            Ok(()) => {
-                // The old child's exit is queued ahead of anything the new one reports (the
-                // reader queues it before recording it): the next exit is that one.
-                if running && pending.is_none() {
-                    entry.stale_exits += 1;
-                }
-                entry.start_command = command.join(" ");
-                entry.command = command;
-                entry.dead = false;
-                entry.exit_status = None;
-                entry.engine_exit = None;
-                Ok(Reply::new())
+        // A dead pane was not marked: another respawn (another connection's) may have got to it
+        // while the lock was free. Its child is not the one this request saw, and the guard must
+        // hold for the pane as it is now, right before the spawn. A running pane's retired
+        // generation kept every other respawn out.
+        if !running {
+            if entry.generation != current {
+                return Err(OpError::new(
+                    "bad_request",
+                    format!("pane {pane} was respawned meanwhile"),
+                ));
             }
-            Err(e) => {
-                // The old child is gone and nothing replaced it: its exit applies after all.
-                if let Some(status) = pending {
-                    let _ = self.sink.send((pane, PaneEvent::Exited { status }));
-                }
-                Err(OpError::new("spawn_failed", e.to_string()))
-            }
+            held(entry)?;
         }
+        let generation = match handle.respawn(spec(command.clone(), cwd, env, 0, 0)) {
+            Ok(generation) => generation,
+            Err(e) => {
+                // The table follows the pane: a generation used up by the failed spawn, or the
+                // current one when the child would not die.
+                entry.generation = handle.generation();
+                // Killed, and nothing replaced it: its exit applies after all, once, under that
+                // generation (its own exit, of the retired one, is ignored whenever it comes).
+                if running && let Some(status) = handle.exit_status() {
+                    let _ = self.sink.send((
+                        pane.clone(),
+                        PaneEvent::Exited {
+                            generation: entry.generation,
+                            status,
+                        },
+                    ));
+                }
+                return Err(OpError::new("spawn_failed", e.to_string()));
+            }
+        };
+        entry.generation = generation;
+        entry.start_command = command.join(" ");
+        entry.command = command;
+        entry.dead = false;
+        entry.exit_status = None;
+        entry.engine_exit = None;
+        Ok(Reply::new())
     }
 
     pub fn handle(&self, op: Op) -> Result<Reply, OpError> {
@@ -381,6 +400,7 @@ impl Panes {
                     self.sink.clone(),
                 )
                 .map_err(|e| OpError::new("spawn_failed", e.to_string()))?;
+                let generation = pane.generation();
                 table.insert(
                     id.clone(),
                     PaneEntry {
@@ -390,9 +410,7 @@ impl Panes {
                         start_command: command.join(" "),
                         command,
                         hold,
-                        respawning: false,
-                        pending_exit: None,
-                        stale_exits: 0,
+                        generation,
                         dead: false,
                         exit_status: None,
                         engine_exit: None,
@@ -405,10 +423,6 @@ impl Panes {
                     .remove(&pane)
                     .ok_or_else(|| OpError::no_pane(&pane))?;
                 self.streams.close(&pane, "killed");
-                // An exit a respawn held back is still announced.
-                if let Some(status) = entry.pending_exit {
-                    let _ = self.sink.send((pane.clone(), PaneEvent::Exited { status }));
-                }
                 // The reply follows the first signal; the grace, the escalation and the drop
                 // happen off the connection. The pane is dropped (which ends its reader) only
                 // once its exit is reported, so the `exit` notice is never lost.
@@ -900,6 +914,119 @@ mod tests {
         // The replacement is no longer the held shell.
         assert_eq!(respawn(&held, tok).unwrap_err().code, "held_mismatch");
         for pane in [held, native, plain] {
+            panes
+                .handle(op(json!({"op": "kill", "pane": pane, "graceMs": 200})))
+                .unwrap();
+        }
+    }
+
+    /// A table with no dispatcher: the test feeds `event` itself, so it decides when exits land.
+    fn bare_table() -> (Arc<Panes>, Receiver<(String, PaneEvent)>) {
+        let (panes, events) = Panes::new(1000, "p9");
+        (Arc::new(panes), events)
+    }
+
+    /// Feed the table its events by hand until `exits` exits have gone in; the exit notices.
+    fn dispatch_exits(
+        panes: &Panes,
+        events: &Receiver<(String, PaneEvent)>,
+        exits: usize,
+    ) -> Vec<Notice> {
+        let mut notices = Vec::new();
+        let mut seen = 0;
+        while seen < exits {
+            let (id, event) = events
+                .recv_timeout(Duration::from_secs(5))
+                .expect("no event");
+            if matches!(event, PaneEvent::Exited { .. }) {
+                seen += 1;
+            }
+            notices.extend(
+                panes
+                    .event(&id, &event)
+                    .filter(|n| matches!(n, Notice::Exit { .. })),
+            );
+        }
+        notices
+    }
+
+    /// Exits on SIGHUP with `status`, so each child's exit is told apart; prints `up-<status+40>`
+    /// once its trap is set (computed, so the command line itself never matches).
+    fn hup_exits(status: i32) -> String {
+        format!("trap 'exit {status}' HUP; echo up-$((40+{status})); while :; do sleep 0.1; done")
+    }
+
+    fn respawn_sh(panes: &Panes, pane: &str, script: &str) -> Result<Reply, OpError> {
+        panes.handle(op(json!({"op": "respawn", "pane": pane,
+            "command": ["/bin/sh", "-c", script]})))
+    }
+
+    /// Two respawns before the first killed child's exit is dispatched: the replaced children's
+    /// exits are ignored however late they land, and the last child's real exit still applies.
+    #[test]
+    fn exits_of_replaced_children_never_count_for_the_current_one() {
+        for hold in [true, false] {
+            let (panes, events) = bare_table();
+            let pane = create(&panes, &hup_exits(11), hold);
+            until("a", || capture(&panes, &pane).unwrap().contains("up-51"));
+            respawn_sh(&panes, &pane, &hup_exits(12)).unwrap();
+            respawn_sh(&panes, &pane, "echo c-ready; read x; exit 7").unwrap();
+            until("c", || capture(&panes, &pane).unwrap().contains("c-ready"));
+            panes
+                .handle(op(json!({"op": "key", "pane": pane, "key": "Enter"})))
+                .unwrap();
+            let notices = dispatch_exits(&panes, &events, 3);
+            assert_eq!(
+                notices,
+                vec![Notice::Exit {
+                    pane: pane.clone(),
+                    status: Some(7)
+                }],
+                "hold {hold}"
+            );
+            if hold {
+                let st = state(&panes, &pane);
+                assert_eq!(
+                    (st["dead"].clone(), st["exitStatus"].clone()),
+                    (json!(true), json!(7))
+                );
+            } else {
+                assert_eq!(state(&panes, &pane), json!("gone"));
+            }
+        }
+    }
+
+    /// A spawn that fails after its respawn killed the running child: that child's exit applies,
+    /// once and with its own status, never a child replaced before it; the pane respawns again.
+    #[test]
+    fn a_failed_spawn_after_the_kill_applies_the_killed_childs_exit() {
+        for hold in [true, false] {
+            let (panes, events) = bare_table();
+            let pane = create(&panes, &hup_exits(11), hold);
+            until("a", || capture(&panes, &pane).unwrap().contains("up-51"));
+            respawn_sh(&panes, &pane, &hup_exits(12)).unwrap();
+            until("b", || capture(&panes, &pane).unwrap().contains("up-52"));
+            let failed = panes
+                .handle(op(json!({"op": "respawn", "pane": pane, "command": []})))
+                .unwrap_err();
+            assert_eq!(failed.code, "spawn_failed");
+            let notices = dispatch_exits(&panes, &events, 3);
+            assert_eq!(
+                notices,
+                vec![Notice::Exit {
+                    pane: pane.clone(),
+                    status: Some(12)
+                }],
+                "hold {hold}"
+            );
+            if !hold {
+                assert_eq!(state(&panes, &pane), json!("gone"));
+                continue;
+            }
+            assert_eq!(state(&panes, &pane)["exitStatus"], 12);
+            respawn_sh(&panes, &pane, "echo d-ready; sleep 30").unwrap();
+            assert_eq!(state(&panes, &pane)["dead"], false);
+            until("d", || capture(&panes, &pane).unwrap().contains("d-ready"));
             panes
                 .handle(op(json!({"op": "kill", "pane": pane, "graceMs": 200})))
                 .unwrap();

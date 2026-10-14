@@ -63,8 +63,16 @@ pub struct PaneSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneEvent {
-    Output { seq: u64, bytes: Arc<[u8]> },
-    Exited { status: Option<i32> },
+    Output {
+        seq: u64,
+        bytes: Arc<[u8]>,
+    },
+    /// `generation`: which of the pane's children exited (1 for the first, one more per respawn),
+    /// so an exit of a child a respawn already replaced is told apart from the current child's.
+    Exited {
+        generation: u64,
+        status: Option<i32>,
+    },
     Title(String),
 }
 
@@ -253,6 +261,8 @@ struct Attachment {
     poller: Arc<Poller>,
     pid: Option<u32>,
     life: Arc<Life>,
+    /// Which of the pane's children this is (`PaneEvent::Exited`).
+    generation: u64,
     /// The child's terminal device (`/dev/pts/3`, `/dev/ttys004`); empty where there is none.
     tty: String,
     #[cfg(windows)]
@@ -294,7 +304,7 @@ impl Pane {
         };
         let term = Term::new(config, &Size { cols, rows }, Listener(shared.clone()));
         let screen = Arc::new(Mutex::new(Screen { term, seq: 0 }));
-        let attachment = attach(&id, &spec, cols, rows, &screen, &shared, sink.clone())?;
+        let attachment = attach(&id, 1, &spec, cols, rows, &screen, &shared, sink.clone())?;
         Ok(Pane {
             id,
             screen,
@@ -307,18 +317,13 @@ impl Pane {
 
     /// Start `spec`'s command in this pane once its child has exited (tmux `respawn-pane`): the
     /// new child draws into the same grid, continuing its sequence. `spec.cwd` defaults to the
-    /// previous child's spawn directory; the size is the pane's.
-    ///
-    /// A child whose exit is already reported but not yet recorded (the reader queues the event
-    /// just before it records the exit) is given `EXIT_REPORT` to finish.
-    pub fn respawn(&self, mut spec: PaneSpec) -> io::Result<()> {
-        let life = lock(&self.attachment).life.clone();
-        if !life.wait(EXIT_REPORT) {
-            return Err(io::Error::other("the pane's process is still running"));
-        }
+    /// previous child's spawn directory; the size is the pane's. The new child's generation: one
+    /// more than the last, used up even when the spawn fails, so a late exit of the last child is
+    /// never taken for the pane's current one.
+    pub fn respawn(&self, mut spec: PaneSpec) -> io::Result<u64> {
         let mut attachment = lock(&self.attachment);
-        if !Arc::ptr_eq(&attachment.life, &life) {
-            return Err(io::Error::other("the pane was respawned meanwhile"));
+        if !attachment.life.has_exited() {
+            return Err(io::Error::other("the pane's process is still running"));
         }
         let (cols, rows) = {
             let screen = lock(&self.screen);
@@ -330,8 +335,11 @@ impl Pane {
         if spec.cwd.is_none() {
             spec.cwd = lock(&self.spawn_cwd).as_ref().map(PathBuf::from);
         }
+        let generation = attachment.generation + 1;
+        attachment.generation = generation;
         *attachment = attach(
             &self.id,
+            generation,
             &spec,
             cols,
             rows,
@@ -340,7 +348,23 @@ impl Pane {
             self.sink.clone(),
         )?;
         *lock(&self.spawn_cwd) = spec.cwd.map(|p| p.to_string_lossy().into_owned());
-        Ok(())
+        Ok(generation)
+    }
+
+    /// Which of the pane's children runs now (or ran last).
+    pub fn generation(&self) -> u64 {
+        lock(&self.attachment).generation
+    }
+
+    /// The current child's exit status once it has exited (`Some(None)` when it is not known).
+    pub fn exit_status(&self) -> Option<Option<i32>> {
+        *lock(&lock(&self.attachment).life.exited)
+    }
+
+    /// Wait up to `timeout` for the current child to exit; whether it has.
+    pub fn wait_exit(&self, timeout: Duration) -> bool {
+        let life = lock(&self.attachment).life.clone();
+        life.wait(timeout)
     }
 
     fn attachment(&self) -> Attachment {
@@ -592,8 +616,10 @@ impl Killing {
 }
 
 /// Spawn `spec`'s command on a new tty and start its reader thread.
+#[allow(clippy::too_many_arguments)]
 fn attach(
     id: &str,
+    generation: u64,
     spec: &PaneSpec,
     cols: u16,
     rows: u16,
@@ -664,6 +690,7 @@ fn attach(
     *lock(&shared.cwd) = None;
     let reader = Reader {
         id: id.to_owned(),
+        generation,
         pty,
         poller: poller.clone(),
         rx,
@@ -688,6 +715,7 @@ fn attach(
         poller,
         pid,
         life,
+        generation,
         tty,
         #[cfg(windows)]
         process,
@@ -747,6 +775,7 @@ enum End {
 /// The reader thread: owns the tty, follows `alacritty_terminal::event_loop`.
 struct Reader {
     id: String,
+    generation: u64,
     pty: tty::Pty,
     poller: Arc<Poller>,
     rx: Receiver<Msg>,
@@ -782,6 +811,7 @@ impl Reader {
             life,
             sink,
             id,
+            generation,
             #[cfg(windows)]
             process,
             ..
@@ -799,10 +829,8 @@ impl Reader {
             #[cfg(windows)]
             End::Hangup => wait_process(&process),
         };
-        // The event first: whoever sees `life` set (a respawn after its kill) knows the old
-        // child's exit is already queued, ahead of anything the next child reports.
-        let _ = sink.send((id, PaneEvent::Exited { status }));
         life.set(status);
+        let _ = sink.send((id, PaneEvent::Exited { generation, status }));
     }
 
     fn event_loop(&mut self) -> End {
@@ -835,11 +863,14 @@ impl Reader {
                             // Drain what the child wrote before it exited.
                             self.read(&mut buf);
                             let status = status.and_then(exit_code);
-                            // Queued before `life` is set, as above.
-                            let _ = self
-                                .sink
-                                .send((self.id.clone(), PaneEvent::Exited { status }));
                             self.life.set(status);
+                            let _ = self.sink.send((
+                                self.id.clone(),
+                                PaneEvent::Exited {
+                                    generation: self.generation,
+                                    status,
+                                },
+                            ));
                             return End::Exited;
                         }
                     }
@@ -1342,7 +1373,10 @@ mod tests {
         .unwrap();
         assert!(wait_for(&rx, |e| matches!(
             e,
-            PaneEvent::Exited { status: Some(3) }
+            PaneEvent::Exited {
+                status: Some(3),
+                ..
+            }
         )));
     }
 
@@ -1364,7 +1398,7 @@ mod tests {
                     seqs.push(seq);
                     bytes.extend_from_slice(&b);
                 }
-                PaneEvent::Exited { status } => {
+                PaneEvent::Exited { status, .. } => {
                     assert_eq!(status, Some(0));
                     break;
                 }
@@ -1451,6 +1485,7 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(5));
         assert!(wait_for(&rx, |e| *e
             == PaneEvent::Exited {
+                generation: 1,
                 status: Some(128 + libc::SIGHUP)
             }));
         assert_eq!(pane.root_pid(), None);
@@ -1472,6 +1507,7 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_millis(300));
         assert!(wait_for(&rx, |e| *e
             == PaneEvent::Exited {
+                generation: 1,
                 status: Some(128 + libc::SIGKILL)
             }));
     }
@@ -1503,7 +1539,11 @@ mod tests {
             tx,
         )
         .unwrap();
-        assert!(wait_for(&rx, |e| *e == PaneEvent::Exited { status: Some(0) }));
+        assert!(wait_for(&rx, |e| *e
+            == PaneEvent::Exited {
+                generation: 1,
+                status: Some(0)
+            }));
     }
 
     #[test]
@@ -1589,7 +1629,9 @@ mod tests {
         assert!(wait_for(&rx, |e| matches!(e, PaneEvent::Exited { .. })));
         let (_, seq) = pane.capture(None, false);
         assert!(pane.root_pid().is_none());
-        pane.respawn(sh("pwd; echo second; sleep 2")).unwrap();
+        assert_eq!(pane.generation(), 1);
+        assert_eq!(pane.respawn(sh("pwd; echo second; sleep 2")).unwrap(), 2);
+        assert_eq!(pane.generation(), 2);
         assert!(pane.root_pid().is_some());
         // Not while the new child runs.
         assert!(pane.respawn(sh("true")).is_err());
