@@ -27,23 +27,11 @@ import { gridEnvelopes } from './gridEnvelope.js'
 import { gridExec, gridJson } from './gridExec.js'
 import { idKey } from './gridPicture.js'
 import {
-  DISCOVER_PATH, GRID_ASLEEP_CODE as PROTOCOL_ASLEEP_CODE, NO_WAKE_FLAG, OVERVIEW_PATH, REFUSAL_STATUS,
+  DISCOVER_PATH, GRID_ASLEEP_CODE, NO_WAKE_FLAG, OVERVIEW_PATH, REFUSAL_STATUS,
   type DiscoveredCapabilities, type DiscoveredModel, type DiscoveredProvider, type GridAsleep,
   type GridOverview, type LastKnown as WireLastKnown, type LastKnownNode, type NodeModelCapability,
   type OverviewModel, type OverviewNode, type ProviderDiscovery,
 } from './gridProtocol.js'
-
-/** The master's two public reads, under a grid's address (the contract's `overview` and `discover`). */
-export const GRID_OVERVIEW_PATH = OVERVIEW_PATH
-export const GRID_DISCOVER_PATH = DISCOVER_PATH
-
-/** The code beside `detail` on a sleeping grid's 503 (the contract's `refusal` / GridAsleep). Compared for
- *  EQUALITY only: any other code, or none, is "not answering" — never asleep, never awake. */
-export const GRID_ASLEEP_CODE = PROTOCOL_ASLEEP_CODE
-
-/** The public CLI's flag that reads without a credential (`grid` ≥ 0.3.49). A `grid` too old for it exits
- *  2 at argparse, before anything is sent — so the fallback below can never turn into a waking read. */
-export const GRID_NO_WAKE_FLAG = NO_WAKE_FLAG
 
 /** The owner status of a grid the platform's reaper slept (grid-apis `grid_sleep_state.ASLEEP`), as
  *  `grid info --json` passes it through. Only the grid's owner sees a status at all. */
@@ -202,7 +190,7 @@ export function parseLastKnown(value: unknown): LastKnown | null {
 export async function readOverview(base: string): Promise<GridRead> {
   let answer: { status: number; body: unknown }
   try {
-    answer = await get(base, GRID_OVERVIEW_PATH, 'read')
+    answer = await get(base, OVERVIEW_PATH, 'read')
   } catch {
     return { kind: 'unreachable' }
   }
@@ -267,7 +255,7 @@ export function displayModelName(raw: string): string {
  */
 export async function readDiscoveryIds(base: string): Promise<string[]> {
   try {
-    const { status, body } = await get(base, GRID_DISCOVER_PATH, 'read')
+    const { status, body } = await get(base, DISCOVER_PATH, 'read')
     if (status !== 200 || !isObject(body)) return []
     const discovery: Unchecked<ProviderDiscovery> = body
     if (!Array.isArray(discovery.providers)) return []
@@ -318,7 +306,7 @@ function envelopeCode(stderr: string): string | null {
  * "no read" — a stale list, which is the direction every failure here must take.
  */
 export async function readViaCli(gridName: string): Promise<GridRead> {
-  const result = await gridExec(['--remote', 'models', gridName, GRID_NO_WAKE_FLAG, '--json'])
+  const result = await gridExec(['--remote', 'models', gridName, NO_WAKE_FLAG, '--json'])
   if (result.code !== 'OK') {
     return envelopeCode(result.stderr) === GRID_ASLEEP_CODE ? { kind: 'asleep', lastKnown: null } : { kind: 'unanswered' }
   }

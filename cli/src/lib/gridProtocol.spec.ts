@@ -13,14 +13,10 @@ import { createServer, type Server } from 'node:http'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  DISCOVER_PATH, GRID_ASLEEP_CODE, NO_WAKE_FLAG, OVERVIEW_PATH, PROTOCOL_VERSION, REFUSAL_STATUS,
+  DISCOVER_PATH, GRID_ASLEEP_CODE, LAST_KNOWN_MAX_AGE_SECONDS, MODEL_RETENTION_SECONDS, OVERVIEW_PATH, REFUSAL_STATUS,
 } from './gridProtocol.js'
-import {
-  GRID_ASLEEP_CODE as READER_ASLEEP_CODE, GRID_DISCOVER_PATH, GRID_NO_WAKE_FLAG, GRID_OVERVIEW_PATH, readDiscoveryIds,
-  readOverview,
-} from './gridReader.js'
+import { readDiscoveryIds, readOverview } from './gridReader.js'
 import { GRID_LAST_KNOWN_MAX_AGE_MS, GRID_MODEL_RETENTION_MS } from './gridPicture.js'
-import { LAST_KNOWN_MAX_AGE_SECONDS, MODEL_RETENTION_SECONDS } from './gridProtocol.js'
 
 interface Recording { schema: string; definition: string | null; status: number; body: Record<string, unknown> }
 
@@ -48,14 +44,6 @@ afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())))
 const serve = (path: string, name: string): void => { routes.set(`/g${path}`, recording(name)) }
 
 describe('the reader speaks the protocol', () => {
-  it('takes its paths, its code and its flag from the generated contract', () => {
-    expect(PROTOCOL_VERSION).toMatch(/^\d+\.\d+\.\d+$/)
-    expect(GRID_OVERVIEW_PATH).toBe(OVERVIEW_PATH)
-    expect(GRID_DISCOVER_PATH).toBe(DISCOVER_PATH)
-    expect(READER_ASLEEP_CODE).toBe(GRID_ASLEEP_CODE)
-    expect(GRID_NO_WAKE_FLAG).toBe(NO_WAKE_FLAG)
-  })
-
   it('keeps a model and a last-known record exactly as long as the contract says', () => {
     expect(GRID_MODEL_RETENTION_MS).toBe(MODEL_RETENTION_SECONDS * 1000)
     expect(GRID_LAST_KNOWN_MAX_AGE_MS).toBe(LAST_KNOWN_MAX_AGE_SECONDS * 1000)
