@@ -46,9 +46,17 @@ it('reports only local counters from a real turn, and the account switch stops t
     const rows = await client!.request('agents_list', { includeStopped: true })
     return rows.agents.some((a: Record<string, unknown>) => a.id === agentId && a.sessionId) || null
   }, 45000)
+  await client.request('session_search', { query: 'PRIVATE_SEARCH_CANARY' })
+  const appReport = { schemaVersion: 1, revision: 0, id: '27b07da5-033b-412e-b91f-7316b254f991', day: new Date().toISOString().slice(0, 10), counters: { ui_desktop_computer_link_failed: 1 } }
+  const forwarded = await fetch(`http://127.0.0.1:${d.port}/api/product-usage/report`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-adapter-local': '1' }, body: JSON.stringify(appReport) })
+  expect(forwarded.status).toBe(200)
+  expect(backend.productUsage.reports).toContainEqual(appReport)
   await turn()
   await until('a reduced completed turn report', () => backend!.productUsage!.reports.some(r => ((r.counters as Record<string, number>).turns_ended ?? 0) > 0) || null, 75000)
   const sum = (metric: string) => backend!.productUsage!.reports.reduce((n, r) => n + ((r.counters as Record<string, number>)[metric] ?? 0), 0)
+  expect(sum('search_requests')).toBe(1)
+  expect(sum('search_first_installations')).toBe(1)
+  expect(sum('measurement_v2_installation_days')).toBe(1)
   expect(sum('launch_started')).toBe(2)
   expect(sum('launch_created')).toBe(1)
   expect(sum('launch_failed')).toBe(1)

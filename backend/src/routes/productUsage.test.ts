@@ -1,6 +1,6 @@
 import Fastify, { type FastifyRequest } from 'fastify'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-const methods = vi.hoisted(() => ({ ingestProductUsage: vi.fn(), productUsageChoice: vi.fn(), setProductUsageChoice: vi.fn() }))
+const methods = vi.hoisted(() => ({ ingestProductUsage: vi.fn(), ingestSetupUsage: vi.fn(), productUsageChoice: vi.fn(), setProductUsageChoice: vi.fn() }))
 vi.mock('../lib/productUsage.js', () => methods)
 import { productUsageRoutes } from './productUsage.js'
 import { PRODUCT_USAGE_METRICS, PRODUCT_USAGE_MAX_COUNT } from '../types/productUsage.js'
@@ -12,6 +12,7 @@ beforeEach(async () => {
   await app.register(productUsageRoutes)
   methods.productUsageChoice.mockResolvedValue({ enabled: true, revision: 0 })
   methods.ingestProductUsage.mockResolvedValue({ accepted: true })
+  methods.ingestSetupUsage.mockResolvedValue({ accepted: true })
 })
 afterEach(() => app.close())
 const good = { schemaVersion: 1, revision: 0, id: 'cf1c5a03-388c-4265-b5fb-a4c3d47e407f', day: '2026-10-13', counters: { turns_started: 1 } }
@@ -61,10 +62,41 @@ it('the visible control changes only the authenticated account', async () => {
   expect((await app.inject({ ...request, payload: { enabled: true, userId: 'another' } })).statusCode).toBe(400)
 })
 
-it('the full fixed vocabulary fits the bounded report body', async () => {
-  const payload = { ...good, counters: Object.fromEntries(PRODUCT_USAGE_METRICS.map(k => [k, PRODUCT_USAGE_MAX_COUNT])) }
-  expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThan(8192)
-  expect((await submit(payload)).statusCode).toBe(200)
+it('the complete vocabulary fits bounded chunks, including the longest metric keys', async () => {
+  for (let i = 0; i < PRODUCT_USAGE_METRICS.length; i += 64) {
+    const payload = { ...good, counters: Object.fromEntries(PRODUCT_USAGE_METRICS.slice(i, i + 64).map(k => [k, PRODUCT_USAGE_MAX_COUNT])) }
+    expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThan(8192)
+    expect((await submit(payload)).statusCode).toBe(200)
+  }
+})
+
+const setup = { schemaVersion: 1, consent: true, id: good.id, day: good.day, counters: { setup_desktop_sign_in_started: 1 } }
+const sendSetup = (payload: unknown = setup, headers = {}) => app.inject({ method: 'POST', url: '/api/product-usage/setup', payload: payload as Record<string, unknown>, headers })
+it('accepts only explicitly enabled setup counts without credentials or account lookup', async () => {
+  expect((await sendSetup()).statusCode).toBe(200)
+  expect(methods.ingestSetupUsage).toHaveBeenCalledWith(setup)
+  expect(methods.productUsageChoice).not.toHaveBeenCalled()
+  expect(methods.ingestProductUsage).not.toHaveBeenCalled()
+  for (const payload of [{ ...setup, consent: false }, { ...setup, account: 'PRIVATE_CANARY' },
+    { ...setup, counters: { turns_started: 1 } }, { ...setup, counters: { setup_desktop_sign_in_started: 1001 } }]) {
+    const response = await sendSetup(payload)
+    expect(response.statusCode).toBe(400)
+    expect(response.body).not.toContain('PRIVATE_CANARY')
+  }
+  for (const headers of [{ authorization: 'fixture' }, { cookie: 'PRIVATE_CANARY' }]) expect((await sendSetup(setup, headers)).statusCode).toBe(400)
+})
+it('bounds untrusted setup writes independently of signed-in reports', async () => {
+  let finish!: (value: unknown) => void
+  methods.ingestSetupUsage.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+  // A shared deferred completion releases all four admitted requests.
+  const done = new Promise(resolve => { finish = resolve })
+  methods.ingestSetupUsage.mockReturnValue(done)
+  const pending = Array.from({ length: 4 }, () => sendSetup().then((r: { statusCode: number }) => r.statusCode))
+  await vi.waitFor(() => expect(methods.ingestSetupUsage).toHaveBeenCalledTimes(4))
+  expect((await sendSetup()).statusCode).toBe(429)
+  expect((await submit(good)).statusCode).toBe(200)
+  finish({ accepted: true })
+  expect(await Promise.all(pending)).toEqual([200, 200, 200, 200])
 })
 
 it('feedback reduces a voluntary fixed choice to one unlinked, retry-safe count', async () => {

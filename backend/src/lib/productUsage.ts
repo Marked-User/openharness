@@ -31,10 +31,24 @@ function validDay(day: string, now: Date): boolean {
 /** Identity is used for permission only. Neither it nor the report body reaches analytics storage. */
 export async function ingestProductUsage(userId: string, report: ProductUsageReport, now = new Date()) {
   if (!validDay(report.day, now)) return { accepted: false, reason: 'EXPIRED' }
+  return ingestCounters(report, userId)
+}
+
+export interface SetupUsageReport { id: string; day: string; counters: Record<string, number> }
+/** Only the dedicated route's narrow schema may call this. No account/authentication lookup. */
+export async function ingestSetupUsage(report: SetupUsageReport, now = new Date()) {
+  const age = Math.floor(now.getTime() / DAY) * DAY - Date.parse(report.day + 'T00:00:00Z')
+  if (!validDay(report.day, now) || age > DAY) return { accepted: false, reason: 'EXPIRED' }
+  return ingestCounters(report)
+}
+
+async function ingestCounters(report: SetupUsageReport & { revision?: number }, userId?: string) {
   try {
     return await prisma.$transaction(async tx => {
-      const choice = await productUsageChoice(userId, tx)
-      if (!choice.enabled || choice.revision !== report.revision) return { accepted: false, reason: 'CHOICE_CHANGED', ...choice }
+      if (userId) {
+        const choice = await productUsageChoice(userId, tx)
+        if (!choice.enabled || choice.revision !== report.revision) return { accepted: false, reason: 'CHOICE_CHANGED', ...choice }
+      }
       // Receipt and increments commit together; a lost HTTP response can be retried with the same id.
       await tx.productUsageReceipt.create({ data: {
         id: report.id, expiresAt: new Date(Date.parse(report.day) + (PRODUCT_USAGE_DAYS + 1) * DAY),

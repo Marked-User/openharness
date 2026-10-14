@@ -4,6 +4,7 @@ import '../../shared/widgets/section_scaffold.dart';
 import '../../shared/widgets/setting_row.dart';
 import '../../shared/widgets/product_feedback.dart';
 import '../../state/app_state.dart';
+import '../../measurement/setup_usage_choice.dart';
 
 typedef UsagePreferenceRequest = Future<Map<String, dynamic>> Function({
   bool? enabled,
@@ -20,12 +21,20 @@ class PrivacySection extends StatelessWidget {
       title: 'Privacy',
       subtitle: 'Choose what you share to help improve Harness.',
       child: notifier.isGuest
-          ? const Text(
-              'No product usage reports are sent while you’re signed out.',
-            )
+          ? notifier.productMeasurement.surface == 'web'
+                ? const Text(
+                    'Product usage sharing is available after sign-in.',
+                  )
+                : SetupUsageChoice(measurement: notifier.productMeasurement)
           : ProductUsagePreference(
               key: ObjectKey(notifier.api),
-              request: notifier.api.productUsageSettings,
+              request: ({bool? enabled}) async {
+                final value = await notifier.api.productUsageSettings(
+                  enabled: enabled,
+                );
+                notifier.productMeasurement.savedChoice(value);
+                return value;
+              },
               feedback: notifier.api.productUsageFeedback,
             ),
     ),
@@ -146,7 +155,7 @@ class _ProductUsagePreferenceState extends State<ProductUsagePreference> {
             '• Agent turns started, ended, or interrupted (including automated work)\n'
             '• Turn durations: under 10 seconds, 10–60 seconds, 1–5 minutes, or over 5 minutes\n'
             '• Launch, resume, restart, model change and history request outcomes, fixed failure categories and wait buckets\n'
-            '• First response waits, missing responses and error-event counts; first-launch 24-hour response counts and D1/D7 working-day returns\n'
+            '• First response waits, missing responses and error-event counts; first-launch 24-hour response counts and D1/D7/D28 working-day returns\n'
             '• A fixed feedback answer only when you choose to send one\n'
             '• Protocol version and the revision of your sharing preference\n\n'
             'Older apps contribute connection, remote-session, and turn-start totals. '
@@ -156,6 +165,8 @@ class _ProductUsagePreferenceState extends State<ProductUsagePreference> {
             'Server retry receipts are scheduled to expire after 36 days; combined totals after 13 months. Background cleanup may lag. '
             'Combined totals cannot be removed for one person. New reports create no per-person history. '
             'Previously collected activity records expire after 35 days. '
+            'Fixed setup, sign-in, connection, viewer and update-stage outcomes; first and repeat feature use; weekly and monthly returns. '
+            'Optional task feedback sends only your selected outcome or reason. '
             'A turn ending does not tell us whether your task succeeded.',
           ),
       ],

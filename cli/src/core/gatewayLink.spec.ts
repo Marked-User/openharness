@@ -3,7 +3,7 @@ import { decodeGatewayBinary, encodeGatewayBinary, GatewayBinary, GATEWAY_CALLS 
 import { RelayConnectError } from '../lib/relayFrames.js'
 import { decodeTerminalLocal, encodeTerminalLocal, TerminalBinaryKind, type TerminalBinaryClear } from '../lib/terminalBinary.js'
 import type { GatewayEvents, LaneSeal } from './api.js'
-import { createGatewayLink, GATEWAY_BUFFER_LIMIT, LANE_WAIT_MS, laneOf, OWED_MAX, PAIR_WAIT_MS, WINDOW_GATEWAY_GONE } from './gatewayLink.js'
+import { createGatewayLink, GATEWAY_BUFFER_LIMIT, GATEWAY_USAGE_BUFFER_LIMIT, LANE_WAIT_MS, laneOf, OWED_MAX, PAIR_WAIT_MS, WINDOW_GATEWAY_GONE } from './gatewayLink.js'
 import { ON_DEMAND_START_MS } from './serviceLinks.js'
 
 const STREAM = '00000000-0000-4000-8000-000000000001'
@@ -111,6 +111,22 @@ describe('the gateway in its own process, as the core sees it', () => {
     expect(decodeTerminalLocal(framed.bytes)).toEqual(bytesOf('hi'))
     await link.stop()
     expect(kinds().at(-1)).toBe('stop')
+  })
+
+  it('drops optional measurement before relay traffic and never wakes a stopped gateway', () => {
+    const { link, kinds, setBuffered, want } = setup()
+    link.port.usageCounter?.('create_requests')
+    expect(kinds()).toEqual([])
+    expect(want).not.toHaveBeenCalled()
+    link.connected()
+    setBuffered(GATEWAY_USAGE_BUFFER_LIMIT)
+    link.port.usageCounter?.('create_requests')
+    link.port.usageLaunch?.({ id: 'creation-fixture-1', phase: 'start' })
+    link.port.broadcast({ type: 'turn_started' })
+    expect(kinds()).toEqual(['start', 'broadcast'])
+    setBuffered(0)
+    link.port.usageCounter?.('create_requests')
+    expect(kinds().at(-1)).toBe('usageCounter')
   })
 
   it('drops what would pile up on the socket to a gateway that reads nothing, and says so once a minute', () => {

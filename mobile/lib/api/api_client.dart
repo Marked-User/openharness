@@ -8,13 +8,28 @@ import '../core/models.dart';
 import '../logging/http_log.dart';
 import '../viewer/device_ack.dart';
 import '../viewer/device_log.dart';
-import '../viewer/device_log_sync.dart' show DeviceLogAppendAnswer, DeviceLogFetched;
+import '../viewer/device_log_sync.dart'
+    show DeviceLogAppendAnswer, DeviceLogFetched;
 import 'access_token_source.dart';
 import 'bearer_auth_interceptor.dart';
 import 'multipart_body.dart';
 
 /// Authenticated control-plane REST client for the phone.
 class ApiClient {
+  Future<Map<String, dynamic>> productUsageReport(
+    Map<String, dynamic> report,
+  ) async {
+    final response = await _dio.post(
+      '/api/product-usage/report',
+      data: report,
+      options: Options(
+        receiveTimeout: const Duration(seconds: 5),
+        sendTimeout: const Duration(seconds: 5),
+      ),
+    );
+    return Map<String, dynamic>.from(unwrapApiResponse(response) as Map);
+  }
+
   Future<void> productUsageFeedback(String answer, String receipt) async {
     final response = await _dio.post(
       '/api/product-usage/feedback',
@@ -28,8 +43,14 @@ class ApiClient {
 
   Future<Map<String, dynamic>> productUsageSettings({bool? enabled}) async {
     final response = enabled == null
-        ? await _dio.get('/api/product-usage/settings')
-        : await _dio.post('/api/product-usage/settings', data: {'enabled': enabled});
+        ? await _dio.get(
+            '/api/product-usage/settings',
+            options: Options(receiveTimeout: const Duration(seconds: 5)),
+          )
+        : await _dio.post(
+            '/api/product-usage/settings',
+            data: {'enabled': enabled},
+          );
     return Map<String, dynamic>.from(unwrapApiResponse(response) as Map);
   }
 
@@ -118,11 +139,16 @@ class ApiClient {
   /// [self]: this app's own key, which the backend counts as used just now (an older one ignores it).
   Future<DeviceLogFetched?> deviceKeys(int since, {String? self}) async {
     try {
-      final res = await _dio.get('/api/device-keys', queryParameters: {'since': since, 'self': ?self});
+      final res = await _dio.get(
+        '/api/device-keys',
+        queryParameters: {'since': since, 'self': ?self},
+      );
       if (res.statusCode != 200) return null;
       final data = unwrapApiResponse(res);
       if (data is! Map) return null;
-      final acct = data['acct'], head = DevLogHead.fromJson(data['head']), entries = data['entries'];
+      final acct = data['acct'],
+          head = DevLogHead.fromJson(data['head']),
+          entries = data['entries'];
       if (acct is! String || head == null || entries is! List) return null;
       return (acct: acct, head: head, entries: entries.cast<Object?>());
     } catch (_) {
@@ -134,14 +160,19 @@ class ApiClient {
   /// be reached; a refusal comes back as its code (`STALE_HEAD` with the current head).
   Future<DeviceLogAppendAnswer?> appendDeviceKey(DevLogEntry entry) async {
     try {
-      final res = await _dio.post('/api/device-keys', data: {'entry': entry.toJson()});
+      final res = await _dio.post(
+        '/api/device-keys',
+        data: {'entry': entry.toJson()},
+      );
       final body = res.data;
       if (body is! Map) return null;
       final data = body['data'];
       final head = data is Map ? DevLogHead.fromJson(data['head']) : null;
       if (res.statusCode == 200) return (head: head, error: null);
       final error = body['error'];
-      final code = error is Map && error['code'] is String ? error['code'] as String : 'HTTP_${res.statusCode}';
+      final code = error is Map && error['code'] is String
+          ? error['code'] as String
+          : 'HTTP_${res.statusCode}';
       return (head: head, error: code);
     } catch (_) {
       return null;
@@ -172,7 +203,10 @@ class ApiClient {
   /// other devices. False when the backend did not keep it (or predates it).
   Future<bool> postDeviceAck(DevAck ack) async {
     try {
-      final res = await _dio.post('/api/device-keys/acks', data: {'ack': ack.toJson()});
+      final res = await _dio.post(
+        '/api/device-keys/acks',
+        data: {'ack': ack.toJson()},
+      );
       return res.statusCode == 200;
     } catch (_) {
       return false;
@@ -190,7 +224,8 @@ class ApiClient {
       return {
         if (seen is Map)
           for (final e in seen.entries)
-            if (e.key is String && e.value is int) e.key as String: e.value as int,
+            if (e.key is String && e.value is int)
+              e.key as String: e.value as int,
       };
     } catch (_) {
       return const {};
@@ -206,11 +241,15 @@ class ApiClient {
   }
 
   Future<void> approveSignIn(String code) async {
-    unwrapApiResponse(await _dio.post('/api/auth/qr/approve', data: {'code': code}));
+    unwrapApiResponse(
+      await _dio.post('/api/auth/qr/approve', data: {'code': code}),
+    );
   }
 
   Future<void> denySignIn(String code) async {
-    unwrapApiResponse(await _dio.post('/api/auth/qr/deny', data: {'code': code}));
+    unwrapApiResponse(
+      await _dio.post('/api/auth/qr/deny', data: {'code': code}),
+    );
   }
 
   // -- the desk: the account's tabs, the same on every computer --

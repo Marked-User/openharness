@@ -139,7 +139,7 @@ export function startGateway(host: GatewayHost): StartedGateway {
   // Account separation is local only. Neither this filename nor the machine identity is uploaded.
   const usage = host.signedIn ? createProductUsage({
     file: join(env.ADAPTER_DATA_DIR, 'product-usage', createHash('sha256').update(host.autonomousEnv + ':' + host.machineId).digest('hex') + '.json'),
-    request: (method, path, body) => accountHttp.backend(method, path, body),
+    request: (method, path, body) => accountHttp.backend(method, path, body, 5_000),
   }) : null
   if (usage) { gateway.productUsage = usage; void usage.sync() }
 
@@ -498,7 +498,7 @@ export function startGateway(host: GatewayHost): StartedGateway {
       // Tokens may change before this process restarts. Never send the previous account's queue
       // under a new sign-in, even when both accounts happen to have the same preference revision.
       if (next.machineId !== account.machineId || next.autonomousEnv !== account.autonomousEnv
-          || next.signIn?.epoch !== account.signIn?.epoch || next.signIn?.acct !== account.signIn?.acct) usage?.stop(true)
+          || next.signIn?.epoch !== account.signIn?.epoch || next.signIn?.acct !== account.signIn?.acct) void usage?.stop(true)
       account = next
       startGroup()
       registerAndSweep()
@@ -530,7 +530,8 @@ export function startGateway(host: GatewayHost): StartedGateway {
     ops,
     windowRelay,
     stop: async () => {
-      usage?.stop()
+      // Shutdown never waits for the optional disk queue. The stopped collector cannot upload.
+      void usage?.stop()
       clearInterval(devlogTimer)
       syncer.stop()
       direct?.stop()

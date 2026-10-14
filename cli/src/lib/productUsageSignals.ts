@@ -1,7 +1,15 @@
 import type { ProductUsageMetric } from './productUsageContract.js'
 
 const actions = { agent_create: 'create', agent_resume: 'resume', agent_restart: 'restart',
-  agent_retarget: 'model_change', agent_recent: 'history' } as const
+  agent_retarget: 'model_change', agent_recent: 'history',
+  agent_fork: 'fork', agent_close: 'close', agent_delete: 'delete',
+  session_search: 'search', session_tail: 'history_page',
+  dsh_list: 'store_list', dsh_install: 'store_install', dsh_update: 'store_update', dsh_remove: 'store_remove',
+  models_list: 'model_list', grid_models_list: 'model_list',
+  grid_fleet_model_download: 'model_download', grid_fleet_model_start: 'model_start', grid_fleet_model_stop: 'model_stop',
+  browser_open: 'browser_open',
+} as const
+const unmeasured = (..._args: unknown[]): void => {}
 const setup = new Set(['TMUX_UNAVAILABLE', 'TMUX_TOO_OLD_FOR_DSH', 'TMUX_TOO_OLD_FOR_GRID', 'ENGINE_UNAVAILABLE',
   'NATIVE_LAUNCH_HELD', 'DSH_MATERIALIZE_FAILED', 'SPAWN_FAILED', 'REGISTRATION_FAILED', 'GRID_CONFIG_FAILED'])
 const auth = new Set(['UNAUTHORIZED', 'AUTH_REQUIRED', 'LOGIN_REQUIRED', 'OWNER_REQUIRED', 'E2EE_REQUIRED'])
@@ -27,6 +35,7 @@ export interface ProductUsageLaunchSignal {
 export function productUsageLaunch(type: string, id: unknown, emit: (signal: ProductUsageLaunchSignal) => void) {
   const known = ['agent_create', 'agent_create_status', 'agent_create_cancel'].includes(type)
     && typeof id === 'string' && /^[a-zA-Z0-9_-]{16,96}$/.test(id)
+  if (!known) return unmeasured
   const send = (signal: Omit<ProductUsageLaunchSignal, 'id'>) => {
     if (known) { try { emit({ id: id as string, ...signal }) } catch { /* Optional measurement. */ } }
   }
@@ -47,19 +56,21 @@ export function productUsageLaunch(type: string, id: unknown, emit: (signal: Pro
  */
 export function productUsageRequest(type: string, emit: (metric: ProductUsageMetric) => void, now = Date.now) {
   const action = Object.hasOwn(actions, type) ? actions[type as keyof typeof actions] : null
+  // In particular, streaming frames and polling do not allocate clocks or observers.
+  if (!action) return unmeasured
   const started = now()
   let answered = false
   const count = (measure: string) => { if (action) { try { emit(`${action}_${measure}` as ProductUsageMetric) } catch { /* Optional measurement. */ } } }
   count('requests')
-  return (error: unknown, state: unknown, hasAgent: boolean) => {
+  return (error: unknown, state: unknown, hasAgent: boolean, ok?: unknown) => {
     if (!action || answered) return
     answered = true
-    if (error != null || state === 'failed') {
+    if (error != null || state === 'failed' || ok === false) {
       count('failed')
       count(`error_${failureKind(error)}`)
     } else if (state === 'pending' || state === 'preparing' || state === 'starting') count('pending')
     else if (state === 'unconfirmed' || state === 'unavailable' || state === 'cancelled') count('unknown')
-    else if (action === 'history' || action === 'model_change' || hasAgent || state === 'created') count('ok')
+    else if (!['create', 'resume', 'restart', 'fork'].includes(action) || hasAgent || state === 'created') count('ok')
     else count('unknown')
     const elapsed = Math.max(0, now() - started)
     count(elapsed < 1000 ? 'under_1s' : elapsed < 10_000 ? '1s_to_10s' : elapsed < 60_000 ? '10s_to_1m' : 'over_1m')

@@ -84,7 +84,7 @@ const bytes = (raw: RawData): Uint8Array => new Uint8Array(Array.isArray(raw) ? 
 
 export class FakeBackend {
   /** Opt-in fixture: older scenarios keep the endpoint absent, as on an older backend. */
-  productUsage: { enabled: boolean; revision: number; reports: Record<string, unknown>[] } | null = null
+  productUsage: { enabled: boolean; revision: number; reports: Record<string, unknown>[]; stallReports?: boolean } | null = null
   readonly seen: string[] = []
   /** What `GET /api/agent-messages` answers: the account's tabs and who is in each; null, a 404. */
   agentMessages: Record<string, unknown> | null = null
@@ -138,6 +138,7 @@ export class FakeBackend {
         res.end(json({ success: true, data: { enabled: usage.enabled, revision: usage.revision } })); return
       }
       if (usage && req.method === 'POST' && ['/api/product-usage/settings', '/api/product-usage/report'].includes(req.url ?? '')) {
+        if (usage.stallReports && req.url === '/api/product-usage/report') { req.resume(); return }
         let body = ''
         req.on('data', chunk => { body += String(chunk) })
         req.on('end', () => {

@@ -1,4 +1,4 @@
-import { PRODUCT_FEEDBACK, PRODUCT_USAGE_ACTIONS } from '../types/productUsage.js'
+import { PRODUCT_FEEDBACK, PRODUCT_FEEDBACK_REASONS, PRODUCT_FEEDBACK_OUTCOMES, PRODUCT_USAGE_ACTIONS, PRODUCT_USAGE_FLOWS, PRODUCT_USAGE_SURFACES } from '../types/productUsage.js'
 import { DAILY_PRODUCT_METRICS } from './dailyProductUsage.js'
 
 type Row = { dayUtc: Date; metric: string; value: number }
@@ -22,7 +22,7 @@ export function dailyProductReview(rows: Row[], now: Date) {
     for (let day = from; day < until; day += DAY) {
       const c = byDay.get(dayKey(day))
       if (!c) continue
-      if (Object.keys(c).some(k => !k.startsWith('relay_'))) observedDays++
+      if ((c.active_installation_days ?? 0) > 0 || (c.working_installation_days ?? 0) > 0 || (c.measurement_v2_installation_days ?? 0) > 0) observedDays++
       for (const [k, n] of Object.entries(c)) counters[k] = (counters[k] ?? 0) + n
     }
     return { from: dayKey(from), untilExclusive: dayKey(until), observedDays, counters }
@@ -47,7 +47,8 @@ export function dailyProductReview(rows: Row[], now: Date) {
       ['response_under_10s', 'response_10s_to_1m', 'response_1m_to_5m', 'response_over_5m']),
     comparison('Matched turn ended without an observed text response', ['turns_ended_without_response'], ['turns_ended', 'turns_interrupted']),
     comparison('Matched turn interrupted', ['turns_interrupted'], ['turns_ended', 'turns_interrupted']),
-    comparison('Useful among voluntary feedback responses', ['feedback_useful'], PRODUCT_FEEDBACK.map(a => `feedback_${a}`)),
+    comparison('Useful among voluntary feedback responses', ['feedback_useful'], PRODUCT_FEEDBACK_REASONS.map(a => `feedback_${a}`)),
+    comparison('Completed among voluntary task-outcome responses', ['feedback_completed'], PRODUCT_FEEDBACK_OUTCOMES.map(a => `feedback_${a}`)),
     ...PRODUCT_USAGE_ACTIONS.map(action => comparison(`${action}: request refusal`, [`${action}_failed`], [`${action}_ok`, `${action}_failed`])),
   ]
   const c = recent.counters
@@ -61,18 +62,48 @@ export function dailyProductReview(rows: Row[], now: Date) {
     { area: 'No observed response', count: c.turns_ended_without_response ?? 0, next: 'Reproduce interruptions, provider failures and tool-only turns; a missing text event alone does not establish task failure.' },
     { area: 'Launch outcome coverage', count: (c.launch_unobserved ?? 0) + (c.launch_unconfirmed ?? 0), next: 'Verify receipt polling, window close and daemon restart; unknown outcomes must not be counted as failed launches.' },
   ].filter(s => s.count > 0).sort((a, b) => b.count - a.count)
-  const retention = [1, 7].map(lag => {
+  const retention = [1, 7, 28].map(lag => {
     const cohorts = Array.from({ length: 7 }, (_, i) => {
       const stamp = today - (lag + 7 - i) * DAY, cohort = byDay.get(dayKey(stamp)) ?? {}
       const denominator = cohort.working_installation_days ?? 0
       const followUpObserved = (byDay.get(dayKey(stamp + lag * DAY))?.working_installation_days ?? 0) > 0
-      const returned = denominator && followUpObserved ? cohort[`d${lag}_returning_work_installations`] ?? 0 : null
-      return { day: dayKey(stamp), workingInstallations: denominator || null, returned,
+      // Older collectors reported work but had no D28 counter. Their missing metric is unknown, not zero retention.
+      const measurementAvailable = lag !== 28 || (cohort.measurement_v2_installation_days ?? 0) > 0
+      const returned = denominator && followUpObserved && measurementAvailable ? cohort[`d${lag}_returning_work_installations`] ?? 0 : null
+      return { day: dayKey(stamp), workingInstallations: denominator || null, returned, measurementAvailable,
         percent: returned === null ? null : rate(returned, denominator) }
     })
     return { day: lag, definition: `Observed work on both the cohort's UTC day and UTC day +${lag}. Installation counts, not people.`, cohorts }
   })
+  const month = new Date(today)
+  const monthStart = Date.UTC(month.getUTCFullYear(), month.getUTCMonth(), 1)
+  const priorStart = Date.UTC(month.getUTCFullYear(), month.getUTCMonth() - 1, 1)
+  const earlierStart = Date.UTC(month.getUTCFullYear(), month.getUTCMonth() - 2, 1)
+  const completeMonth = window(priorStart, monthStart), previousMonth = window(earlierStart, priorStart)
+  const monthDenominator = previousMonth.counters.monthly_working_installations ?? 0
+  const monthReturn = completeMonth.counters.monthly_returning_installations ?? 0
   return {
+    monthlyRetention: { from: completeMonth.from, untilExclusive: completeMonth.untilExclusive,
+      previousWorkingInstallations: monthDenominator || null,
+      returningInstallations: monthDenominator && completeMonth.counters.monthly_working_installations ? monthReturn : null,
+      percent: completeMonth.counters.monthly_working_installations ? rate(monthReturn, monthDenominator) : null,
+      definition: 'Participating installations with work in two consecutive complete UTC calendar months; late uploads and measurement rollout affect coverage.',
+    },
+    flows: ['setup', 'ui'].flatMap(channel => PRODUCT_USAGE_SURFACES.flatMap(surface => PRODUCT_USAGE_FLOWS
+      .filter(flow => channel !== 'setup' || ['setup', 'setup_harness', 'setup_tmux', 'setup_clipboard', 'sign_in'].includes(flow))
+      .map(flow => {
+        const prefix = `${channel}_${surface}_${flow}_`
+        const started = c[`${prefix}started`] ?? null
+        const observed = ['ok', 'failed', 'cancelled', 'unknown'].reduce((n, outcome) => n + (c[`${prefix}${outcome}`] ?? 0), 0)
+        return { channel, surface, flow, started,
+          outcomes: Object.fromEntries(['ok', 'failed', 'cancelled', 'unknown'].map(outcome => [outcome, c[`${prefix}${outcome}`] ?? (started ? 0 : null)])),
+          unmatchedStarts: started === null ? null : Math.max(0, started - observed),
+          durationBuckets: Object.fromEntries(['under_1s', '1s_to_10s', '10s_to_1m', 'over_1m'].map(bucket => [bucket, c[`${prefix}${bucket}`] ?? (started ? 0 : null)])),
+          interpretation: channel === 'setup'
+            ? 'Optional signed-out app-session counts, untrusted and self-selected. No cross-step linkage, unique people or signup conversion. Web pre-sign-in is not collected.'
+            : 'Observed app operations, possibly automatic. Missing outcomes include closed apps, offline reports and choice changes; absence is not failure. Viewer opening is not page rendering; update staging is not successful relaunch.',
+        }
+      }))),
     recent: { from: recent.from, untilExclusive: recent.untilExclusive, observedDays: recent.observedDays },
     baseline: { from: baseline.from, untilExclusive: baseline.untilExclusive, observedDays: baseline.observedDays },
     comparisons, investigate: signals, retention,
@@ -93,8 +124,18 @@ export function dailyProductReview(rows: Row[], now: Date) {
       launchAttempts: c.launch_started ?? null, observedLaunchesCreated: c.launch_created ?? null,
       interpretation: 'Post-sign-in first-use signals; these stage counts are not one signup cohort or a signup conversion rate. Already installed clients enter measurement when updated.' },
     feedback: Object.fromEntries(PRODUCT_FEEDBACK.map(answer => [answer, c[`feedback_${answer}`] ?? 0])),
+    features: PRODUCT_USAGE_ACTIONS.map(action => ({ action, requests: c[`${action}_requests`] ?? 0,
+      installationDays: c[`${action}_installation_days`] ?? null,
+      firstMeasuredInstallations: c[`${action}_first_installations`] ?? null,
+      repeatInstallationDays: c[`${action}_repeat_installation_days`] ?? null,
+      interpretation: 'An operation was requested, possibly automatically. Reach is installation-days, not unique people, UI clicks or successful feature use.',
+    })),
+    measurementHealth: { updatedInstallationDays: c.measurement_v2_installation_days ?? null,
+      queuePruning: c.measurement_queue_pruned ?? 0, turnObservationOverflow: c.turn_observation_overflow ?? 0,
+      interpretation: 'Loss signals establish incomplete coverage; no loss signal does not prove complete collection.',
+    },
     gaps: [
-      'Pre-sign-in setup and sign-in drop-off are not observed: signed-out clients send no reports. Test those paths synthetically.',
+      'Signed-out setup/sign-in counts cover only explicitly participating native app sessions. Stage totals are not a linked funnel; web, app closures and privacy choices leave gaps. Test those paths synthetically.',
       'Durable launch outcomes require observed receipt replies; status polling adds no attempts. Missing outcomes, restarts and the 15-minute observation bound reduce coverage.',
       'Human and automated work are combined. App-open time is not productive use; technical completion is not task success.',
       'Feedback is voluntary and self-selected, not a representative satisfaction survey or a success rate for all tasks.',

@@ -1,11 +1,17 @@
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
+import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ProductUsageLaunchSignal } from '../lib/productUsageSignals.js'
-import { PRODUCT_USAGE_DAYS, PRODUCT_USAGE_MAX_COUNT, PRODUCT_USAGE_METRICS,
+import { PRODUCT_USAGE_ACTIONS, PRODUCT_USAGE_DAYS, PRODUCT_USAGE_MAX_COUNT, PRODUCT_USAGE_METRICS,
   type ProductUsageChoice, type ProductUsageMetric, type ProductUsageReport } from '../lib/productUsageContract.js'
 
 const DAY = 86_400_000
+const MAX_QUEUE_BYTES = 256 * 1024
+// A report stays below the server's 8 KiB body bound even with the complete vocabulary.
+const MAX_REPORT_METRICS = 64
+const metricSet = new Set<string>(PRODUCT_USAGE_METRICS)
+const requestActions = new Map(PRODUCT_USAGE_ACTIONS.map(action => [`${action}_requests`, action]))
 const key = (now: number) => new Date(now).toISOString().slice(0, 10)
 const week = (now: number) => { const d = new Date(now); return key(now - ((d.getUTCDay() + 6) % 7) * DAY) }
 type Counters = Partial<Record<ProductUsageMetric, number>>
@@ -14,6 +20,10 @@ interface State {
   activeDay: string | null
   workDay: string | null
   workWeek: string | null
+  workMonth: string | null
+  measurementDay: string | null
+  featureDays: Partial<Record<typeof PRODUCT_USAGE_ACTIONS[number], string>>
+  featuresUsed: typeof PRODUCT_USAGE_ACTIONS[number][]
   workedBefore: boolean
   respondedBefore: boolean
   launchedBefore: boolean
@@ -25,6 +35,7 @@ interface State {
   pending: ProductUsageReport | null
 }
 const fresh = (revision: number): State => ({ revision, activeDay: null, workDay: null, workWeek: null,
+  workMonth: null, measurementDay: null, featureDays: {}, featuresUsed: [],
   workedBefore: false, respondedBefore: false, launchedBefore: false, firstLaunchAt: null,
   launchWorked: false, launchResponded: false, workDays: [], days: {}, pending: null })
 export interface ProductUsageDeps {
@@ -32,6 +43,8 @@ export interface ProductUsageDeps {
   request(method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }>
   now?(): number
   uuid?(): string
+  /** Test seam for a slow or unavailable disk; never called from an event observer. */
+  write?(file: string, value: string): Promise<void>
 }
 
 /** A reporting component of the gateway service; the core never waits for it.
@@ -42,16 +55,22 @@ export function createProductUsage(deps: ProductUsageDeps) {
   const now = deps.now ?? Date.now, uuid = deps.uuid ?? randomUUID
   let state = fresh(-1), enabled = false, stopped = false, active = false
   let syncing: Promise<void> | null = null, persistTimer: ReturnType<typeof setTimeout> | undefined
+  let writing: Promise<boolean> | null = null, writeAgain = false
   const running = new Map<string, { started: number; response: boolean; error: boolean; waited: boolean }>()
   const launches = new Map<string, { started: number; done: boolean; waits: Set<string> }>()
   try {
-    if (statSync(deps.file).size > 256 * 1024) throw new Error('Usage queue exceeds its bound')
+    if (statSync(deps.file).size > MAX_QUEUE_BYTES) throw new Error('Usage queue exceeds its bound')
     // Reconstruct every field; even a corrupted local file cannot introduce a new upload property.
     const saved = JSON.parse(readFileSync(deps.file, 'utf8')) as State
     if (Number.isSafeInteger(saved.revision) && saved.revision >= 0) {
       state = fresh(saved.revision)
-      for (const field of ['activeDay', 'workDay', 'workWeek'] as const) {
+      for (const field of ['activeDay', 'workDay', 'workWeek', 'measurementDay'] as const) {
         if (typeof saved[field] === 'string' && validDay(saved[field]!)) state[field] = saved[field]
+      }
+      if (typeof saved.workMonth === 'string' && /^\d{4}-\d{2}$/.test(saved.workMonth)) state.workMonth = saved.workMonth
+      for (const action of PRODUCT_USAGE_ACTIONS) {
+        if (validDay(saved.featureDays?.[action] ?? '')) state.featureDays[action] = saved.featureDays![action]
+        if (saved.featuresUsed?.includes(action)) state.featuresUsed.push(action)
       }
       state.workedBefore = saved.workedBefore === true
       state.respondedBefore = saved.respondedBefore === true
@@ -65,7 +84,8 @@ export function createProductUsage(deps: ProductUsageDeps) {
       const pending = saved.pending
       if (pending && pending.schemaVersion === 1 && pending.revision === state.revision && validDay(pending.day)
           && typeof pending.id === 'string' && /^[a-f0-9-]{36}$/.test(pending.id)) {
-        state.pending = { schemaVersion: 1, revision: state.revision, id: pending.id, day: pending.day, counters: clean(pending.counters) }
+        const restored = { schemaVersion: 1 as const, revision: state.revision, id: pending.id, day: pending.day, counters: clean(pending.counters) }
+        if (Buffer.byteLength(JSON.stringify(restored)) <= 8192) state.pending = restored
       }
     }
   } catch { /* Missing or unreadable telemetry must not affect a session. */ }
@@ -83,24 +103,56 @@ export function createProductUsage(deps: ProductUsageDeps) {
     }
     return result
   }
-  function persist(): boolean {
+  function snapshot(): string {
     clearTimeout(persistTimer); persistTimer = undefined
-    for (const field of ['activeDay', 'workDay', 'workWeek'] as const) if (state[field] && !validDay(state[field]!)) state[field] = null
+    for (const field of ['activeDay', 'workDay', 'workWeek', 'measurementDay'] as const) if (state[field] && !validDay(state[field]!)) state[field] = null
     for (const day of Object.keys(state.days)) if (!validDay(day)) delete state.days[day]
+    for (const action of PRODUCT_USAGE_ACTIONS) if (!validDay(state.featureDays[action] ?? '')) delete state.featureDays[action]
     state.workDays = state.workDays.filter(validDay)
     if (state.firstLaunchAt !== null && !validDay(key(state.firstLaunchAt))) state.firstLaunchAt = null
     if (state.pending && !validDay(state.pending.day)) state.pending = null
-    try {
-      mkdirSync(dirname(deps.file), { recursive: true, mode: 0o700 })
-      writeFileSync(deps.file + '.tmp', JSON.stringify(state), { mode: 0o600 })
-      renameSync(deps.file + '.tmp', deps.file)
-      return true
-    } catch { enabled = false; return false }
+    // Size each day once, keeping the most recent ones. Repeatedly serializing a full
+    // offline backlog to remove its oldest day would stall the gateway on a reconnect.
+    let bytes = Buffer.byteLength(JSON.stringify({ ...state, days: {} })) + 1024
+    const kept: State['days'] = {}
+    let pruned = false
+    for (const day of Object.keys(state.days).sort().reverse()) {
+      const size = Buffer.byteLength(JSON.stringify(state.days[day])) + 16
+      if (bytes + size > MAX_QUEUE_BYTES) { pruned = true; continue }
+      kept[day] = state.days[day]; bytes += size
+    }
+    state.days = kept
+    if (pruned) (state.days[key(now())] ??= {}).measurement_queue_pruned = 1
+    return JSON.stringify(state)
+  }
+  function persist(): Promise<boolean> {
+    writeAgain = true
+    // Coalesce concurrent saves to one in-flight write and the latest bounded state.
+    // A slow disk must not create a promise/file queue or block the relay's event loop.
+    return writing ??= (async () => {
+      try {
+        do {
+          writeAgain = false
+          const value = snapshot()
+          if (deps.write) await deps.write(deps.file, value)
+          else {
+            await mkdir(dirname(deps.file), { recursive: true, mode: 0o700 })
+            await writeFile(deps.file + '.tmp', value, { mode: 0o600 })
+            await rename(deps.file + '.tmp', deps.file)
+          }
+        } while (writeAgain)
+        return true
+      } catch { enabled = false; return false }
+    })().finally(() => { writing = null })
   }
   function dirty(): void {
-    if (!persistTimer) { persistTimer = setTimeout(persist, 1000); persistTimer.unref() }
+    if (!persistTimer) { persistTimer = setTimeout(() => { void persist() }, 1000); persistTimer.unref() }
   }
   function add(metric: ProductUsageMetric, day = key(now())): void {
+    if (state.measurementDay !== key(now())) {
+      state.measurementDay = key(now())
+      ;(state.days[state.measurementDay] ??= {}).measurement_v2_installation_days = 1
+    }
     const counters = state.days[day] ??= {}
     counters[metric] = Math.min(PRODUCT_USAGE_MAX_COUNT, (counters[metric] ?? 0) + 1)
     dirty()
@@ -117,11 +169,11 @@ export function createProductUsage(deps: ProductUsageDeps) {
       add(response ? 'first_launch_response_24h_installations' : 'first_launch_work_24h_installations', key(state.firstLaunchAt))
     }
   }
-  function choice(value: ProductUsageChoice): void {
-    if (state.revision !== value.revision || !value.enabled) {
+  async function choice(value: ProductUsageChoice): Promise<void> {
+    if (state.revision !== value.revision || (!value.enabled && (enabled || state.pending || Object.keys(state.days).length))) {
       state = fresh(value.revision); running.clear(); launches.clear()
       enabled = false
-      if (!persist()) return
+      if (!await persist()) return
     }
     enabled = value.enabled && !stopped
   }
@@ -132,7 +184,7 @@ export function createProductUsage(deps: ProductUsageDeps) {
       const body = response.body.data as ProductUsageChoice | undefined
       if (response.status !== 200 || typeof body?.enabled !== 'boolean'
           || !Number.isSafeInteger(body.revision) || body.revision < 0) { enabled = false; running.clear(); launches.clear(); return }
-      choice(body)
+      await choice(body)
       if (!enabled) return
       for (const turn of running.values()) if (!turn.response && !turn.waited && now() - turn.started >= 60_000) {
         turn.waited = true; add('turns_waiting_over_1m')
@@ -145,19 +197,21 @@ export function createProductUsage(deps: ProductUsageDeps) {
       if (!state.pending) {
         const day = Object.keys(state.days).sort().find(d => validDay(d) && Object.keys(state.days[d]).length)
         if (!day) return
-        state.pending = { schemaVersion: 1, revision: state.revision, id: uuid(), day, counters: state.days[day] }
-        delete state.days[day]
+        const counters = Object.fromEntries(Object.entries(state.days[day]).slice(0, MAX_REPORT_METRICS)) as Counters
+        state.pending = { schemaVersion: 1, revision: state.revision, id: uuid(), day, counters }
+        for (const metric of Object.keys(counters)) delete state.days[day][metric as ProductUsageMetric]
+        if (!Object.keys(state.days[day]).length) delete state.days[day]
       }
       // Persist the immutable receipt before sending. A crash or ambiguous response retries that id.
-      if (!persist()) return
+      if (!await persist() || stopped || !enabled) return
       const report = state.pending
       if (!report) return
       const answer = await deps.request('POST', '/api/product-usage/report', report)
       if (stopped) return
       const result = answer.body.data as { accepted?: boolean; reason?: string } | undefined
-      if (answer.status === 200 && result?.accepted === true) { state.pending = null; persist() }
-      else if (result?.reason === 'CHOICE_CHANGED') { enabled = false; state = fresh(-1); running.clear(); launches.clear(); persist() }
-      else if (result?.reason === 'EXPIRED') { state.pending = null; persist() }
+      if (answer.status === 200 && result?.accepted === true) { state.pending = null; await persist() }
+      else if (result?.reason === 'CHOICE_CHANGED') { enabled = false; state = fresh(-1); running.clear(); launches.clear(); await persist() }
+      else if (result?.reason === 'EXPIRED') { state.pending = null; await persist() }
     } catch { enabled = false; running.clear(); launches.clear() /* No error text or request body in logs. */ }
   }
   const sync = (): Promise<void> => syncing ??= syncOnce().finally(() => { syncing = null })
@@ -167,7 +221,15 @@ export function createProductUsage(deps: ProductUsageDeps) {
   return {
     sync,
     counter(metric: ProductUsageMetric): void {
-      if (enabled && !stopped && PRODUCT_USAGE_METRICS.includes(metric)) add(metric)
+      if (!enabled || stopped || !metricSet.has(metric)) return
+      add(metric)
+      const action = requestActions.get(metric)
+      if (action && state.featureDays[action] !== key(now())) {
+        add(`${action}_installation_days`)
+        add(`${action}_${state.featuresUsed.includes(action) ? 'repeat_installation_days' : 'first_installations'}`)
+        if (!state.featuresUsed.includes(action)) state.featuresUsed.push(action)
+        state.featureDays[action] = key(now())
+      }
     },
     launch(signal: ProductUsageLaunchSignal): void {
       if (!enabled || stopped || !signal || typeof signal.id !== 'string' || !/^[a-zA-Z0-9_-]{16,96}$/.test(signal.id)) return
@@ -208,20 +270,29 @@ export function createProductUsage(deps: ProductUsageDeps) {
     observe(type: 'turn_started' | 'turn_ended' | 'text_delta' | 'error', agent: string, replay: boolean, interrupted = false): void {
       if (!enabled || stopped || replay || !agent || agent.length > 256) return
       if (type === 'turn_started') {
-        if (running.has(agent) || running.size >= 1000) return
+        if (running.has(agent)) return
+        if (running.size >= 1000) { add('turn_observation_overflow'); return }
         running.set(agent, { started: now(), response: false, error: false, waited: false }); markActive(); add('turns_started')
         launchValue(false)
         if (state.workDay !== key(now())) {
+          if (state.workDay && now() - Date.parse(state.workDay) >= 7 * DAY) add('reactivated_after_7d_installations')
           add('working_installation_days')
           add(state.workedBefore ? 'repeat_work_installation_days' : 'first_work_installations')
           state.workDay = key(now()); state.workedBefore = true
           // Return counters belong to the earlier working-day cohort, not today's new starts.
           // Only these date flags stay here; no server-side installation/user join is needed.
-          for (const [lag, metric] of [[1, 'd1_returning_work_installations'], [7, 'd7_returning_work_installations']] as const) {
+          for (const [lag, metric] of [[1, 'd1_returning_work_installations'], [7, 'd7_returning_work_installations'], [28, 'd28_returning_work_installations']] as const) {
             const cohort = key(now() - lag * DAY)
             if (state.workDays.includes(cohort)) add(metric, cohort)
           }
           state.workDays = [...state.workDays.filter(validDay), key(now())]
+        }
+        const currentMonth = key(now()).slice(0, 7)
+        if (state.workMonth !== currentMonth) {
+          add('monthly_working_installations')
+          const prior = new Date(currentMonth + '-01T00:00:00Z'); prior.setUTCMonth(prior.getUTCMonth() - 1)
+          if (state.workMonth === key(prior.getTime()).slice(0, 7)) add('monthly_returning_installations')
+          state.workMonth = currentMonth
         }
         const currentWeek = week(now())
         if (state.workWeek !== currentWeek) {
@@ -254,10 +325,10 @@ export function createProductUsage(deps: ProductUsageDeps) {
         add(elapsed < 10_000 ? 'duration_under_10s' : elapsed < 60_000 ? 'duration_10s_to_1m' : elapsed < 300_000 ? 'duration_1m_to_5m' : 'duration_over_5m')
       }
     },
-    stop(discard = false): void {
+    stop(discard = false): Promise<boolean> {
       stopped = true; enabled = false; clearInterval(timer); running.clear(); launches.clear()
       if (discard) state = fresh(-1)
-      persist()
+      return persist()
     },
   }
 }

@@ -824,7 +824,7 @@ export class BackendSocket {
     const measured = productUsageRequest(type, (metric) => this.toGateway('usage', (gateway) => gateway.usageCounter?.(metric)))
     const reply = (t: string, rid: unknown, p: Record<string, unknown>): void => {
       if (t === type) {
-        measured(p.error ?? (p.failure as { code?: unknown } | undefined)?.code, p.state, !!p.agent)
+        measured(p.error ?? (p.failure as { code?: unknown } | undefined)?.code, p.state, !!p.agent, p.ok)
         launchMeasured(p.error ?? (p.failure as { code?: unknown } | undefined)?.code, p.state, !!p.agent, (p.held as { service?: unknown } | undefined)?.service)
       }
       this.emitReply(connId, t, rid, p)

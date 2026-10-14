@@ -1,4 +1,4 @@
-import { PRODUCT_FEEDBACK } from './lib/productUsageContract.js'
+import { PRODUCT_FEEDBACK, PRODUCT_USAGE_UI_METRICS } from './lib/productUsageContract.js'
 /**
  * Tiny localhost HTTP server for the Claude Code hook callbacks. `hook/notify.mjs` POSTs here on
  * SessionStart/SessionEnd (127.0.0.1:<PORT>). This replaces the old Fastify routes — the browser
@@ -203,6 +203,7 @@ export interface HookServerHandlers {
   onExperimentalRead?: () => Promise<PairOutcome>
   onExperimentalWrite?: (body: unknown) => Promise<PairOutcome>
   onProductFeedback?: (body: unknown) => Promise<PairOutcome>
+  onProductUsageReport?: (body: unknown) => Promise<PairOutcome>
   onProductUsageRead?: () => Promise<PairOutcome>
   onProductUsageWrite?: (body: unknown) => Promise<PairOutcome>
   /** /api/store/* — proxy the Harness Store's ratings and reviews to backend the same way: reads
@@ -287,7 +288,7 @@ function validHookBody(value: unknown): value is BoundHookBody {
   return true
 }
 
-function readBody(req: http.IncomingMessage, exact = false): Promise<string> {
+function readBody(req: http.IncomingMessage, exact = false, maximum = MAX_HOOK_BODY_BYTES): Promise<string> {
   return new Promise((resolve) => {
     let data = ''
     let bytes = 0
@@ -296,7 +297,7 @@ function readBody(req: http.IncomingMessage, exact = false): Promise<string> {
     if (!exact) req.setEncoding('utf8')
     req.on('data', (chunk: string | Buffer) => {
       bytes += Buffer.byteLength(chunk)
-      if (bytes > MAX_HOOK_BODY_BYTES) { oversized = true; data = ''; buffers = []; return }
+      if (bytes > maximum) { oversized = true; data = ''; buffers = []; return }
       if (exact) buffers.push(Buffer.from(chunk))
       else data += chunk
     })
@@ -1600,6 +1601,30 @@ export function startHookServer(
       if (req.method === 'GET' && url === '/api/experimental-settings') {
         if (!handlers.onExperimentalRead) { json(503, { error: 'UNAVAILABLE' }); return }
         await proxied(handlers.onExperimentalRead); return
+      }
+      if (req.method === 'POST' && url === '/api/product-usage/report') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onProductUsageReport) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: unknown
+        try {
+          const raw = await readBody(req, false, 8192)
+          body = JSON.parse(raw)
+        } catch { json(400, { error: 'BAD_REQUEST' }); return }
+        const report = body as { schemaVersion?: unknown; revision?: unknown; id?: unknown; day?: unknown; counters?: unknown } | null
+        if (!report || typeof report !== 'object' || Object.keys(report).length !== 5 || report.schemaVersion !== 1
+            || typeof report.revision !== 'number' || !Number.isSafeInteger(report.revision) || report.revision < 0
+            || typeof report.id !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(report.id)
+            || typeof report.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(report.day)
+            || !report.counters || typeof report.counters !== 'object' || Array.isArray(report.counters)
+            || Object.entries(report.counters).some(([key, value]) => !PRODUCT_USAGE_UI_METRICS.includes(key as never)
+              || !Number.isSafeInteger(value) || value < 1 || value > 1000)) {
+          json(400, { error: 'BAD_REQUEST' }); return
+        }
+        try {
+          const result = await handlers.onProductUsageReport(report)
+          json(result.status, result.body)
+        } catch { json(502, { success: false, error: { code: 'USAGE_UNAVAILABLE', message: 'Product usage unavailable' } }) }
+        return
       }
       if (req.method === 'POST' && url === '/api/product-usage/feedback') {
         if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }

@@ -1,3 +1,5 @@
+import 'measurement/setup_usage_choice.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -240,18 +242,34 @@ class RootShell extends ConsumerWidget {
     final app = ref.watch(appStateProvider);
     return ListenableBuilder(
       listenable: app,
-      builder: (context, _) => switch (app.status) {
-        // `bootstrapping` covers two unrelated moments: the app starting
-        // cold, and a sign-in the user just began. The second keeps the
-        // signed-out screen, which carries the wait as a state of its own
-        // button; swapping the window for a separate screen there was a
-        // hard cut in the middle of a flow, and it is why that button's
-        // spinner was almost never seen. Keyed on `signingIn`, which spans
-        // the whole of it — see [AppNotifier.signingIn].
-        AppStatus.bootstrapping =>
-          app.signingIn ? signedOutScreen(app) : bootScreen(app),
-        AppStatus.unauthenticated => signedOutScreen(app),
-        AppStatus.authenticated => authenticatedScreen(app),
+      builder: (context, _) {
+        final screen = switch (app.status) {
+          // `bootstrapping` covers two unrelated moments: the app starting
+          // cold, and a sign-in the user just began. The second keeps the
+          // signed-out screen, which carries the wait as a state of its own
+          // button; swapping the window for a separate screen there was a
+          // hard cut in the middle of a flow, and it is why that button's
+          // spinner was almost never seen. Keyed on `signingIn`, which spans
+          // the whole of it — see [AppNotifier.signingIn].
+          AppStatus.bootstrapping =>
+            app.signingIn ? signedOutScreen(app) : bootScreen(app),
+          AppStatus.unauthenticated => signedOutScreen(app),
+          AppStatus.authenticated => authenticatedScreen(app),
+        };
+        if (app.productMeasurement.surface == 'web' ||
+            app.status == AppStatus.authenticated ||
+            (app.status == AppStatus.bootstrapping && !app.signingIn)) {
+          return screen;
+        }
+        return Column(
+          children: [
+            Expanded(child: screen),
+            SafeArea(
+              top: false,
+              child: SetupUsageChoice(measurement: app.productMeasurement),
+            ),
+          ],
+        );
       },
     );
   }

@@ -9,8 +9,9 @@ typedef ProductFeedbackRequest = Future<void> Function(
 
 /// A voluntary, fixed-choice response. It carries no task, account or session context.
 class ProductFeedback extends StatefulWidget {
-  const ProductFeedback({super.key, required this.send});
+  const ProductFeedback({super.key, required this.send, this.outcome = false});
   final ProductFeedbackRequest send;
+  final bool outcome;
   @override
   State<ProductFeedback> createState() => _ProductFeedbackState();
 }
@@ -22,6 +23,11 @@ class _ProductFeedbackState extends State<ProductFeedback> {
     'slow': 'Slow',
     'confusing': 'Confusing',
     'missing_feature': 'Missing a feature',
+  };
+  static const outcomes = {
+    'completed': 'Completed',
+    'partly_completed': 'Partly completed',
+    'not_completed': 'Not completed',
   };
   final String _receipt = _newReceipt();
   String? _answer, _status;
@@ -72,7 +78,9 @@ class _ProductFeedbackState extends State<ProductFeedback> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'How did your latest task go?',
+          widget.outcome
+              ? 'Did you finish what you wanted?'
+              : 'How did your latest task go?',
           style: Theme.of(context).textTheme.titleSmall,
         ),
         const SizedBox(height: 8),
@@ -84,7 +92,7 @@ class _ProductFeedbackState extends State<ProductFeedback> {
           spacing: 8,
           runSpacing: 4,
           children: [
-            for (final choice in choices.entries)
+            for (final choice in (widget.outcome ? outcomes : choices).entries)
               OutlinedButton(
                 onPressed:
                     _busy || _sent || (_answer != null && _answer != choice.key)

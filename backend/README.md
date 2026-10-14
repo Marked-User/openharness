@@ -294,3 +294,13 @@ activity, not proven inactivity. In particular, do not compare new surface instr
 older desktop history as if both had equal coverage. The collector-based account dashboard
 (`src/lib/analyticsQuery.ts`) is separate: stale collector rows cannot establish current engine
 mix, completion rate, runtime, or token cost.
+
+
+The expanded measurement contract adds fixed app-flow and feature-use counts, D28 and calendar-month
+installation returns, and voluntary task outcomes. Native signed-out setup is a separate explicit
+session opt-in at `POST /api/product-usage/setup`; it rejects credentials and arbitrary fields and
+has a process-wide admission budget without storing IP addresses. Web signed-out reporting is disabled.
+Daily reports keep these populations separate, show unmatched outcomes and measurement loss, and
+compare only mature periods. See [measurement definitions and runtime bounds](../docs/product-measurement.md).
+Deploy this additive allowlist before releasing the new clients. This change does not add identity
+markers or make installation counts comparable to people-based DAU or retention benchmarks.

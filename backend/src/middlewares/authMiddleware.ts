@@ -20,6 +20,8 @@ export function shouldSkipAuth(url: string): boolean {
   const path = url.split('?')[0]
   return (
     path === '/api/health' ||
+    // Explicitly enabled, credential-free setup totals; its own schema and workload budget apply.
+    path === '/api/product-usage/setup' ||
     // Web-driven SSO login (pre-session): /authorize returns the SSO URL, /exchange trades the code
     // for the SSO access token, /logout-url returns the SSO end-session URL. All fetched by web XHR.
     path === '/api/auth/authorize' ||
