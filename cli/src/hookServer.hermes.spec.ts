@@ -274,8 +274,11 @@ it.each([false, true])('reports capacity backpressure without claiming the extra
   if (waits) {
     expect(await f.hook('20261009_120000_ffffff', 202)).toMatchObject({ pending: false, retry: true })
     f.resume()
+    // The first request now keeps its bounded local intake even if durable
+    // retention has not completed. This distinct request waits behind it;
+    // neither response may claim journal ownership or erase the earlier input.
     expect(await f.hook('20261009_120000_ffffff', 202)).toMatchObject({ pending: false, retry: true,
-      detail: expect.stringContaining('too many pending native hooks') })
+      detail: expect.stringContaining('earlier local native hook intake') })
   } else expect(await f.hook('20261009_120000_ffffff', 202)).toEqual({
       pending: false, retry: true, detail: expect.stringContaining('too many pending native hooks'),
     })

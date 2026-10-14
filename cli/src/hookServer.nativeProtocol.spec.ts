@@ -12,7 +12,7 @@ import type { HookServerHandlers, HookServerOptions } from './hookServer.js'
 
 const fault = vi.hoisted(() => ({ unavailable: false, afterRetain: undefined as (() => void) | undefined,
   afterFinish: undefined as (() => void) | undefined, beforeFinish: undefined as (() => Promise<void>) | undefined,
-  beforeSnapshot: undefined as (() => void) | undefined }))
+  beforeSnapshot: undefined as (() => void) | undefined, beforeRetain: undefined as (() => void) | undefined }))
 vi.mock('node:fs', async original => ({ ...await original<object>(),
   fsync: (_fd: number, done: (error: Error | null) => void) => queueMicrotask(() => done(fault.unavailable ? Error('fixture confirmation unavailable') : null)),
 }))
@@ -28,6 +28,7 @@ vi.mock('./engines/kit/nativeHookJournal.js', async original => {
       fault.beforeSnapshot?.(); return journal.snapshot(...input)
     },
       retain: async (...input: Parameters<typeof journal.retain>) => {
+      fault.beforeRetain?.()
       const delivery = await journal.retain(...input); fault.afterRetain?.(); return delivery
     }, claim: async (...input: Parameters<typeof journal.claim>) => {
       const claim = await journal.claim(...input)
@@ -65,7 +66,7 @@ async function close() {
 }
 beforeEach(async () => {
   live = true; fault.unavailable = false; fault.afterRetain = undefined; fault.afterFinish = undefined
-  fault.beforeFinish = undefined; fault.beforeSnapshot = undefined
+  fault.beforeFinish = undefined; fault.beforeSnapshot = undefined; fault.beforeRetain = undefined
   root = realpathSync(mkdtempSync(join(tmpdir(), 'native-protocol-http-')))
   for (const [name, value] of Object.entries({ HOME: join(root, 'home'), ADAPTER_DATA_DIR: join(root, 'data'),
     ADAPTER_RUNTIME_DIR: join(root, 'runtime'), CODEX_HOME: join(root, 'codex'), CLAUDE_CONFIG_DIR: join(root, 'claude') })) {
@@ -157,6 +158,86 @@ it('holds an interrupted namespace until live-owner recovery seals it, then comp
   expect(f.capture).not.toHaveBeenCalled()
 }, 20_000)
 
+it.each(['snapshot', 'retain'] as const)('retries a locally held prompt after initial %s failure without another client request', async boundary => {
+  const held = vi.fn(), prompt = vi.fn(), f = await fixture({ onAdmissionHeld: held, onPromptSubmitted: prompt })
+  const raw = JSON.stringify(body({ hookEvent: 'UserPromptSubmit', prompt: 'retained original prompt' }))
+  const unavailable = () => { throw Error('fixture initial intake unavailable') }
+  if (boundary === 'snapshot') fault.beforeSnapshot = unavailable
+  else fault.beforeRetain = unavailable
+  expect(await f.post(raw, {}, '/api/hook/session-start')).toMatchObject({ status: 202,
+    body: { pending: false, retry: true, detail: expect.stringContaining('fixture initial intake unavailable') } })
+  expect(f.registered).not.toHaveBeenCalled()
+  expect(held).toHaveBeenCalledWith(agentId, expect.stringContaining('fixture initial intake unavailable'))
+  fault.beforeSnapshot = undefined; fault.beforeRetain = undefined
+  f.started.startRecovery()
+  // A legacy hook has exited after its response budget. No client retry is
+  // available to reintroduce the prompt that this core already received.
+  await vi.waitFor(() => expect(prompt).toHaveBeenCalledExactlyOnceWith(agentId, 'retained original prompt'), { timeout: 8_000 })
+  await vi.waitFor(() => expect(f.started.recoveryReady(registry.byAgent(agentId)!)).toBe(true), { timeout: 8_000 })
+  expect(f.registered).toHaveBeenCalledOnce()
+  expect(records().filter(record => record.event.kind === 'intake')).toHaveLength(1)
+  expect(f.capture).not.toHaveBeenCalled()
+}, 20_000)
+
+it('bounds locally held intake and preserves its first arrival order across later requests', async () => {
+  const prompt = vi.fn(), f = await fixture({ onPromptSubmitted: prompt }, 2)
+  fault.beforeRetain = () => { throw Error('fixture first intake unavailable') }
+  const raw = (prompt: string) => JSON.stringify(body({ hookEvent: 'UserPromptSubmit', prompt }))
+  expect(await f.post(raw('first'), {}, '/api/hook/session-start')).toMatchObject({ status: 202, body: { retry: true } })
+  const second = { 'x-harness-hook-delivery-id': 'fixture-local-second-intake', 'x-harness-hook-fired-at': '2000' }
+  expect(await f.post(raw('second'), second, '/api/hook/session-start')).toMatchObject({ status: 202, body: { retry: true } })
+  expect(await f.post(raw('overflow'), { 'x-harness-hook-delivery-id': 'fixture-local-overflow-intake' }, '/api/hook/session-start'))
+    .toMatchObject({ status: 429, body: { pending: false, error: 'HOOK_ADMISSION_BUSY' } })
+  expect(f.started.recoveryReady(registry.byAgent(agentId)!)).toBe(false)
+  fault.beforeRetain = undefined
+  f.started.startRecovery()
+  await vi.waitFor(() => expect(prompt.mock.calls.map(call => call[1])).toEqual(['first', 'second']), { timeout: 8_000 })
+  await vi.waitFor(() => expect(f.started.recoveryReady(registry.byAgent(agentId)!)).toBe(true), { timeout: 8_000 })
+  expect(records().filter(record => record.event.kind === 'intake').map(record => record.event.intake.id))
+    .toEqual([delivery.id, second['x-harness-hook-delivery-id']])
+}, 20_000)
+
+it.each(['equal', 'absent'] as const)('recovers cold durable intake before a later local request with %s native time without another client request', async time => {
+  const headers: Record<string, string | null> = time === 'absent' ? { 'x-harness-hook-fired-at': null } : {}
+  const raw = (prompt: string) => JSON.stringify(body({ hookEvent: 'UserPromptSubmit', prompt }))
+  const before = await fixture({ hookAdmissionBlocked: () => true })
+  expect(await before.post(raw('retained first'), headers, '/api/hook/session-start'))
+    .toMatchObject({ status: 200, body: { pending: true } })
+  await close()
+  const prompt = vi.fn(), after = await fixture({ onPromptSubmitted: prompt })
+  expect(await after.post(raw('arrived after restart'), { ...headers,
+    'x-harness-hook-delivery-id': 'fixture-after-restart-intake' }, '/api/hook/session-start'))
+    .toMatchObject({ status: 200, body: { pending: true } })
+  after.started.startRecovery()
+  await vi.waitFor(() => expect(prompt.mock.calls.map(call => call[1])).toEqual(['retained first', 'arrived after restart']), { timeout: 8_000 })
+  await vi.waitFor(() => expect(after.started.recoveryReady(registry.byAgent(agentId)!)).toBe(true), { timeout: 8_000 })
+  expect(after.registered).toHaveBeenCalledTimes(2)
+}, 20_000)
+
+it('does not transfer unpersisted local intake to a replacement process', async () => {
+  let currentKey = key
+  const prompt = vi.fn(), f = await fixture({ onPromptSubmitted: prompt,
+    readNativeHookOwner: async (_row, expected) => {
+      if (expected && expected.key !== currentKey) throw Error('fixture original process changed')
+      return { key: currentKey, evidence: 'fixture-precise-native-process', verify() {} }
+    },
+  })
+  fault.beforeSnapshot = () => { throw Error('fixture initial snapshot unavailable') }
+  expect(await f.post(JSON.stringify(body({ hookEvent: 'UserPromptSubmit', prompt: 'original' })), {}, '/api/hook/session-start'))
+    .toMatchObject({ status: 202, body: { pending: false, retry: true } })
+  currentKey = `${boot}\u0000codex\u00005100\u000067890`
+  expect(registry.updateProcessIdentity(agentId, { pid: 5100, startMarker: 'fixture-replacement', executable: '<codex>' })).toBe(true)
+  fault.beforeSnapshot = undefined
+  f.started.startRecovery()
+  await vi.waitFor(() => expect(f.started.recoveryReady(registry.byAgent(agentId)!)).toBe(true), { timeout: 8_000 })
+  const replacement = structuredClone(origin); replacement.ancestry[1].birth = '67890'
+  const raw = JSON.stringify(body({ hookEvent: 'UserPromptSubmit', prompt: 'replacement', nativeOrigin: replacement }))
+  expect(await f.post(raw, { 'x-harness-hook-delivery-id': 'fixture-replacement-intake' }, '/api/hook/session-start'))
+    .toMatchObject({ status: 200 })
+  await vi.waitFor(() => expect(prompt.mock.calls.map(call => call[1])).toEqual(['replacement']), { timeout: 8_000 })
+  expect(f.registered).toHaveBeenCalledOnce()
+}, 20_000)
+
 it('starts retained client replay only after readiness and recovers a held registration across core restart', async () => {
   const first = await fixture({ hookAdmissionBlocked: () => true }), raw = JSON.stringify(body())
   const { openNativeHookStorage } = await import('./engines/kit/nativeHookStorage.js')
@@ -228,7 +309,7 @@ it('recovers server intake while unavailable client outboxes remain inactive by 
   restarted.started.startRecovery()
   await restarted.settle(raw)
   expect(restarted.registered).toHaveBeenCalledOnce()
-  expect(restarted.started.recoveryReady(registry.byAgent(agentId)!)).toBe(true)
+  await vi.waitFor(() => expect(restarted.started.recoveryReady(registry.byAgent(agentId)!)).toBe(true), { timeout: 8_000 })
   // Cover more than two replay polling intervals: server recovery must not
   // start recurring scans for the durable client that has not been activated.
   await new Promise<void>(done => setTimeout(done, 1_100))

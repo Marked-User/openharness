@@ -426,12 +426,12 @@ export function startHookServer(
   const recoveryHolds = new Map<string, string>()
   type StopAcknowledgement = { status: number; reply: unknown }
   type LinkedStop = (body: BoundHookBody, firedAt: number | undefined) => StopAcknowledgement | Promise<StopAcknowledgement>
+  type PreparingIntake = { body: BoundHookBody; firedAt?: number; arrival: number; wire?: NativeHookWireIdentity; attempted: boolean }
   type Receipt = { fingerprint: string; status: number; reply: unknown; pending: boolean; bytes: number; linkedStop?: LinkedStop;
-    preparing?: { stopEffect?: CapturedStop; stopCurrent?: () => boolean } }
+    preparing?: { stopEffect?: CapturedStop; stopCurrent?: () => boolean; intake?: PreparingIntake } }
   const admissionReceipts = new Map<string, { scope: string; records: Map<string, Receipt> }>()
   const resolvingStops = new Map<string, { fingerprint: string; stop: LinkedStop }>()
   let receiptCount = 0, receiptBytes = 0
-  let reservedCount = 0, reservedBytes = 0
   const intakeReservations = new Set<string>()
   const saveReceipt = (records: Map<string, Receipt>, id: string, next?: Receipt) => {
     const before = records.get(id)
@@ -529,7 +529,15 @@ export function startHookServer(
     try { return verify(await pending) } finally { openingProcesses.delete(key) }
   }
   const ready = (context: DurableProcess, value: boolean) => {
-    context.ready = value && !closed
+    // A legacy client may have exited before the first journal snapshot. Its
+    // bounded local request still needs intake even when the journal is empty.
+    const waiting = value && registry.list().some(row => {
+      const history = admissionReceipts.get(row.agentId)
+      try { return durableKey(row) === context.key && history && history.scope === scopeOf(row)
+        && [...history.records.values()].some(receipt => receipt.preparing?.intake) }
+      catch { return false }
+    })
+    context.ready = value && !closed && !waiting
     if (!context.ready) { recovered.delete(context.key); return }
     recovered.add(context.key)
     for (const row of registry.list()) {
@@ -691,7 +699,7 @@ export function startHookServer(
       return true
     } finally { for (const journal of journals.values()) journal.close() }
   }
-  const admitStart = async (body: BoundHookBody, native: { firedAt?: number; deliveryId?: string | string[];
+  const admitStart = async (body: BoundHookBody, native: { firedAt?: number; deliveryId?: string | string[]; arrival?: number;
     recovery?: { agentId: string; key: string; owner?: NativeHookOwner }; wire?: NativeHookWireIdentity },
     respond: (status: number, reply: unknown, ownership?: NativeHookAcknowledgement['outcome']) => void,
   ): Promise<void> => {
@@ -735,7 +743,7 @@ export function startHookServer(
     }
     const engine = body.engine ?? 'claude'
     // Capture before process resolution yields. Native time is unchanged across client retries.
-    const admissionOrder = { firedAt: native.firedAt, arrival: ++admissionArrival }
+    const admissionOrder = { firedAt: native.firedAt, arrival: native.arrival ?? ++admissionArrival }
     const fingerprint = createHash('sha256').update(native.wire
       ? JSON.stringify([body, admissionOrder.firedAt, native.wire]) : JSON.stringify([body, admissionOrder.firedAt])).digest('hex')
     const originalBody = structuredClone(body)
@@ -829,53 +837,67 @@ export function startHookServer(
     // Include the retained process snapshot and closure overhead, and reserve
     // against concurrent HTTP requests before any intake becomes daemon-owned.
     const retainedBytes = 2 * (JSON.stringify(body).length + JSON.stringify(processAgent).length) + 2_048
-    let reservation: string | undefined, countedReservation = false
+    const cached = history.records.get(deliveryId)
+    if (cached && cached.fingerprint !== fingerprint) { answer(conflict.status, conflict.reply); return }
+    const provisional = !cached && receiptCount < receiptCapacity && receiptBytes + retainedBytes <= bytesCapacity
+    if (provisional) {
+      // Reserve before the first fallible snapshot, not merely before retain().
+      // Otherwise a concurrent startup publication loses a one-shot legacy prompt.
+      saveReceipt(history.records, deliveryId, { fingerprint, status: 202,
+        reply: { pending: false, retry: true, detail: 'Waiting for the original native hook intake to be confirmed.' },
+        pending: false, bytes: retainedBytes, preparing: { stopEffect,
+          stopCurrent: processAgent.sessionId === body.sessionId && stopScope === scope ? stopWitness : undefined,
+          intake: { body: originalBody, ...admissionOrder, ...(native.wire ? { wire: native.wire } : {}), attempted: false } } })
+    }
+    const preparing = history.records.get(deliveryId)?.preparing
+    if (preparing?.intake) admissionOrder.arrival = preparing.intake.arrival
+    let reservation: string | undefined
     let durable: NativeHookDelivery, earlierPreparing = false
     try {
       if (closed) return
+      if (preparing) {
+        ready(context, false)
+        reservation = `${context.key}\u0000${deliveryId}`
+        if (intakeReservations.has(reservation)) {
+          reservation = undefined
+          throw new IdentityReadUnavailable('the original native hook intake is still being confirmed')
+        }
+        intakeReservations.add(reservation)
+      }
       const snapshot = await confirmedSnapshot(context, processAgent)
-      if (!snapshot.active && [...snapshot.deliveries.values()].every(item => item.result || history.records.has(item.intake.id))) recovered.add(context.key)
+      if (!snapshot.active && ![...history.records.values()].some(receipt => receipt.preparing?.intake)
+        && [...snapshot.deliveries.values()].every(item => item.result || history.records.has(item.intake.id))) recovered.add(context.key)
       const known = snapshot.deliveries.get(deliveryId)
       if (known && (known.intake.fingerprint !== fingerprint || known.intake.agentId !== processAgent.agentId
         || known.intake.conversationId !== (body.sessionId ?? ''))) {
+        if (provisional || preparing?.intake) saveReceipt(history.records, deliveryId)
         answer(conflict.status, conflict.reply); return
       }
-      const cached = history.records.get(deliveryId)
-      if (cached && cached.fingerprint !== fingerprint) { answer(conflict.status, conflict.reply); return }
+      // A newly reserved local slot is not evidence that a cold Stop originated
+      // here. Only a prior local retention attempt may carry its live effect.
+      // The cancellation witness can only revoke a Stop; it cannot close a turn.
+      if (known && preparing?.intake && !preparing.intake.attempted) {
+        preparing.stopEffect = undefined; stopEffect = undefined
+      }
+      if (!known?.result && !cached && !preparing) {
+        if (known) {
+          recovered.delete(context.key)
+          recoveryHeld(processAgent.agentId, 'Waiting for capacity to resume this retained native hook.')
+          ownership = 'owned'; verifyOwnership = () => { snapshot.verifyAuthority(); known.verify() }
+          answer(200, { pending: true })
+        } else answer(429, { pending: false, error: 'HOOK_ADMISSION_BUSY', detail: 'Hook acknowledgement storage is full; this delivery was not queued.' })
+        return
+      }
+      if (!known && [...history.records].slice(0, [...history.records.keys()].indexOf(deliveryId))
+        .some(([id, receipt]) => receipt.preparing?.intake && !snapshot.deliveries.has(id))) {
+        throw new IdentityReadUnavailable('an earlier local native hook intake is still being confirmed')
+      }
       for (const [id, delivery] of snapshot.deliveries) {
         if (id === deliveryId) break
-        if (!delivery.result && history.records.get(id)?.preparing) earlierPreparing = true
-      }
-      if (!known?.result && (!cached || cached.preparing)) {
-        const key = `${context.key}\u0000${deliveryId}`
-        if (intakeReservations.has(key)) {
-          answer(202, { pending: false, retry: true, detail: 'Waiting for the original native hook intake to be confirmed.' }); return
-        }
-        if (!cached && (receiptCount + reservedCount >= receiptCapacity
-          || receiptBytes + reservedBytes + retainedBytes > bytesCapacity)) {
-          if (known) {
-            recovered.delete(context.key)
-            recoveryHeld(processAgent.agentId, 'Waiting for capacity to resume this retained native hook.')
-            ownership = 'owned'; verifyOwnership = () => { snapshot.verifyAuthority(); known.verify() }
-            answer(200, { pending: true })
-          } else answer(429, { pending: false, error: 'HOOK_ADMISSION_BUSY', detail: 'Hook acknowledgement storage is full; this delivery was not queued.' })
-          return
-        }
-        intakeReservations.add(key); reservation = key
-        if (!cached) {
-          reservedCount++; reservedBytes += retainedBytes; countedReservation = true
-          // Retention can publish bytes and then fail its confirmation. Keep the FIRST live
-          // witness under the same bounded receipt budget so this core can retry it. Cold recovery
-          // has no such witness and never captures its replacement parser as the original turn.
-          saveReceipt(history.records, deliveryId, { fingerprint, status: 202,
-            reply: { pending: false, retry: true, detail: 'Waiting for the original native hook intake to be confirmed.' },
-            pending: false, bytes: retainedBytes,
-            preparing: { stopEffect: !known ? stopEffect : undefined,
-              stopCurrent: processAgent.sessionId === body.sessionId && stopScope === scope ? stopWitness : undefined } })
-          reservedCount--; reservedBytes -= retainedBytes; countedReservation = false
-        }
+        if (!delivery.result && (!history.records.has(id) || history.records.get(id)?.preparing)) earlierPreparing = true
       }
       if (!known?.result) ready(context, false)
+      if (preparing?.intake) preparing.intake.attempted = true
       durable = await context.journal.retain({ id: deliveryId, fingerprint, agentId: processAgent.agentId,
         conversationId: body.sessionId ?? '', ...(admissionOrder.firedAt ? { firedAt: admissionOrder.firedAt } : {}),
         ...(context.owner ? { owner: context.owner } : {}),
@@ -896,15 +918,14 @@ export function startHookServer(
       return
     } finally {
       if (reservation) intakeReservations.delete(reservation)
-      if (countedReservation) { reservedCount--; reservedBytes -= retainedBytes }
     }
     if (durable.result) {
       if (typeof durable.result.status !== 'number' || !durable.result.reply) {
         ownership = undefined
         answer(202, { pending: false, retry: true, detail: 'Waiting for a complete native hook outcome.' }); return
       }
-      if (carriesStop && (history.records.has(deliveryId) || receiptCount + reservedCount < receiptCapacity
-        && receiptBytes + reservedBytes + retainedBytes <= bytesCapacity)) saveReceipt(history.records, deliveryId, {
+      if (carriesStop && (history.records.has(deliveryId) || receiptCount < receiptCapacity
+        && receiptBytes + retainedBytes <= bytesCapacity)) saveReceipt(history.records, deliveryId, {
         fingerprint, status: durable.result.status, reply: durable.result.reply, pending: false, bytes: retainedBytes,
         linkedStop: (stop, firedAt) => {
           if (stopProvenance(stop, firedAt) !== originalStop || stop.transcriptPath !== originalBody.transcriptPath) return conflict
@@ -913,6 +934,7 @@ export function startHookServer(
             : { status: 202, reply: { pending: false, retry: true, detail: 'Waiting for the original Stop outcome.' } }
         },
       })
+      else if (preparing?.intake) saveReceipt(history.records, deliveryId)
       ownership = 'complete'; answer(durable.result.status, durable.result.reply); return
     }
     const completed = history.records.get(deliveryId)
@@ -1154,7 +1176,17 @@ export function startHookServer(
       const pending = [...snapshot.deliveries.values()].find(delivery => !delivery.result
         && (!admissionReceipts.get(delivery.intake.agentId)?.records.has(delivery.intake.id)
           || admissionReceipts.get(delivery.intake.agentId)?.records.get(delivery.intake.id)?.preparing))
-      if (!pending) { recovered.add(context.key); return }
+      if (!pending) {
+        const history = admissionReceipts.get(row.agentId)
+        const local = history && history.scope === scopeOf(row)
+          ? [...history.records].find(([, receipt]) => receipt.preparing?.intake) : undefined
+        if (!local) { recovered.add(context.key); return }
+        const [id, receipt] = local, input = receipt.preparing!.intake!
+        await admitStart(structuredClone(input.body), { deliveryId: id, firedAt: input.firedAt, arrival: input.arrival,
+          ...(input.wire ? { wire: input.wire } : {}),
+          recovery: { agentId: row.agentId, key: context.key, owner: context.owner } }, () => {})
+        return
+      }
       if (!validHookBody(pending.intake.payload)) throw new IdentityReadUnavailable('the retained native hook body is invalid')
       await admitStart(structuredClone(pending.intake.payload), { deliveryId: pending.intake.id, firedAt: pending.intake.firedAt,
         ...(pending.intake.wire ? { wire: pending.intake.wire } : {}),

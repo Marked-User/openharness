@@ -1,6 +1,6 @@
 import type { Server } from 'node:http'
 import type { HookServerHandlers } from '../hookServer.js'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -185,7 +185,12 @@ it.each([false, true])('verifies prepared registration facts under a fresh budge
   await Promise.resolve()
   clock.now = 10_000
   if (replaced) {
-    rmSync(transcript); writeFileSync(transcript, header())
+    // Keep the former inode allocated: unlink/recreate may immediately reuse it
+    // on Linux, so that operation alone does not establish a distinct file.
+    const prior = statSync(transcript, { bigint: true })
+    renameSync(transcript, transcript + '.fixture-prior'); writeFileSync(transcript, header())
+    const next = statSync(transcript, { bigint: true })
+    expect(`${next.dev}:${next.ino}`).not.toBe(`${prior.dev}:${prior.ino}`)
     expect(() => staged.commit()).toThrow('changed')
     unchanged(before)
   } else expect(staged.commit()?.entry.sessionId).toBe(A)
@@ -1370,6 +1375,28 @@ it.each([false, true])('retains the first live Stop latch through uncertain inta
     expect(firstStop).toHaveBeenCalledOnce()
     expect((await before.post(body, delivery, 'turn-stop')).body).toEqual({ ok: true, duplicate: true })
   }
+})
+
+it('lets Cancel revoke a cold retained Stop without applying it to a replacement turn', async () => {
+  const { body, delivery, owner } = boundCursorStop()
+  const before = await httpFixture(() => true, undefined, {}, undefined, true)
+  expect((await before.post(body, delivery)).body).toEqual({ pending: true })
+  await new Promise<void>(resolve => server!.close(() => resolve()))
+  const { createAttach } = await import('../core/transcripts/attach.js')
+  const { createSessionNormalizers } = await import('../core/transcripts/normalizers.js')
+  const attach = createAttach({ normalizers: createSessionNormalizers(), resolve: registry.byAgent } as import('../core/transcripts/attach.js').AttachDeps)
+  const replacement = vi.fn(async () => 'completed' as const), registered = vi.fn()
+  const recovered = await httpFixture(undefined, undefined, {
+    captureAdmissionStop: attach.captureAdmissionStop, captureTurnStop: () => replacement, onRegistered: registered,
+  }, undefined, true)
+  recovered.startRecovery()
+  await vi.waitFor(() => expect(recovered.reasons.some(reason => reason?.includes('original Stop turn'))).toBe(true), { timeout: 4_000 })
+  expect(replacement).not.toHaveBeenCalled()
+  expect(registered).not.toHaveBeenCalled()
+  attach.beforeCancel(registry.byAgent(owner.agentId)!)
+  await vi.waitFor(() => expect(registered).toHaveBeenCalledOnce(), { timeout: 4_000 })
+  expect((await recovered.post(body, delivery, 'turn-stop')).body).toEqual({ ok: true, duplicate: true })
+  expect(replacement).not.toHaveBeenCalled()
 })
 
 it('retries the exact Stop result after failed terminal persistence without repeating the effect', async () => {

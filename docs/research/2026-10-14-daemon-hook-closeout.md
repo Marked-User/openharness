@@ -198,3 +198,43 @@ validation and review, not a guaranteed completion date. The earlier two-to-thre
 day estimate was wrong. Scope is frozen; additional blockers need a concrete
 violation and reproducer. Implementation and validation overlap; merge,
 publication and external waiting remain zero at this checkpoint.
+
+## Final acceptance findings, October 14
+
+The ready-state Linux unit run [38502330644](https://github.com/autonomous-ai/openharness/actions/runs/38502330644)
+failed on four fixture mismatches. The platform-pinned descriptor fixture now
+supplies the helper's identity mode, startup ordering includes non-awaited server
+recovery, the default-off test waits for confirmed recovery readiness, and the
+replacement-transcript fixture keeps the old inode alive so replacement is a
+proven precondition. The former-main golden JSON is unchanged. These do not
+weaken the production ownership fences or establish general inode ABA exclusion.
+
+Private acceptance reproduced a one-shot prompt lost when its initial journal
+snapshot failed before the server retained its body. The bounded preparing receipt
+now retains original input and arrival order before that snapshot; recovery retries
+it without a client. No unpersisted input receives a durable-ownership acknowledgement.
+Capacity, conflicts, replacement processes and cold Stop effect authority remain
+fenced. Review also found that a cold durable predecessor with no local receipt
+could be overtaken by a fresh same-conversation request. Such requests now wait
+outside the live queue until recovery admits their predecessor. Both equal-time
+and headerless reproductions failed by assertion before that correction in
+`20261014T030912.108976Z-28758`.
+
+The full affected HTTP, storage, admission, golden and architecture run
+`20261014T031032.807838Z-33548` passes 260 tests and fails one stale Hermes capacity
+expectation; its typecheck also found a test-only header-map type. The completed
+corrections pass types and both capacity cases in
+`20261014T031633.308506Z-59933` (5.9/17.7 seconds). The capacity case now says why a
+distinct request waits behind the newly retained local predecessor, while still
+requiring an unowned retry response. Normal journal-capacity refusal remains
+asserted. Independent review approved this recovery slice and its cold Cancel
+test, which proves no replacement-turn effect and eventual explicit revocation.
+
+The full [end-to-end run 38502341357](https://github.com/autonomous-ai/openharness/actions/runs/38502341357)
+failed and is not acceptance evidence. Failures include the reproduced missing
+prompt, cold recovery ordering and a legacy Claude Stop received while admission
+is pending: the one-shot client exits after an unowned retry response. The Stop
+case remains blocking. macOS disk tests also lacked the required native helper;
+their workflow now builds the verified helper and requires its embedding before
+testing. Independent review approved that wiring; an exercised workflow remains
+required. No extra run was started to hide an unchanged failure.
