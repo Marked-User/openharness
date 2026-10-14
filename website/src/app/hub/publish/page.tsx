@@ -98,8 +98,10 @@ export default function PublishPage() {
       <PublishChecks noOutput={!!draft.files.length && html === undefined} unchanged={unchanged ? draft.viewerPath : null} outside={outside} missingMarker={marker} findings={findings} acknowledged={secretsChecked} onAcknowledge={value => setCheckedSecrets(value ? findingsKey : '')} />
       <label className={styles.check}><input required type="checkbox" name="confirmation" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} /><span>I have permission to publish these files and this conversation under the MIT license. I have reviewed them for private information.</span></label>
       {(error || loadError || saveError) && <p className={styles.error} role="alert">{error || loadError || saveError}</p>}
-      <button className={styles.primary} disabled={busy || !ready}>{updating ? (busy ? 'Saving…' : 'Save changes') : (busy ? 'Publishing…' : 'Publish harness')}</button>
+      <div className={styles.submitRow}>
+        <button className={styles.primary} disabled={busy || !ready}>{updating ? (busy ? 'Saving…' : 'Save changes') : (busy ? 'Publishing…' : 'Publish harness')}</button>
+        {updating && <UnpublishAction busy={busy} onUnpublish={unpublish} />}
+      </div>
     </form>
-    {updating && <UnpublishAction busy={busy} onUnpublish={unpublish} />}
   </main></>;
 }

@@ -87,6 +87,10 @@
 .signin{font-size:13px;line-height:1.7;color:#777;margin:15px 0}
 .signin a{text-decoration:underline;text-underline-offset:3px;color:#242424}
 .error{font-size:13px;line-height:1.6;color:#a4483f;margin:15px 0}
+.submitRow{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.danger{font-size:13px;color:#c0362c;text-decoration:underline;text-underline-offset:3px;background:none;border:0;padding:0;cursor:pointer}
+.danger:hover{color:#9b2a21}
+.danger:disabled{opacity:.5;cursor:default}
 .textLink{text-decoration:underline!important;text-underline-offset:3px}
 .fork{max-width:1050px;padding:45px 0 100px}
 .fork h1,.publish h1{font-size:38px;font-weight:400;letter-spacing:-1px;line-height:1.1;margin-bottom:15px}
@@ -114,8 +118,6 @@
 .check{display:flex;gap:11px;align-items:flex-start;color:#777;font-size:13px;line-height:1.7;margin:25px 0}
 .check input{margin-top:5px;accent-color:#242424}
 .loading{padding:70px 0;color:#777}
-.manage{margin-top:38px;font-size:12px;color:#777;display:flex;gap:20px;flex-wrap:wrap}
-.manage button,.manage a{text-decoration:underline;text-underline-offset:3px}
 @media(min-width:1900px){.viewer iframe{height:780px}}
 @media(max-width:1100px){.wrap{width:90%}.nav{gap:20px}.barActions{gap:18px}.chat{padding-left:22px}.actions{gap:13px}.identity h1{font-size:22px}.viewer iframe{height:640px}}
 @media(max-width:760px){.wrap{width:92%}.feed{padding-top:22px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:44px 14px}.split{grid-template-columns:1fr;gap:28px;min-height:0}.chat{padding:0}.detail{padding-top:16px;padding-bottom:50px}.back{margin-bottom:14px}.detailHead{flex-wrap:wrap;gap:16px;margin-bottom:22px}.actions{margin-left:auto}.viewer iframe{height:590px}.forkColumns,.publishForm{grid-template-columns:1fr;gap:25px}.fork h1,.publish h1{font-size:32px}.page input,.page textarea,.page select{font-size:16px}}
