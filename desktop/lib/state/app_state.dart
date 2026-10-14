@@ -281,6 +281,11 @@ class AgentCreationAttempt {
   Future<String?>? _inFlight;
   bool _awaitingConfirmation = false, _finished = false;
   String? _holdReason;
+
+  /// The machine answered `pending` with nothing held: it has begun starting
+  /// this harness and ends it made or refused by itself, so it is asked after
+  /// whatever [holdWait] says ([AppNotifier._createFollowingHold]).
+  bool _starting = false;
   bool _cancelling = false;
 
   /// Prepare a session without adding a pane or changing the selected tab.
@@ -314,6 +319,7 @@ class AgentCreationAttempt {
     _finished = true;
     _awaitingConfirmation = false;
     _holdReason = null;
+    _starting = false;
     return _outcome = error;
   }
 }
@@ -12047,10 +12053,7 @@ class AppNotifier extends ChangeNotifier {
       attempt: creation,
       placement: placement,
     );
-    final holdWait = creation.holdWait;
-    return holdWait == null
-        ? ask()
-        : _createFollowingHold(creation, holdWait, ask);
+    return _createFollowingHold(creation, creation.holdWait, ask);
   }
 
   /// How often a harness the machine holds is asked after
@@ -12059,28 +12062,57 @@ class AppNotifier extends ChangeNotifier {
   @visibleForTesting
   Duration heldCreationInterval = const Duration(seconds: 2);
 
+  /// How long a harness the machine has begun starting is asked after, from
+  /// when it is first seen starting, before the create answers that it is
+  /// still starting ([AgentCreationAttempt._starting]). A worktree from main took 13 s on
+  /// the office Mac (2026-10-14); a minute covers that several times over
+  /// without holding the form much longer than a lost reply already can.
+  @visibleForTesting
+  Duration startingCreationWait = const Duration(minutes: 1);
+
   /// A create that waits out a hold. The machine starts a held harness by
   /// itself (an engine it is installing, a model waking) and answers `pending`
   /// meanwhile; [ask] again reads what became of that same request, never
   /// starts a second. Asked every [heldCreationInterval] until the harness is
-  /// made, refused or cancelled, or [wait] has passed, when the hold's own
-  /// words are the answer as they are without this.
+  /// made, refused or cancelled, or [holdWait] has passed, when the hold's own
+  /// words are the answer as they are without this. A null [holdWait] answers
+  /// a hold at once, for a form whose person reads it and may cancel.
   ///
   /// For a caller nobody is watching. The first workspace on a new computer
   /// asked once, while setup was still downloading the agents, was told
   /// "Installing OpenCode. The harness starts once it is installed.", and
   /// opened nothing: the three harnesses then started with no pane anywhere
   /// (desktop 1.2.65 with CLI 0.3.77, a fresh Ubuntu VM, 2026-10-12).
+  ///
+  /// A harness the machine is already starting is asked after for every
+  /// caller, for up to [startingCreationWait]: there is nothing to read or
+  /// cancel, only a wait. The machine answers `pending` five seconds into a
+  /// create, and a worktree from main took 13 s, so every such New Harness
+  /// said "office is still starting your harness. Check again in a moment."
+  /// in red and opened nothing until Check status was pressed (2026-10-14).
   Future<String?> _createFollowingHold(
     AgentCreationAttempt creation,
-    Duration wait,
+    Duration? holdWait,
     Future<String?> Function() ask,
   ) async {
-    final deadline = DateTime.now().add(wait);
+    final began = DateTime.now();
+    DateTime? starting;
     var answer = await ask();
-    while (creation.canCancelPending &&
-        !_disposed &&
-        DateTime.now().isBefore(deadline)) {
+    while (!_disposed && !creation._finished) {
+      final now = DateTime.now();
+      final bool follow;
+      if (creation._starting) {
+        // From when it was first seen starting: a hold before it (an install
+        // on a new computer) does not use up the start's own wait.
+        final since = starting ??= now;
+        follow = now.difference(since) < startingCreationWait;
+      } else {
+        follow =
+            holdWait != null &&
+            creation.canCancelPending &&
+            now.difference(began) < holdWait;
+      }
+      if (!follow) break;
       await Future<void>.delayed(heldCreationInterval);
       if (_disposed || creation._finished) break;
       answer = await ask();
@@ -12346,6 +12378,9 @@ class AppNotifier extends ChangeNotifier {
   }
 
   Future<String?> _createAgentWithReceipt(AgentCreationAttempt creation) async {
+    // Only this answer says whether it is starting; one that never reaches
+    // the machine (it went offline) must not be followed as if it were.
+    creation._starting = false;
     final machineId = creation._machineId!;
     var targetId = creation._targetId!;
     final split = creation._split;
@@ -12621,6 +12656,9 @@ class AppNotifier extends ChangeNotifier {
           }
         }
         creation._holdReason = null;
+        // Nothing held: the machine has claimed the request and is starting
+        // the harness now (making its worktree, opening its pane).
+        creation._starting = held == null;
         return '$machineName is still starting your harness. Check again in a moment.';
       case 'cancelled':
         return creation._complete('Creation cancelled.');
