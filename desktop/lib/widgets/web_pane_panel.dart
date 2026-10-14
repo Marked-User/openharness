@@ -16,6 +16,7 @@ import '../shared/theme/app_pane_icon.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../shared/theme/workspace_bar_style.dart';
 import '../state/app_state.dart';
+import '../measurement/product_measurement.dart';
 import '../state/harness_monitor_controller.dart';
 import '../state/terminal_pane.dart';
 import '../theme/app_theme.dart';
@@ -106,6 +107,20 @@ class _WebPanePanelState extends State<WebPanePanel> {
   String? _loadedUrl;
   bool _loading = false;
   String? _failure;
+  void Function(ProductOutcome)? _finishLoad;
+  void _startLoad() {
+    _finishLoad?.call(ProductOutcome.cancelled);
+    _finishLoad = widget.notifier.productMeasurement.begin(
+      ProductFlow.viewerLoad,
+    );
+  }
+
+  void _remoteLoaded() {
+    if (_remote?.image != null)
+      _finishLoad?.call(ProductOutcome.ok);
+    else if (_remote?.error != null)
+      _finishLoad?.call(ProductOutcome.failed);
+  }
 
   /// The appearance last stamped on the page, so a rebuild that changed nothing runs no script.
   Brightness? _stampedBrightness;
@@ -133,6 +148,10 @@ class _WebPanePanelState extends State<WebPanePanel> {
       (payload) => notifier.viewerSurface(machineId, agentId, payload),
       onHostAction: (action) => unawaited(_hostAction(action)),
     );
+    if (!kIsWeb) {
+      _startLoad();
+      _remote!.addListener(_remoteLoaded);
+    }
     pane.focusViewerInput = _focusRemote;
   }
 
@@ -140,6 +159,7 @@ class _WebPanePanelState extends State<WebPanePanel> {
 
   @override
   void dispose() {
+    _finishLoad?.call(ProductOutcome.cancelled);
     if (widget.pane.focusViewerInput == _focusRemote) {
       widget.pane.focusViewerInput = null;
     }
@@ -164,10 +184,12 @@ class _WebPanePanelState extends State<WebPanePanel> {
           ..setNavigationDelegate(
             NavigationDelegate(
               onPageStarted: (_) => _set(() {
+                _startLoad();
                 _loading = true;
                 _failure = null;
               }),
               onPageFinished: (_) {
+                _finishLoad?.call(ProductOutcome.ok);
                 _set(() => _loading = false);
                 // A fresh document has no stamp; give it the app's appearance before it is looked at.
                 _stampedBrightness = null;
@@ -178,6 +200,7 @@ class _WebPanePanelState extends State<WebPanePanel> {
                 // and images of its own, and one of those failing is its business
                 // to show, not ours to call a dead viewer.
                 if (error.isForMainFrame == false) return;
+                _finishLoad?.call(ProductOutcome.failed);
                 _set(() {
                   _loading = false;
                   _failure = error.description.isNotEmpty

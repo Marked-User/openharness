@@ -1,7 +1,11 @@
+
 import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+
+import 'product_health_contract.dart';
+export 'product_health_contract.dart';
 
 enum ProductFlow {
   setup('setup'),
@@ -14,7 +18,15 @@ enum ProductFlow {
   remoteConnect('remote_connect'),
   viewerOpen('viewer_open'),
   updateCheck('update_check'),
-  updateStage('update_stage');
+  updateStage('update_stage'),
+  appStart('app_start'),
+  workspaceReady('workspace_ready'),
+  viewerLoad('viewer_load'),
+  updateApply('update_apply'),
+  updateRelaunch('update_relaunch'),
+  connectUser('connect_user'),
+  connectAuto('connect_auto'),
+  resumeRecovery('resume_recovery');
 
   const ProductFlow(this.wire);
   final String wire;
@@ -38,6 +50,7 @@ class ProductMeasurement extends ChangeNotifier {
     DateTime Function()? now,
     String Function()? receipt,
     this.automatic = true,
+    this.context,
   }) : assert(const ['desktop', 'phone', 'web'].contains(surface)),
        _now = now ?? DateTime.now,
        _receipt = receipt ?? newProductReceipt {
@@ -45,6 +58,14 @@ class ProductMeasurement extends ChangeNotifier {
   }
 
   final String surface;
+  ProductUsageContext? context;
+  bool get healthEnabled => surface == 'desktop' && context != null;
+  String? _coverageDay;
+  final _funnelSeen = <String, Set<ProductHealthMeasure>>{};
+  final _funnelStarted = <String, DateTime>{};
+  final _expires = <Object, DateTime>{};
+  final _expire = <Object, void Function(ProductOutcome)>{};
+  int get choiceRevision => _revision;
   final ProductReportRequest sendSetup;
   final bool automatic;
   final DateTime Function() _now;
@@ -89,6 +110,12 @@ class ProductMeasurement extends ChangeNotifier {
   }) {
     if (_disposed || scope == _account) return;
     _accountEpoch++;
+    if (_account != null) {
+      _guestEpoch++;
+      signedOutSharing = false;
+      _clear('setup');
+      _setup.clear();
+    }
     _account = scope;
     _enabled = null;
     _revision = -1;
@@ -124,16 +151,116 @@ class ProductMeasurement extends ChangeNotifier {
   void _clear(String channel) {
     _days.removeWhere((key, _) => key.startsWith('$channel:'));
     _pending.remove(channel);
-    _active.removeWhere((_, value) => value == channel);
+    for (final ticket
+        in _active.keys.where((key) => _active[key] == channel).toList()) {
+      _active.remove(ticket);
+      _expires.remove(ticket);
+      _expire.remove(ticket);
+    }
+    _funnelSeen.remove(channel);
+    _funnelStarted.remove(channel);
+    if (channel == 'ui') _coverageDay = null;
+  }
+
+  void _coverage() {
+    if (!healthEnabled || !sharing || _disposed) return;
+    final day = _now().toUtc().toIso8601String().substring(0, 10);
+    if (_coverageDay == day) return;
+    _coverageDay = day;
+    _count('ui', day, 'health_desktop_collector_days');
+  }
+
+  /// Only fixed enum scalars enter the queue. Called after checking the account choice.
+  void health(ProductHealthMeasure measure) {
+    if (!healthEnabled || !sharing || _disposed) return;
+    _coverage();
+    _count(
+      'ui',
+      _now().toUtc().toIso8601String().substring(0, 10),
+      'health_desktop_${measure.wire}',
+    );
+  }
+
+  /// Observed readiness since process launch; only its coarse duration is kept.
+  void observedStartup(Duration elapsed) {
+    if (!healthEnabled || !sharing || _disposed) return;
+    _coverage();
+    final day = _now().toUtc().toIso8601String().substring(0, 10);
+    const prefix = 'ui_desktop_app_start_';
+    final ms = elapsed.inMilliseconds;
+    _count('ui', day, '${prefix}started');
+    _count('ui', day, '${prefix}ok');
+    _count(
+      'ui',
+      day,
+      '$prefix${ms < 1000
+          ? 'under_1s'
+          : ms < 10000
+          ? '1s_to_10s'
+          : ms < 60000
+          ? '10s_to_1m'
+          : 'over_1m'}',
+    );
+  }
+
+  /// A consented app-session funnel, never a click trail or an account join.
+  /// Its clock starts at the first permitted observation, not retrospectively at install.
+  void milestone(ProductHealthMeasure measure) {
+    if (!healthEnabled || _disposed || !measure.wire.startsWith('funnel_')) {
+      return;
+    }
+    final channel = _setupAllowed
+        ? 'setup'
+        : sharing
+        ? 'ui'
+        : null;
+    if (channel == null) return;
+    final seen = _funnelSeen.putIfAbsent(channel, () => {});
+    if (!seen.add(measure)) return;
+    final now = _now().toUtc();
+    final start = _funnelStarted.putIfAbsent(channel, () => now);
+    final day = now.toIso8601String().substring(0, 10);
+    if (channel == 'ui') _coverage();
+    void count(String name) => _count(
+      channel,
+      day,
+      channel == 'setup' ? 'setup_desktop_$name' : 'health_desktop_$name',
+    );
+    count(measure.wire);
+    if (measure == ProductHealthMeasure.funnelFirstWork ||
+        measure == ProductHealthMeasure.funnelFirstResponse) {
+      final elapsed = now.difference(start).inSeconds;
+      final value = measure == ProductHealthMeasure.funnelFirstWork
+          ? 'first_work'
+          : 'first_response';
+      count(
+        '${value}_${elapsed < 60
+            ? 'under_1m'
+            : elapsed < 300
+            ? '1m_to_5m'
+            : 'over_5m'}',
+      );
+    }
   }
 
   void Function(ProductOutcome) begin(ProductFlow flow) {
+    if (flow == ProductFlow.signIn) {
+      milestone(ProductHealthMeasure.funnelSignInSeen);
+    }
+    if (flow.index >= ProductFlow.appStart.index && !healthEnabled) {
+      return (_) {};
+    }
+    _coverage();
     final channel = sharing
         ? 'ui'
         : flow.beforeSignIn && _setupAllowed
         ? 'setup'
         : null;
-    if (_disposed || channel == null || _active.length >= 64) return (_) {};
+    if (_disposed || channel == null) return (_) {};
+    if (_active.length >= 64) {
+      health(ProductHealthMeasure.observationOverflow);
+      return (_) {};
+    }
     final epoch = channel == 'setup' ? _guestEpoch : _accountEpoch;
     final started = _now().toUtc();
     final watch = Stopwatch()..start();
@@ -143,10 +270,12 @@ class ProductMeasurement extends ChangeNotifier {
     _active[ticket] = channel;
     _count(channel, day, '${prefix}started');
     var done = false;
-    return (outcome) {
+    void finish(ProductOutcome outcome) {
       if (done) return;
       done = true;
       if (_active.remove(ticket) == null) return;
+      _expires.remove(ticket);
+      _expire.remove(ticket);
       watch.stop();
       if (_disposed ||
           (channel == 'setup'
@@ -167,6 +296,18 @@ class ProductMeasurement extends ChangeNotifier {
             ? '10s_to_1m'
             : 'over_1m'}',
       );
+    }
+
+    _expires[ticket] = started.add(const Duration(minutes: 15));
+    _expire[ticket] = finish;
+    return finish;
+  }
+
+  /// A widget's delayed callback cannot count after sign-out or a choice revision.
+  VoidCallback observer(ProductHealthMeasure measure) {
+    final epoch = _accountEpoch;
+    return () {
+      if (epoch == _accountEpoch) health(measure);
     };
   }
 
@@ -179,6 +320,7 @@ class ProductMeasurement extends ChangeNotifier {
   }
 
   void _observeSetupFacts() {
+    if (_setupFacts.isNotEmpty) milestone(ProductHealthMeasure.funnelSetupSeen);
     if (!_setupAllowed && !sharing) return;
     for (final entry in _setupFacts.entries) {
       if (!entry.key.beforeSignIn || entry.key == ProductFlow.signIn) continue;
@@ -210,6 +352,9 @@ class ProductMeasurement extends ChangeNotifier {
           today.difference(DateTime.parse(key.split(':')[1])).inDays > 1,
     );
     final counters = _days.putIfAbsent('$channel:$day', () => {});
+    if ((counters[metric] ?? 0) >= 1000 && healthEnabled && channel == 'ui') {
+      counters['health_desktop_queue_capped'] = 1;
+    }
     counters[metric] = min(1000, (counters[metric] ?? 0) + 1);
     _schedule();
   }
@@ -243,6 +388,11 @@ class ProductMeasurement extends ChangeNotifier {
   Future<void> _flush() async {
     if (_disposed) return;
     _lastAttempt = _now();
+    for (final ticket in _expires.keys.toList()) {
+      if (!_now().toUtc().isBefore(_expires[ticket]!)) {
+        _expire[ticket]?.call(ProductOutcome.unknown);
+      }
+    }
     final account = _account, read = _readChoice;
     final choiceEpoch = _accountEpoch;
     if (account != null && read != null) {
@@ -279,6 +429,7 @@ class ProductMeasurement extends ChangeNotifier {
           'day': key.split(':')[1],
           'counters': batch,
           if (channel == 'setup') 'consent': true else 'revision': _revision,
+          if (channel == 'ui' && healthEnabled) 'context': context!.toJson(),
         };
         _pending[channel] = report;
       }
@@ -288,6 +439,7 @@ class ProductMeasurement extends ChangeNotifier {
               .inDays >
           1) {
         _pending.remove(channel);
+        if (channel == 'ui') health(ProductHealthMeasure.reportExpired);
         continue;
       }
       try {
@@ -303,12 +455,18 @@ class ProductMeasurement extends ChangeNotifier {
         if (result['accepted'] == true || result['reason'] == 'EXPIRED') {
           _pending.remove(channel);
         }
+        if (result['accepted'] != true &&
+            result['reason'] != 'EXPIRED' &&
+            result['reason'] != 'CHOICE_CHANGED') {
+          health(ProductHealthMeasure.reportRejected);
+        }
         if (result['reason'] == 'CHOICE_CHANGED') {
           _enabled = null;
           _clear('ui');
           _clear('setup');
         }
       } catch (_) {
+        if (channel == 'ui') health(ProductHealthMeasure.reportFailed);
         /* Same receipt on the next timer. No logs, aggressive retry, or product failure. */
       }
     }
@@ -322,6 +480,8 @@ class ProductMeasurement extends ChangeNotifier {
     _pending.clear();
     _setup.clear();
     _active.clear();
+    _expires.clear();
+    _expire.clear();
     super.dispose();
   }
 }

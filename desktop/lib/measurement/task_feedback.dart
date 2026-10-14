@@ -3,11 +3,13 @@ import 'package:flutter/material.dart';
 import '../shared/widgets/app_dialog.dart';
 import '../shared/widgets/product_feedback.dart';
 import '../widgets/desktop_chrome.dart';
+import 'product_measurement.dart';
 
 Future<void> showTaskFeedback(
   BuildContext context, {
   required Future<Map<String, dynamic>> Function() choice,
   required ProductFeedbackRequest send,
+  ProductMeasurement? measurement,
 }) async {
   final permitted = choice();
   await showAppDialog<void>(
@@ -47,10 +49,28 @@ Future<void> showTaskFeedback(
                               key: const ValueKey('outcome'),
                               send: send,
                               outcome: true,
+                              onShown: measurement?.observer(
+                                ProductHealthMeasure.feedbackOutcomeShown,
+                              ),
+                              onAnswered: measurement?.observer(
+                                ProductHealthMeasure.feedbackOutcomeAnswered,
+                              ),
+                              onDismissed: measurement?.observer(
+                                ProductHealthMeasure.feedbackOutcomeDismissed,
+                              ),
                             ),
                             ProductFeedback(
                               key: const ValueKey('reason'),
                               send: send,
+                              onShown: measurement?.observer(
+                                ProductHealthMeasure.feedbackReasonShown,
+                              ),
+                              onAnswered: measurement?.observer(
+                                ProductHealthMeasure.feedbackReasonAnswered,
+                              ),
+                              onDismissed: measurement?.observer(
+                                ProductHealthMeasure.feedbackReasonDismissed,
+                              ),
                             ),
                           ],
                         ),

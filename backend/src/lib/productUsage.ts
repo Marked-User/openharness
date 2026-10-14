@@ -1,3 +1,5 @@
+import { healthBreakdowns } from '../analytics/productHealth.js'
+import type { ProductUsageContext } from '../types/productHealthContract.js'
 import { createHmac } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { env } from '../config/env.js'
@@ -47,7 +49,8 @@ export async function ingestSetupUsage(report: SetupUsageReport, now = new Date(
   return ingestCounters(report)
 }
 
-async function ingestCounters(report: SetupUsageReport & { revision?: number }, userId?: string) {
+async function ingestCounters(report: SetupUsageReport & { revision?: number; context?: ProductUsageContext }, userId?: string) {
+  if (report.context?.channel === 'development') return { accepted: true, reason: 'DEVELOPMENT' }
   try {
     return await prisma.$transaction(async tx => {
       if (userId) {
@@ -60,10 +63,12 @@ async function ingestCounters(report: SetupUsageReport & { revision?: number }, 
       } })
       for (const [metric, value] of Object.entries(report.counters)) {
         if (!value) continue
-        await tx.productUsageTotal.upsert({
-          where: { dayUtc_metric: { dayUtc: new Date(report.day), metric } },
-          create: { dayUtc: new Date(report.day), metric, value }, update: { value: { increment: value } },
-        })
+        for (const name of [metric, ...healthBreakdowns(report.context, metric)]) {
+          await tx.productUsageTotal.upsert({
+            where: { dayUtc_metric: { dayUtc: new Date(report.day), metric: name } },
+            create: { dayUtc: new Date(report.day), metric: name, value }, update: { value: { increment: value } },
+          })
+        }
       }
       return { accepted: true }
     })

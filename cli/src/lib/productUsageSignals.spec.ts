@@ -1,5 +1,25 @@
 import { expect, it, vi } from 'vitest'
-import { productUsageLaunch, productUsageRequest } from './productUsageSignals.js'
+import { productUsageIntent, productUsageLaunch, productUsageRequest } from './productUsageSignals.js'
+
+it('separates automated polling, tool and app RPCs without inspecting error objects or content', () => {
+  const emit = vi.fn()
+  productUsageRequest('models_list', emit, Date.now, 'app')(undefined, undefined, false)
+  productUsageRequest('agent_resume', emit, Date.now, 'tool')('AGENT_NOT_FOUND', 'failed', false)
+  productUsageRequest('agent_close', emit, Date.now, 'app')(undefined, 'cancelled', false)
+  const secret = { toString() { throw Error('PRIVATE') } }
+  expect(() => productUsageRequest('agent_restart', emit, Date.now, 'unknown')(secret, 'failed', false)).not.toThrow()
+  expect(emit.mock.calls.flat()).toEqual(expect.arrayContaining(['request_automatic_model_list_ok', 'request_tool_resume_error_not_found', 'request_app_close_cancelled', 'request_unknown_restart_error_other']))
+  expect(JSON.stringify(emit.mock.calls)).not.toContain('PRIVATE')
+})
+it('requires an explicit composer marker for interactive work; raw terminal input is unclassified', () => {
+  const emit = vi.fn()
+  productUsageIntent('terminal_input', 'interactive', 'agent', 'app', emit)
+  productUsageIntent('message', undefined, 'agent', 'app', emit)
+  expect(emit).not.toHaveBeenCalled()
+  productUsageIntent('message', 'interactive', 'agent', 'app', emit)
+  expect(emit).toHaveBeenCalledWith({ id: 'agent', phase: 'work_requested', origin: 'interactive' })
+  expect(() => productUsageIntent('message', undefined, 'agent', 'tool', () => { throw Error() })).not.toThrow()
+})
 
 it('distinguishes a pending launch from a launched harness, and counts replies once', () => {
   let now = 0

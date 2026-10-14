@@ -1,4 +1,4 @@
-import { productUsageLaunch, productUsageRequest } from './lib/productUsageSignals.js'
+import { productUsageIntent, productUsageLaunch, productUsageRequest } from './lib/productUsageSignals.js'
 import { isLocalOnly, withoutUpdate } from './lib/cardUpdate.js'
 import type { PurgeAgentService } from './lib/purgeAgentService.js'
 import { MESSAGES_REQUESTS, SHARE_REQUESTS, type Asker, type LocalWindows, type WindowSurface, type BackendNotice, type GatewayEvents, type GatewayPort, type ModelsPort, type RemoteClient, type RemoteRole, type RemoteTransport } from './core/api.js'
@@ -826,7 +826,11 @@ export class BackendSocket {
     }
     const launchMeasured = productUsageLaunch(type, (frame.payload as { creationId?: unknown } | undefined)?.creationId,
       signal => this.toGateway('usage', gateway => gateway.usageLaunch?.(signal)))
-    const measured = productUsageRequest(type, (metric) => this.toGateway('usage', (gateway) => gateway.usageCounter?.(metric)))
+    const usageSource = local && connId && this.toolClients.has(connId) ? 'tool' : local || role === 'web' ? 'app' : 'unknown'
+    const measured = productUsageRequest(type, (metric) => this.toGateway('usage', (gateway) => gateway.usageCounter?.(metric)), Date.now, usageSource)
+    productUsageIntent(type, (frame.payload as { usageIntent?: unknown } | undefined)?.usageIntent,
+      (frame.payload as { agentId?: unknown } | undefined)?.agentId, usageSource,
+      signal => this.toGateway('usage', gateway => gateway.usageLaunch?.(signal)))
     const reply = (t: string, rid: unknown, p: Record<string, unknown>): void => {
       if (t === type) {
         measured(p.error ?? (p.failure as { code?: unknown } | undefined)?.code, p.state, !!p.agent, p.ok)

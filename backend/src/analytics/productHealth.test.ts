@@ -1,0 +1,38 @@
+import { readFileSync } from 'node:fs'
+import { expect, it } from 'vitest'
+import { cleanUsageContext, HEALTH_MEASURES, HEALTH_FLOWS } from '../types/productHealthContract.js'
+import { dailyProductHealth, healthBreakdowns } from './productHealth.js'
+
+const context = { surface: 'desktop', release: '1.2.73', platform: 'macos', channel: 'production' } as const
+it('keeps the CLI contract identical and every Desktop enum in the server vocabulary', () => {
+  expect(readFileSync('../cli/src/lib/productHealthContract.ts', 'utf8')).toBe(readFileSync('src/types/productHealthContract.ts', 'utf8'))
+  const dart = readFileSync('../desktop/lib/measurement/product_health_contract.dart', 'utf8')
+  for (const metric of HEALTH_MEASURES) expect(dart).toContain(`'${metric}'`)
+  const flows = readFileSync('../desktop/lib/measurement/product_measurement.dart', 'utf8')
+  for (const flow of HEALTH_FLOWS) expect(flows).toContain(`'${flow}'`)
+})
+it('creates two independent margins with no joint dimensions or arbitrary labels', () => {
+  expect(healthBreakdowns(context, 'turns_started')).toEqual(['breakdown:release:desktop:1.2.73:turns_started', 'breakdown:platform:desktop:macos:turns_started'])
+  expect(healthBreakdowns({ ...context, channel: 'development' }, 'turns_started')).toEqual([])
+  expect(healthBreakdowns(context, 'PRIVATE')).toEqual([])
+  expect(cleanUsageContext({ ...context, release: 'PRIVATE/custom-build', private: 'PRIVATE' })).toEqual({ ...context, release: 'unknown' })
+  expect(cleanUsageContext({ ...context, platform: 'PRIVATE' })).toBeUndefined()
+})
+it('suppresses sparse labels, distinguishes missing from zero, and matures first-work cohorts', () => {
+  const row = (day: string, metric: string, value: number) => ({ dayUtc: new Date(day), metric, value })
+  const data = dailyProductHealth([
+    row('2026-10-01', 'health_cli_first_interactive_work', 10),
+    row('2026-10-01', 'health_cli_first_work_d1_return', 4),
+    row('2026-10-02', 'health_cli_collector_days', 30),
+    row('2026-10-01', 'breakdown:release:desktop:1.2.73:health_desktop_collector_days', 19),
+    row('2026-10-01', 'breakdown:platform:desktop:macos:health_desktop_collector_days', 20),
+    row('2026-10-01', 'breakdown:release:desktop:PRIVATE:turns_started', 500),
+    row('2026-10-01', 'create_requests', 4), row('2026-10-01', 'create_ok', 2),
+  ], new Date('2026-10-04'))
+  expect(data.breakdowns).toHaveLength(1); expect(JSON.stringify(data)).not.toContain('1.2.73')
+  expect(JSON.stringify(data)).not.toContain('PRIVATE')
+  expect(data.daily[0].firstWorkRetention[0]).toMatchObject({ denominator: 10, returned: 4, percent: 40, mature: true })
+  expect(data.daily[0].firstWorkRetention[1].percent).toBeNull()
+  expect(data.daily[0].requestReconciliation[0]).toMatchObject({ starts: 4, outcomes: 2, difference: 2 })
+  expect(data.daily[1].firstWorkRetention[0].denominator).toBeNull()
+})

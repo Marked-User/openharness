@@ -2,6 +2,9 @@ import 'core/app_version.dart';
 import 'measurement/setup_usage_choice.dart';
 
 import 'dart:async';
+
+import 'measurement/product_runtime_health.dart';
+
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
@@ -73,6 +76,7 @@ Future<void> startHarness({
   /// [TerminalTransportPlugin]); the desktop passes none.
   TerminalTransportPluginFactory? transportPlugins,
 }) async {
+  if (!kIsWeb) ProductRuntimeHealth.launched();
   // Share links and OAuth own the browser URL. Flutter's default hash routing would
   // erase the share's pinned identity on the first navigation or window resize.
   if (kIsWeb) setUrlStrategy(null);
@@ -236,6 +240,7 @@ class _RootShellState extends ConsumerState<RootShell>
   @override
   Future<AppExitResponse> didRequestAppExit() async {
     final app = ref.read(appStateProvider);
+    app.productRuntimeHealth?.cleanExit();
     // A sign-in still waiting on the browser or a phone ends with the app: its
     // CLI would otherwise wait on, holding the lock the next sign-in needs.
     if (app.canCancelLogin) app.cancelLogin();

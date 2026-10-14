@@ -1,3 +1,4 @@
+import { HEALTH_FLOWS, PRODUCT_HEALTH_METRICS, type ProductUsageContext } from './productHealthContract.js'
 /** Fixed vocabulary only. Keep the CLI copy identical; conformance is tested. */
 export const PRODUCT_USAGE_VERSION = 1
 export const PRODUCT_USAGE_DAYS = 35
@@ -14,19 +15,24 @@ export const PRODUCT_USAGE_AUTOMATIC_ACTIONS: readonly typeof PRODUCT_USAGE_ACTI
 export const PRODUCT_USAGE_FEATURE_MEASURES = ['installation_days', 'first_installations', 'repeat_installation_days'] as const
 export const PRODUCT_USAGE_SURFACES = ['desktop', 'phone', 'web'] as const
 export const PRODUCT_USAGE_FLOWS = ['setup', 'setup_harness', 'setup_tmux', 'setup_clipboard', 'sign_in',
-  'workspace_connect', 'computer_link', 'remote_connect', 'viewer_open', 'update_check', 'update_stage'] as const
+  'workspace_connect', 'computer_link', 'remote_connect', 'viewer_open', 'update_check', 'update_stage', ...HEALTH_FLOWS] as const
 export const PRODUCT_USAGE_FLOW_MEASURES = ['started', 'ok', 'failed', 'cancelled', 'unknown',
   'under_1s', '1s_to_10s', '10s_to_1m', 'over_1m'] as const
 export const PRODUCT_USAGE_UI_METRICS = PRODUCT_USAGE_SURFACES.flatMap(surface =>
   PRODUCT_USAGE_FLOWS.flatMap(flow => PRODUCT_USAGE_FLOW_MEASURES.map(measure => `ui_${surface}_${flow}_${measure}` as const)))
 // A signed-out report is explicitly enabled on this app. It cannot carry account/work metrics.
-export const PRODUCT_USAGE_SETUP_METRICS = PRODUCT_USAGE_SURFACES.flatMap(surface =>
+export const PRODUCT_USAGE_SETUP_METRICS = [...PRODUCT_USAGE_SURFACES.flatMap(surface =>
   (['setup', 'setup_harness', 'setup_tmux', 'setup_clipboard', 'sign_in'] as const).flatMap(flow =>
-    PRODUCT_USAGE_FLOW_MEASURES.map(measure => `setup_${surface}_${flow}_${measure}` as const)))
+    PRODUCT_USAGE_FLOW_MEASURES.map(measure => `setup_${surface}_${flow}_${measure}` as const))),
+  ...(['funnel_setup_seen', 'funnel_sign_in_seen', 'funnel_workspace_ready', 'funnel_first_work', 'funnel_first_response',
+    'first_work_under_1m', 'first_work_1m_to_5m', 'first_work_over_5m',
+    'first_response_under_1m', 'first_response_1m_to_5m', 'first_response_over_5m'] as const).map(m => `setup_desktop_${m}` as const),
+] as const
 export const PRODUCT_USAGE_ACTION_MEASURES = ['requests', 'ok', 'failed', 'pending', 'unknown',
   'error_setup', 'error_auth', 'error_unavailable', 'error_invalid', 'error_other',
   'under_1s', '1s_to_10s', '10s_to_1m', 'over_1m'] as const
 export const PRODUCT_USAGE_METRICS = [
+  ...PRODUCT_HEALTH_METRICS,
   'active_installation_days', 'working_installation_days', 'first_work_installations',
   'repeat_work_installation_days', 'weekly_working_installations', 'weekly_returning_installations',
   'monthly_working_installations', 'monthly_returning_installations', 'reactivated_after_7d_installations',
@@ -50,6 +56,7 @@ export const PRODUCT_USAGE_METRICS = [
 export type ProductUsageMetric = typeof PRODUCT_USAGE_METRICS[number]
 export interface ProductUsageReport {
   schemaVersion: 1
+  context?: ProductUsageContext
   revision: number
   id: string
   day: string

@@ -1,3 +1,4 @@
+import { dailyProductHealth } from './analytics/productHealth.js'
 /** Aggregate-only daily report. Run with a read-only database identity; never prints identifiers. */
 import { PrismaClient } from '@prisma/client'
 import { DAILY_PRODUCT_METRICS, dailyProductUsage } from './analytics/dailyProductUsage.js'
@@ -14,6 +15,10 @@ try {
     where: { dayUtc: { gte: new Date(today - 92 * 86400000), lt: new Date(today + 86400000) }, metric: { in: [...DAILY_PRODUCT_METRICS, ...PEOPLE_METRICS] } },
     select: { dayUtc: true, metric: true, value: true }, orderBy: [{ dayUtc: 'asc' }, { metric: 'asc' }], take: 93 * (DAILY_PRODUCT_METRICS.length + PEOPLE_METRICS.length),
   })
+  const breakdowns = await db.productUsageTotal.findMany({
+    where: { dayUtc: { gte: new Date(today - (days - 1) * 86400000), lt: new Date(today + 86400000) }, metric: { startsWith: 'breakdown:' } },
+    select: { dayUtc: true, metric: true, value: true }, orderBy: [{ dayUtc: 'desc' }, { metric: 'asc' }], take: 50000,
+  })
   console.log(JSON.stringify({ generatedAt: new Date().toISOString(), timezone: 'UTC',
     definitions: {
       population: 'Daemon counts cover participating signed-in installations, including staff and both service environments. App flows and optional signed-out setup counts are separate populations, never unique people.',
@@ -25,6 +30,6 @@ try {
       outcomes: 'Matched observed turn ends and interruptions, not task success. Missing or interrupted telemetry is not a failed task.',
       relay: 'Legacy relay event totals are separate; never add them to the client counters.',
       coverage: 'New local counters need updated clients. Delayed/offline reports and privacy changes can affect counts; today is incomplete.',
-    }, ...dailyProductUsage(rows, days, new Date()), review: dailyProductReview(rows, new Date()), people: dailyProductPeople(rows, days, new Date()) }, null, 2))
+    }, ...dailyProductUsage(rows, days, new Date()), review: dailyProductReview(rows, new Date()), people: dailyProductPeople(rows, days, new Date()), health: { ...dailyProductHealth([...rows, ...breakdowns], new Date()), breakdownReadLimitReached: breakdowns.length === 50000 } }, null, 2))
 } catch { console.error('Could not read aggregate product usage. Check the read-only connection and schema.'); process.exitCode = 1 }
 finally { await db.$disconnect() }

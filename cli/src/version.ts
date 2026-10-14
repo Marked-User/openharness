@@ -22,3 +22,5 @@ function resolveVersion(): string {
 }
 
 export const VERSION: string = resolveVersion()
+/** Source runs and prerelease builds never contribute production health totals. */
+export const IS_RELEASE_BUILD = typeof __ADAPTER_VERSION__ !== 'undefined' && __ADAPTER_VERSION__ !== '0.0.1' && /^\d+\.\d+\.\d+$/.test(__ADAPTER_VERSION__)

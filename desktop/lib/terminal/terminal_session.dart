@@ -1022,6 +1022,7 @@ class TerminalSession extends ChangeNotifier {
       'content': content,
       'agentId': agentId,
       'mode': 'auto',
+      if (!kIsWeb && client?.kind == 'desktop') 'usageIntent': 'interactive',
     });
   }
 

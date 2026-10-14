@@ -1,3 +1,4 @@
+import type { HealthSource } from './productHealthContract.js'
 import type { ProductUsageMetric } from './productUsageContract.js'
 
 const actions = { agent_create: 'create', agent_resume: 'resume', agent_restart: 'restart',
@@ -26,7 +27,8 @@ function failureKind(error: unknown): Failure {
 export interface ProductUsageLaunchSignal {
   /** Local RAM only, discarded on stop/choice change; never part of a report or persisted queue. */
   id: string
-  phase: 'start' | 'pending' | 'created' | 'failed' | 'cancelled' | 'unconfirmed'
+  phase: 'start' | 'pending' | 'created' | 'failed' | 'cancelled' | 'unconfirmed' | 'work_requested'
+  origin?: 'interactive' | 'tool'
   failure?: Failure
   wait?: 'install' | 'model' | 'native' | 'other'
 }
@@ -54,25 +56,37 @@ export function productUsageLaunch(type: string, id: unknown, emit: (signal: Pro
  * A pending durable launch is an acknowledgement, never a successful launch. Status polling is
  * excluded: counting each poll as a launch would turn a slow install into hundreds of attempts.
  */
-export function productUsageRequest(type: string, emit: (metric: ProductUsageMetric) => void, now = Date.now) {
-  const action = Object.hasOwn(actions, type) ? actions[type as keyof typeof actions] : null
+export function productUsageRequest(type: string, emit: (metric: ProductUsageMetric) => void, now = Date.now, source?: HealthSource) {
+  const action = type === 'message' ? 'message' : Object.hasOwn(actions, type) ? actions[type as keyof typeof actions] : null
   // In particular, streaming frames and polling do not allocate clocks or observers.
   if (!action) return unmeasured
   const started = now()
   let answered = false
-  const count = (measure: string) => { if (action) { try { emit(`${action}_${measure}` as ProductUsageMetric) } catch { /* Optional measurement. */ } } }
-  count('requests')
+  const origin = ['history', 'history_page', 'store_list', 'model_list'].includes(action) ? 'automatic' : source
+  const count = (measure: string) => { if (action && action !== 'message') { try { emit(`${action}_${measure}` as ProductUsageMetric) } catch { /* Optional measurement. */ } } }
+  const detail = (measure: string) => { if (!source) return; try { emit(`request_${origin}_${action}_${measure}` as ProductUsageMetric) } catch { /* Optional measurement. */ } }
+  count('requests'); detail('started')
   return (error: unknown, state: unknown, hasAgent: boolean, ok?: unknown) => {
     if (!action || answered) return
     answered = true
     if (error != null || state === 'failed' || ok === false) {
-      count('failed')
+      count('failed'); detail('failed')
       count(`error_${failureKind(error)}`)
-    } else if (state === 'pending' || state === 'preparing' || state === 'starting') count('pending')
-    else if (state === 'unconfirmed' || state === 'unavailable' || state === 'cancelled') count('unknown')
-    else if (!['create', 'resume', 'restart', 'fork'].includes(action) || hasAgent || state === 'created') count('ok')
-    else count('unknown')
+      detail(`error_${error === 'TIMEOUT' ? 'timeout' : typeof error === 'string' && ['AGENT_NOT_FOUND', 'SESSION_NOT_FOUND', 'NOT_FOUND'].includes(error) ? 'not_found' : typeof error === 'string' && ['DELETE_IN_PROGRESS', 'WORKTREE_BUSY', 'BUSY'].includes(error) ? 'conflict' : failureKind(error)}`)
+    } else if (state === 'pending' || state === 'preparing' || state === 'starting') { count('pending'); detail('pending') }
+    else if (state === 'unconfirmed' || state === 'unavailable' || state === 'cancelled') { count('unknown'); detail(state === 'cancelled' ? 'cancelled' : 'unknown') }
+    else if (!['create', 'resume', 'restart', 'fork'].includes(action) || hasAgent || state === 'created') { count('ok'); detail('ok') }
+    else { count('unknown'); detail('unknown') }
     const elapsed = Math.max(0, now() - started)
     count(elapsed < 1000 ? 'under_1s' : elapsed < 10_000 ? '1s_to_10s' : elapsed < 60_000 ? '10s_to_1m' : 'over_1m')
   }
+}
+
+/** Explicit composer intent only. Never infer a human from keystrokes, text or an open window. */
+export function productUsageIntent(type: string, intent: unknown, agent: unknown, source: HealthSource, emit: (signal: ProductUsageLaunchSignal) => void): void {
+  if (type !== 'message' || typeof agent !== 'string' || !agent || agent.length > 256) return
+  try {
+    if (source === 'app' && intent === 'interactive') emit({ id: agent, phase: 'work_requested', origin: 'interactive' })
+    else if (source === 'tool') emit({ id: agent, phase: 'work_requested', origin: 'tool' })
+  } catch { /* Optional observation cannot block a message. */ }
 }

@@ -1,3 +1,5 @@
+import { VERSION, IS_RELEASE_BUILD } from '../version.js'
+import { gatewayResourceSample } from './productHealth.js'
 /**
  * The gateway, started: everything that holds this machine's keys or speaks for them, built in one place
  * so that it runs the same in the core's process (`HARNESSD_SERVICES=none`, or a master that does not run
@@ -140,6 +142,8 @@ export function startGateway(host: GatewayHost): StartedGateway {
   const usage = host.signedIn ? createProductUsage({
     file: join(env.ADAPTER_DATA_DIR, 'product-usage', createHash('sha256').update(host.autonomousEnv + ':' + host.machineId).digest('hex') + '.json'),
     request: (method, path, body) => accountHttp.backend(method, path, body, 5_000),
+    context: { surface: 'cli', release: VERSION, platform: process.platform === 'darwin' ? 'macos' : process.platform === 'linux' ? 'linux' : process.platform === 'win32' ? 'windows' : 'other', channel: host.autonomousEnv === 'prod' && IS_RELEASE_BUILD ? 'production' : 'development' },
+    sample: gatewayResourceSample(),
   }) : null
   if (usage) { gateway.productUsage = usage; void usage.sync() }
 

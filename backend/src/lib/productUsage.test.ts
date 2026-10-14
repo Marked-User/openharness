@@ -19,6 +19,20 @@ vi.mock('../config/env.js', () => ({ env: { PRODUCT_USAGE_SUBJECT_KEY: 'k'.repea
 import { activitySubject, deleteActivity, deleteLegacyProductUsage, ensureProductUsageExpiry, markActivity, resetActivityMarksForTests, ingestProductUsage, ingestSetupUsage, productUsageChoice, recordRelayUsage, setProductUsageChoice } from './productUsage.js'
 import type { ProductUsageReport } from '../types/productUsage.js'
 
+it('commits release and platform margins under the same unlinked receipt and discards development reports', async () => {
+  const context = { surface: 'desktop', release: '1.2.73', platform: 'macos', channel: 'production' } as const
+  expect(await ingestProductUsage('PRIVATE_ACCOUNT', { ...report, context }, now)).toEqual({ accepted: true })
+  expect(db.$transaction).toHaveBeenCalledOnce()
+  expect(db.productUsageTotal.upsert).toHaveBeenCalledTimes(6)
+  const stored = JSON.stringify([db.productUsageReceipt.create.mock.calls, db.productUsageTotal.upsert.mock.calls])
+  expect(stored).not.toContain('PRIVATE_ACCOUNT')
+  expect(stored).not.toContain('1.2.73:macos')
+  expect(stored).toContain('breakdown:release:desktop:1.2.73:turns_started')
+  db.$transaction.mockClear()
+  expect(await ingestProductUsage('PRIVATE_ACCOUNT', { ...report, context: { ...context, channel: 'development' } }, now)).toMatchObject({ accepted: true, reason: 'DEVELOPMENT' })
+  expect(db.$transaction).not.toHaveBeenCalled()
+})
+
 const report: ProductUsageReport = { schemaVersion: 1, revision: 0, id: 'cf1c5a03-388c-4265-b5fb-a4c3d47e407f', day: '2026-10-13', counters: { turns_started: 4, turns_ended: 3 } }
 const now = new Date('2026-10-13T12:00:00Z')
 beforeEach(() => {
@@ -165,11 +179,16 @@ it('setup ingestion never reads an account and expires after yesterday', async (
   expect(await ingestSetupUsage({ ...setup, day: '2026-10-12' }, now)).toMatchObject({ accepted: true })
 })
 
-it('keeps the native app collectors and anonymous transport identical', () => {
-  for (const file of ['product_measurement.dart', 'setup_transport.dart', 'setup_usage_choice.dart']) {
+it('keeps anonymous transport and consent unchanged across native apps while Desktop health evolves independently', () => {
+  for (const file of ['setup_transport.dart', 'setup_usage_choice.dart']) {
     expect(readFileSync(new URL(`../../../desktop/lib/measurement/${file}`, import.meta.url), 'utf8'))
       .toBe(readFileSync(new URL(`../../../mobile/lib/measurement/${file}`, import.meta.url), 'utf8'))
   }
+  const mobile = readFileSync(new URL('../../../mobile/lib/measurement/product_measurement.dart', import.meta.url), 'utf8')
+  const desktop = readFileSync(new URL('../../../desktop/lib/measurement/product_measurement.dart', import.meta.url), 'utf8')
+  const mobileFlows = [...mobile.split('enum ProductOutcome')[0].matchAll(/\w+\('([a-z_]+)'\)/g)].map(m => m[1])
+  for (const flow of mobileFlows) expect(desktop).toContain(`'${flow}'`)
+  expect(mobile).not.toContain('product_health_contract.dart')
 })
 
 describe('activity marks', () => {

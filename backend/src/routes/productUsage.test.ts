@@ -64,10 +64,20 @@ it('the visible control changes only the authenticated account', async () => {
 
 it('the complete vocabulary fits bounded chunks, including the longest metric keys', async () => {
   for (let i = 0; i < PRODUCT_USAGE_METRICS.length; i += 64) {
-    const payload = { ...good, counters: Object.fromEntries(PRODUCT_USAGE_METRICS.slice(i, i + 64).map(k => [k, PRODUCT_USAGE_MAX_COUNT])) }
+    const payload = { ...good, context: { surface: 'desktop', release: '999.999.999', platform: 'windows', channel: 'production' }, counters: Object.fromEntries(PRODUCT_USAGE_METRICS.slice(i, i + 64).map(k => [k, PRODUCT_USAGE_MAX_COUNT])) }
     expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThan(8192)
     expect((await submit(payload)).statusCode).toBe(200)
   }
+})
+
+it('rejects extra context, custom versions and device fingerprints without echoing them', async () => {
+  const context = { surface: 'desktop', release: '1.2.73', platform: 'macos', channel: 'production' }
+  for (const c of [{ ...context, path: 'PRIVATE_CANARY' }, { ...context, release: 'PRIVATE_CANARY' },
+    { ...context, platform: 'PRIVATE_CANARY' }, { ...context, channel: 'PRIVATE_CANARY' }]) {
+    const response = await submit({ ...good, context: c })
+    expect(response.statusCode).toBe(400); expect(response.body).not.toContain('PRIVATE_CANARY')
+  }
+  expect(methods.ingestProductUsage).not.toHaveBeenCalled()
 })
 
 const setup = { schemaVersion: 1, consent: true, id: good.id, day: good.day, counters: { setup_desktop_sign_in_started: 1 } }

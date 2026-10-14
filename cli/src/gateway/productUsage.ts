@@ -1,3 +1,5 @@
+import { cleanUsageContext, type ProductUsageContext } from '../lib/productHealthContract.js'
+import { cleanHealthState, createProductHealth, type HealthState } from './productHealth.js'
 import { readFileSync, statSync } from 'node:fs'
 import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
@@ -18,6 +20,8 @@ const key = (now: number) => new Date(now).toISOString().slice(0, 10)
 const week = (now: number) => { const d = new Date(now); return key(now - ((d.getUTCDay() + 6) % 7) * DAY) }
 type Counters = Partial<Record<ProductUsageMetric, number>>
 interface State {
+  health: HealthState
+  healthDay: string | null
   revision: number
   activeDay: string | null
   workDay: string | null
@@ -36,12 +40,14 @@ interface State {
   days: Record<string, Counters>
   pending: ProductUsageReport | null
 }
-const fresh = (revision: number): State => ({ revision, activeDay: null, workDay: null, workWeek: null,
+const fresh = (revision: number): State => ({ health: cleanHealthState(null, Date.now()), healthDay: null, revision, activeDay: null, workDay: null, workWeek: null,
   workMonth: null, measurementDay: null, featureDays: {}, featuresUsed: [],
   workedBefore: false, respondedBefore: false, launchedBefore: false, firstLaunchAt: null,
   launchWorked: false, launchResponded: false, workDays: [], days: {}, pending: null })
 export interface ProductUsageDeps {
   file: string
+  context?: ProductUsageContext
+  sample?: () => { rss: number; cpuPercent?: number }
   request(method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }>
   now?(): number
   uuid?(): string
@@ -55,6 +61,7 @@ export interface ProductUsageDeps {
  */
 export function createProductUsage(deps: ProductUsageDeps) {
   const now = deps.now ?? Date.now, uuid = deps.uuid ?? randomUUID
+  const context = cleanUsageContext(deps.context)
   let state = fresh(-1), enabled = false, stopped = false, active = false
   let syncing: Promise<void> | null = null, persistTimer: ReturnType<typeof setTimeout> | undefined
   let writing: Promise<boolean> | null = null, writeAgain = false
@@ -66,6 +73,8 @@ export function createProductUsage(deps: ProductUsageDeps) {
     const saved = JSON.parse(readFileSync(deps.file, 'utf8')) as State
     if (Number.isSafeInteger(saved.revision) && saved.revision >= 0) {
       state = fresh(saved.revision)
+      state.health = cleanHealthState(saved.health, now())
+      state.healthDay = typeof saved.healthDay === 'string' && validDay(saved.healthDay) ? saved.healthDay : null
       for (const field of ['activeDay', 'workDay', 'workWeek', 'measurementDay'] as const) {
         if (typeof saved[field] === 'string' && validDay(saved[field]!)) state[field] = saved[field]
       }
@@ -86,11 +95,13 @@ export function createProductUsage(deps: ProductUsageDeps) {
       const pending = saved.pending
       if (pending && pending.schemaVersion === 1 && pending.revision === state.revision && validDay(pending.day)
           && typeof pending.id === 'string' && /^[a-f0-9-]{36}$/.test(pending.id)) {
-        const restored = { schemaVersion: 1 as const, revision: state.revision, id: pending.id, day: pending.day, counters: clean(pending.counters) }
+        const restored = { schemaVersion: 1 as const, revision: state.revision, id: pending.id, day: pending.day, counters: clean(pending.counters), ...(cleanUsageContext(pending.context) ? { context: cleanUsageContext(pending.context) } : {}) }
         if (Buffer.byteLength(JSON.stringify(restored)) <= 8192) state.pending = restored
       }
     }
   } catch { /* Missing or unreadable telemetry must not affect a session. */ }
+
+  const health = createProductHealth(add, now, state.health)
 
   function validDay(day: string): boolean {
     const stamp = Date.parse(day + 'T00:00:00.000Z'), today = Math.floor(now() / DAY) * DAY
@@ -106,6 +117,7 @@ export function createProductUsage(deps: ProductUsageDeps) {
     return result
   }
   function snapshot(): string {
+    state.health = health.snapshot()
     clearTimeout(persistTimer); persistTimer = undefined
     for (const field of ['activeDay', 'workDay', 'workWeek', 'measurementDay'] as const) if (state[field] && !validDay(state[field]!)) state[field] = null
     for (const day of Object.keys(state.days)) if (!validDay(day)) delete state.days[day]
@@ -173,7 +185,7 @@ export function createProductUsage(deps: ProductUsageDeps) {
   }
   async function choice(value: ProductUsageChoice): Promise<void> {
     if (state.revision !== value.revision || (!value.enabled && (enabled || state.pending || Object.keys(state.days).length))) {
-      state = fresh(value.revision); running.clear(); launches.clear()
+      state = fresh(value.revision); running.clear(); launches.clear(); health.reset()
       enabled = false
       if (!await persist()) return
     }
@@ -185,9 +197,13 @@ export function createProductUsage(deps: ProductUsageDeps) {
       if (stopped) return
       const body = response.body.data as ProductUsageChoice | undefined
       if (response.status !== 200 || typeof body?.enabled !== 'boolean'
-          || !Number.isSafeInteger(body.revision) || body.revision < 0) { enabled = false; running.clear(); launches.clear(); return }
+          || !Number.isSafeInteger(body.revision) || body.revision < 0) { enabled = false; running.clear(); launches.clear(); health.clearObservations(); return }
       await choice(body)
       if (!enabled) return
+      if (context) {
+        health.start(context.release); health.checkpoint(); health.sample(deps.sample)
+        if (state.healthDay !== key(now())) { state.healthDay = key(now()); add('health_cli_collector_days') }
+      }
       for (const turn of running.values()) if (!turn.response && !turn.waited && now() - turn.started >= 60_000) {
         turn.waited = true; add('turns_waiting_over_1m')
       }
@@ -200,7 +216,7 @@ export function createProductUsage(deps: ProductUsageDeps) {
         const day = Object.keys(state.days).sort().find(d => validDay(d) && Object.keys(state.days[d]).length)
         if (!day) return
         const counters = Object.fromEntries(Object.entries(state.days[day]).slice(0, MAX_REPORT_METRICS)) as Counters
-        state.pending = { schemaVersion: 1, revision: state.revision, id: uuid(), day, counters }
+        state.pending = { schemaVersion: 1, revision: state.revision, id: uuid(), day, counters, ...(context ? { context } : {}) }
         for (const metric of Object.keys(counters)) delete state.days[day][metric as ProductUsageMetric]
         if (!Object.keys(state.days[day]).length) delete state.days[day]
       }
@@ -212,9 +228,13 @@ export function createProductUsage(deps: ProductUsageDeps) {
       if (stopped) return
       const result = answer.body.data as { accepted?: boolean; reason?: string } | undefined
       if (answer.status === 200 && result?.accepted === true) { state.pending = null; await persist() }
-      else if (result?.reason === 'CHOICE_CHANGED') { enabled = false; state = fresh(-1); running.clear(); launches.clear(); await persist() }
-      else if (result?.reason === 'EXPIRED') { state.pending = null; await persist() }
-    } catch { enabled = false; running.clear(); launches.clear() /* No error text or request body in logs. */ }
+      else if (result?.reason === 'CHOICE_CHANGED') { enabled = false; state = fresh(-1); running.clear(); launches.clear(); health.reset(); await persist() }
+      else if (result?.reason === 'EXPIRED') { state.pending = null; add('health_cli_report_expired'); await persist() }
+      else { add('health_cli_report_rejected') }
+    } catch {
+      if (enabled) add('health_cli_report_failed')
+      enabled = false; running.clear(); launches.clear(); health.clearObservations() /* No error text or request body in logs. */
+    }
   }
   const sync = (): Promise<void> => syncing ??= syncOnce().finally(() => { syncing = null })
   const timer = setInterval(() => { void sync() }, 60_000)
@@ -234,7 +254,12 @@ export function createProductUsage(deps: ProductUsageDeps) {
       }
     },
     launch(signal: ProductUsageLaunchSignal): void {
-      if (!enabled || stopped || !signal || typeof signal.id !== 'string' || !/^[a-zA-Z0-9_-]{16,96}$/.test(signal.id)) return
+      if (!enabled || stopped || !signal || typeof signal.id !== 'string') return
+      if (signal.phase === 'work_requested') {
+        if (signal.id.length > 0 && signal.id.length <= 256 && (signal.origin === 'interactive' || signal.origin === 'tool')) health.intent(signal.id, signal.origin)
+        return
+      }
+      if (!/^[a-zA-Z0-9_-]{16,96}$/.test(signal.id)) return
       if (signal.phase === 'start') {
         if (launches.has(signal.id)) return
         if (!state.launchedBefore) {
@@ -274,7 +299,7 @@ export function createProductUsage(deps: ProductUsageDeps) {
       if (type === 'turn_started') {
         if (running.has(agent)) return
         if (running.size >= 1000) { add('turn_observation_overflow'); return }
-        running.set(agent, { started: now(), response: false, error: false, waited: false }); markActive(); add('turns_started')
+        running.set(agent, { started: now(), response: false, error: false, waited: false }); markActive(); add('turns_started'); if (context) health.work(agent)
         launchValue(false)
         if (state.workDay !== key(now())) {
           if (state.workDay && now() - Date.parse(state.workDay) >= 7 * DAY) add('reactivated_after_7d_installations')
@@ -328,8 +353,8 @@ export function createProductUsage(deps: ProductUsageDeps) {
       }
     },
     stop(discard = false): Promise<boolean> {
-      stopped = true; enabled = false; clearInterval(timer); running.clear(); launches.clear()
-      if (discard) state = fresh(-1)
+      stopped = true; enabled = false; clearInterval(timer); running.clear(); launches.clear(); health.stop()
+      if (discard) { state = fresh(-1); health.reset() }
       return persist()
     },
   }

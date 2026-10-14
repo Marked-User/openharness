@@ -5,6 +5,8 @@ import '../../shared/widgets/setting_row.dart';
 import '../../shared/widgets/product_feedback.dart';
 import '../../state/app_state.dart';
 import '../../measurement/setup_usage_choice.dart';
+import '../../measurement/task_feedback.dart';
+import '../../measurement/product_measurement.dart';
 
 typedef UsagePreferenceRequest = Future<Map<String, dynamic>> Function({
   bool? enabled,
@@ -36,6 +38,7 @@ class PrivacySection extends StatelessWidget {
                 return value;
               },
               feedback: notifier.api.productUsageFeedback,
+              measurement: notifier.productMeasurement,
             ),
     ),
   );
@@ -47,9 +50,11 @@ class ProductUsagePreference extends StatefulWidget {
     super.key,
     required this.request,
     this.feedback,
+    this.measurement,
   });
   final UsagePreferenceRequest request;
   final ProductFeedbackRequest? feedback;
+  final ProductMeasurement? measurement;
 
   @override
   State<ProductUsagePreference> createState() => _ProductUsagePreferenceState();
@@ -159,6 +164,13 @@ class _ProductUsagePreferenceState extends State<ProductUsagePreference> {
             '• First response waits, missing responses and error-event counts; first-launch 24-hour response counts and D1/D7/D28 working-day returns\n'
             '• A fixed feedback answer only when you choose to send one\n'
             '• Protocol version and the revision of your sharing preference\n\n'
+            'Desktop and CLI also share separate release and operating-system totals; '
+            'fixed startup, viewer-load, update-apply, reconnect and resume-to-work outcomes; '
+            'coarse memory, CPU and frame-time buckets; and counts of errors and interrupted app runs. '
+            'No error text, stack trace, device specification or browsing address is sent. '
+            'Local day flags measure explicit composer work and weekly use; they are never uploaded. '
+            'The last app run keeps only local restart/update control flags, removed when sharing is off. '
+            'Feedback views, answers and dismissals are counted without linking them to a task.\n\n'
             'Older apps contribute connection, remote-session, and turn-start totals. '
             'These event counts are separate from active computer counts.\n\n'
             'Sign-in checks your preference. Account, computer, and agent identifiers are not stored '
@@ -172,8 +184,29 @@ class _ProductUsagePreferenceState extends State<ProductUsagePreference> {
             'A turn ending does not tell us whether your task succeeded.',
           ),
         ],
-        if (_enabled == true && widget.feedback != null)
-          ProductFeedback(send: widget.feedback!),
+        if (_enabled == true && widget.feedback != null) ...[
+          TextButton(
+            onPressed: () => showTaskFeedback(
+              context,
+              choice: widget.request,
+              send: widget.feedback!,
+              measurement: widget.measurement,
+            ),
+            child: const Text('Rate task outcome'),
+          ),
+          ProductFeedback(
+            send: widget.feedback!,
+            onShown: widget.measurement?.observer(
+              ProductHealthMeasure.feedbackReasonShown,
+            ),
+            onAnswered: widget.measurement?.observer(
+              ProductHealthMeasure.feedbackReasonAnswered,
+            ),
+            onDismissed: widget.measurement?.observer(
+              ProductHealthMeasure.feedbackReasonDismissed,
+            ),
+          ),
+        ],
       ],
     ),
   );

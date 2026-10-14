@@ -17,6 +17,14 @@ import 'test_run.dart';
 /// Everything here is best-effort and bounded. Diagnostics must never be the
 /// reason something fails.
 class CrashLog {
+  /// The observer receives only the error channel, never the exception or stack.
+  static void Function(bool framework)? healthError;
+  static void _health(bool framework) {
+    try {
+      healthError?.call(framework);
+    } catch (_) {}
+  }
+
   static const _maxBytes = 256 * 1024;
 
   @visibleForTesting
@@ -79,12 +87,14 @@ class CrashLog {
   static void install() {
     final previousFlutterError = FlutterError.onError;
     FlutterError.onError = (details) {
+      _health(true);
       record(details.exception, details.stack, context: 'flutter');
       previousFlutterError?.call(details);
     };
 
     final previousPlatformError = PlatformDispatcher.instance.onError;
     PlatformDispatcher.instance.onError = (error, stack) {
+      _health(false);
       record(error, stack, context: 'async');
       return previousPlatformError?.call(error, stack) ?? false;
     };
