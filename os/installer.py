@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Offline full-disk installer. Nothing is erased until the exact disk is confirmed."""
+"""Offline installer: the whole disk, or the free space beside the systems already on it. Nothing is
+written until the exact disk is confirmed."""
 from __future__ import annotations
 import argparse
 from contextlib import contextmanager, ExitStack
@@ -21,6 +22,11 @@ import textwrap
 import time
 
 MIN_DISK_BYTES = 12 * 1024**3
+# Beside another system (KE-HOACH-HARNESS-OS-DUAL-BOOT): Harness gets its own EFI system partition, never a shared
+# one. Recovery empties and refills /boot (system.py `copy_contents`), and the other system's ESP is often too small
+# for Harness's kernel and initramfs.
+BOOT_BYTES = 1024**3
+ALIGN_BYTES = 1024**2
 LIVE_PAYLOADS = (Path('/run/archiso/copytoram/airootfs.sfs'),
                  Path('/run/archiso/bootmnt/arch/x86_64/airootfs.sfs'))
 WORDMARK = ('█ █ ▄▀█ █▀█ █▄ █ █▀▀ █▀ █▀', '█▀█ █▀█ █▀▄ █ ▀█ ██▄ ▄█ ▄█')
@@ -178,6 +184,10 @@ def validate_config(config):
         raise ValueError('encrypt must be true or false.')
     if not re.fullmatch(r'/dev/[a-zA-Z0-9_-]+', config.get('disk', '')):
         raise ValueError('Select a whole /dev disk.')
+    if config.get('layout', 'erase') not in ('erase', 'alongside'):
+        raise ValueError('layout must be erase or alongside.')
+    if config.get('layout') == 'alongside' and type(config.get('free_start')) is not int:
+        raise ValueError('An install beside other systems needs the free space it was shown (free_start).')
 
 
 def validate_disk(device, expected_serial=None):
@@ -220,6 +230,95 @@ def selected_disk(config):
         raise ValueError('Target disk was not found.')
     validate_disk(devices[0], config.get('expected_serial'))
     return devices[0]
+
+
+def uefi_booted(sysfs=Path('/sys')):
+    return (sysfs / 'firmware/efi').is_dir()
+
+
+def partition_table(disk):
+    return json.loads(run('sfdisk', '--json', disk, capture=True))['partitiontable']
+
+
+def free_gaps(table):
+    """A GPT disk's free ranges, 1 MiB aligned, as inclusive (first, last) sectors, largest first."""
+    if table.get('label') != 'gpt':
+        return []
+    sector = int(table.get('sectorsize', 512))
+    align = ALIGN_BYTES // sector
+    used = sorted((int(p['start']), int(p['start']) + int(p['size']) - 1) for p in table.get('partitions', []))
+    last_usable = int(table['lastlba'])
+    gaps, cursor = [], int(table['firstlba'])
+    for start, end in used + [(last_usable + 1, last_usable + 1)]:
+        first = -(-cursor // align) * align
+        if start - 1 >= first:
+            gaps.append((first, start - 1))
+        cursor = max(cursor, end + 1)
+    return sorted(gaps, key=lambda gap: gap[1] - gap[0], reverse=True)
+
+
+def free_space(disk):
+    """The largest free range on [disk] Harness fits in, beside at least one partition; None otherwise."""
+    try:
+        table = partition_table(disk)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return None
+    sector = int(table.get('sectorsize', 512))
+    gaps = free_gaps(table)
+    if not gaps or not table.get('partitions'):
+        return None
+    first, last = gaps[0]
+    size = (last - first + 1) * sector
+    if size < MIN_DISK_BYTES:
+        return None
+    return {'start': first, 'end': last, 'sector': sector, 'bytes': size, 'kept': len(table['partitions'])}
+
+
+def alongside_gap(config):
+    """The free range the person chose, read again from the disk: unchanged, or nothing is written."""
+    table = partition_table(config['disk'])
+    sector = int(table.get('sectorsize', 512))
+    for first, last in free_gaps(table):
+        if first == config['free_start'] and (last - first + 1) * sector >= MIN_DISK_BYTES:
+            return table, (first, last, sector)
+    raise ValueError('The free space on this disk changed since it was chosen. Nothing was written.')
+
+
+def alongside_partitions(disk, table):
+    """The two lowest unused GPT partition numbers, and their device names."""
+    taken = set()
+    for partition in table.get('partitions', []):
+        match = re.search(r'(\d+)$', partition['node'])
+        if match:
+            taken.add(int(match.group(1)))
+    numbers = [n for n in range(1, 129) if n not in taken][:2]
+    if len(numbers) < 2:
+        raise ValueError('This disk has no free partition entries left.')
+    separator = 'p' if disk[-1].isdigit() else ''
+    return numbers, [f'{disk}{separator}{n}' for n in numbers]
+
+
+def install_bytes(config):
+    """What the installed system gets: the chosen free space less its boot partition, else the disk."""
+    if config.get('layout') == 'alongside':
+        _, (first, last, sector) = alongside_gap(config)
+        return (last - first + 1) * sector - BOOT_BYTES
+    return int(selected_disk(config)['size'])
+
+
+def boot_order():
+    output = run('efibootmgr', capture=True)
+    match = re.search(r'^BootOrder:\s*([0-9A-Fa-f,]+)\s*$', output, re.M)
+    return match.group(1).split(',') if match else []
+
+
+def keep_boot_order(before):
+    """The system that started first before still does: Harness is added last, chosen from the boot menu."""
+    entries = re.findall(r'^Boot([0-9A-Fa-f]{4})\*?\s+Harness\b', run('efibootmgr', capture=True), re.M)
+    if not before or not entries:
+        return
+    harness = entries[-1]
+    run('efibootmgr', '--bootorder', ','.join([entry for entry in before if entry != harness] + [harness]))
 
 
 def write(root, path, text, mode=0o644):
@@ -285,7 +384,7 @@ def trial_source(config):
     if not source.exists():
         return None
     required = trial_command('size', source, account)['bytes']
-    available = int(selected_disk(config)['size']) - 5 * 1024**3
+    available = install_bytes(config) - 5 * 1024**3
     if required > available:
         raise ValueError('This disk needs more space for your trial projects. Choose a larger disk or save the projects elsewhere first.')
     return source, account
@@ -367,12 +466,23 @@ def install_image(config, source, target, progress, resources):
         raise ValueError('Live system payload is missing; boot the Harness USB.')
     if target.exists() and any(target.iterdir()):
         raise ValueError('Installation mountpoint is not empty.')
-    if config.get('confirm_erase') != config['disk']:
+    alongside = config.get('layout') == 'alongside'
+    if alongside:
+        if config.get('confirm_alongside') != config['disk']:
+            raise ValueError('Explicit confirmation of the exact disk is required.')
+        if not uefi_booted():
+            raise ValueError('Installing beside another system needs the USB started in UEFI mode.')
+        for command in ('sfdisk', 'efibootmgr'):
+            if not shutil.which(command):
+                raise ValueError(f'The installer is missing {command}. Boot an intact Harness image.')
+    elif config.get('confirm_erase') != config['disk']:
         raise ValueError('Explicit confirmation of the exact disk is required.')
     report('Checking installation files…')
     kernel = preflight(config, source)
     platform = boot_module().selected()
     preserved = None
+    if alongside and platform['id'] != 'pc':
+        raise ValueError('Installing beside another system is only for PCs.')
     if platform['id'] == 'apple-t2':
         report('Preserving this Mac’s wireless firmware…')
         preserved = resources.enter_context(boot_module().module('t2_install').preserve(config['disk']))
@@ -381,17 +491,30 @@ def install_image(config, source, target, progress, resources):
     pbkdf_memory = encryption_memory() if config['encrypt'] else None
     started = time.monotonic()
     disk = config['disk']
-    _, boot, root_partition = partitions(disk)
+    if alongside:
+        # Read once more right before writing: the range must still be free, and nothing else is touched.
+        table, (free_first, free_last, sector) = alongside_gap(config)
+        numbers, (boot, root_partition) = alongside_partitions(disk, table)
+    else:
+        _, boot, root_partition = partitions(disk)
     target.mkdir(parents=True, exist_ok=True)
     mapper = f'hn-install-{os.getpid()}'
     opened = False
     mounted = False
     try:
         report('Preparing the disk…')
-        run('sgdisk', '--zap-all', disk)
-        run('sgdisk', '-n', '1:1MiB:+2MiB', '-t', '1:ef02', '-c', '1:HN BIOS',
-            '-n', '2:0:+1GiB', '-t', '2:ef00', '-c', '2:HN BOOT',
-            '-n', '3:0:0', '-t', '3:8309' if config['encrypt'] else '3:8300', '-c', '3:HN ROOT', disk)
+        if alongside:
+            # Only the chosen range, at exact sectors; no other partition or the table's header is rewritten.
+            boot_last = free_first + BOOT_BYTES // sector - 1
+            b, r = numbers
+            run('sgdisk', '-n', f'{b}:{free_first}:{boot_last}', '-t', f'{b}:ef00', '-c', f'{b}:HN BOOT',
+                '-n', f'{r}:{boot_last + 1}:{free_last}', '-t', f'{r}:8309' if config['encrypt'] else f'{r}:8300',
+                '-c', f'{r}:HN ROOT', disk)
+        else:
+            run('sgdisk', '--zap-all', disk)
+            run('sgdisk', '-n', '1:1MiB:+2MiB', '-t', '1:ef02', '-c', '1:HN BIOS',
+                '-n', '2:0:+1GiB', '-t', '2:ef00', '-c', '2:HN BOOT',
+                '-n', '3:0:0', '-t', '3:8309' if config['encrypt'] else '3:8300', '-c', '3:HN ROOT', disk)
         run('udevadm', 'settle')
         run('mkfs.fat', '-F', '32', '-n', 'HNBOOT', boot)
         if preserved:
@@ -527,13 +650,23 @@ def install_image(config, source, target, progress, resources):
             run('/usr/bin/python3', '/usr/lib/harness-os/hardware.py', 'configure-install', target)
         (target / 'etc/harness-live').unlink()
         chroot(target, 'mkinitcpio', '-P')
-        chroot(target, 'grub-install', '--target=i386-pc', '--recheck', disk)
-        chroot(target, 'grub-install', '--target=x86_64-efi', '--efi-directory=/boot', '--boot-directory=/boot', '--removable', '--no-nvram')
+        if alongside:
+            # UEFI only, under its own name in the firmware's boot menu: never the disk's BIOS boot code, nor the
+            # removable path another system may rely on.
+            before = boot_order()
+            chroot(target, 'grub-install', '--target=x86_64-efi', '--efi-directory=/boot', '--boot-directory=/boot',
+                   '--bootloader-id=Harness')
+            keep_boot_order(before)
+        else:
+            chroot(target, 'grub-install', '--target=i386-pc', '--recheck', disk)
+            chroot(target, 'grub-install', '--target=x86_64-efi', '--efi-directory=/boot', '--boot-directory=/boot', '--removable', '--no-nvram')
         chroot(target, 'grub-mkconfig', '-o', '/boot/grub/grub.cfg')
         receipt = {'version': lock['version'], 'installed_at': datetime.now(timezone.utc).isoformat(),
                    'duration_seconds': round(time.monotonic() - started, 3), 'encrypted': config['encrypt'],
-                   'disk_bytes': selected_size(config), 'root_uuid': root_uuid, 'boot_uuid': boot_uuid,
-                   'platform': platform['id']}
+                   'disk_bytes': (free_last - free_first + 1) * sector if alongside else selected_size(config),
+                   'root_uuid': root_uuid, 'boot_uuid': boot_uuid, 'platform': platform['id']}
+        if alongside:
+            receipt['layout'] = 'alongside'
         if apple_firmware:
             receipt['apple_firmware'] = apple_firmware
         if pbkdf_memory is not None:
@@ -576,9 +709,10 @@ def display_text(value):
 
 
 def disk_label(disk, width=None):
-    size = f"{int(disk['size']) / 1_000_000_000:.1f}".removesuffix('.0')
+    beside = disk.get('alongside')
+    size = f"{int(beside['bytes'] if beside else disk['size']) / 1_000_000_000:.1f}".removesuffix('.0')
     model = display_text(disk.get('model')) or 'Disk'
-    suffix = f'  {size} GB'
+    suffix = f'  {size} GB free space' if beside else f'  {size} GB'
     if width is not None and len(model) + len(suffix) > width:
         model = model[:max(1, width - len(suffix) - 1)] + '…'
     return model + suffix
@@ -734,6 +868,10 @@ class InstallForm:
             suffix = '  ' + Path(disk['name']).name if duplicate else ''
             label = disk_label(disk, self.width - 18 - len(suffix)) + suffix
             self.field(4, 'Disk', label, self.focus == 0)
+            if disk.get('alongside'):
+                self.line(5, ' ' * 18 + 'Keeps the other systems on this disk.', accent=True)
+            elif disk.get('children'):
+                self.line(5, ' ' * 18 + 'Erases everything on this disk.', accent=True)
             self.field(6, 'Encryption', f"[{'x' if self.encrypt else ' '}]", self.focus == 1)
             capacity = self.width - 20
             for index, label in enumerate(('Password', 'Repeat password')):
@@ -769,6 +907,8 @@ class InstallForm:
                     config = dict(disk=disk['name'], username=self.username, hostname=self.hostname,
                                   encrypt=self.encrypt, password=self.passwords[0],
                                   expected_serial=str(disk.get('serial') or '').strip())
+                    if disk.get('alongside'):
+                        config.update(layout='alongside', free_start=disk['alongside']['start'])
                     try:
                         validate_config(config)
                         if self.passwords[0] != self.passwords[1]:
@@ -777,7 +917,7 @@ class InstallForm:
                     except ValueError as error:
                         self.error = str(error)
                         continue
-                    config['confirm_erase'] = disk['name']
+                    config['confirm_alongside' if disk.get('alongside') else 'confirm_erase'] = disk['name']
                     return config
             elif self.focus in (2, 3):
                 self.edit_password(self.focus - 2, key)
@@ -790,6 +930,11 @@ def interactive(username='me', hostname='harness', encrypt=True):
             validate_disk(disk)
         except ValueError:
             continue
+        # A disk that already holds a system offers its free space first, so the choice that keeps it is the one
+        # already selected. Only on UEFI: Harness is added to the firmware's boot menu.
+        beside = free_space(disk['name']) if disk.get('children') and uefi_booted() else None
+        if beside:
+            candidates.append(dict(disk, alongside=beside))
         candidates.append(disk)
     if not candidates:
         raise ValueError('No unmounted, writable whole disk of at least 12 GiB is available.')

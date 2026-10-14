@@ -109,6 +109,24 @@ The account and computer name are set to **`me@harness`**. Installation works of
 When **Harness is installed.** appears, choose **Shut down**. Once the ThinkPad is
 off, remove the USB and power it on.
 
+### Installing beside Ubuntu or Windows
+
+Harness can keep another system on the same disk and use only its free space. This is new: back up first.
+
+1. Make the free space in the other system first, at least 12 GiB in one piece. In Ubuntu, start an
+   Ubuntu USB and shrink the root partition with GParted (it cannot shrink while Ubuntu runs). In
+   Windows, use Disk Management's **Shrink Volume**.
+2. Start the Harness USB in **UEFI** mode. A disk that already holds a system then lists its free
+   space first, as *Model  N GB free space*, and the form says **Keeps the other systems on this
+   disk.** Choosing the whole disk instead says **Erases everything on this disk.**
+3. Fill in the form as above. Harness creates two partitions in the free space only: its own EFI partition
+   (1 GiB) and its system. Nothing else on the disk is changed.
+4. The system that started first before still does. To start Harness, open the computer's boot menu
+   (F12 on ThinkPads, F11 on MSI) and choose **Harness**.
+
+The free space must be on a GPT disk, and the USB must be started in UEFI mode; otherwise only the
+whole disk is offered.
+
 ## 6. First boot
 
 With encryption enabled, the Harness logo appears with **Enter your password**.

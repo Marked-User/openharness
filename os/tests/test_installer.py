@@ -808,5 +808,140 @@ class InstallerOutput(unittest.TestCase):
             self.assertEqual(target.read_text(), 'preserve')
 
 
+# A disk as `sfdisk --json` reads it: Ubuntu's ESP and root, the root shrunk to 300 GiB, the rest left free.
+UBUNTU = {'label': 'gpt', 'firstlba': 34, 'lastlba': 1000215182, 'sectorsize': 512, 'partitions': [
+    {'node': '/dev/nvme0n1p1', 'start': 2048, 'size': 1048576, 'type': 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B'},
+    {'node': '/dev/nvme0n1p2', 'start': 1050624, 'size': 300 * 2097152, 'type': '0FC63DAF-8483-4772-8E79-3D69D8477DE4'},
+]}
+FREE_FIRST = 1050624 + 300 * 2097152  # already on a 1 MiB boundary
+
+
+class InstallBeside(unittest.TestCase):
+    """Beside another system: only the free range is written, Harness has its own ESP and boot entry, and the
+    system that started first still does."""
+
+    def config(self, **changes):
+        return dict(dict(username='me', hostname='harness', password='test-password', encrypt=True,
+                         disk='/dev/nvme0n1', layout='alongside', free_start=FREE_FIRST,
+                         confirm_alongside='/dev/nvme0n1'), **changes)
+
+    def test_free_ranges_are_aligned_and_largest_first(self):
+        gaps = installer.free_gaps(UBUNTU)
+        self.assertEqual(gaps[0], (FREE_FIRST, 1000215182))
+        # The sectors before the first partition round up past it: not free space.
+        self.assertEqual(len(gaps), 1)
+        self.assertEqual(installer.free_gaps(dict(UBUNTU, label='dos')), [])
+        unaligned = dict(UBUNTU, partitions=[dict(UBUNTU['partitions'][0], size=1048577)])
+        self.assertEqual(installer.free_gaps(unaligned)[0][0] % 2048, 0)
+
+    def test_free_space_needs_room_and_another_system(self):
+        with patch.object(installer, 'partition_table', return_value=UBUNTU):
+            beside = installer.free_space('/dev/nvme0n1')
+        self.assertEqual((beside['start'], beside['end'], beside['kept']), (FREE_FIRST, 1000215182, 2))
+        self.assertEqual(beside['bytes'], (1000215182 - FREE_FIRST + 1) * 512)
+        full = dict(UBUNTU, partitions=[UBUNTU['partitions'][0], dict(UBUNTU['partitions'][1], size=1000215182 - 1050624 - 2048)])
+        empty = dict(UBUNTU, partitions=[])
+        for table in (full, empty):
+            with patch.object(installer, 'partition_table', return_value=table):
+                self.assertIsNone(installer.free_space('/dev/nvme0n1'))
+        with patch.object(installer, 'partition_table', side_effect=subprocess.CalledProcessError(1, 'sfdisk')):
+            self.assertIsNone(installer.free_space('/dev/nvme0n1'))
+
+    def test_new_partitions_take_the_lowest_unused_numbers(self):
+        self.assertEqual(installer.alongside_partitions('/dev/nvme0n1', UBUNTU),
+                         ([3, 4], ['/dev/nvme0n1p3', '/dev/nvme0n1p4']))
+        gap = {'partitions': [{'node': '/dev/sda1'}, {'node': '/dev/sda3'}]}
+        self.assertEqual(installer.alongside_partitions('/dev/sda', gap), ([2, 4], ['/dev/sda2', '/dev/sda4']))
+        full = {'partitions': [{'node': f'/dev/sda{n}'} for n in range(1, 128)]}
+        with self.assertRaisesRegex(ValueError, 'no free partition entries'):
+            installer.alongside_partitions('/dev/sda', full)
+
+    def install_until(self, stop, config=None, table=UBUNTU, uefi=True):
+        def run(*args, **kwargs):
+            if args[0] == stop:
+                raise OSError('stop before writing a filesystem')
+            return ''
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / 'payload'
+            source.touch()
+            with patch.object(installer, 'selected_disk'), \
+                 patch.object(installer, 'preflight'), \
+                 patch.object(installer, 'trial_source', return_value=None), \
+                 patch.object(installer, 'encryption_memory', return_value=192 * 1024), \
+                 patch.object(installer, 'uefi_booted', return_value=uefi), \
+                 patch.object(installer.shutil, 'which', return_value='/usr/bin/tool'), \
+                 patch.object(installer, 'partition_table', return_value=table), \
+                 patch.object(installer, 'run', side_effect=run) as commands:
+                with self.assertRaises((OSError, ValueError)) as stopped:
+                    installer.install(config or self.config(), source, Path(temp) / 'target')
+        return commands, stopped.exception
+
+    def test_only_the_free_range_is_partitioned(self):
+        commands, _ = self.install_until('mkfs.fat')
+        calls = [c.args for c in commands.call_args_list]
+        self.assertFalse(any('--zap-all' in call for call in calls))
+        boot_last = FREE_FIRST + 1024**3 // 512 - 1
+        self.assertIn(('sgdisk', '-n', f'3:{FREE_FIRST}:{boot_last}', '-t', '3:ef00', '-c', '3:HN BOOT',
+                       '-n', f'4:{boot_last + 1}:1000215182', '-t', '4:8309', '-c', '4:HN ROOT', '/dev/nvme0n1'), calls)
+        self.assertIn(('mkfs.fat', '-F', '32', '-n', 'HNBOOT', '/dev/nvme0n1p3'), calls)
+
+    def test_nothing_is_written_unless_confirmed_on_uefi_with_the_range_unchanged(self):
+        for config, uefi, table, message in [
+            (self.config(confirm_alongside=None, confirm_erase='/dev/nvme0n1'), True, UBUNTU, 'Explicit confirmation'),
+            (self.config(), False, UBUNTU, 'UEFI mode'),
+            (self.config(free_start=FREE_FIRST + 2048), True, UBUNTU, 'free space on this disk changed'),
+            (self.config(free_start='1'), True, UBUNTU, 'free_start'),
+        ]:
+            with self.subTest(message=message):
+                commands, error = self.install_until('mkfs.fat', config, table, uefi)
+                self.assertRegex(str(error), message)
+                self.assertFalse(any(c.args[0] == 'sgdisk' for c in commands.call_args_list))
+
+    def test_harness_is_added_last_to_the_boot_order(self):
+        outputs = iter(['BootCurrent: 0001\nBootOrder: 0001,0000\nBoot0001* ubuntu\n',
+                        'BootOrder: 0003,0001,0000\nBoot0001* ubuntu\nBoot0003* Harness\tHD(3,GPT)\n', ''])
+        with patch.object(installer, 'run', side_effect=lambda *a, **k: next(outputs)) as commands:
+            installer.keep_boot_order(installer.boot_order())
+        self.assertEqual(commands.call_args_list[-1].args, ('efibootmgr', '--bootorder', '0001,0000,0003'))
+        with patch.object(installer, 'run', return_value='BootOrder: 0001\n') as commands:
+            installer.keep_boot_order(['0001'])  # no Harness entry: nothing changed
+        self.assertEqual(len(commands.call_args_list), 1)
+
+    def test_the_installed_system_gets_the_free_range_less_its_boot_partition(self):
+        with patch.object(installer, 'partition_table', return_value=UBUNTU):
+            self.assertEqual(installer.install_bytes(self.config()), (1000215182 - FREE_FIRST + 1) * 512 - 1024**3)
+
+
+class InteractiveBeside(unittest.TestCase):
+    def setUp(self):
+        InteractiveInstall.setUp(self)
+        self.disk.update(name='/dev/nvme0n1', model='KINGSTON', children=[{'mountpoints': [None]}])
+        self.beside = {'start': FREE_FIRST, 'end': 1000215182, 'sector': 512, 'bytes': 170 * 10**9, 'kept': 2}
+        context = ExitStack()
+        self.addCleanup(context.close)
+        context.enter_context(patch.object(installer, 'uefi_booted', return_value=True))
+        context.enter_context(patch.object(installer, 'free_space', return_value=self.beside))
+
+    def test_the_free_space_is_offered_first_and_keeps_the_other_system(self):
+        self.screen.keys.extend([*'pw', '\n', *'pw', '\n', '\n'])
+        installer.main()
+        config = self.install.call_args.args[0]
+        self.assertEqual((config['layout'], config['free_start'], config['confirm_alongside']),
+                         ('alongside', FREE_FIRST, '/dev/nvme0n1'))
+        self.assertNotIn('confirm_erase', config)
+        self.assertIn('170 GB free space', self.screen.frames[0])
+        self.assertIn('Keeps the other systems on this disk.', self.screen.frames[0])
+
+    def test_erasing_a_disk_that_holds_a_system_says_so(self):
+        # Disk, then the picker: down to the whole disk.
+        self.screen.keys.extend([curses_up := installer.curses.KEY_UP, curses_up, '\n', installer.curses.KEY_DOWN, '\n',
+                                 '\t', '\t', *'pw', '\n', *'pw', '\n', '\n'])
+        installer.main()
+        config = self.install.call_args.args[0]
+        self.assertEqual(config['confirm_erase'], '/dev/nvme0n1')
+        self.assertNotIn('layout', config)
+        self.assertIn('Erases everything on this disk.', self.screen.frames[-1])
+
+
 if __name__ == '__main__':
     unittest.main()
