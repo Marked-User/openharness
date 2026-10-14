@@ -714,8 +714,8 @@ bool pod_ui_pet_on_screen(const pod_ui_t *u)
 }
 
 // The clock's period while the screen animates on a fixed beat: 300 ms while the Classic Tabs grid shows a Playing ribbon; 150 ms
-// while an agent works on Tab (Console: 66 ms while a row on screen works, its bars move; the equaliser is three rects, cheap to redraw); else a second (the elapsed clocks).
-static uint32_t unit_ms(const pod_ui_t *u, uint32_t now_ms)
+// while a listed agent works on Tab (Classic: the footer mark; Console: 66 ms while a row on screen works, its bars move; the equaliser is three rects, cheap to redraw); else a second (the elapsed clocks).
+static uint32_t unit_ms(const pod_ui_t *u)
 {
     if (u->pg_mode == POD_PG_ANIM && u->nav.skin != POD_SKIN_CONSOLE) return POD_PG_STEP_MS;   // Console's pages switch at once
     const pod_frame_t *f = top(u);
@@ -732,9 +732,12 @@ static uint32_t unit_ms(const pod_ui_t *u, uint32_t now_ms)
         int first = f->scroll < 0 ? 0 : f->scroll > max ? max : f->scroll;
         for (int i = first; i < n && i < first + CS_ROWS_MAX; i++)
             if (pod_model_eff(&u->model, l[i]) == POD_WORKING) return POD_CS_ANIM_MS;
-    } else if (u->model.linked && f && f->view == POD_V_TAB)
-        for (int i = 0; i < u->model.agent_count; i++)
-            if (pod_model_state(&u->model, &u->model.agents[i], now_ms) == POD_WORKING) return 150;
+    } else if (u->model.linked && f && f->view == POD_V_TAB) {   // Classic: the footer's mark moves while a listed agent works
+        const pod_agent_t *l[POD_AGENTS_MAX];
+        int n = pod_nav_list(&u->nav, &u->model, l, POD_AGENTS_MAX);
+        for (int i = 0; i < n; i++)
+            if (pod_model_eff(&u->model, l[i]) == POD_WORKING) return 150;
+    }
     return 1000;
 }
 
@@ -756,7 +759,7 @@ static uint32_t edge_ms(const pod_ui_t *u, uint32_t now_ms)
         edge = pod_view_next_ms(&u->nav, &u->model, now_ms);
         if (edge > 1000 - now_ms % 1000) edge = 1000 - now_ms % 1000;   // the elapsed clocks still tick on the second
     }
-    else { uint32_t unit = unit_ms(u, now_ms); edge = unit - now_ms % unit; }
+    else { uint32_t unit = unit_ms(u); edge = unit - now_ms % unit; }
     if (u->notice_on) {   // a notice clears on time, not at the pet's next step
         int32_t left = (int32_t)(u->notice_until - now_ms);
         if (left < 1) left = 1;

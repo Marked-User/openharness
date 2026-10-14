@@ -436,6 +436,23 @@ static void working_bars_wake(void) {
     CHECK(pod_ui_wake_ms(&U, 330) > 66);
 }
 
+// The Classic Tab and Recent footer's working mark moves only while a listed agent works: 150 ms then, a second otherwise.
+static void classic_list_working_wake(void) {
+    fresh(POD_SKIN_CLASSIC);
+    to_tab(0);   // a1 works
+    CHECK(pod_ui_wake_ms(&U, 330) <= 150);
+    act(POD_A_BACK, 0);
+    act(POD_A_OPEN_TAB, POD_TAB_RECENT);
+    CHECK(pod_ui_wake_ms(&U, 330) <= 150);
+    fresh(POD_SKIN_CLASSIC);
+    to_tab(1);   // a4 only asks (a1 works in tab 0, not listed here)
+    CHECK(pod_ui_wake_ms(&U, 330) > 150);
+    fresh(POD_SKIN_CLASSIC);
+    calm();
+    to_tab(0);
+    CHECK(pod_ui_wake_ms(&U, 330) > 150);
+}
+
 // v3 Task 4: the Console equaliser and spinner step at 66 ms and the voice wave at 100 ms; Classic keeps its 33 ms.
 static void animation_rates(void) {
     uint32_t most = 0;
@@ -1260,6 +1277,7 @@ int main(void) {
     send_before_talk_drawn();
     offline_tap_aborts();
     working_bars_wake();
+    classic_list_working_wake();
     animation_rates();
     recent_rows_do_not_hold();
     overview_down_opens_inbox();

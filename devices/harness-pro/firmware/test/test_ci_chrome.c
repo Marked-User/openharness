@@ -46,6 +46,22 @@ static void test_bar_hits(void) {
     ci_bar(&F, "Update", NULL, 5, false);
     CHECK(!find_hit(POD_A_INBOX) && !find_hit(POD_A_BACK) && F.unread == 0 && F.bell_x == 0 && !find_text("5"));
 }
+static void test_bar_no_title(void) {
+    fresh();
+    ci_bar(&F, NULL, "averyveryverylongtabname", 2, true);
+    const ht_run_t *r = NULL;
+    for (int i = 0; i < S.count; i++)
+        if (S.runs[i].pro_kind == K_TEXT && !strncmp(S.runs[i].text, "avery", 5)) r = &S.runs[i];
+    const pod_hit_t *b = find_hit(POD_A_BACK);
+    CHECK(r && r->w > 115 && r->x + r->w <= F.bell_x - 16 && b && b->x + b->w <= 632 && b->w >= 173);
+    for (int i = 0; i < S.count; i++) CHECK(!(S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ci_bd_30));
+    fresh();
+    ci_bar(&F, "Task", "averyveryverylongtabname", 2, true);   // a titled bar keeps the 115 px cut
+    r = NULL;
+    for (int i = 0; i < S.count; i++)
+        if (S.runs[i].pro_kind == K_TEXT && !strncmp(S.runs[i].text, "avery", 5)) r = &S.runs[i];
+    CHECK(r && r->w <= 115 && find_hit(POD_A_BACK)->w == 173);
+}
 static void test_bar_back_ellipsis(void) {
     fresh();
     ci_bar(&F, "Task", "averyveryverylongtabname", 0, false);
@@ -82,8 +98,9 @@ static void test_band_geometry(void) {
         if (r->pro_kind == K_RECT_AA && r->w == 10 && r->pro_height == 10 && r->fg == CI_GREEN) dot = true;
     }
     CHECK(top && bottom && split && dot);
-    const ht_run_t *eng = find_text("Engine"), *ready = find_text("Ready");
+    const ht_run_t *eng = find_text("Engine"), *ready = find_text("Ready"), *st = find_text("Status");
     CHECK(eng && eng->x >= 336 && eng->x <= 340 && ready && ready->fg == CI_GREEN);
+    CHECK(st && st->x == 32 && st->y == eng->y && st->pro_font == eng->pro_font && st->fg == eng->fg && ready->y > st->y);   // same label face, colour and line
 }
 // ci_rgb picks the nearest RGB565 where ht_rgb truncates: the ask box is (239, 234, 214) not (246, 234, 222).
 static void test_ci_rgb_nearest(void) {
@@ -109,7 +126,7 @@ static void test_band_tokens_or_engine(void) {
     fresh();
     ci_band(&S, 224, POD_DONE, 134, "claude", 10100, 2300, 0);
     CHECK(find_text("Tokens") && find_text("10.1k in \xc2\xb7 2.3k out") && !find_text("Engine"));
-    CHECK(find_text("Finished") && find_text("2:14"));
+    CHECK(find_text("Finished") && find_text("Status") && find_text(" \xc2\xb7 2:14"));
     fresh();
     ci_band(&S, 224, POD_WORKING, 5, "codex", -1, -1, 100);
     CHECK(find_text("Engine") && find_text("Codex") && !find_text("Tokens") && find_text("Working"));
@@ -117,7 +134,7 @@ static void test_band_tokens_or_engine(void) {
 static void test_band_unknowns(void) {
     fresh();
     ci_band(&S, 224, POD_DONE, -1, "", 100, -1, 0);
-    CHECK(find_text("\xe2\x80\x94"));
+    CHECK(!find_text("\xe2\x80\x94") && find_text("Finished"));   // time unknown: omitted, never a dash or a dangling dot
     for (int i = 0; i < S.count; i++)
         if (S.runs[i].pro_kind == K_TEXT) CHECK(strcmp(S.runs[i].text, "-"));
     CHECK(find_text("100 in"));
@@ -127,8 +144,8 @@ static void test_band_unknowns(void) {
             CHECK(!dot);   // tokens_out unknown: no separator at all
         }
     fresh();
-    ci_band(&S, 224, POD_ASKING, 30, "", -1, -1, 0);
-    CHECK(find_text("Engine") && find_text("Needs you"));
+    ci_band(&S, 224, POD_ASKING, -1, "", -1, -1, 0);
+    CHECK(find_text("Engine") && find_text("Needs you") && find_text("Status"));
     for (int i = 0; i < S.count; i++)
         if (S.runs[i].pro_kind == K_TEXT) CHECK(!strstr(S.runs[i].text, "\xc2\xb7"));
 }
@@ -223,6 +240,7 @@ static void test_classic_em_dash(void) {
 int main(void) {
     test_bar_hits();
     test_bar_back_ellipsis();
+    test_bar_no_title();
     test_talk_disabled_no_hit();
     test_band_tokens_or_engine();
     test_band_unknowns();

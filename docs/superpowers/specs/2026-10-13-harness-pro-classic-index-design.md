@@ -242,6 +242,19 @@ Source design: the design team's "Harness Pro / Index v5" developer handoff (`ha
 
 **Device:** flash with `scripts/flash.sh`, switch to Classic, and walk every screen above, including Voice tap-to-send, banner × and timer, link down, and a real Claude turn (Agent → Recap with tokens).
 
+## v2 (owner, 2026-10-14)
+
+Classic only; Console is unchanged.
+
+**A. Lists (Recent and Tab)**
+- The footer's left shows the working mark (green, about 3 cqw tall), the count of working agents in that list in Bold and " working"; "None working" (no mark) when none, "No panes" for an empty tab. The right side is unchanged. The glue wakes for the mark only while a listed agent works.
+- A Ready row has no right-hand meta: no time or dash, no state word.
+
+**B. Agent and Recap**
+- Recap loses the "SAVED RESULT" eyebrow; the body moves up to where it was. Scroll by 42 px lines and the cut rules are unchanged.
+- No title in the bar. The back label (tab name, or "Recent" / "Inbox") may run up to the bell's left edge minus 16 px; BACK widens to the label (at least 173 px) and stays clear of the bell hit. Other screens keep their titles.
+- The band's left half has two lines like the right half: a muted "Status" label, then the state icon and word followed by " Â· time" in the muted time colour when the time is known (omitted when unknown, never a dangling "Â·"). All states; Ready stays green. Geometry is unchanged; label and value baselines follow the mockup within 2 px.
+
 ## Risk
 
 **Critical:**

@@ -24,9 +24,12 @@ static void row(pod_out_frame_t *f, const pod_model_t *m, const pod_agent_t *a, 
     int tw = ht_pro_width(&ci_rg_22, t), ww = ht_pro_width(&ci_bd_20, word), mw = imax(tw, ww), right = POD_W - CI_MARGIN;
     const int cy = y0 + CI_ROW_H / 2;
     ci_mark(s, CI_MARGIN, y0 + (CI_ROW_H - CI_MARK) / 2, a->engine);
-    ci_text(s, right - tw, cy - 15 - ci_rg_22.height / 2, tw, &ci_rg_22, CI_MUTED, t);
-    ci_text(s, right - ww, cy + 16 - ci_bd_20.height / 2, ww, &ci_bd_20, wink, word);
-    int room = right - mw - META_GAP - NAME_X;
+    if (st == POD_IDLE) { tw = ww = mw = 0; }   // Ready: no meta at all (owner, 2026-10-14)
+    else {
+        ci_text(s, right - tw, cy - 15 - ci_rg_22.height / 2, tw, &ci_rg_22, CI_MUTED, t);
+        ci_text(s, right - ww, cy + 16 - ci_bd_20.height / 2, ww, &ci_bd_20, wink, word);
+    }
+    int room = right - mw - (mw ? META_GAP : 0) - NAME_X;
     ci_text(s, NAME_X, cy - 18 - ci_rg_33.height / 2, room, &ci_rg_33, CI_INK, a->name);
     char eng[16], sub[HT_TEXT_BYTES];
     pod_engine_name(eng, sizeof eng, a->engine);
@@ -34,6 +37,24 @@ static void row(pod_out_frame_t *f, const pod_model_t *m, const pod_agent_t *a, 
     ci_text(s, NAME_X, cy + 21 - ci_rg_23.height / 2, room, &ci_rg_23, CI_MUTED, sub);
     ht_pro_rect(s, 0, y0 + CI_ROW_H - 1, POD_W, 1, 0, CI_RULE);
     pod_hit_add_id(f, 0, y0, POD_W, imin(CI_ROW_H, CI_FOOT_Y - y0), POD_A_OPEN_AGENT, index, a->id);
+}
+
+// The footer's left: `none` ("None working"; "No panes" / "No agents" for an empty list), or the working mark, the count in Bold and " working".
+static void foot_left(ht_scene_t *s, int working, const char *none, uint32_t now_ms)
+{
+    const int cy = CI_FOOT_Y + (POD_W - CI_FOOT_Y) / 2;
+    if (!working) {
+        ci_text(s, CI_MARGIN, cy - ci_rg_23.height / 2, 300, &ci_rg_23, CI_MUTED, none);
+        return;
+    }
+    char n[8];
+    snprintf(n, sizeof n, "%d", working);
+    int x = CI_MARGIN;
+    pod_eq(s, x, cy - 10, CI_EQ, now_ms);
+    x += 23 + 14;
+    ht_pro_text(s, x, cy - ci_bd_23.height / 2, ht_pro_width(&ci_bd_23, n), &ci_bd_23, CI_INK, n);
+    x += ht_pro_width(&ci_bd_23, n) + 7;
+    ht_pro_text(s, x, cy - ci_rg_23.height / 2, ht_pro_width(&ci_rg_23, "working"), &ci_rg_23, CI_EQ, "working");
 }
 
 void pod_view_tab(pod_out_frame_t *f, const pod_nav_t *nav, const pod_model_t *m, uint32_t now_ms)
@@ -61,7 +82,8 @@ void pod_view_tab(pod_out_frame_t *f, const pod_nav_t *nav, const pod_model_t *m
             ht_pro_text(s, (POD_W - w2) / 2, 242 - ci_rg_25.height / 2, w2, &ci_rg_25, CI_MUTED, l2);
             snprintf(foot, sizeof foot, "No panes");
         }
-        ci_foot(s, foot, true, NULL);
+        ci_foot(s, NULL, false, NULL);
+        foot_left(s, 0, foot, now_ms);
         ci_bar(f, pod_view_title(nav, m), back, f->unread, true);
         return;
     }
@@ -72,7 +94,10 @@ void pod_view_tab(pod_out_frame_t *f, const pod_nav_t *nav, const pod_model_t *m
 
     char right[24];
     snprintf(right, sizeof right, "%d %s%s", n, is_recent ? "AGENT" : "PANE", n == 1 ? "" : "S");
-    ci_foot(s, "Scroll to browse", true, right);
+    int working = 0;
+    for (int i = 0; i < n; i++) working += pod_model_eff(m, list[i]) == POD_WORKING;
+    ci_foot(s, NULL, false, right);
+    foot_left(s, working, "None working", now_ms);
     ci_bar(f, pod_view_title(nav, m), back, f->unread, true);
 }
 
