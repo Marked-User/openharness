@@ -9,7 +9,6 @@ import type { StoppedAgentStore } from './stoppedAgents.js'
 import { resumeStoppedAgent, waitForResumedAgent, resumeChanged, resumeUnconfirmed, RESUME_READINESS_BUDGET_MS } from './resumeStoppedAgent.js'
 import { checkPidRuntime } from './deleteAgentFallback.js'
 import { checkSessionRuntime, resolvePaneEngineProcess } from './paneEngineProcess.js'
-import { listTmuxPanes } from './tmuxAgentDiscovery.js'
 import { enginePathOverride } from './engineBin.js'
 import { engineInstallRecipe } from './engineInstall.js'
 import { buildEngineLaunchArgv, dropPermissionFlagIfUnsupported, permissionModeApproves, permissionModeFlags, refusePermissionFlagIfUnsupported } from './engineLaunch.js'
@@ -25,7 +24,7 @@ import { harnessPermissionEnvironment } from './harnessDefaults.js'
 export interface ResumeAgentServiceDeps {
   registry: Pick<typeof liveRegistry, 'byAgent' | 'bySession' | 'resumePendingAgent' | 'setLaunch' | 'updateProcessIdentity'>
   stoppedAgents: StoppedAgentStore
-  tmuxBackend: (CreateAgentPaneDeps['tmuxBackend'] & Pick<TerminalBackend<TmuxRuntimeRef>, 'releaseHold' | 'paneState' | 'rootProcess'>) | null
+  tmuxBackend: (CreateAgentPaneDeps['tmuxBackend'] & Pick<TerminalBackend<TmuxRuntimeRef>, 'releaseHold' | 'paneState' | 'rootProcess' | 'inventory'>) | null
   restartJobs: AgentRestartCoordinator
   stopJobs: ReadonlyMap<string, Promise<void>>
   pinnedControls: { has(agentId: string): boolean }
@@ -159,23 +158,24 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
     current,
     checkLive: async entry => {
       if (!entry.tmuxPane) return { state: 'unknown', reason: 'Only tmux resume is supported.' }
-      const inventory = await listTmuxPanes()
-      if (!inventory.ok) return { state: 'unknown', reason: 'Terminal inventory is unavailable.' }
-      const paneAlive = inventory.panes.some(pane => pane.tmuxPane === entry.tmuxPane)
+      if (!tmuxBackend) return { state: 'unknown', reason: 'Terminal inventory is unavailable.' }
+      const inventory = await tmuxBackend.inventory()
+      if (inventory.state !== 'available') return { state: 'unknown', reason: 'Terminal inventory is unavailable.' }
+      const paneAlive = inventory.roots.some(root => root.runtime.paneId === entry.tmuxPane)
       if (isTerminalEngine(entry.engine)) return paneAlive ? { state: 'alive' } : { state: 'gone', reason: 'Shell pane is gone.' }
       const process = await checkPidRuntime(entry)
       if (process.state !== 'gone') {
-        if (!paneAlive || process.state === 'unknown' || !tmuxBackend) return { state: 'unknown', reason: 'The previous process is not available through its saved terminal.' }
+        if (!paneAlive || process.state === 'unknown') return { state: 'unknown', reason: 'The previous process is not available through its saved terminal.' }
         return checkSessionRuntime(tmuxBackend, entry)
       }
       if (!entry.processIdentity && paneAlive) return { state: 'unknown', reason: 'The engine has not been identified yet.' }
       return process
     },
     retain: async entry => {
-      const inventory = await listTmuxPanes()
-      if (!inventory.ok) throw new Error('Could not verify the previous terminal. Try again.')
+      const inventory = await tmuxBackend?.inventory()
+      if (inventory?.state !== 'available') throw new Error('Could not verify the previous terminal. Try again.')
       if (!current()) return
-      retainExitedSession(entry, inventory.panes.some(pane => pane.tmuxPane === entry.tmuxPane))
+      retainExitedSession(entry, inventory.roots.some(root => root.runtime.paneId === entry.tmuxPane))
     },
     waitForReady: saved => waitForResume(saved, current),
     canLaunch: async saved => {

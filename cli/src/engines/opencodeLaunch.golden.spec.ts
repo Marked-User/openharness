@@ -12,7 +12,6 @@ vi.mock('../lib/createAgentPane.js', () => ({ createAndRegisterPane: async (inpu
   captured.panes.push(input)
   return { ok: false, error: 'RECORDED', detail: 'No pane is opened by this golden.' }
 } }))
-vi.mock('../lib/tmuxVersion.js', async real => ({ ...await real<object>(), tmuxSupportsSessionEnv: async () => true }))
 vi.mock('../lib/processTable.js', async real => ({ ...await real<object>(), processArgs: async () => '' }))
 vi.mock('../lib/gatewayRuntime.js', async real => ({ ...await real<object>(), probeGatewayRuntime: async () => ({ kind: 'none' }) }))
 vi.mock('../lib/binaryOnPath.js', async real => {
@@ -95,14 +94,14 @@ it('records create, fork, relaunch and actual retarget dispatch before the extra
   const { buildEngineLaunchArgv } = await import('../lib/engineLaunch.js')
   const { env } = await import('../config/env.js')
   const world = { dataDir: join(root, 'adapter_data_dir'), machine: async () => ({ hermesSystemManaged: false, opencodeMajor: await opencodeMajorVersion() }),
-    tmuxSupportsSessionEnv: async () => true, readCodexConfig: () => null, setGridLaunch: () => {} }
+    capabilities: async () => ({ sessionEnv: true }), readCodexConfig: () => null, setGridLaunch: () => {} }
   const shapes = launchShapes(world)
   const row = (engine: AgentEngine, named = false): RegisteredSession => ({ agentId: 'fixture-agent', sessionId: 'ses_fixture', engine, cwd: work,
     registeredAt: Date.now(), active: true, runtimes: [{ backend: 'tmux', paneId: '%4' }], agent: named ? 'reviewer' : null,
     processIdentity: { pid: 4242, executable: engine, startMarker: 'fixture' }, grid: null, gridLaunch: null, codexHome: null,
     dsh: null, dshRuntime: null, scmLaunch: null, permissionMode: null, bypassPermission: false, subscriptionModel: 'fixture/model#high',
   }) as unknown as RegisteredSession
-  const createRest = { tmuxBackend: {}, registry: {}, hooksDisabled: true, hookPort: 4242,
+  const createRest = { createBackend: {}, registry: {}, hooksDisabled: true, hookPort: 4242,
     installOpencodePlugin: async () => true, terminalHintMachineName: () => 'fixture-machine', blocksFolder: () => false,
     gridSetup: () => null, privateGridName: async () => null, watchNewPane: async () => {}, announceSession: () => {}, attachDsh: () => {},
   }
@@ -137,7 +136,7 @@ it('records create, fork, relaunch and actual retarget dispatch before the extra
         setGridLaunch: (...args: unknown[]) => event(['grid', ...args]), setSubscriptionModel: (...args: unknown[]) => event(['subscription', ...args]),
         setActive: (...args: unknown[]) => event(['active', ...args]) },
       runtimeProfiles: { selectedModel: () => null },
-      launchOverridesDeps: { machine: world.machine, tmuxSupportsSessionEnv: world.tmuxSupportsSessionEnv },
+      launchOverridesDeps: { machine: world.machine, capabilities: world.capabilities },
       sessionTurnOpen: () => false,
       acquireTerminalControl: () => () => event(['release']), relaunchOverrides: shapes.relaunch,
       downgradedPermission: async () => ({ bypassPermission: false, permissionMode: null }),

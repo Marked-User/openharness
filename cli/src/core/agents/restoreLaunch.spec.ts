@@ -48,7 +48,7 @@ describe('restore preparation keeps session authority in core', () => {
       authority: createLaunchAuthority({ byAgent: () => live, revision: () => 1, cancelled: () => false }),
       prepareApiTools: apiNotes, setGridLaunch: vi.fn(), setTail: vi.fn(),
       launchOverridesDeps: { machine: () => ({ hermesSystemManaged: false }), gridLaunch: vi.fn(),
-        tmuxSupportsSessionEnv: async () => true, writeGridConfigDir: vi.fn(), installCodexHooks: vi.fn(async () => true), readCodexConfig: () => null },
+        capabilities: async () => ({ sessionEnv: true }), writeGridConfigDir: vi.fn(), installCodexHooks: vi.fn(async () => true), readCodexConfig: () => null },
     })
     const { deps } = setup()
     const build = createRestoreLaunch({ ...deps, relaunchOverrides: helpers.relaunchOverrides })
@@ -66,7 +66,7 @@ describe('restore preparation keeps session authority in core', () => {
       authority: createLaunchAuthority({ byAgent: () => live, revision: () => 1, cancelled: () => false }),
       prepareApiTools: apiNotes, setGridLaunch: vi.fn(), setTail: vi.fn(),
       launchOverridesDeps: { machine: () => ({ hermesSystemManaged: false }), gridLaunch: vi.fn(),
-        tmuxSupportsSessionEnv: async () => true, writeGridConfigDir: vi.fn(), installCodexHooks: vi.fn(async () => true), readCodexConfig: () => null,
+        capabilities: async () => ({ sessionEnv: true }), writeGridConfigDir: vi.fn(), installCodexHooks: vi.fn(async () => true), readCodexConfig: () => null,
         dshLaunch: async () => { live.permissionMode = 'ask'; return { ok: true, launch: { env: {}, args: [] } } } },
     })
     const { deps } = setup()

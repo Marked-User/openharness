@@ -17,7 +17,6 @@ import { ENUMERATION_ATTEMPTS } from '../../engines/kit/nativeFiles.js'
 import { loadEngine } from '../../engines/inProcess.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { stopSessionOwner, type SessionOwner } from '../../lib/sessionSearch/external.js'
-import { tmuxSupportsSessionEnv } from '../../lib/tmuxVersion.js'
 import { createAgentCreator, type CreateAgentDeps } from './create.js'
 import { prepareInstructionWrites } from '../../scm/scmProjects.js'
 import { opencodeMajorVersion } from '../../engines/launchControl.js'
@@ -105,7 +104,8 @@ vi.mock('../../engines/hooks.js', async (real) => {
   return { ...actual, engineHooks: { ...actual.engineHooks, codex: { ...actual.engineHooks.codex, installIn: vi.fn(async () => true) } } }
 })
 vi.mock('../../lib/sessionSearch/external.js', async (real) => ({ ...await real<object>(), stopSessionOwner: vi.fn(async () => true) }))
-vi.mock('../../lib/tmuxVersion.js', async (real) => ({ ...await real<object>(), tmuxSupportsSessionEnv: vi.fn(async () => true) }))
+// What the backend new panes are made on can do; every test's backend can give a session its own environment.
+const capabilities = vi.fn(async () => ({ sessionEnv: true }))
 
 const launchDsh = vi.fn<CreateAgentDeps['dshLaunch']['launch']>(async () => ({ ok: true, launch: { env: { HARNESS_DSH: 'blender' }, args: ['--dsh'] } }))
 
@@ -129,7 +129,7 @@ const owner = { pid: 7, engine: 'claude' } as SessionOwner
 
 function setup(over: Partial<CreateAgentDeps> = {}) {
   const deps: CreateAgentDeps = {
-    tmuxBackend: { releaseHold: vi.fn(async () => {}) } as unknown as CreateAgentDeps['tmuxBackend'],
+    createBackend: { releaseHold: vi.fn(async () => {}), capabilities } as unknown as CreateAgentDeps['createBackend'],
     registry: { setLaunch: vi.fn(() => ({ ...pending, launch: { state: 'ready' } })) } as unknown as CreateAgentDeps['registry'],
     externalResume: vi.fn<CreateAgentDeps['externalResume']>(async () => ({ ok: true, session: pending })),
     watchNewPane: vi.fn(async () => {}),
@@ -219,7 +219,7 @@ describe('creating an agent', () => {
     vi.mocked(installedDsh).mockReturnValue(installed() as never)
     const run = setup()
     if (stage === 'folder inspection') vi.mocked(readdir).mockImplementationOnce(async () => { current = false; return [] })
-    if (stage === 'tmux capabilities') vi.mocked(tmuxSupportsSessionEnv).mockImplementationOnce(async () => { current = false; return true })
+    if (stage === 'tmux capabilities') capabilities.mockImplementationOnce(async () => { current = false; return { sessionEnv: true } })
     if (stage === 'config publication') vi.mocked(writeGridConfigDir).mockImplementationOnce(async () => { current = false; return '/fixture/config' })
     buildGridLaunch.mockResolvedValueOnce({ ok: true, override: { networkId: 'fixture', networkName: 'Fixture', baseUrl: 'http://fixture.invalid', apiKey: 'fixture' }, launch: {
       env: {}, args: [], webSearch: 'unsupported', configDir: { envVar: 'PI_CONFIG', files: [] },
@@ -372,7 +372,7 @@ describe('creating an agent', () => {
 
   describe('refusals before any pane opens', () => {
     it('without tmux, in a folder being purged, or in a folder that is not one', async () => {
-      expect(await setup({ tmuxBackend: null }).create(request())).toEqual({ ok: false, error: 'TMUX_UNAVAILABLE' })
+      expect(await setup({ createBackend: null }).create(request())).toEqual({ ok: false, error: 'TMUX_UNAVAILABLE' })
       expect(await setup({ blocksFolder: () => true }).create(request())).toEqual({ ok: false, error: 'WORKTREE_BUSY' })
       const { create } = setup()
       const file = join(folder(['x']), 'x')
@@ -394,7 +394,7 @@ describe('creating an agent', () => {
       vi.mocked(installedDsh).mockReturnValue(installed() as never)
       vi.mocked(incompatibleHarnessEngine).mockReturnValueOnce('Blender runs on codex')
       expect(await create(request({ dsh: 'blender' }))).toMatchObject({ error: 'INVALID_DSH', detail: 'Blender runs on codex' })
-      vi.mocked(tmuxSupportsSessionEnv).mockResolvedValueOnce(false)
+      capabilities.mockResolvedValueOnce({ sessionEnv: false })
       expect(await create(request({ dsh: 'blender' }))).toMatchObject({ error: 'TMUX_TOO_OLD_FOR_DSH' })
       vi.mocked(installedDsh).mockReset().mockReturnValue(undefined)
     })
@@ -430,7 +430,7 @@ describe('creating an agent', () => {
       const { create } = setup()
       buildGridLaunch.mockResolvedValueOnce({ ok: false, error: 'GRID_ENGINE_UNSUPPORTED', detail: 'no grid for amp' })
       expect(await create(request({ grid }))).toEqual({ ok: false, error: 'GRID_ENGINE_UNSUPPORTED', detail: 'no grid for amp' })
-      vi.mocked(tmuxSupportsSessionEnv).mockResolvedValueOnce(false)
+      capabilities.mockResolvedValueOnce({ sessionEnv: false })
       expect(await create(request({ grid }))).toMatchObject({ error: 'TMUX_TOO_OLD_FOR_GRID' })
       const configured = { ok: true, launch: { env: {}, args: [], webSearch: 'off', configDir: { envVar: 'PI_CONFIG', files: {}, links: [] } } }
       buildGridLaunch.mockResolvedValueOnce(configured as never).mockResolvedValueOnce(configured as never)
@@ -469,7 +469,7 @@ describe('creating an agent', () => {
       vi.mocked(createAndRegisterPane).mockResolvedValueOnce({ ok: true, spawned: { runtime: { paneId: '%2' } }, pending: { ...pending, engine: 'terminal' } } as never)
       const { deps, create } = setup()
       expect(await create(request({ engine: 'terminal' }))).toMatchObject({ ok: true, session: { launch: { state: 'ready' } } })
-      expect(deps.tmuxBackend!.releaseHold).toHaveBeenCalledWith({ paneId: '%2' })
+      expect(deps.createBackend!.releaseHold).toHaveBeenCalledWith({ paneId: '%2' })
       expect(deps.watchNewPane).not.toHaveBeenCalled()
       vi.mocked(createAndRegisterPane).mockResolvedValueOnce({ ok: true, spawned: { runtime: { paneId: '%3' } }, pending: { ...pending, engine: 'terminal' } } as never)
       vi.mocked(deps.registry.setLaunch).mockReturnValueOnce(null)

@@ -56,7 +56,7 @@ it.each([true, false])('completes native Codex preparation before its dispatch c
     return { ok: true, pending, spawned: { runtime: { backend: 'tmux', paneId: '%fixture' } } }
   })
   const creator = createAgentCreator({ native: (engine, source) => inspectNativeLaunch(engine, source),
-    tmuxBackend: {} as CreateAgentDeps['tmuxBackend'], registry: {} as CreateAgentDeps['registry'],
+    createBackend: {} as CreateAgentDeps['createBackend'], registry: {} as CreateAgentDeps['registry'],
     externalResume: async () => { throw Error('unexpected external resume') }, watchNewPane: async () => {},
     announceSession: () => {}, attachDsh: () => {}, prepareApiTools: () => {},
     hookPort: 19473, hooksDisabled: false, installOpencodePlugin: async () => true,

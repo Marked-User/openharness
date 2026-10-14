@@ -37,7 +37,6 @@ vi.mock('../lib/createAgentPane.js', () => ({
     return { ok: false, error: 'RECORDED', detail: 'the pane is not opened by this spec' }
   }),
 }))
-vi.mock('../lib/tmuxVersion.js', async (real) => ({ ...await real<object>(), tmuxSupportsSessionEnv: vi.fn(async () => pane.tmux) }))
 vi.mock('../engines/launchControl.js', async (real) => ({ ...await real<object>(), opencodeMajorVersion: vi.fn(() => 2) }))
 vi.mock('../lib/engineBin.js', async (real) => ({ ...await real<object>(), enginePathOverride: vi.fn(() => null) }))
 // A create's and a fork's label is new each time, and their session's runtime is keyed on it: one per engine here.
@@ -181,7 +180,7 @@ beforeAll(async () => {
   const { launchShapes } = await import('../testing/launchShapes.js')
   invalidate = (await import('../dsh/installed.js')).invalidateInstalledDsh
   shapes = (gridName = null) => launchShapes({
-    dataDir: join(root, 'data'), machine: () => ({ ...M1 }), tmuxSupportsSessionEnv: async () => pane.tmux,
+    dataDir: join(root, 'data'), machine: () => ({ ...M1 }), capabilities: async () => ({ sessionEnv: pane.tmux }),
     readCodexConfig: () => null, setGridLaunch: () => {}, gridName: () => gridName,
   })
 })
@@ -221,7 +220,7 @@ const paneOf = (call: Record<string, unknown> | undefined): unknown => call ? {
 const pending = { agentId: 'created', sessionId: '', engine: 'claude' } as RegisteredSession
 const gridSetups: string[] = []
 const createRest = (privateGrid: string | null) => ({
-  tmuxBackend: {} as never, registry: { setLaunch: () => pending } as never,
+  createBackend: { capabilities: async () => ({ sessionEnv: pane.tmux }) } as never, registry: { setLaunch: () => pending } as never,
   adoptableSession: async () => ({ ok: false, error: 'UNUSED' }) as never, heldBy: async () => 'none' as const, takeOverWhenIdle: async () => {},
   watchNewPane: (async () => {}) as never, announceSession: () => {}, attachDsh: () => {}, hookPort: 4242, hooksDisabled: true,
   installOpencodePlugin: async () => true, terminalHintMachineName: () => 'this-mac', blocksFolder: () => false,

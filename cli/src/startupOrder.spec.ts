@@ -125,6 +125,20 @@ describe('the core\'s start-up order (core/main.ts)', () => {
     }
   })
 
+  it('names the enabled terminal backends before any backend says how it started', () => {
+    // A tmux machine's start log reads `[terminal] enabled backends: tmux`, then `[terminal] tmux: available`,
+    // which `TmuxBackend.prepare` prints once its first inventory lands (tmuxBackend.spec.ts): the list is
+    // printed after every prepare is started and before any is awaited.
+    const source = code(SOURCE)
+    const started = source.indexOf('backend.prepare({ ownedPanes })')
+    const named = source.indexOf('console.log(`[terminal] enabled backends: ${terminalConfig.backends.join(\', \')}`)')
+    const awaited = source.indexOf('await preparing')
+    expect(started, 'core/main.ts still prepares each backend').toBeGreaterThan(-1)
+    expect(named, 'core/main.ts still names the enabled backends').toBeGreaterThan(started)
+    expect(awaited).toBeGreaterThan(named)
+    expect(source.slice(started, named)).not.toContain('await ')
+  })
+
   it('starts native hook maintenance after readiness without awaiting its completion', () => {
     const source = code(SOURCE)
     expect(source).not.toMatch(/await\s+installEngineHooks\(/)

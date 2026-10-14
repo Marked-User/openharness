@@ -55,9 +55,8 @@ import { DAEMON_LOG_FILE, PID_FILE, daemonPort, isAlive, readPid, LEGACY_LOG_FIL
 import { clearSafeModeMarker, safeModeDisposition, safeModeStatusBody, SafeModeRequest, writeSafeModeMarker } from '../lib/daemonSafeMode.js'
 import { awakeTimeout } from '../lib/sleepAware.js'
 import { removePidFileIf, onError } from '../lib/daemonLaunch.js'
-import { ensureTmuxOnPath } from '../lib/tmuxOnPath.js'
-import { harnessdEnv, holdHarnessdEnv, isHarnessdVariable } from '../lib/harnessdEnv.js'
-import { dropAgentSessionEnv, isAgentSessionVariable } from '../lib/agentSessionEnv.js'
+import { harnessdEnv, holdHarnessdEnv } from '../lib/harnessdEnv.js'
+import { dropAgentSessionEnv } from '../lib/agentSessionEnv.js'
 import { AUTH_DIR, AuthSessionManager, clearAuthSession, ensureSignInEpoch, readAuthSession, signInOf, type AuthSession } from '../lib/authSession.js'
 import { ENGINES, enginePathOverride } from '../lib/engineBin.js'
 import { isTerminalEngine, type AgentEngine } from '../engines/types.js'
@@ -66,7 +65,6 @@ import { buildEngineLaunchArgv, supportsFirstPrompt } from '../lib/engineLaunch.
 import { workspaceMissing } from '../lib/workspaceCheck.js'
 import { HERMES_SYSTEM_MANAGED_DIR, type GridLaunchMachine } from '../lib/gridLaunchWire.js'
 import { writeGridConfigDir } from '../lib/gridConfigDir.js'
-import { tmuxSupportsSessionEnv } from '../lib/tmuxVersion.js'
 import { clearDeleted, isRecentlyDeleted, markDeleted } from '../lib/deletedSessions.js'
 import { findLiveSession, findResumedTranscript } from '../lib/sessionRepair.js'
 import { processSessionOf } from '../engines/sessionStores.js'
@@ -86,7 +84,7 @@ import { externalSessionAnswer, externalUnavailable } from '../lib/externalSessi
 import { externalResumePending } from '../lib/externalResume.js'
 import { type LaunchOverridesDeps } from '../lib/launchOverrides.js'
 import { buildHarnessSessionLabel } from '../lib/harnessSessionLabel.js'
-import { adoptLegacyHarnessSessions, listTmuxPanes } from '../lib/tmuxAgentDiscovery.js'
+import { listTmuxPanes } from '../lib/tmuxAgentDiscovery.js'
 import { installedDsh, invalidateInstalledDsh } from '../dsh/installed.js'
 import { dshThrough } from './agents/dshThrough.js'
 import { ApiConnectionMetadata } from '../lib/apiConnectionMetadata.js'
@@ -99,6 +97,8 @@ import { lookupPaneEngineProcess, resolvePaneEngineProcess } from '../lib/paneEn
 import { argvTokens, processRows } from '../lib/processTable.js'
 import { ALL_TERMINAL_BACKENDS } from '../config/terminalConfig.js'
 import { TerminalBackendCoordinator } from '../lib/terminalBackendCoordinator.js'
+import type { TerminalBackend } from '../lib/terminalBackend.js'
+import type { TerminalRuntimeRef } from '../lib/terminalTypes.js'
 import { TerminalStreamManager } from '../lib/terminalStreamManager.js'
 import { terminalRouteKey, terminalRuntimeLabel } from '../lib/terminalRuntime.js'
 import { probeTerminalAgents } from '../lib/terminalAgentDiscovery.js'
@@ -524,60 +524,43 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   const terminalConfig = {
     backends: env.TERMINAL_BACKENDS ?? ALL_TERMINAL_BACKENDS,
   }
-  // Before ANY tmux call: a daemon that came up outside a terminal (the usual shape after a reboot)
-  // has a minimal PATH, and every `execFile('tmux', …)` below would ENOENT. Ask the user's own login
-  // shell where tmux is and adopt that directory, the same way the engine launch already consults it.
-  // Both of these are independent login-shell spawns with nothing dependent on the other's
-  // result — started together here so their wall-clock cost overlaps instead of adding up.
-  // `loginShellEnvPromise` is awaited later, near the existing `[env]` log line.
-  const tmuxPathPromise = terminalConfig.backends.includes('tmux') ? ensureTmuxOnPath() : null
-  const loginShellEnvPromise = warmLoginShellEnvironment()
-  // Missing tmux is a STATE, not a reason to refuse to start. The daemon already models a machine
-  // without it — `tmuxBackend` is null whenever the config omits tmux, every caller tests it, and the
-  // create/restart/resume paths answer `TMUX_UNAVAILABLE` — so it can still serve its status, the
-  // local socket and the backend link, leave for an update, and say what is missing. Refusing instead left a
-  // machine whose PATH lost tmux with a daemon that could not start and therefore could not be fixed.
-  let tmuxUnavailable: string | null = null
-  if (tmuxPathPromise) {
-    const tmuxPath = await tmuxPathPromise
-    if (tmuxPath.state === 'absent') {
-      tmuxUnavailable = tmuxPath.reason
-      console.error(`[tmux] unavailable: ${tmuxPath.reason} · install tmux and verify \`tmux -V\`,`
-        + ' then restart — agents cannot be created or restored until then')
-    } else if (tmuxPath.state === 'adopted') {
-      console.log(`[tmux] not on the daemon PATH · adopted ${tmuxPath.path} · ${tmuxPath.from}`)
-    }
-  }
   // The desktop's pane colours, for tmux's `window-style` (lib/hostTheme.ts): the last ones the app
   // sent, or its stock dark palette until it says otherwise. Read through a closure so a change
   // reaches sessions created after it without rebuilding the backend.
   let hostTheme: HostTheme = loadHostTheme() ?? DEFAULT_HOST_THEME
-  const tmuxBackend = terminalConfig.backends.includes('tmux') && !tmuxUnavailable ? new TmuxBackend(() => hostTheme) : null
-  const terminalBackends = tmuxBackend ? [tmuxBackend] : []
+  // Each configured backend readies itself (`TerminalBackend.prepare`: tmux finds its binary, renames
+  // legacy sessions, forgets harnessd's variables and logs its first inventory). One that cannot is a
+  // STATE the daemon runs on without, never a reason to refuse to start: it still serves its status, the
+  // local socket and the backend link, leaves for an update, and says what is missing.
+  const candidates: TerminalBackend[] = []
+  if (terminalConfig.backends.includes('tmux')) candidates.push(new TmuxBackend(() => hostTheme))
+  // The registry's panes, for a backend that adopts what an older build left (tmux's legacy session names).
+  const ownedPanes = new Map(registry.list().flatMap((s) => s.runtimes.map((r) => [r.paneId, s.engine] as const)))
+  const preparing = Promise.all(candidates.map(async (backend) => ({ backend, result: await backend.prepare({ ownedPanes }) })))
+  // Started while the backends prepare, which ask a login shell too (tmux: where it is installed): two
+  // independent login-shell spawns whose wall-clock cost overlaps instead of adding up.
+  // `loginShellEnvPromise` is awaited later, near the existing `[env]` log line.
+  const loginShellEnvPromise = warmLoginShellEnvironment()
+  console.log(`[terminal] enabled backends: ${terminalConfig.backends.join(', ')}`)
+  const prepared = await preparing
+  const terminalBackends = prepared.filter((p) => p.result.state === 'ready').map((p) => p.backend)
+  // The first backend that could not be readied, and why, for the status's `discoveryError`.
+  const terminalUnavailable = prepared.flatMap(({ backend, result }) => result.state === 'unavailable'
+    ? [{ backend: backend.name, reason: result.reason, code: result.code }] : [])[0] ?? null
+  // The backend new panes are made on. Every other pane operation reaches the pane's own backend
+  // through the coordinator (`terminals.backendFor`).
+  const createBackend: TerminalBackend | null = terminalBackends[0] ?? null
+  // What only tmux does so far — a held pane's token (`isHeld`/`killHeld`), clearing a pane's
+  // session environment, a respawn in place — reaches the services that need it on the tmux backend
+  // itself, and only when it is the one new panes are made on.
+  const tmuxBackend = createBackend instanceof TmuxBackend ? createBackend : null
   const terminals = new TerminalBackendCoordinator(
     terminalBackends,
     terminalConfig.backends,
   )
-  console.log(`[terminal] enabled backends: ${terminalConfig.backends.join(', ')}`)
-  if (tmuxBackend) {
-    // Before the first inventory: sessions a pre-prefix build named `<engine>-<ts>` are renamed to
-    // `harness-<engine>-<ts>` so discovery's whitelist sees the registry's own panes again.
-    const ownedPanes = new Map(registry.list().flatMap((session) => session.runtimes
-      .filter((runtime) => runtime.backend === 'tmux')
-      .map((runtime) => [runtime.paneId, session.engine] as const)))
-    for (const adopted of await adoptLegacyHarnessSessions(ownedPanes)) {
-      console.log(`[terminal] renamed tmux session ${adopted.from} → ${adopted.to} (pane ${adopted.paneId}) · named by a build before the harness- prefix`)
-    }
-    // Before the first pane this boot makes or restarts: a server an earlier core started still has that
-    // core's HARNESSD_* (the service token among them) in the environment it gives every new pane, and one
-    // started from an agent's shell that agent's session (lib/agentSessionEnv.ts).
-    const forgotten = await tmuxBackend.unsetServerEnvironment((name) => isHarnessdVariable(name) || isAgentSessionVariable(name))
-    if (forgotten.length) console.log(`[terminal] tmux: removed ${forgotten.join(', ')} from the environment new panes start with`)
-    const tmuxStartup = await tmuxBackend.inventory()
-    console.log(tmuxStartup.state === 'available'
-      ? '[terminal] tmux: available'
-      : `[terminal] tmux: ${tmuxStartup.state} (${tmuxStartup.reason})`)
-  }
+  // A row's pane (`tmuxPane`, its primary runtime's id) as the runtime the coordinator finds its backend
+  // by: tmux's, until rows carry another backend.
+  const paneRuntime = (paneId: string): TerminalRuntimeRef => ({ backend: 'tmux', paneId })
   const sqliteWarning = sqlitePreflightMessage()
   if (sqliteWarning) console.warn(sqliteWarning)
   // The user's shell environment is captured at startup, not on the first recap — a slow profile
@@ -763,7 +746,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     cloud: cloudDoors,
     cloudRows: () => (cloudAgents?.dialRows() ?? []) as unknown as RegisteredSession[],
     // Agents' terminals: a literal-argv launch, and a read-only view for Share's observers (core/terminalWatch.ts).
-    terminals: { ...TERMINALS_OFF, ...createTerminalOpener({ tmuxBackend, registry, announceSession, blocksFolder: (cwd) => !!backendRef?.purgeAgentService?.blocksFolder(cwd) }), watch: terminalWatch.watch },
+    terminals: { ...TERMINALS_OFF, ...createTerminalOpener({ tmuxBackend: createBackend, registry, announceSession, blocksFolder: (cwd) => !!backendRef?.purgeAgentService?.blocksFolder(cwd) }), watch: terminalWatch.watch },
     dataDir: env.ADAPTER_DATA_DIR,
     registry,
     stoppedAgents,
@@ -953,7 +936,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // client's frames go through, held at the same gate. In its own process by default (core/gatewayLink.ts),
   // or here (gateway/start.ts); the socket hears it through `fromGateway` and speaks to it in the clear.
   Object.assign(coreApi.terminals, createTerminalSessions({ agents: coreApi.agents,
-    paneState: (pane) => tmuxBackend?.paneState({ backend: 'tmux', paneId: pane }) ?? Promise.resolve('unknown'), processState: checkPidRuntime }))
+    paneState: (pane) => { const runtime = paneRuntime(pane); return terminals.backendFor(runtime)?.paneState(runtime) ?? Promise.resolve('unknown') },
+    processState: checkPidRuntime }))
   const account = (s = readAuthSession()): GatewayAccount => ({ machineId: s?.machineId ?? null, signIn: signInOf(s?.signInEpoch, s?.signInAcct), autonomousEnv: s?.autonomousEnv ?? env.AUTONOMOUS_ENV })
   const engineReaders = createEngineReaders({ isolated: outOfProcess, inline: inline?.engineTranscriptFor,
     call: (service, type, payload, waitMs) => serviceLinksRef?.call(service, type, payload, waitMs) ?? Promise.resolve({ error: 'SERVICE_UNAVAILABLE' }) })
@@ -1043,7 +1027,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       if (!label || GENERIC_PAIR_LABELS.has(label)) return null
       return { kind: client.role === 'device' ? 'device' : 'web', name: label }
     },
-    streamingAvailable: tmuxBackend != null,
+    streamingAvailable: terminalBackends.some((backend) => !!backend.openStream),
     diagnostic: (event, fields) => console.log(`[terminal-stream] ${event}`, fields),
     // The keystroke prewarm (grid-reads-without-waking issue 03): typing into a pane whose agent runs on
     // a sleeping grid starts that grid while the person types. Here, in the daemon's own input path, so
@@ -1061,7 +1045,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // theme is applied only for a frame, well after `agentReconciler` below exists (connect() comes last).
   const terminalRequests = createTerminalRequests({
     resolve: (id) => registry.resolve(id),
-    paneInfo: (pane) => tmuxBackend?.paneInfo({ backend: 'tmux', paneId: pane }) ?? Promise.resolve(null),
+    paneInfo: (pane) => { const runtime = paneRuntime(pane); return terminals.backendFor(runtime)?.paneInfo(runtime) ?? Promise.resolve(null) },
     applyTheme: (theme) => {
       if (theme.background === hostTheme.background && theme.foreground === hostTheme.foreground) return
       hostTheme = theme
@@ -1767,7 +1751,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       // handoff. Informational: nothing should build readiness on a field the server stops serving.
       restarting: updateHandoff.restarting(),
       discoveryReady,
-      discoveryError: discoveryError ?? (tmuxUnavailable ? `tmux unavailable: ${tmuxUnavailable}` : null),
+      discoveryError: discoveryError ?? (terminalUnavailable ? `${terminalUnavailable.backend} unavailable: ${terminalUnavailable.reason}` : null),
       // Present only when start-up failed and this daemon is holding the machine open until a fix
       // arrives. Clients key on `discoveryReady`; this says WHY, in one word, for a person reading it.
       ...(daemonBoot.safeMode ? { safeMode: true } : {}),
@@ -1780,9 +1764,9 @@ async function runForeground(session: AuthSession | null): Promise<void> {
         watching: `${terminalConfig.backends.join(' + ')} terminals across all supported engines`,
         terminalBackends: terminalConfig.backends,
         terminalSelection: backendsExplicit ? 'configured' : 'auto',
-        terminalTargets: [
-          ...(tmuxBackend ? [{ backend: 'tmux', instance: 'default', state: 'configured' }] : []),
-        ],
+        terminalTargets: terminalBackends.map((target) => ({
+          backend: target.name, instance: target.instanceId.slice(target.name.length + 1), state: 'configured',
+        })),
         dormantAgents: registry.list().filter((session) => !session.active).length,
         dataDir: tildify(env.ADAPTER_DATA_DIR),
         port: daemonPort(),
@@ -2126,7 +2110,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     prepareNative: (native, current, environment, clear) => native.prepareHooks(env.DISABLE_HOOK_INSTALL ? 0 : hookPort, current, environment, clear),
     gridLaunch,
     writeGridConfigDir,
-    tmuxSupportsSessionEnv,
+    // No backend to make the pane on is not this check's to say: the launch answers TMUX_UNAVAILABLE.
+    capabilities: () => createBackend?.capabilities() ?? Promise.resolve({ sessionEnv: true }),
     installCodexHooks: (codexHome) => env.DISABLE_HOOK_INSTALL ? true : engineHookFacets.codex.installIn(hookPort, codexHome),
     dshLaunch: dshLaunch.relaunch,
   }
@@ -2183,7 +2168,11 @@ async function runForeground(session: AuthSession | null): Promise<void> {
    // restore never got to, so the next daemon can put them back.
    try {
     const backend = tmuxBackend
-    const lookupPane = (pane: string, engine: AgentEngine) => lookupPaneEngineProcess(backend, { backend: 'tmux', paneId: pane }, engine)
+    // Asked of the pane's own backend, as every other pane read is; restore runs only with tmux there.
+    const lookupPane = (pane: string, engine: AgentEngine) => {
+      const runtime = paneRuntime(pane)
+      return lookupPaneEngineProcess(terminals.backendFor(runtime) ?? backend, runtime, engine)
+    }
     const restoreDeps: RestoreAgentsDeps = {
       cancelled: (agentId) => !current() || restoreCancelled(agentId),
       revision: (agentId) => restoreRevision(agentId),
@@ -2423,7 +2412,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     publishConfig: publishGridConfigDir,
     native: prepareNativeLaunch,
     dshLaunch,
-    tmuxBackend,
+    createBackend,
     registry,
     externalResume: externalResumes.create,
     watchNewPane,
@@ -2505,7 +2494,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     registry,
     stoppedAgents,
     restartJobs,
-    tmuxBackend,
+    tmuxBackend: createBackend,
     agentReconciler,
     forgetSession,
     markDeleted,

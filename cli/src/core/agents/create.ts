@@ -43,8 +43,8 @@ import { folderTrust } from '../../engines/launchPrep.js'
 import { projectsRoot } from '../../lib/projectFolder.js'
 import { NativeFiles } from '../../engines/kit/nativeFiles.js'
 import type { registry, RegisteredSession } from '../../lib/registry.js'
-import type { TmuxBackend } from '../../lib/tmuxBackend.js'
-import { TMUX_SESSION_ENV_MIN, tmuxSupportsSessionEnv } from '../../lib/tmuxVersion.js'
+import type { TerminalBackend } from '../../lib/terminalBackend.js'
+import { tmuxTooOldForSessionEnv } from '../../lib/tmuxBackend.js'
 import { prepareInstructionWrites, scmLaunchEnv } from '../../scm/scmProjects.js'
 import { mergedLaunchEnv } from './launchEnv.js'
 import type { createPaneWatcher } from './newPane.js'
@@ -58,9 +58,9 @@ type CreateAgent = NonNullable<BackendSocket['onCreateAgent']>
 
 export interface CreateAgentDeps {
   publishConfig?: typeof publishGridConfigDir
-  /** The tmux backend; null where the configuration lists no tmux. */
   native?: (engine: AgentEngine, source: NativeLaunchSource, authority: LaunchAuthority) => Promise<NativeLaunchResult>
-  tmuxBackend: TmuxBackend | null
+  /** The backend new panes are made on; null where none is configured or could be readied. */
+  createBackend: TerminalBackend | null
   registry: typeof registry
   externalResume: CreateAgent
   watchNewPane: ReturnType<typeof createPaneWatcher>
@@ -90,7 +90,7 @@ export interface CreateAgentDeps {
 }
 
 export function createAgentCreator({
-  native: inspectNative, publishConfig, tmuxBackend, registry, externalResume, watchNewPane, announceSession, attachDsh,
+  native: inspectNative, publishConfig, createBackend, registry, externalResume, watchNewPane, announceSession, attachDsh,
   prepareApiTools, hookPort, hooksDisabled, installOpencodePlugin, gridLaunchMachine, buildGridLaunch, terminalHintMachineName, blocksFolder,
   gridSetup, privateGridName, dshLaunch,
 }: CreateAgentDeps) {
@@ -99,7 +99,7 @@ export function createAgentCreator({
     const stale = () => ({ ok: false as const, error: 'LAUNCH_AUTHORITY_CHANGED', unavailable: 'launch', detail: 'Waiting for the original launch request’s authority.' })
     if (!authority.current()) return stale()
     let { engine, cwd, bypassPermission, permissionMode, grid, codexHome, dsh, prompt, name, agent, scmLaunchRecord, startedBy, parentAgentId } = input
-    if (!tmuxBackend) return { ok: false, error: 'TMUX_UNAVAILABLE' }
+    if (!createBackend) return { ok: false, error: 'TMUX_UNAVAILABLE' }
     if (blocksFolder(cwd)) return { ok: false, error: 'WORKTREE_BUSY' }
     const workspaceIdentity = () => { const info = statSync(cwd); return `${info.dev}:${info.ino}:${realpathSync(cwd)}` }
     let originalWorkspace: string
@@ -174,9 +174,8 @@ export function createAgentCreator({
       if (refusal) {
         return { ok: false, error: 'INVALID_DSH', detail: refusal }
       }
-      if (!(await tmuxSupportsSessionEnv())) {
-        const detail = `this machine's tmux is older than ${TMUX_SESSION_ENV_MIN.major}.${TMUX_SESSION_ENV_MIN.minor}, `
-          + `which is the first version that can give a new session its own environment — so ${installed.manifest.name} `
+      if (!(await createBackend.capabilities()).sessionEnv) {
+        const detail = `${tmuxTooOldForSessionEnv('a new session')} — so ${installed.manifest.name} `
           + `could not tell ${engine} which harness it is. Upgrade tmux.`
         console.warn(`[agent] create ${dsh} refused · ${detail}`)
         return { ok: false, error: 'TMUX_TOO_OLD_FOR_DSH', detail }
@@ -242,10 +241,8 @@ export function createAgentCreator({
     }
     let gridLaunch: { env: Record<string, string>; args: string[]; webSearch: GridWebSearchStatus } | undefined
     if (grid && built?.ok) {
-      if (!(await tmuxSupportsSessionEnv())) {
-        const detail = `this machine's tmux is older than `
-          + `${TMUX_SESSION_ENV_MIN.major}.${TMUX_SESSION_ENV_MIN.minor}, which is the first version that can `
-          + `give a new session its own environment — so ${engine} could not have been pointed at grid `
+      if (!(await createBackend.capabilities()).sessionEnv) {
+        const detail = `${tmuxTooOldForSessionEnv('a new session')} — so ${engine} could not have been pointed at grid `
           + `${grid.networkName}. Upgrade tmux, or create this agent without a grid selected.`
         console.warn(`[agent] create ${engine} refused · ${detail}`)
         return { ok: false, error: 'TMUX_TOO_OLD_FOR_GRID', detail }
@@ -354,7 +351,7 @@ export function createAgentCreator({
     if (!current()) return stale()
     const result = await createAndRegisterPane({
       current, ...(native ? { nativeToken: native.token } : {}),
-      tmuxBackend,
+      tmuxBackend: createBackend,
       registry,
       engine,
       cwd,
@@ -383,7 +380,7 @@ export function createAgentCreator({
     // shell exiting is the person closing it — so `remain-on-exit` comes off now, and the pane going
     // away is what removes the row (reconciler `onRemoved`), exactly as for an engine that quit.
     if (isTerminalEngine(engine)) {
-      await tmuxBackend.releaseHold(spawned.runtime)
+      await createBackend.releaseHold(spawned.runtime)
       const ready = registry.setLaunch(pending.agentId, { state: 'ready' }) ?? pending
       announceSession(ready)
       console.log(`[agent] create terminal open · agent ${pending.agentId}`)

@@ -11,7 +11,6 @@ import { env } from '../config/env.js'
 import { StoppedAgentStore } from './stoppedAgents.js'
 import { AgentRestartCoordinator } from './restartAgent.js'
 import { checkPidRuntime } from './deleteAgentFallback.js'
-import { listTmuxPanes } from './tmuxAgentDiscovery.js'
 import { checkSessionRuntime, resolvePaneEngineProcess } from './paneEngineProcess.js'
 import { buildEngineLaunchArgv, dropPermissionFlagIfUnsupported, refusePermissionFlagIfUnsupported } from './engineLaunch.js'
 import { enginePathOverride } from './engineBin.js'
@@ -19,9 +18,9 @@ import { installedDsh } from '../dsh/installed.js'
 import { createLaunchHelpers } from '../core/agents/launch.js'
 import { createLaunchAuthority } from '../core/agents/launchAuthority.js'
 import type { NativeLaunch } from '../engines/nativeLaunch.js'
+import type { TerminalInventoryResult } from './terminalTypes.js'
 
 vi.mock('./deleteAgentFallback.js', () => ({ checkPidRuntime: vi.fn() }))
-vi.mock('./tmuxAgentDiscovery.js', () => ({ listTmuxPanes: vi.fn() }))
 vi.mock('./paneEngineProcess.js', () => ({ checkSessionRuntime: vi.fn(), resolvePaneEngineProcess: vi.fn() }))
 // `resumeCapability` reads the real flag table through this module; only the argv builder and the
 // capability gate are faked. The gate would otherwise spawn the tester's own login shell to ask
@@ -49,7 +48,9 @@ const kill = vi.fn()
 const paneState = vi.fn()
 const releaseHold = vi.fn()
 const rootProcess = vi.fn()
-const inventory = () => ({ ok: true as const, panes: [{ tmuxPane: pane }] as any[] })
+const inventory = vi.fn<() => Promise<TerminalInventoryResult>>()
+/** The backend's inventory, listing [panes]. */
+const listed = (...panes: string[]): TerminalInventoryResult => ({ state: 'available', roots: panes.map(paneId => ({ runtime: { backend: 'tmux', paneId }, rootPid: 1, cwd: '/' })) })
 function live(extra: Partial<RegisteredSession> = {}) {
   return Object.assign(registry.resumePendingAgent(saved, [{ backend: 'tmux', paneId: pane }])!, extra)
 }
@@ -80,7 +81,7 @@ beforeEach(() => {
   vi.mocked(enginePathOverride).mockReturnValue(undefined)
   vi.mocked(refusePermissionFlagIfUnsupported).mockReset().mockResolvedValue(null)
   vi.mocked(installedDsh).mockReturnValue(undefined)
-  vi.mocked(listTmuxPanes).mockReset().mockResolvedValue(inventory())
+  inventory.mockReset().mockResolvedValue(listed(pane))
   vi.mocked(checkPidRuntime).mockReset().mockResolvedValue({ state: 'gone', reason: 'fixture' })
   vi.mocked(checkSessionRuntime).mockReset().mockResolvedValue({ state: 'alive' })
   paneState.mockReset().mockResolvedValue({ dead: false } as any)
@@ -91,7 +92,7 @@ beforeEach(() => {
     return identity
   })
   deps = {
-    registry, stoppedAgents: store, tmuxBackend: { create, kill, paneState, releaseHold, rootProcess }, restartJobs: new AgentRestartCoordinator(),
+    registry, stoppedAgents: store, tmuxBackend: { create, kill, paneState, releaseHold, rootProcess, inventory }, restartJobs: new AgentRestartCoordinator(),
     stopJobs: new Map(), pinnedControls: new Set(),
     retainExitedSession: vi.fn((row, alive) => { store.save(row); if (alive) registry.releaseEngine(row.agentId, true); else registry.removeAgent(row.agentId) }),
     announceSession: vi.fn(), relaunchOverrides: vi.fn(async () => ({ ok: true as const, overrides: { env: {}, extraArgs: [], clearEnv: [] } })),
@@ -108,7 +109,7 @@ describe('production resume handler', () => {
       authority: createLaunchAuthority({ byAgent: id => registry.byAgent(id), revision: id => deps.restartJobs.revision(id), cancelled: id => deps.stopJobs.has(id) }),
       prepareApiTools: apiNotes, setGridLaunch: vi.fn(), setTail: vi.fn(),
       launchOverridesDeps: { machine: () => ({ hermesSystemManaged: false }), gridLaunch: vi.fn(),
-        tmuxSupportsSessionEnv: async () => true, writeGridConfigDir: vi.fn(), installCodexHooks: vi.fn(async () => true), readCodexConfig: () => null },
+        capabilities: async () => ({ sessionEnv: true }), writeGridConfigDir: vi.fn(), installCodexHooks: vi.fn(async () => true), readCodexConfig: () => null },
     })
     deps.relaunchOverrides = helpers.relaunchOverrides
     expect(registry.byAgent(saved.agentId)).toBeUndefined()
@@ -451,29 +452,34 @@ describe('existing runtime and readiness verification', () => {
   it.each(['no route', 'no inventory', 'process unknown', 'process detached', 'unidentified engine', 'no tmux backend'] as const)('does not disturb %s', async reason => {
     live({ resumeOnly: undefined, launch: { state: 'ready' }, ...(reason === 'no route' ? { tmuxPane: '' } : {}) })
     if (reason === 'no tmux backend') { deps.tmuxBackend = null; vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }) }
-    if (reason === 'no inventory') vi.mocked(listTmuxPanes).mockResolvedValue({ ok: false, error: 'fixture' })
+    if (reason === 'no inventory') inventory.mockResolvedValue({ state: 'unavailable', reason: 'fixture' })
     if (reason === 'process unknown') vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'unknown', reason: 'fixture' })
-    if (reason === 'process detached') { vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }); vi.mocked(listTmuxPanes).mockResolvedValue({ ok: true, panes: [] }) }
+    if (reason === 'process detached') { vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }); inventory.mockResolvedValue(listed()) }
     expect(await start()).toMatchObject({ error: 'RESUME_UNCONFIRMED' }); expect(create).not.toHaveBeenCalled()
   })
   it.each([true, false])('retains a confirmed engine exit, surviving shell = %s', async alive => {
     live({ resumeOnly: undefined, processIdentity: identity, launch: { state: 'ready' } })
-    vi.mocked(listTmuxPanes).mockResolvedValue({ ok: true, panes: alive ? [{ tmuxPane: pane }] as any[] : [] })
+    inventory.mockResolvedValue(alive ? listed(pane) : listed())
     // New pane must be distinct from the shell retained by this scenario.
     create.mockResolvedValue({ state: 'succeeded', runtime: { backend: 'tmux', paneId: '%100' } })
     expect(await start()).toMatchObject({ ok: true }); expect(deps.retainExitedSession).toHaveBeenCalledWith(expect.objectContaining({ agentId: saved.agentId }), alive)
     if (alive) expect(registry.byRuntimeTerminal({ backend: 'tmux', paneId: pane })?.engine).toBe('terminal')
   })
+  it('cannot verify a surviving shell with no tmux backend to list it', async () => {
+    live({ engine: 'terminal', resumeOnly: undefined, launch: { state: 'ready' } }); deps.tmuxBackend = null
+    await expect(start()).rejects.toThrow('Could not verify')
+    expect(deps.retainExitedSession).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled()
+  })
   it('resumes a missing shell', async () => {
     rewrite({ engine: 'terminal', sessionId: '', transcriptPath: '' }); live({ resumeOnly: undefined, launch: { state: 'ready' } })
-    vi.mocked(listTmuxPanes).mockResolvedValue({ ok: true, panes: [] })
+    inventory.mockResolvedValue(listed())
     expect(await start()).toMatchObject({ ok: true }); expect(create).toHaveBeenCalledTimes(1)
   })
   it.each(['unknown', 'cancel'] as const)('refuses to retire the old route when its second probe is %s', async mode => {
     live({ resumeOnly: undefined, processIdentity: identity, launch: { state: 'ready' } })
-    vi.mocked(listTmuxPanes).mockResolvedValueOnce(inventory()).mockImplementationOnce(async () => {
+    inventory.mockResolvedValueOnce(listed(pane)).mockImplementationOnce(async () => {
       if (mode === 'cancel') deps.restartJobs.cancel(saved.agentId)
-      return mode === 'unknown' ? { ok: false, error: 'fixture' } : inventory()
+      return mode === 'unknown' ? { state: 'unavailable', reason: 'fixture' } : listed(pane)
     })
     if (mode === 'unknown') await expect(start()).rejects.toThrow('Could not verify')
     else expect(await start()).toMatchObject({ error: 'AGENT_CHANGED' })

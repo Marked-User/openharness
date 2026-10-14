@@ -20,7 +20,7 @@ function session(): RegisteredSession {
 
 function backend(instanceId: string, submit: TerminalBackend['submitText']): TerminalBackend {
   return {
-    name: 'tmux', instanceId,
+    name: 'tmux', instanceId, prepare: vi.fn(), capabilities: vi.fn(),
     create: vi.fn(), kill: vi.fn(), inventory: vi.fn(),
     titles: vi.fn(async () => ({ state: 'succeeded' as const, value: new Map() })),
     validate: vi.fn(async () => ({ state: 'alive' as const })), capture: vi.fn(), typeLiteral: vi.fn(), submitText: submit,

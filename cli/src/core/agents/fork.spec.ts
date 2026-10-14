@@ -164,7 +164,7 @@ describe('forking an agent', () => {
     const helpers = createLaunchHelpers({ authority: () => () => true, prepareApiTools: vi.fn(), setGridLaunch: vi.fn(), setTail: vi.fn(),
       launchOverridesDeps: { native: (engine, source) => inspectNativeLaunch(engine, source), prepareNative,
         machine: () => ({ hermesSystemManaged: false }), gridLaunch: vi.fn(), writeGridConfigDir: vi.fn(),
-        tmuxSupportsSessionEnv: async () => true, installCodexHooks: async () => true,
+        capabilities: async () => ({ sessionEnv: true }), installCodexHooks: async () => true,
       },
     })
     const finalHome = join(root, 'harness-codex')

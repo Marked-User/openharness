@@ -1,6 +1,8 @@
+import type { AgentEngine } from '../engines/types.js'
 import type {
   SubmitOptions,
   TerminalActionResult,
+  TerminalBackendCapabilities,
   TerminalBackendName,
   TerminalCaptureOptions,
   TerminalCreateRequest,
@@ -19,10 +21,19 @@ import type {
   RuntimeValidation,
 } from './terminalTypes.js'
 
+/** What `prepare` says: ready, or why not with the error code a create/restore/resume then answers. */
+export type TerminalBackendPrepared = { state: 'ready' } | { state: 'unavailable'; reason: string; code: string }
+
 /** Backend-specific terminal I/O. Process ownership and registry reconciliation deliberately live above it. */
 export interface TerminalBackend<Ref extends TerminalRuntimeRef = TerminalRuntimeRef> {
   readonly name: TerminalBackendName
   readonly instanceId: string
+
+  /** Ready the backend at daemon start. A failure is a state: the daemon keeps running without it.
+   *  [ownedPanes] is the registry's panes (pane id → engine), for a backend that adopts what it finds. */
+  prepare(context: { ownedPanes: ReadonlyMap<string, AgentEngine> }): Promise<TerminalBackendPrepared>
+  /** What this backend can do for a new pane, asked before a launch that needs it. */
+  capabilities(): Promise<TerminalBackendCapabilities>
 
   create(request: TerminalCreateRequest): Promise<TerminalCreateResult<Ref>>
   /** Recheck the original Stop permission after backend waits, at command dispatch. */
