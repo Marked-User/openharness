@@ -788,14 +788,15 @@ mod tests {
     fn pane_info_names_the_foreground_command() {
         let (panes, _n) = table();
         let pane = create(&panes, "echo ready; exec sleep 30", false);
-        until("ready", || {
-            capture(&panes, &pane).unwrap().contains("ready")
-        });
-        let info = panes
-            .handle(op(json!({"op": "paneInfo", "pane": pane})))
-            .unwrap()["info"]
-            .clone();
-        assert_eq!(info["command"], "sleep");
+        let info = || {
+            panes
+                .handle(op(json!({"op": "paneInfo", "pane": pane})))
+                .unwrap()["info"]
+                .clone()
+        };
+        // "ready" can be on the screen before the shell has exec'd sleep.
+        until("sleep in the foreground", || info()["command"] == "sleep");
+        let info = info();
         assert!(info["pid"].as_u64().is_some());
         assert!(info["tty"].as_str().unwrap().starts_with("/dev/"), "{info}");
         assert_eq!(

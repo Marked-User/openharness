@@ -146,3 +146,78 @@ export type PtyEvent =
   /** `status` is null when the host could not learn it. */
   | { event: 'exit'; pane: string; status: number | null }
   | { event: 'title'; pane: string; title: string }
+
+/* Stream connection payloads (pty/src/stream.rs). */
+
+/** `FrameKind.Subscribe`. A subscriber that is not read-only resizes the pane to itself. */
+export interface StreamSubscribe {
+  pane: string
+  cols: number
+  rows: number
+  readOnly: boolean
+}
+/** `FrameKind.Resize`. */
+export interface StreamResize {
+  cols: number
+  rows: number
+}
+/**
+ * `FrameKind.Snapshot`. `historyLines` defaults to 2000 for `conversation` and 500 otherwise;
+ * `none` sends no history.
+ */
+export interface StreamSnapshotRequest {
+  id: number
+  history: 'none' | 'plain' | 'conversation'
+  historyLines?: number
+}
+/** `PaneMeta` as the host sends it (snake_case). */
+export interface PtyPaneMeta {
+  cols: number
+  rows: number
+  alternate_on: boolean
+  cursor_x: number
+  cursor_y: number
+  cursor_visible: boolean
+  mouse_standard: boolean
+  mouse_button: boolean
+  mouse_all: boolean
+  mouse_utf8: boolean
+  mouse_sgr: boolean
+}
+/**
+ * `FrameKind.SnapshotReply`. `capture` is `capture-pane -p -e -N` (one line per screen row) and
+ * `history` is `capture-pane -p -e -N -S -<n> -E -1`. Output frames with `seq <= seq` that arrive
+ * after the reply are already in it; every later output follows it.
+ *
+ * For `history: 'conversation'` the reply also carries the history as `capture-pane -p -e -J`
+ * prints it (`historyJoined`) and whether its last line continues into the screen
+ * (`lastContinues`, as read from `capture-pane -p -J -S -1 -E 0`). They are dropped, before any
+ * plain history, from a reply that would not fit a frame.
+ */
+export type StreamSnapshotReply =
+  | {
+      id: number
+      ok: true
+      seq: number
+      capture: string
+      history: string
+      historyJoined?: string
+      lastContinues?: boolean
+      meta: PtyPaneMeta
+    }
+  | { id: number; ok: false; reason: 'not_subscribed' | 'no_pane' | 'bad_request' }
+/**
+ * `FrameKind.Ack`, one per Subscribe, Input, Paste and Resize, in order; `for` is the acknowledged
+ * frame's kind. A Resize ack's `seq` is the last output drawn at the old size.
+ */
+export type StreamAck =
+  | { for: FrameKind; ok: true; seq?: number }
+  | {
+      for: FrameKind
+      ok: false
+      reason: 'not_subscribed' | 'already_subscribed' | 'read_only' | 'no_pane' | 'exited' | 'bad_request'
+    }
+/** `FrameKind.Closed`; the host ends the connection after it. */
+export interface StreamClosed {
+  reason: 'exited' | 'killed' | 'overflow'
+}

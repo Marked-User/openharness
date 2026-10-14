@@ -507,3 +507,41 @@ fn frames_before_subscribe_are_refused() {
         )
     );
 }
+
+#[test]
+fn conversation_snapshots_carry_the_joined_history() {
+    let (_h, disc) = start();
+    let (mut w, mut r) = connect(&disc);
+    let req = serde_json::json!({"id": 1, "op": "create", "command": ["/bin/sh", "-c",
+        "sleep 0.3; printf 'h1\\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\\ns2\\ns3\\ns4\\ns5\\ns6'; sleep 30"],
+        "cols": 20, "rows": 6, "owner": "t", "hold": false});
+    let pane = call(&mut w, &mut r, &req.to_string())["pane"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut s = stream(&disc);
+    assert_eq!(subscribe_with(&mut s, &pane, 20, 6, false)["ok"], true);
+    read_until(&mut s, |t| t.contains("s6"));
+    let ask = |s: &mut UnixStream, id: u64, history: &str| {
+        let req = serde_json::json!({"id": id, "history": history, "historyLines": 100});
+        write_frame(s, Kind::Snapshot, req.to_string().as_bytes()).unwrap();
+        loop {
+            let (kind, v) = next_reply(s);
+            if kind == Kind::SnapshotReply {
+                return v;
+            }
+        }
+    };
+    let v = ask(&mut s, 1, "conversation");
+    // Rows: the wrapped line's first row is the history's last line, its second the screen's first.
+    assert_eq!(v["history"], "h1\nCCCCCCCCCCCCCCCCCCCC\n");
+    assert_eq!(v["capture"], "CCCCCCCCCC\ns2\ns3\ns4\ns5\ns6\n");
+    assert_eq!(v["historyJoined"], "h1\nCCCCCCCCCCCCCCCCCCCC\n");
+    assert_eq!(v["lastContinues"], true);
+    let v = ask(&mut s, 2, "plain");
+    assert_eq!(v["history"], "h1\nCCCCCCCCCCCCCCCCCCCC\n");
+    assert!(
+        v.get("historyJoined").is_none() && v.get("lastContinues").is_none(),
+        "{v}"
+    );
+}

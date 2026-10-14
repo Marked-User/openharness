@@ -88,9 +88,31 @@ pub struct PaneMeta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub seq: u64,
+    /// `capture-pane -p -e -N`: one line per screen row.
     pub capture: String,
+    /// `capture-pane -p -e -N -S -<n> -E -1`: one line per history row (none without history).
     pub history: String,
+    /// For a conversation: the same history as `capture-pane -p -e -J` prints it (wrapped rows
+    /// joined into their lines), and whether its last line runs on into the screen, read as
+    /// `tmuxStream.ts` reads `capture-pane -p -J -S -1 -E 0` (one line, its newline last).
+    pub conversation: Option<Conversation>,
     pub meta: PaneMeta,
+}
+
+/// A conversation's history in its joined form (`Snapshot::conversation`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conversation {
+    pub joined: String,
+    pub last_continues: bool,
+}
+
+/// What `capture-pane -p` prints for `text`: ending in exactly one newline (the last line of a
+/// joined range has none of its own).
+fn printed(mut text: String) -> String {
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
 }
 
 struct Size {
@@ -363,28 +385,57 @@ impl Pane {
     }
 
     /// Under one lock, for a stream keyframe: the visible screen, the last `history_lines` lines
-    /// of the history above it (none when 0), the metadata, and the sequence number of the last
-    /// output they contain. Both texts are what `tmux capture-pane -p -e -J` prints.
-    pub fn snapshot(&self, history_lines: u32) -> Snapshot {
+    /// of the history above it (none when 0), with `conversation` that history joined as well,
+    /// the metadata, and the sequence number of the last output they contain.
+    ///
+    /// Rows are as tmux's capture-pane prints them, except that a row ends at its last cell that
+    /// is not a default blank where tmux pads to the cells it has allocated: the two paint the
+    /// same. A pane with no history has an empty one (tmux's `-E -1` would then print the first
+    /// screen row).
+    pub fn snapshot(&self, history_lines: u32, conversation: bool) -> Snapshot {
+        use harness_term::capture::{Flags2, history};
+        // -p -e -N: not joined, not trimmed; -p -e -J and -p -J: joined.
+        let plain = Flags2 {
+            join: false,
+            sequences: true,
+            escape: false,
+            empty_cells: false,
+            trim: false,
+        };
+        let joined = Flags2 {
+            join: true,
+            sequences: true,
+            ..Flags2::default()
+        };
+        let seam = Flags2 {
+            join: true,
+            ..Flags2::default()
+        };
         let screen = lock(&self.screen);
         let grid = screen.term.grid();
+        let rows = grid.screen_lines() as i32;
         let depth = (history_lines as usize).min(grid.history_size()) as i32;
-        let history = if depth == 0 {
-            String::new()
+        let (text, conversation) = if depth == 0 {
+            let none = conversation.then(|| Conversation {
+                joined: String::new(),
+                last_continues: false,
+            });
+            (String::new(), none)
         } else {
-            let flags = harness_term::capture::Flags2 {
-                join: true,
-                sequences: true,
-                escape: false,
-                empty_cells: false,
-                trim: false,
-            };
-            harness_term::capture::history(grid, -depth, -1, flags)
+            let conversation = conversation.then(|| {
+                let seam = printed(history(grid, -1, 0, seam));
+                Conversation {
+                    joined: printed(history(grid, -depth, -1, joined)),
+                    last_continues: seam.find('\n') == Some(seam.len() - 1),
+                }
+            });
+            (history(grid, -depth, -1, plain), conversation)
         };
         Snapshot {
             seq: screen.seq,
-            capture: harness_term::capture::capture_pane(grid, None, true),
-            history,
+            capture: history(grid, 0, rows - 1, plain),
+            history: text,
+            conversation,
             meta: meta(&screen.term),
         }
     }
@@ -1566,5 +1617,66 @@ mod tests {
         .unwrap();
         let text = wait_text(&pane, &rx, "w=");
         assert!(text.contains("w=unset a=unset"), "{text:?}");
+    }
+
+    /// What tmux 3.8 printed for the same output on a 20×6 pane (`capture-pane -p -e -N`,
+    /// `-p -e -N -S -500 -E -1`, `-p -e -J -S -500 -E -1`, `-p -J -S -1 -E 0`), less the default
+    /// blanks tmux pads a row with up to the cells it has allocated.
+    #[test]
+    fn snapshot_rows_are_capture_pane_rows_and_a_conversation_is_joined() {
+        let (tx, rx) = channel();
+        let script = r"stty -echo; printf 'line-1\n\033[44mblue\033[0m\033[44m      \033[0m\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n\033[42mgr\033[0m\033[45m   \033[0m\nDDDDDDDDDDDDDDDDDDDDDDDDD\nx4\nx5'; read x; printf '\nz1\nz2\nz3\nz4\nz5\nz6'; sleep 5";
+        let pane = Pane::spawn(
+            "%1".into(),
+            PaneSpec {
+                cols: 20,
+                rows: 6,
+                ..sh(script)
+            },
+            1000,
+            tx,
+        )
+        .unwrap();
+        wait_text(&pane, &rx, "x5");
+        let snap = pane.snapshot(500, true);
+        // One line per screen row: the wrapped D line is two, as tmux prints it.
+        assert_eq!(
+            snap.capture,
+            "CCCCCCCCCC\n\x1b[42mgr\x1b[45m   \n\x1b[49mDDDDDDDDDDDDDDDDDDDD\nDDDDD\nx4\nx5\n"
+        );
+        assert_eq!(snap.capture.lines().count(), snap.meta.rows as usize);
+        // The plain history is rows too: the C line's first row is the history's last line.
+        assert_eq!(
+            snap.history,
+            "line-1\n\x1b[44mblue      \n\x1b[49mCCCCCCCCCCCCCCCCCCCC\n"
+        );
+        // Joined, that row is a line of its own that runs on into the screen.
+        let conversation = snap.conversation.unwrap();
+        assert_eq!(
+            conversation.joined,
+            "line-1\n\x1b[44mblue      \n\x1b[49mCCCCCCCCCCCCCCCCCCCC\n"
+        );
+        assert!(conversation.last_continues);
+        assert_eq!(pane.snapshot(500, false).conversation, None);
+        assert_eq!(pane.snapshot(0, true).history, "");
+
+        pane.write(b"\n").unwrap();
+        wait_text(&pane, &rx, "z6");
+        let snap = pane.snapshot(500, true);
+        assert_eq!(snap.capture, "z1\nz2\nz3\nz4\nz5\nz6\n");
+        assert!(
+            snap.history.ends_with("DDDDD\nx4\nx5\n"),
+            "{:?}",
+            snap.history
+        );
+        let conversation = snap.conversation.unwrap();
+        assert!(
+            conversation
+                .joined
+                .ends_with("\x1b[49mDDDDDDDDDDDDDDDDDDDDDDDDD\nx4\nx5\n"),
+            "{:?}",
+            conversation.joined
+        );
+        assert!(!conversation.last_continues);
     }
 }

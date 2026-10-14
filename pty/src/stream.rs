@@ -4,7 +4,9 @@
 //! A stream connection subscribes to one pane (`Subscribe`), then receives every output the pane
 //! produces after that as `Output [seq][bytes]`. `Snapshot` answers the screen, the history and
 //! the metadata with the `seq` of the last output they contain; the client drops later frames
-//! whose `seq` is not above it.
+//! whose `seq` is not above it. The texts are capture-pane's (`Pane::snapshot`): `capture` and
+//! `history` one line per row (`-p -e -N`), and for `"history":"conversation"` also
+//! `historyJoined` (`-p -e -J`) and `lastContinues`, as `tmuxStream.ts` reads them from tmux.
 //!
 //! Replies: `Subscribe`, `Input`, `Paste` and `Resize` are each answered by one `Ack`
 //! (`{"for":<kind>,"ok":bool,"reason"?}`), in the order they came; `Snapshot` by its
@@ -393,6 +395,14 @@ struct SnapshotRequest {
     history_lines: Option<u32>,
 }
 
+/// What a snapshot request asks for.
+struct SnapshotTarget {
+    id: u64,
+    pane: Arc<Pane>,
+    lines: u32,
+    conversation: bool,
+}
+
 /// One stream connection's state, on its reader thread.
 struct Session<'a> {
     panes: &'a Panes,
@@ -420,26 +430,35 @@ fn reason(err: OpError) -> &'static str {
     }
 }
 
-/// A snapshot reply that fits a frame: the oldest history lines go first.
+/// A snapshot reply that fits a frame.
 fn snapshot_reply(id: u64, snap: crate::pane::Snapshot) -> Vec<u8> {
     snapshot_reply_within(id, snap, MAX_FRAME as usize)
 }
 
+/// A conversation's joined history goes first (the client then uses the plain one, as it does
+/// when tmux's cannot be re-wrapped); then the oldest plain history lines.
 fn snapshot_reply_within(id: u64, snap: crate::pane::Snapshot, max: usize) -> Vec<u8> {
     let mut history = snap.history;
+    let mut conversation = snap.conversation;
     loop {
-        let payload = json!({
+        let mut reply = json!({
             "id": id,
             "ok": true,
             "seq": snap.seq,
             "capture": snap.capture,
             "history": history,
             "meta": snap.meta,
-        })
-        .to_string()
-        .into_bytes();
-        if payload.len() <= max || history.is_empty() {
+        });
+        if let Some(c) = &conversation {
+            reply["historyJoined"] = json!(c.joined);
+            reply["lastContinues"] = json!(c.last_continues);
+        }
+        let payload = reply.to_string().into_bytes();
+        if payload.len() <= max || (history.is_empty() && conversation.is_none()) {
             return payload;
+        }
+        if conversation.take().is_some() {
+            continue;
         }
         // JSON escapes at most sextuple a byte; drop at least the excess, at a line's end (a
         // newline byte is always a character's end).
@@ -496,8 +515,8 @@ impl Session<'_> {
             }
             Kind::Snapshot => match self.snapshot_target(&payload) {
                 // Cut: every output after the reply whose seq is above the reply's is new to it.
-                Ok((id, pane, lines)) => self.sub.push_reply_cut(Kind::SnapshotReply, || {
-                    snapshot_reply(id, pane.snapshot(lines))
+                Ok(t) => self.sub.push_reply_cut(Kind::SnapshotReply, || {
+                    snapshot_reply(t.id, t.pane.snapshot(t.lines, t.conversation))
                 }),
                 Err((id, reason)) => self.sub.push_reply(
                     Kind::SnapshotReply,
@@ -556,11 +575,9 @@ impl Session<'_> {
         self.panes.pane(self.subscribed()?).map_err(reason)
     }
 
-    /// A snapshot request's id, pane and history depth; or its id and why it is refused.
-    fn snapshot_target(
-        &self,
-        payload: &[u8],
-    ) -> Result<(u64, Arc<Pane>, u32), (u64, &'static str)> {
+    /// A snapshot request's id, pane, history depth and whether it is a conversation's; or its
+    /// id and why it is refused.
+    fn snapshot_target(&self, payload: &[u8]) -> Result<SnapshotTarget, (u64, &'static str)> {
         let req: SnapshotRequest = serde_json::from_slice(payload).map_err(|_| {
             let id = serde_json::from_slice::<Value>(payload)
                 .ok()
@@ -575,7 +592,13 @@ impl Session<'_> {
             Some("conversation") => req.history_lines.unwrap_or(DEFAULT_CONVERSATION_HISTORY),
             Some(_) => req.history_lines.unwrap_or(DEFAULT_HISTORY),
         };
-        Ok((req.id, pane, lines))
+        let conversation = req.history.as_deref() == Some("conversation");
+        Ok(SnapshotTarget {
+            id: req.id,
+            pane,
+            lines,
+            conversation,
+        })
     }
 }
 
@@ -758,6 +781,10 @@ mod tests {
             seq: 7,
             capture: "screen".into(),
             history: format!("first\n{}last\n", line.repeat(200)),
+            conversation: Some(crate::pane::Conversation {
+                joined: "joined\n".into(),
+                last_continues: true,
+            }),
             meta: crate::pane::PaneMeta {
                 cols: 80,
                 rows: 24,
@@ -779,6 +806,8 @@ mod tests {
         let history = v["history"].as_str().unwrap();
         assert!(!history.starts_with("first") && history.ends_with("last\n"));
         assert!(history.starts_with('\u{1b}'));
+        // The joined form went first.
+        assert!(v.get("historyJoined").is_none() && v.get("lastContinues").is_none());
         assert_eq!(
             (v["seq"].clone(), v["capture"].clone()),
             (json!(7), json!("screen"))
@@ -786,6 +815,15 @@ mod tests {
         // One that fits is whole.
         let whole: Value = serde_json::from_slice(&snapshot_reply(3, snap.clone())).unwrap();
         assert_eq!(whole["history"], json!(snap.history));
+        assert_eq!(whole["historyJoined"], json!("joined\n"));
+        assert_eq!(whole["lastContinues"], json!(true));
         assert_eq!(whole["meta"]["alternate_on"], json!(false));
+        // Only a conversation's carries the joined form.
+        let plain = crate::pane::Snapshot {
+            conversation: None,
+            ..snap
+        };
+        let plain: Value = serde_json::from_slice(&snapshot_reply(3, plain)).unwrap();
+        assert!(plain.get("historyJoined").is_none() && plain.get("lastContinues").is_none());
     }
 }
