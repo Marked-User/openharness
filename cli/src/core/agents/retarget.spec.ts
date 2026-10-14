@@ -7,7 +7,6 @@ import type { RegisteredSession } from '../../lib/registry.js'
 import { AgentRestartCoordinator, bypassPermissionFor, restartAgent } from '../../lib/restartAgent.js'
 import { probeGatewayRuntime } from '../../lib/gatewayRuntime.js'
 import { parseRuntimeProfile } from '../../lib/runtimeProfileWire.js'
-import { clearPaneRemainOnExit } from '../../lib/tmux.js'
 import { workspaceMissing } from '../../lib/workspaceCheck.js'
 import { TerminalAgentReconciler } from '../../lib/terminalAgentReconciler.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
@@ -36,9 +35,6 @@ vi.mock('../../lib/restartAgent.js', async (real) => ({
   restartAgent: vi.fn(async () => ({ ok: true, resumed: true, processIdentity: { pid: 2, startMarker: 'new', executable: '/bin/claude' } })),
 }))
 vi.mock('../../lib/runtimeProfileWire.js', async (real) => ({ ...await real<object>(), parseRuntimeProfile: vi.fn(() => ({ engine: 'claude', model: 'opus' })) }))
-vi.mock('../../lib/tmux.js', async (real) => ({
-  ...await real<object>(), clearPaneRemainOnExit: vi.fn(async () => {}),
-}))
 vi.mock('../../lib/processTable.js', async (real) => ({
   ...await real<object>(),
   processLaunchArgs: vi.fn(async () => 'codex -c model_providers.grid.base_url=http://grid.local/v1'),
@@ -56,7 +52,7 @@ function setup(row: RegisteredSession | null = agent(), over: Partial<RetargetDe
   const deps: RetargetDeps = {
     sessionTurnOpen: vi.fn(() => false),
     purgeBusy: vi.fn(() => false),
-    tmuxBackend: { clearEnv: vi.fn(async () => ({ state: 'succeeded' })) } as unknown as RetargetDeps['tmuxBackend'],
+    tmuxBackend: { clearEnv: vi.fn(async () => ({ state: 'succeeded' })), releaseHold: vi.fn(async () => {}) } as unknown as RetargetDeps['tmuxBackend'],
     registry: {
       resolve: vi.fn(() => row ?? undefined),
       byAgent: vi.fn(() => row ?? undefined),
@@ -203,7 +199,7 @@ describe('retargeting an agent', () => {
           case 'permission': vi.mocked(run.deps.downgradedPermission).mockImplementationOnce(async () => { replace(); return {} }); break
           case 'replacement': vi.mocked(restartAgent).mockImplementationOnce(async () => { replace(); return { ok: true, resumed: true, processIdentity: { pid: 2, executable: 'opencode', startMarker: 'new' } } }); break
           case 'gateway': vi.mocked(probeGatewayRuntime).mockImplementationOnce(async () => { replace(); return { kind: 'none' } as never }); break
-          case 'pane-option': vi.mocked(clearPaneRemainOnExit).mockImplementationOnce(async () => { replace() }); break
+          case 'pane-option': vi.mocked(run.deps.tmuxBackend!.releaseHold).mockImplementationOnce(async () => { replace() }); break
         }
         const result = await createAgentRetargeter(run.deps)({ agentId: 'a1', grid: phase === 'environment' ? null : grid })
         expect(result).toMatchObject({ ok: false, error: 'AGENT_CHANGED' })
@@ -436,7 +432,7 @@ describe('retargeting an agent', () => {
       expect(run.deps.registry.setSubscriptionModel).toHaveBeenCalledWith('a1', 'opus')
       expect(run.deps.registry.setActive).toHaveBeenCalledWith('a1', true)
       expect(run.deps.refreshGridAssignment).toHaveBeenCalledWith(agent())
-      expect(clearPaneRemainOnExit).toHaveBeenCalledWith('%4', expect.any(Function))
+      expect(run.deps.tmuxBackend!.releaseHold).toHaveBeenCalledWith(pane, expect.any(Function))
       expect(run.deps.announceSession).toHaveBeenCalled()
       expect(run.release).toHaveBeenCalled()
       expect(run.releaseRoute).toHaveBeenCalled()

@@ -47,6 +47,28 @@ export type RuntimeValidation =
   | { state: 'gone'; reason: string; replaced?: true }
   | { state: 'unknown'; reason: string }
 
+/** What a backend knows about a pane right now. */
+export interface TerminalPaneState {
+  dead: boolean
+  /** Exit status once the process is gone; null while it is still running. */
+  exitStatus: number | null
+  /** Foreground command name, as tmux #{pane_current_command}. */
+  command: string
+  /** Engine exit status recorded by the launch wrapper; null before. */
+  engineExit: number | null
+}
+
+/** A pane's state, `'gone'` when the backend says it has no such pane, `'unknown'` when it could not be asked. */
+export type TerminalPaneRead = TerminalPaneState | 'gone' | 'unknown'
+
+/** What a pane is running and where (terminal clients' #{pane_current_*}). */
+export interface TerminalPaneInfo { command: string; path: string; pid: number | null; tty: string }
+
+export interface TerminalBackendCapabilities {
+  /** Per-session environment for new panes (tmux >= TMUX_SESSION_ENV_MIN; always on ptyhost). */
+  sessionEnv: boolean
+}
+
 /**
  * Result of a PTY side effect. Only `not_started` and a server-confirmed `rejected` result may be
  * retried on another runtime. `possibly_executed` must be observed before any further side effect.

@@ -15,6 +15,8 @@ import {
   type TerminalCreateResult,
   type TerminalInventoryResult,
   type TerminalLogicalKey,
+  type TerminalPaneInfo,
+  type TerminalPaneRead,
   type TerminalProcessExpectation,
   type TerminalReadResult,
   type TerminalRespawnRequest,
@@ -28,9 +30,9 @@ import { inTmuxRoom } from './tmuxControlGate.js'
 import { TmuxControlStream } from './tmuxStream.js'
 import {
   captureTmuxPane,
+  clearPaneRemainOnExit,
   ENGINE_EXIT_PANE_OPTION,
   listPaneTitles,
-  lookupPaneEngineProcess,
   sendKeyToTmux,
   sendLiteralToTmux,
   paneOptionScope,
@@ -38,7 +40,11 @@ import {
   sendToTmux,
   setPaneMouseOn,
   setPaneStyle,
+  tmuxPaneInfo,
+  tmuxPanePid,
+  tmuxPaneState,
 } from './tmux.js'
+import { lookupPaneEngineProcess } from './paneEngineProcess.js'
 import { LSTART_MARKER_RE } from './processTable.js'
 import { env } from '../config/env.js'
 import { HARNESS_OWNER_OPTION, harnessPaneOwner, ownerCommand } from './harnessSessionLabel.js'
@@ -480,7 +486,7 @@ export class TmuxBackend implements TerminalBackend<TmuxRuntimeRef> {
 
   async validate(runtime: TmuxRuntimeRef, expected: TerminalProcessExpectation): Promise<RuntimeValidation> {
     try {
-      const found = await lookupPaneEngineProcess(runtime.paneId, expected.engine)
+      const found = await lookupPaneEngineProcess(this, runtime, expected.engine)
       if (!found.ok) return { state: found.unknown ? 'unknown' : 'gone', reason: found.reason }
       const live = found.identity
       // A saved marker that is not a C-locale `lstart` stamp was written either by the pre-fix parser,
@@ -501,6 +507,23 @@ export class TmuxBackend implements TerminalBackend<TmuxRuntimeRef> {
     } catch {
       return { state: 'unknown', reason: 'tmux runtime probe failed' }
     }
+  }
+
+  /** Hand the pane back to tmux's default disposal (`clearPaneRemainOnExit`). */
+  releaseHold(runtime: TmuxRuntimeRef, current?: () => boolean): Promise<void> {
+    return clearPaneRemainOnExit(runtime.paneId, current)
+  }
+
+  paneState(runtime: TmuxRuntimeRef): Promise<TerminalPaneRead> {
+    return tmuxPaneState(runtime.paneId)
+  }
+
+  paneInfo(runtime: TmuxRuntimeRef): Promise<TerminalPaneInfo | null> {
+    return tmuxPaneInfo(runtime.paneId)
+  }
+
+  rootProcess(runtime: TmuxRuntimeRef): Promise<number | 'missing' | null> {
+    return tmuxPanePid(runtime.paneId)
   }
 
   async capture(runtime: TmuxRuntimeRef, options: TerminalCaptureOptions = {}): Promise<TerminalReadResult<string>> {

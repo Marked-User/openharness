@@ -3,22 +3,16 @@
 import { execFile, spawn } from 'child_process'
 import { existsSync } from 'node:fs'
 import { basename } from 'path'
-import { registry, type ProcessIdentity, type RegisteredSession } from './registry.js'
+import type { ProcessIdentity } from './registry.js'
 import { ENGINE_EXIT_PANE_OPTION } from './engineExitOption.js'
 import { psEnv } from './childLocale.js'
 import { neutralizePasteControls } from './pasteText.js'
 import { patientDeadline, patientExec } from './patientExec.js'
 import { inTmuxRoom } from './tmuxControlGate.js'
 import { tmuxFeatures, type TmuxFeatures } from './tmuxVersion.js'
-import { processIdentityOf, sameProcessIdentity } from './terminalRuntime.js'
-import {
-  enrichProcessRows,
-  LSTART_MARKER_RE,
-  processRows,
-  processTreePids,
-  selectEngineProcess,
-  type ProcessRow,
-} from './processTable.js'
+import { processIdentityOf } from './terminalRuntime.js'
+import type { TerminalPaneInfo, TerminalPaneRead, TerminalPaneState } from './terminalTypes.js'
+import { processRows, type ProcessRow } from './processTable.js'
 export { captureTmuxPane, tmuxCaptureArgs } from './tmuxCapture.js'
 
 // Every tmux and `ps` call here: a held event loop must not turn a timeout into an empty answer
@@ -138,7 +132,7 @@ export function forgetTmuxServer(): void { knownServer = null }
  * which says nothing about the pane. tmux 3.7 answers `display-message -t` for an unknown pane with an
  * empty line and exit 0; older versions say "can't find pane".
  */
-function panePidLookup(pane: string, revived = false): Promise<number | 'missing' | null> {
+export function tmuxPanePid(pane: string, revived = false): Promise<number | 'missing' | null> {
   return new Promise((resolve) => {
     run('tmux', ['display-message', '-p', '-t', pane, '#{pane_pid}'], { timeout: 2000 }, (err, stdout, stderr) => {
       const text = String(stdout ?? '').trim()
@@ -151,46 +145,15 @@ function panePidLookup(pane: string, revived = false): Promise<number | 'missing
       else if (err && isNoTmuxServerError(String(stderr ?? ''))) {
         // A server whose socket was removed is still running this pane: ask it back, then read again.
         if (revived) { resolve('missing'); return }
-        void reviveRemovedTmuxSocket().then((asked) => { if (asked) void panePidLookup(pane, true).then(resolve); else resolve('missing') })
+        void reviveRemovedTmuxSocket().then((asked) => { if (asked) void tmuxPanePid(pane, true).then(resolve); else resolve('missing') })
       } else resolve(null)
     })
   })
 }
 
 async function panePid(pane: string): Promise<number | null> {
-  const found = await panePidLookup(pane)
+  const found = await tmuxPanePid(pane)
   return typeof found === 'number' ? found : null
-}
-
-/**
- * Resolve the stable CLI process below one tmux pane, ahead of short-lived helper descendants — and say
- * whether a negative answer means "nothing is running there" or "the probe itself failed". Those are not
- * the same fact: `tmux display-message` and `ps` are subprocesses with 2-3s timeouts, and treating a
- * timeout as proof of death evicts a live session.
- */
-type PaneProcessLookup =
-  | { ok: true; identity: ProcessIdentity }
-  | { ok: false; unknown: boolean; reason: string }
-
-export async function lookupPaneEngineProcess(
-  pane: string,
-  engine: RegisteredSession['engine'],
-): Promise<PaneProcessLookup> {
-  const rootPid = await panePidLookup(pane)
-  // tmux saying it has no such pane is an answer: the pane is gone. The reconciler asks exactly when a
-  // pane has dropped out of `tmux list-panes`, and reading that as "could not ask" kept an agent whose
-  // pane was killed counted as active for good. A failed call is still no evidence either way.
-  if (rootPid === 'missing') return { ok: false, unknown: false, reason: `tmux has no pane ${pane}` }
-  if (!rootPid) return { ok: false, unknown: true, reason: `tmux could not resolve pane ${pane}` }
-  const rows = await processRows()
-  if (!rows) return { ok: false, unknown: true, reason: 'the process table could not be read' }
-  const enrichedRows = await enrichProcessRows(rows, processTreePids(rows, [rootPid]))
-  const process = selectEngineProcess(enrichedRows, rootPid, engine)
-  if (!process) return { ok: false, unknown: false, reason: `no ${engine} process under pane ${pane}` }
-  return {
-    ok: true,
-    identity: processIdentityOf(process),
-  }
 }
 
 /**
@@ -250,64 +213,6 @@ export async function tmuxPaneProcessTree(
     for (const child of children.get(pid) ?? []) queue.push(child.pid)
   }
   return found
-}
-
-/** Boolean form for callers that only need "is it there". */
-export async function resolvePaneEngineProcess(
-  pane: string,
-  engine: RegisteredSession['engine'],
-): Promise<ProcessIdentity | null> {
-  const found = await lookupPaneEngineProcess(pane, engine)
-  return found.ok ? found.identity : null
-}
-
-/**
- * The same check, but three-valued and with a reason — the reaper needs both.
- *
- * `unknown` exists because a failed probe is not evidence of death. The reaper already refuses to evict
- * when `tmux list-panes` fails; the per-session probes (`tmux display-message`, `ps`) deserve exactly the
- * same treatment, and did not get it: a live Command Code pane was dropped with "no commandcode process
- * under pane %3" 14s after attaching, while that process was demonstrably running — still alive minutes
- * later, and matched by this very resolver run by hand. The eviction landed 3.6s into a 5s tick, i.e.
- * `ps` had hit its 3s timeout during the load spike of a freshly started daemon warming its pools.
- *
- * The reason string matters just as much. "process for pane %3 gone" read identically whether the user
- * had quit the CLI or the adapter had simply lost sight of it, and telling those apart after the fact
- * means reconstructing a process table that no longer exists.
- */
-export type RuntimeCheck =
-  | { state: 'alive' }
-  | { state: 'gone'; reason: string }
-  | { state: 'unknown'; reason: string }
-
-export async function checkSessionRuntime(session: RegisteredSession): Promise<RuntimeCheck> {
-  const found = await lookupPaneEngineProcess(session.tmuxPane, session.engine)
-  if (!found.ok) return { state: found.unknown ? 'unknown' : 'gone', reason: found.reason }
-  const live = found.identity
-  const saved = session.processIdentity
-  // A persisted identity whose startMarker is not a C-locale lstart stamp was written either by the
-  // pre-fix parser (see parseProcessRow), with its fields shifted, or by a `ps` that still inherited the
-  // user's LC_TIME (see psEnv). Either way it can NEVER match the corrected ones again. Adopt the
-  // corrected identity instead of failing: the pane still has a matching engine process, and failing here
-  // would drop a live session for good (Command Code, the only engine affected, does not re-register on
-  // its Stop hook). One-time, per session.
-  if (saved && !LSTART_MARKER_RE.test(saved.startMarker)) {
-    registry.updateProcessIdentity(session.sessionId, live)
-    return { state: 'alive' }
-  }
-  // pid + start time IS the identity of a process, and neither can change under it — that is the whole
-  // PID-reuse guard. `executable` is argv-derived and therefore mutable (Command Code rewrites its own
-  // argv to `⌘ <session title>` and renames the session mid-life), so it is recorded but not compared:
-  // comparing it evicted live panes for renaming themselves.
-  if (saved && !sameProcessIdentity(saved, live)) {
-    return {
-      state: 'gone',
-      reason: `process changed under pane ${session.tmuxPane}`
-        + ` (was pid ${saved.pid} @ ${saved.startMarker}, now pid ${live.pid} @ ${live.startMarker})`,
-    }
-  }
-  if (!saved) registry.updateProcessIdentity(session.sessionId, live)
-  return { state: 'alive' }
 }
 
 // Short single-line messages need no settling delay, but still need bracketed-paste boundaries:
@@ -420,14 +325,7 @@ export async function setPaneStyle(pane: string, style: string): Promise<boolean
 /** What tmux knows about a pane right now. See `agentCreateDiagnosis.ts` for why this is read. */
 export { ENGINE_EXIT_PANE_OPTION }
 
-export interface TmuxPaneState {
-  dead: boolean
-  /** Exit status once the process is gone; null while it is still running. */
-  exitStatus: number | null
-  command: string
-  /** The engine's exit status once its launch wrapper handed the pane to a shell; null before. */
-  engineExit: number | null
-}
+export type TmuxPaneState = TerminalPaneState
 
 /**
  * What tmux said about a pane: its state, `'gone'`, or `'unknown'`.
@@ -441,7 +339,7 @@ export interface TmuxPaneState {
  * relaunched a resumed engine fresh over its conversation, and stopped a new agent's watcher
  * (e2e/stall.e2e.ts).
  */
-export type TmuxPaneRead = TmuxPaneState | 'gone' | 'unknown'
+export type TmuxPaneRead = TerminalPaneRead
 
 /** Pane liveness plus, for a pane kept alive by `remain-on-exit`, how its process ended (see TmuxPaneRead). */
 export function tmuxPaneState(pane: string): Promise<TmuxPaneRead> {
@@ -485,7 +383,7 @@ function readPaneState(pane: string, revived: boolean): Promise<TmuxPaneRead> {
 }
 
 /** What a pane is running and where, as tmux knows it (terminal clients' #{pane_current_*}). */
-export interface TmuxPaneInfo { command: string; path: string; pid: number | null; tty: string }
+export type TmuxPaneInfo = TerminalPaneInfo
 
 /**
  * The foreground command, live working directory, pid and tty of a pane — tmux's

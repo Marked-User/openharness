@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { RegisteredSession } from '../../lib/registry.js'
-import type { TmuxPaneInfo } from '../../lib/tmux.js'
+import type { TerminalPaneInfo } from '../../lib/terminalTypes.js'
 import { createTerminalRequests, type TerminalRequestDeps } from './requests.js'
 
 /** `terminal_info` and `theme_set`, answered by the core: tmux's word on an agent's pane, read outside
@@ -25,8 +25,8 @@ function setup(over: Partial<TerminalRequestDeps> = {}) {
 
 describe('terminal_info', () => {
   it('what an agent\'s pane runs and where, in tmux\'s fields, read outside the connection\'s line', async () => {
-    let answer!: (info: TmuxPaneInfo | null) => void
-    const { deps, replies, ask } = setup({ paneInfo: vi.fn(() => new Promise<TmuxPaneInfo | null>((resolve) => { answer = resolve })) })
+    let answer!: (info: TerminalPaneInfo | null) => void
+    const { deps, replies, ask } = setup({ paneInfo: vi.fn(() => new Promise<TerminalPaneInfo | null>((resolve) => { answer = resolve })) })
     ask({ agentId: 'a1' })
     expect(deps.paneInfo).toHaveBeenCalledWith('%7')
     expect(replies).toEqual([])

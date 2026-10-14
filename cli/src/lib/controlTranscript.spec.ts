@@ -441,7 +441,7 @@ it.each(['before', 'configuration', 'history repair', 'permission', 'tmux dispat
         newOwner = other.agentId
       } else writeFileSync(transcript, header(B))
       return tmuxFeaturesOf({ major: 3, minor: 7 })
-    }) : { create, kill }
+    }) : { create, kill, releaseHold: vi.fn(async () => {}), paneState: vi.fn(async () => 'unknown' as const), rootProcess: vi.fn(async () => null) }
     const resume = createResumeAgentService({ registry, stoppedAgents: stopped, restartJobs: new AgentRestartCoordinator(),
       stopJobs: new Map(), pinnedControls: new Set(), tmuxBackend: backend,
       retainExitedSession: vi.fn(), announceSession: announce,

@@ -43,7 +43,6 @@ import { folderTrust } from '../../engines/launchPrep.js'
 import { projectsRoot } from '../../lib/projectFolder.js'
 import { NativeFiles } from '../../engines/kit/nativeFiles.js'
 import type { registry, RegisteredSession } from '../../lib/registry.js'
-import { clearPaneRemainOnExit } from '../../lib/tmux.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
 import { TMUX_SESSION_ENV_MIN, tmuxSupportsSessionEnv } from '../../lib/tmuxVersion.js'
 import { prepareInstructionWrites, scmLaunchEnv } from '../../scm/scmProjects.js'
@@ -384,7 +383,7 @@ export function createAgentCreator({
     // shell exiting is the person closing it — so `remain-on-exit` comes off now, and the pane going
     // away is what removes the row (reconciler `onRemoved`), exactly as for an engine that quit.
     if (isTerminalEngine(engine)) {
-      await clearPaneRemainOnExit(spawned.runtime.paneId)
+      await tmuxBackend.releaseHold(spawned.runtime)
       const ready = registry.setLaunch(pending.agentId, { state: 'ready' }) ?? pending
       announceSession(ready)
       console.log(`[agent] create terminal open · agent ${pending.agentId}`)

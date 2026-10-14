@@ -12,7 +12,7 @@ import { StoppedAgentStore } from './stoppedAgents.js'
 import { AgentRestartCoordinator } from './restartAgent.js'
 import { checkPidRuntime } from './deleteAgentFallback.js'
 import { listTmuxPanes } from './tmuxAgentDiscovery.js'
-import { checkSessionRuntime, clearPaneRemainOnExit, resolvePaneEngineProcess, tmuxPaneState } from './tmux.js'
+import { checkSessionRuntime, resolvePaneEngineProcess } from './paneEngineProcess.js'
 import { buildEngineLaunchArgv, dropPermissionFlagIfUnsupported, refusePermissionFlagIfUnsupported } from './engineLaunch.js'
 import { enginePathOverride } from './engineBin.js'
 import { installedDsh } from '../dsh/installed.js'
@@ -22,7 +22,7 @@ import type { NativeLaunch } from '../engines/nativeLaunch.js'
 
 vi.mock('./deleteAgentFallback.js', () => ({ checkPidRuntime: vi.fn() }))
 vi.mock('./tmuxAgentDiscovery.js', () => ({ listTmuxPanes: vi.fn() }))
-vi.mock('./tmux.js', () => ({ checkSessionRuntime: vi.fn(), clearPaneRemainOnExit: vi.fn(), resolvePaneEngineProcess: vi.fn(), tmuxPaneState: vi.fn() }))
+vi.mock('./paneEngineProcess.js', () => ({ checkSessionRuntime: vi.fn(), resolvePaneEngineProcess: vi.fn() }))
 // `resumeCapability` reads the real flag table through this module; only the argv builder and the
 // capability gate are faked. The gate would otherwise spawn the tester's own login shell to ask
 // `<engine> --help` about a flag, which is neither this file's subject nor the same answer on two
@@ -45,6 +45,10 @@ const identity = { pid: 54321, startMarker: 'new-process', executable: 'codex' }
 const pane = '%99'
 const create = vi.fn()
 const kill = vi.fn()
+// The pane's backend: its state and hold. Which engine runs in it is `paneEngineProcess.ts`'s, faked above.
+const paneState = vi.fn()
+const releaseHold = vi.fn()
+const rootProcess = vi.fn()
 const inventory = () => ({ ok: true as const, panes: [{ tmuxPane: pane }] as any[] })
 function live(extra: Partial<RegisteredSession> = {}) {
   return Object.assign(registry.resumePendingAgent(saved, [{ backend: 'tmux', paneId: pane }])!, extra)
@@ -79,15 +83,15 @@ beforeEach(() => {
   vi.mocked(listTmuxPanes).mockReset().mockResolvedValue(inventory())
   vi.mocked(checkPidRuntime).mockReset().mockResolvedValue({ state: 'gone', reason: 'fixture' })
   vi.mocked(checkSessionRuntime).mockReset().mockResolvedValue({ state: 'alive' })
-  vi.mocked(tmuxPaneState).mockReset().mockResolvedValue({ dead: false } as any)
-  vi.mocked(clearPaneRemainOnExit).mockReset().mockResolvedValue(undefined)
+  paneState.mockReset().mockResolvedValue({ dead: false } as any)
+  releaseHold.mockReset().mockResolvedValue(undefined)
   vi.mocked(resolvePaneEngineProcess).mockReset().mockImplementation(async () => {
     const row = registry.byAgent(saved.agentId)
     if (row) { Object.assign(row, { processIdentity: identity, lastHookAt: Date.now(), launch: { state: 'ready' } }) }
     return identity
   })
   deps = {
-    registry, stoppedAgents: store, tmuxBackend: { create, kill }, restartJobs: new AgentRestartCoordinator(),
+    registry, stoppedAgents: store, tmuxBackend: { create, kill, paneState, releaseHold, rootProcess }, restartJobs: new AgentRestartCoordinator(),
     stopJobs: new Map(), pinnedControls: new Set(),
     retainExitedSession: vi.fn((row, alive) => { store.save(row); if (alive) registry.releaseEngine(row.agentId, true); else registry.removeAgent(row.agentId) }),
     announceSession: vi.fn(), relaunchOverrides: vi.fn(async () => ({ ok: true as const, overrides: { env: {}, extraArgs: [], clearEnv: [] } })),
@@ -442,9 +446,11 @@ describe('existing runtime and readiness verification', () => {
     if (engine === 'terminal') rewrite({ engine, sessionId: '', transcriptPath: '' })
     live({ engine, resumeOnly: undefined, launch: { state: 'ready' } }); vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' })
     expect(await start()).toMatchObject({ ok: true }); expect(create).not.toHaveBeenCalled()
+    if (engine === 'claude') expect(checkSessionRuntime).toHaveBeenCalledWith(deps.tmuxBackend, expect.objectContaining({ agentId: saved.agentId }))
   })
-  it.each(['no route', 'no inventory', 'process unknown', 'process detached', 'unidentified engine'] as const)('does not disturb %s', async reason => {
+  it.each(['no route', 'no inventory', 'process unknown', 'process detached', 'unidentified engine', 'no tmux backend'] as const)('does not disturb %s', async reason => {
     live({ resumeOnly: undefined, launch: { state: 'ready' }, ...(reason === 'no route' ? { tmuxPane: '' } : {}) })
+    if (reason === 'no tmux backend') { deps.tmuxBackend = null; vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }) }
     if (reason === 'no inventory') vi.mocked(listTmuxPanes).mockResolvedValue({ ok: false, error: 'fixture' })
     if (reason === 'process unknown') vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'unknown', reason: 'fixture' })
     if (reason === 'process detached') { vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }); vi.mocked(listTmuxPanes).mockResolvedValue({ ok: true, panes: [] }) }
@@ -475,6 +481,14 @@ describe('existing runtime and readiness verification', () => {
   })
   it('rechecks a pending allocation after reconnect without spawning again', async () => {
     live(); expect(await start()).toMatchObject({ ok: true }); expect(create).not.toHaveBeenCalled()
+    // Asked of the pane's own backend, about the pane the row records.
+    expect(resolvePaneEngineProcess).toHaveBeenCalledWith(deps.tmuxBackend, { backend: 'tmux', paneId: pane }, 'codex')
+    expect(releaseHold).toHaveBeenCalledWith({ backend: 'tmux', paneId: pane })
+  })
+  it('confirms nothing of a pending allocation with no tmux backend to ask', async () => {
+    live(); deps.tmuxBackend = null
+    expect(await start()).toEqual({ ok: false, error: 'TMUX_UNAVAILABLE' })
+    expect(resolvePaneEngineProcess).not.toHaveBeenCalled(); expect(deps.announceSession).not.toHaveBeenCalled()
   })
   it('asks a live unconfirmed resume for confirmation again, withdrawing the old verdict first', async () => {
     live({ processIdentity: identity, launch: { state: 'failed', error: 'RESUME_UNCONFIRMED', detail: 'fixture' } })
@@ -522,11 +536,11 @@ describe('existing runtime and readiness verification', () => {
   })
   it.each([true, false])('cancels while clearing remain-on-exit, terminal=%s', async terminal => {
     if (terminal) rewrite({ engine: 'terminal', sessionId: '', transcriptPath: '' })
-    vi.mocked(clearPaneRemainOnExit).mockImplementation(async () => { deps.restartJobs.cancel(saved.agentId) })
+    releaseHold.mockImplementation(async () => { deps.restartJobs.cancel(saved.agentId) })
     expect(await start()).toMatchObject({ error: 'AGENT_CHANGED' })
   })
   it('does not finish a reservation when the route changes during final readiness cleanup', async () => {
-    vi.mocked(clearPaneRemainOnExit).mockImplementation(async () => { registry.byAgent(saved.agentId)!.tmuxPane = '%102' })
+    releaseHold.mockImplementation(async () => { registry.byAgent(saved.agentId)!.tmuxPane = '%102' })
     expect(await start()).toMatchObject({ error: 'AGENT_CHANGED' })
     expect(deps.stoppedAgents.beginResume(saved.agentId)).toBeNull()
   })
@@ -543,11 +557,11 @@ describe('existing runtime and readiness verification', () => {
       if (mode === 'failed hook') registry.setLaunch(saved.agentId, { state: 'failed', error: 'RESUME_SESSION_MISMATCH', detail: 'fixture' })
       return null
     })
-    vi.mocked(tmuxPaneState).mockResolvedValueOnce({ dead: false, engineExit: 1 } as any)
-    if (mode === 'exit dead pane') vi.mocked(tmuxPaneState).mockResolvedValueOnce({ dead: true } as any)
+    paneState.mockResolvedValueOnce({ dead: false, engineExit: 1 } as any)
+    if (mode === 'exit dead pane') paneState.mockResolvedValueOnce({ dead: true } as any)
     if (mode === 'exit unknown process') vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'unknown', reason: 'fixture' })
     if (mode === 'cancel process probe') vi.mocked(checkPidRuntime).mockImplementation(async () => { deps.restartJobs.cancel(saved.agentId); return { state: 'gone', reason: 'fixture' } })
-    if (mode === 'cancel pane probe') vi.mocked(tmuxPaneState).mockImplementationOnce(async () => { deps.restartJobs.cancel(saved.agentId); return 'gone' })
+    if (mode === 'cancel pane probe') paneState.mockImplementationOnce(async () => { deps.restartJobs.cancel(saved.agentId); return 'gone' })
     expect(await start()).toMatchObject({ ok: false })
     expect(create).not.toHaveBeenCalled(); expect(deps.stoppedAgents.get(saved.agentId)).not.toBeNull()
   })
@@ -558,7 +572,7 @@ describe('existing runtime and readiness verification', () => {
     // the daemon's event loop was held) keeps it, for the reconciler to judge with scans that agree.
     live()
     vi.mocked(resolvePaneEngineProcess).mockResolvedValue(null)
-    vi.mocked(tmuxPaneState).mockResolvedValueOnce({ dead: false, engineExit: 1 } as any).mockResolvedValueOnce(pane)
+    paneState.mockResolvedValueOnce({ dead: false, engineExit: 1 } as any).mockResolvedValueOnce(pane)
     expect(await start()).toMatchObject({ ok: false, error: 'RESUME_FAILED' })
     expect(deps.retainExitedSession).toHaveBeenCalledWith(expect.objectContaining({ agentId: saved.agentId }), kept)
   })

@@ -1,11 +1,12 @@
 /** Terminal identity and exit evidence stay with the core's live registry. */
 import type { CoreApi, TerminalsPort } from '../api.js'
-import type { tmuxPaneState } from '../../lib/tmux.js'
+import type { TerminalPaneRead } from '../../lib/terminalTypes.js'
 import type { checkPidRuntime } from '../../lib/deleteAgentFallback.js'
 
 interface TerminalSessionDeps {
   agents: Pick<CoreApi['agents'], 'byAgent' | 'displayName' | 'terminalAvailable'>
-  paneState: typeof tmuxPaneState
+  /** The pane's state, as its backend reads it (`TerminalBackend.paneState`). */
+  paneState: (pane: string) => Promise<TerminalPaneRead>
   processState: typeof checkPidRuntime
 }
 

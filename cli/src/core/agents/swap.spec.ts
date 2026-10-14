@@ -4,7 +4,7 @@ import { checkPidRuntime, terminateDeletedAgent } from '../../lib/deleteAgentFal
 import { buildEngineLaunchArgv } from '../../lib/engineLaunch.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { processRows } from '../../lib/terminalAgentDiscovery.js'
-import { resolvePaneEngineProcess } from '../../lib/tmux.js'
+import { resolvePaneEngineProcess } from '../../lib/paneEngineProcess.js'
 import { bypassPermissionActive } from '../../lib/processTable.js'
 import { AgentRestartCoordinator } from '../../lib/restartAgent.js'
 import { createPaneSwap, SWAP_SETTLE_MS, type PaneSwapDeps } from './swap.js'
@@ -13,7 +13,7 @@ import type { NativeLaunch } from '../../engines/nativeLaunch.js'
 vi.mock('../../lib/deleteAgentFallback.js', async (real) => ({ ...await real<object>(), terminateDeletedAgent: vi.fn(async () => ({ ok: true })) }))
 vi.mock('../../lib/engineLaunch.js', async (real) => ({ ...await real<object>(), buildEngineLaunchArgv: vi.fn(() => ['zsh', '-lc', 'claude']) }))
 vi.mock('../../lib/terminalAgentDiscovery.js', async (real) => ({ ...await real<object>(), processRows: vi.fn(async () => null) }))
-vi.mock('../../lib/tmux.js', async (real) => ({
+vi.mock('../../lib/paneEngineProcess.js', async (real) => ({
   ...await real<object>(),
   resolvePaneEngineProcess: vi.fn(async () => null),
 }))
@@ -126,12 +126,14 @@ describe('the pane-process swap', () => {
 
   it('waits for the new process with growing pauses, and gives up once eight seconds have passed', async () => {
     vi.useFakeTimers()
-    const { swap } = setup()
+    const { swap, tmuxBackend } = setup()
     const found = { pid: 99, startMarker: 'now' }
     vi.mocked(resolvePaneEngineProcess).mockResolvedValueOnce(null).mockResolvedValueOnce(found as never).mockResolvedValueOnce({ ...found } as never)
     const waiting = swap.paneSwapDeps(session(), runtime).waitForProcess()
     await vi.advanceTimersByTimeAsync(150 + 300 + SWAP_SETTLE_MS)
     expect(await waiting).toEqual(found)
+    // Asked of the pane's own backend, about the pane being swapped.
+    expect(resolvePaneEngineProcess).toHaveBeenCalledWith(tmuxBackend, runtime, 'claude')
     const never = swap.paneSwapDeps(session(), runtime).waitForProcess()
     // 150, 300, 600, then 750 ms at a time: the budget is spent on the look that crosses 8 s.
     await vi.advanceTimersByTimeAsync(9_000)

@@ -8,7 +8,7 @@ import { IdentityReadUnavailable } from '../engines/kit/identityScan.js'
 import type { StoppedAgentStore } from './stoppedAgents.js'
 import { resumeStoppedAgent, waitForResumedAgent, resumeChanged, resumeUnconfirmed, RESUME_READINESS_BUDGET_MS } from './resumeStoppedAgent.js'
 import { checkPidRuntime } from './deleteAgentFallback.js'
-import { checkSessionRuntime, clearPaneRemainOnExit, resolvePaneEngineProcess, tmuxPaneState } from './tmux.js'
+import { checkSessionRuntime, resolvePaneEngineProcess } from './paneEngineProcess.js'
 import { listTmuxPanes } from './tmuxAgentDiscovery.js'
 import { enginePathOverride } from './engineBin.js'
 import { engineInstallRecipe } from './engineInstall.js'
@@ -18,12 +18,14 @@ import { buildHarnessSessionLabel } from './harnessSessionLabel.js'
 import { createAndRegisterPane, type CreateAgentPaneDeps } from './createAgentPane.js'
 import type { LaunchOverrides, LaunchOverridesResult } from './launchOverrides.js'
 import type { AgentRestartCoordinator } from './restartAgent.js'
+import type { TerminalBackend } from './terminalBackend.js'
+import type { TmuxRuntimeRef } from './terminalTypes.js'
 import { harnessPermissionEnvironment } from './harnessDefaults.js'
 
 export interface ResumeAgentServiceDeps {
   registry: Pick<typeof liveRegistry, 'byAgent' | 'bySession' | 'resumePendingAgent' | 'setLaunch' | 'updateProcessIdentity'>
   stoppedAgents: StoppedAgentStore
-  tmuxBackend: CreateAgentPaneDeps['tmuxBackend'] | null
+  tmuxBackend: (CreateAgentPaneDeps['tmuxBackend'] & Pick<TerminalBackend<TmuxRuntimeRef>, 'releaseHold' | 'paneState' | 'rootProcess'>) | null
   restartJobs: AgentRestartCoordinator
   stopJobs: ReadonlyMap<string, Promise<void>>
   pinnedControls: { has(agentId: string): boolean }
@@ -75,6 +77,9 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
     // Registry observations may update the same object; pin the route being verified.
     const saved = { ...entry }
     const ownsRoute = () => current() && registry.byAgent(saved.agentId)?.tmuxPane === saved.tmuxPane
+    // A resume to confirm runs in a tmux pane: one with no tmux backend to ask is not confirmed here.
+    if (!tmuxBackend) return { ok: false as const, error: 'TMUX_UNAVAILABLE' }
+    const runtime: TmuxRuntimeRef = { backend: 'tmux', paneId: saved.tmuxPane }
     // A second look at an unconfirmed resume: the verdict is withdrawn before the check, or the
     // readiness probe would return it straight back. The desk sees the tile leave "Start failed".
     const unconfirmed = ownsRoute() ? registry.byAgent(saved.agentId) : undefined
@@ -85,8 +90,8 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
     const result = await waitForResumedAgent(saved, {
       current: ownsRoute,
       session: () => registry.byAgent(saved.agentId),
-      process: () => resolvePaneEngineProcess(saved.tmuxPane, saved.engine),
-      pane: () => tmuxPaneState(saved.tmuxPane),
+      process: () => resolvePaneEngineProcess(tmuxBackend, runtime, saved.engine),
+      pane: () => tmuxBackend.paneState(runtime),
       sleep: ms => new Promise(resolve => { const timer = setTimeout(resolve, ms); timer.unref?.() }),
     })
     if (!ownsRoute()) return resumeChanged
@@ -95,7 +100,7 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
       // an engine whose hook is delayed or absent must still be attachable and stoppable now.
       if (!result.session.processIdentity
         || !registry.updateProcessIdentity(saved.agentId, result.session.processIdentity)) return resumeChanged
-      await clearPaneRemainOnExit(saved.tmuxPane)
+      await tmuxBackend.releaseHold(runtime)
       if (!ownsRoute()) return resumeChanged
       stoppedAgents.finishResume(saved.agentId)
       // Whoever got there first wins, and if nobody did, this does: a hook that already reached
@@ -137,7 +142,7 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
       // keeps both runtime and reservation; another Enter cannot launch a duplicate process.
       if (result.error === 'RESUME_FAILED' && (await checkPidRuntime(row)).state === 'gone') {
         if (!ownsRoute()) return resumeChanged
-        const pane = await tmuxPaneState(saved.tmuxPane)
+        const pane = await tmuxBackend.paneState(runtime)
         if (!ownsRoute()) return resumeChanged
         // Only a pane known to be gone or dead loses its row. One tmux could not read keeps it, as a
         // terminal: the reconciler removes it once its scans agree the pane is gone.
@@ -160,8 +165,8 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
       if (isTerminalEngine(entry.engine)) return paneAlive ? { state: 'alive' } : { state: 'gone', reason: 'Shell pane is gone.' }
       const process = await checkPidRuntime(entry)
       if (process.state !== 'gone') {
-        if (!paneAlive || process.state === 'unknown') return { state: 'unknown', reason: 'The previous process is not available through its saved terminal.' }
-        return checkSessionRuntime(entry)
+        if (!paneAlive || process.state === 'unknown' || !tmuxBackend) return { state: 'unknown', reason: 'The previous process is not available through its saved terminal.' }
+        return checkSessionRuntime(tmuxBackend, entry)
       }
       if (!entry.processIdentity && paneAlive) return { state: 'unknown', reason: 'The engine has not been identified yet.' }
       return process
@@ -328,7 +333,7 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
         refreshGridWebSearch(pending.agentId, built.overrides)
         announceSession(pending)
         if (isTerminalEngine(saved.engine)) {
-          await clearPaneRemainOnExit(spawned.runtime.paneId)
+          await tmuxBackend.releaseHold(spawned.runtime)
           if (!current()) return resumeChanged
           const ready = registry.setLaunch(pending.agentId, { state: 'ready' })!
           stoppedAgents.finishResume(agentId, token)

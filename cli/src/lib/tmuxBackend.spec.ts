@@ -689,6 +689,17 @@ describe('handing a pane back to tmux\'s disposal', () => {
   })
 })
 
+describe('asking TmuxBackend for a pane\'s root process', () => {
+  it('rootProcess maps "can\'t find pane" to missing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tmux-backend-root-'))
+    dirs.push(dir)
+    writeFileSync(join(dir, 'tmux'), `#!/bin/sh\nprintf "can't find pane: %%9\\n" >&2\nexit 1\n`, { mode: 0o700 })
+    process.env.PATH = `${dir}${delimiter}${originalPath ?? ''}`
+    const backend = new TmuxBackend()
+    expect(await backend.rootProcess({ backend: 'tmux', paneId: '%9' })).toBe('missing')
+  })
+})
+
 describe('TmuxBackend with variables on a tmux that cannot take them', () => {
   const env = { CODEX_HOME: '/work/profile' }
 

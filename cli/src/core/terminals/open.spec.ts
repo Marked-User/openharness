@@ -1,16 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createAndRegisterPane } from '../../lib/createAgentPane.js'
 import type { RegisteredSession } from '../../lib/registry.js'
-import { clearPaneRemainOnExit } from '../../lib/tmux.js'
 import { createTerminalOpener, type TerminalOpenerDeps } from './open.js'
 
 vi.mock('../../lib/createAgentPane.js', () => ({ createAndRegisterPane: vi.fn() }))
-vi.mock('../../lib/tmux.js', () => ({ clearPaneRemainOnExit: vi.fn(async () => {}) }))
 
 const row = { agentId: 'shell', engine: 'terminal', launch: { state: 'ready' } } as RegisteredSession
 function setup(over: Partial<TerminalOpenerDeps> = {}) {
   const deps: TerminalOpenerDeps = {
-    tmuxBackend: { create: vi.fn(), kill: vi.fn() },
+    tmuxBackend: { create: vi.fn(), kill: vi.fn(), releaseHold: vi.fn(async () => {}) },
     registry: { openPendingAgent: vi.fn(), setLaunch: vi.fn(() => row) },
     announceSession: vi.fn(), blocksFolder: vi.fn(() => false), ...over,
   }
@@ -31,7 +29,7 @@ describe('the core terminal launch call', () => {
       spawnCwd: '/work/project', argv, sessionLabel: expect.stringMatching(/^harness-shell-[\da-f-]+$/), bypassPermission: false,
     })
     expect(vi.mocked(createAndRegisterPane).mock.calls[0]![0].argv).not.toBe(argv)
-    expect(clearPaneRemainOnExit).toHaveBeenCalledWith('%42')
+    expect(deps.tmuxBackend!.releaseHold).toHaveBeenCalledWith({ backend: 'tmux', paneId: '%42' })
     expect(deps.registry.setLaunch).toHaveBeenCalledWith('shell', { state: 'ready' })
     expect(deps.announceSession).toHaveBeenCalledWith(row)
   })
@@ -44,7 +42,7 @@ describe('the core terminal launch call', () => {
     const { deps, open } = setup()
     vi.mocked(createAndRegisterPane).mockResolvedValueOnce({ ok: false, error: 'SPAWN_FAILED', detail: 'gone' })
     expect(await open({ argv: ['/bin/sh'], cwd: '/work' })).toEqual({ ok: false, error: 'SPAWN_FAILED', detail: 'gone' })
-    expect(clearPaneRemainOnExit).not.toHaveBeenCalled()
+    expect(deps.tmuxBackend!.releaseHold).not.toHaveBeenCalled()
     expect(deps.announceSession).not.toHaveBeenCalled()
   })
   it('does not announce a terminal that closed before it became ready', async () => {

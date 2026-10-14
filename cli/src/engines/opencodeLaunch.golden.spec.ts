@@ -13,7 +13,6 @@ vi.mock('../lib/createAgentPane.js', () => ({ createAndRegisterPane: async (inpu
   return { ok: false, error: 'RECORDED', detail: 'No pane is opened by this golden.' }
 } }))
 vi.mock('../lib/tmuxVersion.js', async real => ({ ...await real<object>(), tmuxSupportsSessionEnv: async () => true }))
-vi.mock('../lib/tmux.js', async real => ({ ...await real<object>(), clearPaneRemainOnExit: async () => {} }))
 vi.mock('../lib/processTable.js', async real => ({ ...await real<object>(), processArgs: async () => '' }))
 vi.mock('../lib/gatewayRuntime.js', async real => ({ ...await real<object>(), probeGatewayRuntime: async () => ({ kind: 'none' }) }))
 vi.mock('../lib/binaryOnPath.js', async real => {
@@ -133,7 +132,7 @@ it('records create, fork, relaunch and actual retarget dispatch before the extra
     const source = row('opencode', true), events: unknown[] = []
     const event = (entry: unknown[]) => { events.push(entry); appendFileSync(calls, JSON.stringify({ control: entry }) + '\n') }
     const retarget = createAgentRetargeter({
-      purgeBusy: () => false, tmuxBackend: { clearEnv: async (_pane: unknown, names: string[]) => { event(['clearEnv', names]); return { state: 'succeeded' } } },
+      purgeBusy: () => false, tmuxBackend: { clearEnv: async (_pane: unknown, names: string[]) => { event(['clearEnv', names]); return { state: 'succeeded' } }, releaseHold: async () => {} },
       registry: { resolve: () => source, byAgent: () => source, updateProcessIdentity: (...args: unknown[]) => event(['process', ...args]),
         setGridLaunch: (...args: unknown[]) => event(['grid', ...args]), setSubscriptionModel: (...args: unknown[]) => event(['subscription', ...args]),
         setActive: (...args: unknown[]) => event(['active', ...args]) },

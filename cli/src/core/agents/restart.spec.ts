@@ -7,7 +7,6 @@ import { probeGatewayRuntime } from '../../lib/gatewayRuntime.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { AgentRestartCoordinator, bypassPermissionFor, restartAgent } from '../../lib/restartAgent.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
-import { clearPaneRemainOnExit } from '../../lib/tmux.js'
 import { processLaunchArgs } from '../../lib/processTable.js'
 import { workspaceMissing } from '../../lib/workspaceCheck.js'
 import { createAgentRestarter, type RestartDeps } from './restart.js'
@@ -24,9 +23,6 @@ vi.mock('../../lib/restartAgent.js', async (real) => ({
   bypassPermissionFor: vi.fn(async (_s: unknown, live: () => Promise<boolean>) => live()),
   restartAgent: vi.fn(async () => ({ ok: true, resumed: true, processIdentity: { pid: 2, startMarker: 'new', executable: '/bin/claude' } })),
 }))
-vi.mock('../../lib/tmux.js', async (real) => ({
-  ...await real<object>(), clearPaneRemainOnExit: vi.fn(async () => {}),
-}))
 vi.mock('../../lib/processTable.js', async (real) => ({
   ...await real<object>(),
   processLaunchArgs: vi.fn(async () => '/bin/claude --model opus -c model_provider=grid'),
@@ -34,6 +30,8 @@ vi.mock('../../lib/processTable.js', async (real) => ({
 vi.mock('../../lib/workspaceCheck.js', () => ({ workspaceMissing: vi.fn(() => null) }))
 
 const runtime = { backend: 'tmux', paneId: '%4' }
+/** The pane's backend handing the pane back to its default disposal (`TerminalBackend.releaseHold`). */
+const releaseHold = vi.fn(async (..._args: unknown[]) => {})
 const routeKey = terminalRouteKey(runtime as never)
 const newProcess = { pid: 2, startMarker: 'new', executable: '/bin/claude' }
 const agent = (over: Partial<RegisteredSession> = {}): RegisteredSession => ({
@@ -45,7 +43,7 @@ const terminal = (over: Partial<RegisteredSession> = {}) => agent({ engine: 'ter
  *  (null: the row vanished mid-restart). `live` goes false to make the operation stale. */
 function setup(row: RegisteredSession | null = agent(), over: Partial<RestartDeps> = {}, refreshed: RegisteredSession | null = row) {
   const state = { live: true }
-  const tmuxBackend = { respawn: vi.fn(async () => ({ state: 'succeeded' })) }
+  const tmuxBackend = { respawn: vi.fn(async () => ({ state: 'succeeded' })), releaseHold }
   const deps: RestartDeps = {
     restartJobs: { run: vi.fn((_id: string, job: (current: () => boolean) => unknown) => job(() => state.live)) } as never,
     registry: {
@@ -253,7 +251,7 @@ describe('restarting an agent', () => {
       expect(await run.restart('a1')).toEqual({ ok: true, session: terminal(), resumed: false })
       expect(buildEngineLaunchArgv).toHaveBeenCalledWith('terminal', { cwd: '/work', terminalHint: { machineName: 'studio' } })
       expect(run.tmuxBackend.respawn).toHaveBeenCalledWith(runtime, { command: ['zsh', '-l'], cwd: homedir() })
-      expect(clearPaneRemainOnExit).toHaveBeenCalledWith('%4')
+      expect(releaseHold).toHaveBeenCalledWith(runtime)
       expect(run.deps.registry.setActive).toHaveBeenCalledWith('a1', true)
       expect(run.deps.announceSession).toHaveBeenCalledWith(terminal())
       expect(console.log).toHaveBeenCalledWith('[restart] a1 terminal · fresh shell')
@@ -271,7 +269,7 @@ describe('restarting an agent', () => {
       const run = setup(terminal())
       run.tmuxBackend.respawn.mockResolvedValueOnce({ state: 'failed', reason: 'pane gone' } as never)
       expect(await run.restart('a1')).toEqual({ ok: false, error: 'RESTART_FAILED', detail: 'pane gone' })
-      expect(clearPaneRemainOnExit).not.toHaveBeenCalled()
+      expect(releaseHold).not.toHaveBeenCalled()
       expect(run.deps.agentReconciler.releaseRoute).toHaveBeenCalledWith(routeKey)
     })
 
@@ -279,11 +277,11 @@ describe('restarting an agent', () => {
       const respawned = setup(terminal())
       respawned.tmuxBackend.respawn.mockImplementationOnce(async () => { respawned.state.live = false; return { state: 'succeeded' } })
       expect(await respawned.restart('a1')).toEqual(changed)
-      expect(clearPaneRemainOnExit).not.toHaveBeenCalled()
+      expect(releaseHold).not.toHaveBeenCalled()
       expect(respawned.deps.agentReconciler.releaseRoute).toHaveBeenCalledWith(routeKey)
 
       const cleared = setup(terminal())
-      vi.mocked(clearPaneRemainOnExit).mockImplementationOnce(async () => { cleared.state.live = false })
+      releaseHold.mockImplementationOnce(async () => { cleared.state.live = false })
       expect(await cleared.restart('a1')).toEqual(changed)
       expect(cleared.deps.registry.setActive).not.toHaveBeenCalled()
     })
@@ -313,7 +311,7 @@ describe('restarting an agent', () => {
       // Its command line, where a Codex or pi grid's address and model are: never its executable alone.
       expect(run.deps.registry.updateProcessIdentity).toHaveBeenCalledWith('a1', newProcess, 'none')
       expect(run.deps.registry.setActive).toHaveBeenCalledWith('a1', true)
-      expect(clearPaneRemainOnExit).toHaveBeenCalledWith('%4')
+      expect(releaseHold).toHaveBeenCalledWith(runtime)
       expect(run.deps.announceSession).toHaveBeenCalledWith(agent())
       expect(run.deps.refreshGridAssignment).toHaveBeenCalledWith(agent())
       expect(console.log).toHaveBeenCalledWith('[restart] a1 claude · resumed')
@@ -357,7 +355,7 @@ describe('restarting an agent', () => {
       expect(probed.deps.registry.updateProcessIdentity).not.toHaveBeenCalled()
 
       const cleared = setup()
-      vi.mocked(clearPaneRemainOnExit).mockImplementationOnce(async () => { cleared.state.live = false })
+      releaseHold.mockImplementationOnce(async () => { cleared.state.live = false })
       expect(await cleared.restart('a1')).toEqual(changed)
       expect(cleared.deps.announceSession).not.toHaveBeenCalled()
     })

@@ -12,7 +12,7 @@ import type { RegisteredSession } from '../../lib/registry.js'
 import { AgentRestartCoordinator, type RestartAgentDeps } from '../../lib/restartAgent.js'
 import { processRows } from '../../lib/terminalAgentDiscovery.js'
 import type { TmuxRuntimeRef } from '../../lib/terminalTypes.js'
-import { resolvePaneEngineProcess } from '../../lib/tmux.js'
+import { resolvePaneEngineProcess } from '../../lib/paneEngineProcess.js'
 import { bypassPermissionActive } from '../../lib/processTable.js'
 import { sameProcessIdentity } from '../../lib/terminalRuntime.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
@@ -93,14 +93,14 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
       while (waited < SWAP_DISCOVERY_BUDGET_MS) {
         await new Promise((resolve) => setTimeout(resolve, delayMs))
         waited += delayMs
-        const found = await resolvePaneEngineProcess(runtime.paneId, session.engine)
+        const found = await resolvePaneEngineProcess(tmuxBackend!, runtime, session.engine)
         if (found) {
           // Up means still up a moment later: a launch the engine refuses (`codex resume` after an update
           // dropped it) runs for an instant, and seen then, the restart said "resumed" and never fell back
           // to a fresh start (e2e/updates.e2e.ts on Linux, whose faster start put it in the first look).
           await new Promise((resolve) => setTimeout(resolve, SWAP_SETTLE_MS))
           waited += SWAP_SETTLE_MS
-          const still = await resolvePaneEngineProcess(runtime.paneId, session.engine)
+          const still = await resolvePaneEngineProcess(tmuxBackend!, runtime, session.engine)
           if (sameProcessIdentity(still, found)) return found
         }
         delayMs = Math.min(delayMs * 2, 750)

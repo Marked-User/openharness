@@ -18,8 +18,7 @@ vi.mock('./processLiveness.js', async original => ({ ...await original<object>()
 }))
 vi.mock('./deleteAgentFallback.js', () => ({ checkPidRuntime: async () => ({ state: 'gone', reason: 'fixture' }) }))
 vi.mock('./tmuxAgentDiscovery.js', () => ({ listTmuxPanes: async () => ({ ok: true, panes: [] }) }))
-vi.mock('./tmux.js', () => ({ checkSessionRuntime: async () => ({ state: 'alive' }),
-  clearPaneRemainOnExit: async () => {}, tmuxPaneState: async () => ({ dead: false }),
+vi.mock('./paneEngineProcess.js', () => ({ checkSessionRuntime: async () => ({ state: 'alive' }),
   resolvePaneEngineProcess: async () => ({ pid: 7001, executable: '<engine>', startMarker: 'fixture-start' }),
 }))
 vi.mock('./engineLaunch.js', async original => ({ ...await original<object>(),
@@ -75,6 +74,8 @@ it.each(['linux', 'darwin'])('keeps healthy native resume composition on %s', as
           create: async request => { events.push(['create', request.command]); return { state: 'succeeded', dispatch: 'executed',
             runtime: { backend: 'tmux', paneId: `%${++pane}` } } },
           kill: async () => { throw Error('A healthy resume must not kill a pane') },
+          releaseHold: async () => {}, paneState: async () => ({ dead: false, exitStatus: null, command: '<engine>', engineExit: null }),
+          rootProcess: async () => { throw Error('The engine process is resolved through paneEngineProcess.js') },
         }, retainExitedSession: () => { throw Error('No live session exists in this fixture') },
         announceSession: session => { events.push(['announce', session.engine, session.sessionId, session.launch?.state]) },
         relaunchOverrides: async session => { events.push(['launch-prepare', session.engine, session.sessionId]);

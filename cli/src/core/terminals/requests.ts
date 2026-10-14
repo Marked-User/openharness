@@ -6,12 +6,12 @@
  */
 import { parseHostTheme, type HostTheme } from '../../lib/hostTheme.js'
 import type { RegisteredSession } from '../../lib/registry.js'
-import type { TmuxPaneInfo } from '../../lib/tmux.js'
+import type { TerminalPaneInfo } from '../../lib/terminalTypes.js'
 
 export interface TerminalRequestDeps {
   resolve: (id: string) => RegisteredSession | undefined
-  /** tmux's own word on a pane (lib/tmux.ts `tmuxPaneInfo`). */
-  paneInfo: (pane: string) => Promise<TmuxPaneInfo | null>
+  /** The pane's backend's own word on it (`TerminalBackend.paneInfo`). */
+  paneInfo: (pane: string) => Promise<TerminalPaneInfo | null>
   /** Makes a pair of colours this machine's tmux `window-style` (cli.ts). */
   applyTheme: (theme: HostTheme) => void
 }

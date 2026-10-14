@@ -25,7 +25,6 @@ import { parseRuntimeProfile } from '../../lib/runtimeProfileWire.js'
 import type { TerminalAgentReconciler } from '../../lib/terminalAgentReconciler.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
 import type { TmuxRuntimeRef } from '../../lib/terminalTypes.js'
-import { clearPaneRemainOnExit } from '../../lib/tmux.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
 import { workspaceMissing } from '../../lib/workspaceCheck.js'
 import type { createLaunchHelpers } from './launch.js'
@@ -284,7 +283,7 @@ export function createAgentRetargeter({
       // Commit the new process now. Optional grid metadata follows outside the route hold.
       const gateway = await probeGatewayRuntime(outcome.processIdentity)
       if (!current()) return changed()
-      await clearPaneRemainOnExit(pane.paneId, current)
+      await tmuxBackend.releaseHold(pane, current)
       if (!current()) return changed()
       registry.updateProcessIdentity(session.agentId, outcome.processIdentity, gateway.kind)
       // The launch that just worked is the one a restart or a post-reboot restore must repeat — and

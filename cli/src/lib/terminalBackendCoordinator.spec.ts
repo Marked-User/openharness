@@ -25,6 +25,7 @@ function backend(instanceId: string, submit: TerminalBackend['submitText']): Ter
     titles: vi.fn(async () => ({ state: 'succeeded' as const, value: new Map() })),
     validate: vi.fn(async () => ({ state: 'alive' as const })), capture: vi.fn(), typeLiteral: vi.fn(), submitText: submit,
     sendKey: vi.fn(), setTitle: vi.fn(), notify: vi.fn(),
+    releaseHold: vi.fn(), paneState: vi.fn(), paneInfo: vi.fn(), rootProcess: vi.fn(),
   }
 }
 

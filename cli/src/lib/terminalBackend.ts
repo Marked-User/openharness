@@ -7,6 +7,8 @@ import type {
   TerminalCreateResult,
   TerminalInventoryResult,
   TerminalLogicalKey,
+  TerminalPaneInfo,
+  TerminalPaneRead,
   TerminalProcessExpectation,
   TerminalReadResult,
   TerminalRespawnRequest,
@@ -35,6 +37,16 @@ export interface TerminalBackend<Ref extends TerminalRuntimeRef = TerminalRuntim
   sendKey(runtime: Ref, key: TerminalLogicalKey): Promise<TerminalActionResult>
   setTitle(runtime: Ref, title: string): Promise<TerminalActionResult>
   notify(runtime: Ref, title: string, body: string): Promise<TerminalActionResult>
+
+  /** Hand a pane back to the backend's default disposal after `create()` kept it when dead. Rechecks
+   *  [current] after its own waits, before the command. */
+  releaseHold(runtime: Ref, current?: () => boolean): Promise<void>
+  /** Pane liveness plus, for a held pane, how its process ended. */
+  paneState(runtime: Ref): Promise<TerminalPaneRead>
+  /** The pane's foreground command, working directory, pid and tty; null when the pane is unknown. */
+  paneInfo(runtime: Ref): Promise<TerminalPaneInfo | null>
+  /** The pane's own root process, 'missing' when the backend says the pane does not exist, null when it could not ask. */
+  rootProcess(runtime: Ref): Promise<number | 'missing' | null>
 
   /** Byte streaming is optional per backend. */
   openStream?(

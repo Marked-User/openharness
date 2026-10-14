@@ -15,7 +15,6 @@ import { bypassPermissionFor, restartAgent } from '../../lib/restartAgent.js'
 import type { TerminalAgentReconciler } from '../../lib/terminalAgentReconciler.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
 import type { TmuxRuntimeRef } from '../../lib/terminalTypes.js'
-import { clearPaneRemainOnExit } from '../../lib/tmux.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
 import type { HeldRestart } from './heldLaunches.js'
 import { workspaceMissing } from '../../lib/workspaceCheck.js'
@@ -137,7 +136,7 @@ export function createAgentRestarter({
         })
         if (!current()) return changed
         if (respawned.state !== 'succeeded') return { ok: false, error: 'RESTART_FAILED', detail: respawned.reason }
-        await clearPaneRemainOnExit(pane)
+        await tmuxBackend.releaseHold(runtime)
         if (!current()) return changed
         registry.setActive(session.agentId, true)
         const refreshed = registry.byAgent(session.agentId)
@@ -199,7 +198,7 @@ export function createAgentRestarter({
       if (!current()) return changed
       registry.updateProcessIdentity(session.agentId, outcome.processIdentity, gateway.kind)
       registry.setActive(session.agentId, true)
-      await clearPaneRemainOnExit(pane)
+      await tmuxBackend.releaseHold(runtime)
       if (!current()) return changed
       const refreshed = registry.byAgent(session.agentId)
       if (!refreshed) return { ok: false, error: 'RESTART_FAILED', detail: 'agent vanished from the registry mid-restart' }
