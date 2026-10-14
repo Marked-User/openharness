@@ -39,7 +39,8 @@ export type EnsureStatus =
   | 'created'
   /** It was already there — the ordinary answer on every machine after the first. */
   | 'existed'
-  /** A create failed, but the grid turned out to exist anyway: another machine won the race. */
+  /** A create failed, but the grid turned out to exist anyway: another machine won the race, or this
+   *  create finished on the server after `grid` gave up waiting for it. */
   | 'adopted'
   /** Nothing was attempted. The harness sign-in is unaffected; `message` says why. */
   | 'skipped'
@@ -65,10 +66,31 @@ const REMOTE = '--remote'
  */
 export const FREE_NETWORK_LIMIT_CODE = 'free_network_limit'
 
-/** How long to wait before each retry of a failed create: one per retry, so two retries. A create that
- *  fails for a reason that can pass — a server low on memory, a restart, a network blip — is asked again
- *  rather than reported at the first refusal. Short, because a person is waiting on the answer. */
+/** How long to wait before each retry of a failed create: one per retry, so two retries. A create the
+ *  control plane refused for a reason that can pass — a server low on memory, a restart — is asked again
+ *  rather than reported at the first refusal. A create it did not answer is never asked again: its waits
+ *  only look ([createAnswered]). Short, because a person is waiting on the answer. */
 export const CREATE_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000]
+
+/** The public CLI's line for a control plane that answered with a refusal: `failed (<status>): <body>`
+ *  (`remote/control_plane._raise`, the same contract [REFUSED_402] reads). */
+const ANSWERED = /failed \((\d{3})\): /
+
+/** A proxy in front of the control plane that stopped waiting answers these (nginx 504, Cloudflare 524).
+ *  They are not the control plane's answer, so the create behind them may still be running. */
+const GATEWAY_TIMEOUTS: ReadonlySet<number> = new Set([504, 524])
+
+/**
+ * Whether the control plane answered the create whose failed `grid start` printed `output`. Its create
+ * route is synchronous and repairs a failed create before it answers, so an answer means that attempt is
+ * over, and asking again cannot make a second grid. No answer — `grid`'s own timeout or "cannot reach",
+ * this module's bound on `grid`, a gateway timeout, a create that succeeded but could not be saved here —
+ * means it may still be running on the server, or done.
+ */
+function createAnswered(output: string): boolean {
+  const status = ANSWERED.exec(output)?.[1]
+  return status !== undefined && !GATEWAY_TIMEOUTS.has(Number(status))
+}
 
 /** The public CLI's line for a control plane that answered 402: `remote/control_plane._raise`, a
  *  contract in that repo (`cli/auth._SESSION_EXPIRED_RE` anchors on the same rendering). */
@@ -109,6 +131,57 @@ function rowNames(rows: GridRow[] | null): string[] {
 async function gridExists(name: string): Promise<boolean> {
   const { value } = await gridJson<GridRow[]>([REMOTE, 'ls'])
   return rowNames(value).includes(name)
+}
+
+/** Pull the account's grids, then look — the same two calls the first look makes, since `grid ls` alone
+ *  reads a local registry that only a sync brings up to date. */
+async function syncedExists(name: string): Promise<boolean> {
+  await gridExec([REMOTE, 'sync'])
+  return gridExists(name)
+}
+
+const ADOPTED: EnsureResult = { status: 'adopted', message: '' }
+
+/**
+ * What a failed create came to, or null when it is safe and worth asking again — after the wait, and only
+ * once a last look has not found the grid.
+ *
+ * ⚠️ Every outcome LOOKS before it is believed: a create can fail and still have made the grid. Another
+ * machine of this account may have won the race (the control plane refuses the duplicate name, in prose —
+ * and `grid`'s own `--json` envelope documents `code` as null for that class), or this create may have
+ * outlasted `grid` and finished on the server. So rather than parse the refusal: sync, look, and believe
+ * what is there.
+ */
+async function afterFailedCreate(
+  name: string,
+  said: string,
+  waits: readonly number[],
+  sleep: (ms: number) => Promise<void>,
+): Promise<EnsureResult | null> {
+  const failed: EnsureResult = { status: 'failed', message: said.slice(0, 500) }
+
+  // The Free plan's limit is the one refusal read for what it says: asking again cannot succeed (it is the
+  // owner's plan, or a grid they deleted still counting), so it is shown, never retried — unless the grid
+  // is there after all, which is then the very grid the quota counted.
+  const refused = quotaRefusal(said)
+  if (refused) return (await syncedExists(name)) ? ADOPTED : { status: 'refused', message: refused }
+
+  // ⚠️ A create the control plane did not answer may still be running there, and it registers the grid
+  // only at its very end, once the grid's server is up. Asked again, it could make a SECOND grid of the
+  // same name (nothing on the control plane serializes two creates), so these waits only look.
+  if (!createAnswered(said)) {
+    if (await syncedExists(name)) return ADOPTED
+    for (const wait of waits) {
+      await sleep(wait)
+      if (await syncedExists(name)) return ADOPTED
+    }
+    return failed
+  }
+
+  if (!waits.length) return (await syncedExists(name)) ? ADOPTED : failed
+  await sleep(waits[0])
+  // Right before asking again: a grid made in the wait is used, never created twice.
+  return (await syncedExists(name)) ? ADOPTED : null
 }
 
 /**
@@ -154,20 +227,7 @@ export async function ensureHarnessGrid(
       return { status: 'created', message: '' }
     }
     const said = created.stderr.trim() || created.message
-
-    // The Free plan's limit is the one refusal read for what it says: asking again cannot succeed (it is
-    // the owner's plan, or a grid they deleted still counting), so it is shown, never retried.
-    const refused = quotaRefusal(said)
-    if (refused) return { status: 'refused', message: refused }
-
-    // A create can fail because another machine created it first — grid names are globally unique and
-    // the control plane rejects a duplicate. Rather than parse that refusal (grid's own `--json` error
-    // envelope documents `code` as null for exactly this class, and its message is prose), ask the
-    // question again: sync, look, and believe what is there. Correct however the refusal is encoded.
-    await gridExec([REMOTE, 'sync'])
-    if (await gridExists(name)) return { status: 'adopted', message: '' }
-
-    if (retry >= CREATE_RETRY_DELAYS_MS.length) return { status: 'failed', message: said.slice(0, 500) }
-    await sleep(CREATE_RETRY_DELAYS_MS[retry])
+    const outcome = await afterFailedCreate(name, said, CREATE_RETRY_DELAYS_MS.slice(retry), sleep)
+    if (outcome) return outcome
   }
 }
