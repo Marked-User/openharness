@@ -1,4 +1,4 @@
-import type { HealthSource } from './productHealthContract.js'
+import type { HealthSource, ResumeReason } from './productHealthContract.js'
 import { PRODUCT_USAGE_USER_OPENED_ACTIONS, type ProductUsageMetric } from './productUsageContract.js'
 
 const actions = { agent_create: 'create', agent_resume: 'resume', agent_restart: 'restart',
@@ -18,6 +18,17 @@ const unavailable = new Set(['SERVICE_UNAVAILABLE', 'SERVICE_FAILED', 'GRID_UNAV
   'UNSUPPORTED', 'UNSUPPORTED_ON_REMOTE', 'TIMEOUT', 'NATIVE_UNAVAILABLE'])
 const invalid = new Set(['INVALID_ENGINE', 'INVALID_CWD', 'CWD_NOT_FOUND', 'INVALID_GRID', 'INVALID_DSH',
   'INVALID_MODEL', 'INVALID_PERMISSION_MODE', 'INVALID_CREATION_ID', 'INVALID_PROJECT_SOURCE', 'WORKTREE_BUSY'])
+const resumeReasons = new Map<string, ResumeReason>([
+  ['TMUX_UNAVAILABLE', 'runtime_unavailable'], ['NATIVE_LAUNCH_HELD', 'runtime_unavailable'],
+  ['ENGINE_UNAVAILABLE', 'runtime_unavailable'],
+  ['AGENT_NOT_FOUND', 'saved_state_missing'], ['RESUME_UNAVAILABLE', 'saved_state_missing'],
+  ['CWD_NOT_FOUND', 'project_missing'], ['INVALID_DSH', 'harness_missing'],
+  ['GRID_CREDENTIAL_REQUIRED', 'credentials_missing'], ['AUTH_REQUIRED', 'credentials_missing'],
+  ['AGENT_BUSY', 'busy'], ['WORKTREE_BUSY', 'busy'], ['PERMISSION_CHANGE_REQUIRES_STOP', 'busy'],
+  ['AGENT_CHANGED', 'changed'], ['RESUME_UNCONFIRMED', 'unconfirmed'],
+  ['RESUME_PREPARATION_FAILED', 'preparation_failed'], ['RESUME_FAILED', 'launch_failed'],
+  ['INVALID_PERMISSION_MODE', 'invalid'], ['INVALID_CREATION_ID', 'invalid'],
+])
 
 type Failure = 'setup' | 'auth' | 'unavailable' | 'invalid' | 'other'
 function failureKind(error: unknown): Failure {
@@ -72,7 +83,15 @@ export function productUsageRequest(type: string, emit: (metric: ProductUsageMet
   return (error: unknown, state: unknown, hasAgent: boolean, ok?: unknown) => {
     if (!action || answered) return
     answered = true
-    if (error != null || state === 'failed' || ok === false) {
+    if (action === 'resume' && (error != null || ok === false || ['failed', 'cancelled', 'unconfirmed', 'unavailable'].some(value => state === value))) {
+      const reason = typeof error === 'string' ? resumeReasons.get(error) : undefined
+      detail(`reason_${reason ?? (state === 'unconfirmed' ? 'unconfirmed' : 'other')}`)
+    }
+    // A runtime we cannot verify is unknown; a harness changed during the request is cancelled.
+    // Neither proves a launch failure. Older clients classified these two codes as failures.
+    if (action === 'resume' && (state === 'unconfirmed' || error === 'RESUME_UNCONFIRMED' || error === 'AGENT_CHANGED')) {
+      count('unknown'); detail(error === 'AGENT_CHANGED' ? 'cancelled' : 'unknown')
+    } else if (error != null || state === 'failed' || ok === false) {
       count('failed'); detail('failed')
       count(`error_${failureKind(error)}`)
       detail(`error_${error === 'TIMEOUT' ? 'timeout' : typeof error === 'string' && ['AGENT_NOT_FOUND', 'SESSION_NOT_FOUND', 'NOT_FOUND'].includes(error) ? 'not_found' : typeof error === 'string' && ['DELETE_IN_PROGRESS', 'WORKTREE_BUSY', 'BUSY'].includes(error) ? 'conflict' : failureKind(error)}`)

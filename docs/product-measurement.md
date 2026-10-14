@@ -119,6 +119,18 @@ Fast database write conflicts retry that complete transaction up to three times 
 rechecking the sharing choice each time. No retry starts after the first second; existing transaction
 deadlines still apply to each attempt. Slow or exhausted conflicts return to the client's normal
 immutable-report retry. Receipts prevent both immediate and later retries from counting twice.
+Reports update their counters and separate margins in one Mongo update command inside
+that transaction. A partial write aborts the receipt and all counts; no per-report body is stored.
+This shortens shared-row contention without adding a daemon timer or delaying product actions.
+The public `/api/health` response includes validated release tag/SHA coordinates so a successful
+image build can be distinguished from the version actually serving requests.
+
+Resume diagnostics add fixed conditions by request source: runtime unavailable, saved state missing,
+project missing, harness missing, credentials missing, busy, changed, unconfirmed, preparation failed,
+launch failed, invalid and other. These come only from known error codes, never error text or paths.
+From CLI 0.4.2, an unconfirmed runtime counts as unknown and a concurrently changed harness as
+cancelled (legacy aggregate: unknown), rather than failed. Compare releases separately across this
+definition change; a lower failure rate alone is not proof the product improved.
 Receipts expire within 36 days and totals within 396 days through the existing Mongo TTL indexes.
 No account deduplication markers or stable hashes enter these totals. People-based daily counts and
 D1/D2/D3/D7 returns come from one mark per sharing person per day under an HMAC pseudonym (no time,

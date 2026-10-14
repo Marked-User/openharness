@@ -7,6 +7,7 @@ import { env } from '../config/env.js'
 import { prisma } from './prisma.js'
 import { PRODUCT_USAGE_DAYS, type ProductUsageChoice, type ProductUsageReport } from '../types/productUsage.js'
 import { ACTIVITY_DAYS, type ActivitySurface } from '../types/productUsageActivity.js'
+import { incrementUsageTotals, type UsageIncrement } from './productUsageWrite.js'
 
 const DAY = 86_400_000
 type Db = Pick<Prisma.TransactionClient, 'productUsagePreference' | 'analyticsMachineState'>
@@ -52,6 +53,17 @@ export async function ingestSetupUsage(report: SetupUsageReport, now = new Date(
 
 async function ingestCounters(report: SetupUsageReport & { revision?: number; context?: ProductUsageContext }, userId?: string, now = new Date()) {
   if (report.context?.channel === 'development') return { accepted: true, reason: 'DEVELOPMENT' }
+  const increments: UsageIncrement[] = []
+  for (const [metric, value] of Object.entries(report.counters)) {
+    if (!value) continue
+    for (const name of [metric, ...healthBreakdowns(report.context, metric)]) {
+      increments.push({ dayUtc: new Date(report.day), metric: name, value })
+    }
+  }
+  if (report.context && report.day < now.toISOString().slice(0, 10)) {
+    increments.push({ dayUtc: new Date(Math.floor(now.getTime() / DAY) * DAY),
+      metric: `health_${report.context.surface}_report_late`, value: 1 })
+  }
   // October's delivery audit found aggregate write conflicts. Retry the entire transaction,
   // including permission, without extending a slow request or waiting a full client interval.
   // At most four attempts; only fast conflicts may start another within the first second.
@@ -67,21 +79,7 @@ async function ingestCounters(report: SetupUsageReport & { revision?: number; co
         await tx.productUsageReceipt.create({ data: {
           id: report.id, expiresAt: new Date(Date.parse(report.day) + (PRODUCT_USAGE_DAYS + 1) * DAY),
         } })
-        for (const [metric, value] of Object.entries(report.counters)) {
-          if (!value) continue
-          for (const name of [metric, ...healthBreakdowns(report.context, metric)]) {
-            await tx.productUsageTotal.upsert({
-              where: { dayUtc_metric: { dayUtc: new Date(report.day), metric: name } },
-              create: { dayUtc: new Date(report.day), metric: name, value }, update: { value: { increment: value } },
-            })
-          }
-        }
-        if (report.context && report.day < now.toISOString().slice(0, 10)) {
-          const dayUtc = new Date(Math.floor(now.getTime() / DAY) * DAY)
-          const metric = `health_${report.context.surface}_report_late`
-          await tx.productUsageTotal.upsert({ where: { dayUtc_metric: { dayUtc, metric } },
-            create: { dayUtc, metric, value: 1 }, update: { value: { increment: 1 } } })
-        }
+        await incrementUsageTotals(tx, increments)
         return { accepted: true }
       })
     } catch (error) {

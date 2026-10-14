@@ -28,8 +28,13 @@ export const HEALTH_MEASURES = [
 export const CLI_REPORT_FAILURES = ['invalid', 'too_large', 'auth', 'rate_limited', 'timeout', 'unreachable',
   'write_conflict', 'transaction', 'server', 'other'] as const
 export type CliReportFailure = typeof CLI_REPORT_FAILURES[number]
+// Fixed resume conditions, separate from raw errors and from whether a request actually failed.
+export const RESUME_REASONS = ['runtime_unavailable', 'saved_state_missing', 'project_missing', 'harness_missing',
+  'credentials_missing', 'busy', 'changed', 'unconfirmed', 'preparation_failed', 'launch_failed', 'invalid', 'other'] as const
+export type ResumeReason = typeof RESUME_REASONS[number]
 export const PRODUCT_HEALTH_METRICS = [
   ...CLI_REPORT_FAILURES.map(reason => `health_cli_report_failure_${reason}` as const),
+  ...HEALTH_SOURCES.flatMap(source => RESUME_REASONS.map(reason => `request_${source}_resume_reason_${reason}` as const)),
   ...(['cli', 'desktop'] as const).flatMap(surface => HEALTH_MEASURES.map(m => `health_${surface}_${m}` as const)),
   ...HEALTH_SOURCES.flatMap(source => HEALTH_ACTIONS.flatMap(action => [
     ...HEALTH_RESULTS.map(result => `request_${source}_${action}_${result}` as const),

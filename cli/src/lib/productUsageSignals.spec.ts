@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import { productUsageIntent, productUsageLaunch, productUsageRequest } from './productUsageSignals.js'
+import { PRODUCT_USAGE_METRICS } from './productUsageContract.js'
 
 it('separates automated polling, tool and app RPCs without inspecting error objects or content', () => {
   const emit = vi.fn()
@@ -77,4 +78,40 @@ it('marks a Store or model list a person opened, and only those', () => {
   productUsageRequest('agent_recent', emit, Date.now, 'app', true)(undefined, undefined, false)
   productUsageRequest('session_tail', emit, Date.now, 'app', true)(undefined, undefined, false)
   expect(emit.mock.calls.flat().filter(m => String(m).includes('_user_'))).toEqual([])
+})
+
+it.each([
+  ['TMUX_UNAVAILABLE', 'runtime_unavailable'], ['NATIVE_LAUNCH_HELD', 'runtime_unavailable'],
+  ['AGENT_NOT_FOUND', 'saved_state_missing'], ['RESUME_UNAVAILABLE', 'saved_state_missing'],
+  ['CWD_NOT_FOUND', 'project_missing'], ['INVALID_DSH', 'harness_missing'],
+  ['GRID_CREDENTIAL_REQUIRED', 'credentials_missing'], ['AGENT_BUSY', 'busy'],
+  ['RESUME_PREPARATION_FAILED', 'preparation_failed'], ['RESUME_FAILED', 'launch_failed'],
+  ['INVALID_PERMISSION_MODE', 'invalid'], ['PRIVATE_ERROR_WITH_PATH', 'other'], ['__proto__', 'other'],
+])('reduces resume condition %s to an approved counter without retaining it', (error, reason) => {
+  const emit = vi.fn(), done = productUsageRequest('agent_resume', emit, () => 0, 'app')
+  done(error, 'failed', false); done(error, 'failed', false)
+  const names = emit.mock.calls.flat()
+  expect(names.filter(name => name.startsWith('request_app_resume_reason_'))).toEqual([`request_app_resume_reason_${reason}`])
+  expect(names).toContain('request_app_resume_failed')
+  for (const name of names) expect(PRODUCT_USAGE_METRICS).toContain(name)
+  expect(JSON.stringify(names)).not.toContain(error)
+})
+it.each([
+  ['RESUME_UNCONFIRMED', undefined, 'unconfirmed', 'unknown'],
+  [undefined, 'unconfirmed', 'unconfirmed', 'unknown'],
+  ['AGENT_CHANGED', 'failed', 'changed', 'cancelled'],
+])('does not call an unverified or superseded resume a failure', (error, state, reason, result) => {
+  const emit = vi.fn()
+  productUsageRequest('agent_resume', emit, () => 0, 'tool')(error, state, false)
+  expect(emit.mock.calls.flat()).toEqual(['resume_requests', 'request_tool_resume_started',
+    `request_tool_resume_reason_${reason}`, 'resume_unknown', `request_tool_resume_${result}`, 'resume_under_1s'])
+})
+it('never coerces private reply values and leaves successful resumes without a diagnostic', () => {
+  const emit = vi.fn(), privateValue = { toString() { throw Error('PRIVATE') } }
+  expect(() => productUsageRequest('agent_resume', emit, () => 0, 'unknown')(privateValue, privateValue, false)).not.toThrow()
+  expect(emit.mock.calls.flat()).toContain('request_unknown_resume_reason_other')
+  emit.mockClear()
+  productUsageRequest('agent_resume', emit, () => 0, 'app')(undefined, 'created', true)
+  expect(emit.mock.calls.flat()).toContain('request_app_resume_ok')
+  expect(emit.mock.calls.flat().some(name => name.includes('_reason_'))).toBe(false)
 })
