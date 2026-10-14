@@ -37,6 +37,9 @@ const READ_PER_WAKEUP: usize = 1024 * 1024;
 /// How long a dropped pane's child gets after SIGHUP before SIGKILL.
 #[cfg(unix)]
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+/// How often a kill looks whether the pane's process group is empty.
+#[cfg(unix)]
+const GROUP_POLL: Duration = Duration::from_millis(20);
 
 #[cfg(unix)]
 const READ_WRITE_TOKEN: usize = 0; // alacritty's `tty::unix::PTY_READ_WRITE_TOKEN` (crate-private)
@@ -199,6 +202,8 @@ struct Attachment {
     poller: Arc<Poller>,
     pid: Option<u32>,
     life: Arc<Life>,
+    /// The child's terminal device (`/dev/pts/3`, `/dev/ttys004`); empty where there is none.
+    tty: String,
     #[cfg(windows)]
     process: Arc<std::os::windows::io::OwnedHandle>,
 }
@@ -217,7 +222,10 @@ pub struct Pane {
     screen: Arc<Mutex<Screen>>,
     shared: Arc<Shared>,
     attachment: Mutex<Attachment>,
-    spawn_cwd: Option<String>,
+    /// The directory the current child was spawned in.
+    spawn_cwd: Mutex<Option<String>>,
+    /// Where every child of this pane reports its events (a respawn attaches with it).
+    sink: Sender<(String, PaneEvent)>,
 }
 
 impl Pane {
@@ -235,14 +243,46 @@ impl Pane {
         };
         let term = Term::new(config, &Size { cols, rows }, Listener(shared.clone()));
         let screen = Arc::new(Mutex::new(Screen { term, seq: 0 }));
-        let attachment = attach(&id, &spec, cols, rows, &screen, &shared, sink)?;
+        let attachment = attach(&id, &spec, cols, rows, &screen, &shared, sink.clone())?;
         Ok(Pane {
             id,
             screen,
             shared,
             attachment: Mutex::new(attachment),
-            spawn_cwd: spec.cwd.map(|p| p.to_string_lossy().into_owned()),
+            spawn_cwd: Mutex::new(spec.cwd.map(|p| p.to_string_lossy().into_owned())),
+            sink,
         })
+    }
+
+    /// Start `spec`'s command in this pane once its child has exited (tmux `respawn-pane`): the
+    /// new child draws into the same grid, continuing its sequence. `spec.cwd` defaults to the
+    /// previous child's spawn directory; the size is the pane's.
+    pub fn respawn(&self, mut spec: PaneSpec) -> io::Result<()> {
+        let mut attachment = lock(&self.attachment);
+        if !attachment.life.has_exited() {
+            return Err(io::Error::other("the pane's process is still running"));
+        }
+        let (cols, rows) = {
+            let screen = lock(&self.screen);
+            (
+                screen.term.columns() as u16,
+                screen.term.screen_lines() as u16,
+            )
+        };
+        if spec.cwd.is_none() {
+            spec.cwd = lock(&self.spawn_cwd).as_ref().map(PathBuf::from);
+        }
+        *attachment = attach(
+            &self.id,
+            &spec,
+            cols,
+            rows,
+            &self.screen,
+            &self.shared,
+            self.sink.clone(),
+        )?;
+        *lock(&self.spawn_cwd) = spec.cwd.map(|p| p.to_string_lossy().into_owned());
+        Ok(())
     }
 
     fn attachment(&self) -> Attachment {
@@ -306,15 +346,35 @@ impl Pane {
         lock(&self.shared.title).clone()
     }
 
-    /// The last directory the child reported with OSC 7, else the directory it was spawned in.
-    pub fn cwd(&self) -> Option<String> {
-        lock(&self.shared.cwd)
-            .clone()
-            .or_else(|| self.spawn_cwd.clone())
+    /// Set the title (tmux `select-pane -T`); the child's next OSC 0/2 replaces it.
+    pub fn set_title(&self, title: &str) {
+        *lock(&self.shared.title) = title.to_owned();
     }
 
-    /// Unix: SIGHUP to the child's process group; after `grace`, SIGKILL if it is still running.
-    /// Returns as soon as the child has exited, at most after `grace`.
+    /// The terminal modes the pane's program set (cursor keys, bracketed paste, …).
+    pub fn mode(&self) -> TermMode {
+        *lock(&self.screen).term.mode()
+    }
+
+    /// The current child's terminal device; empty where there is none (Windows).
+    pub fn tty(&self) -> String {
+        self.attachment().tty
+    }
+
+    /// The last directory the child reported with OSC 7, else the directory it was spawned in.
+    pub fn cwd(&self) -> Option<String> {
+        // One lock at a time: `respawn` takes them in the other order.
+        let reported = lock(&self.shared.cwd).clone();
+        reported.or_else(|| lock(&self.spawn_cwd).clone())
+    }
+
+    /// Unix: SIGHUP to the child's process group (as closing a tmux pane's tty does); after
+    /// `grace`, SIGKILL to the group if anything in it still runs, so a descendant that ignores
+    /// SIGHUP does not outlive the pane. Returns once the child has exited and the group is
+    /// empty, at most after `grace`.
+    ///
+    /// A child that had already exited is left alone: its pid, and so the group id, may since
+    /// belong to another process.
     #[cfg(unix)]
     pub fn kill(&self, grace: Duration) {
         let attachment = self.attachment();
@@ -322,11 +382,26 @@ impl Pane {
         if attachment.life.has_exited() {
             return;
         }
-        // `tty::new` makes the child a session (and process group) leader: pgid == pid.
-        let group = -(pid as libc::pid_t);
-        unsafe { libc::kill(group, libc::SIGHUP) };
-        if !attachment.life.wait(grace) {
-            unsafe { libc::kill(group, libc::SIGKILL) };
+        // `tty::new` makes the child a session (and process group) leader: pgid == pid. Until
+        // the child is reaped, and then while any process is in the group, the id is not reused.
+        let group = pid as libc::pid_t;
+        unsafe { libc::kill(-group, libc::SIGHUP) };
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            let exited = attachment.life.has_exited();
+            if exited && !group_alive(group) {
+                return;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                unsafe { libc::kill(-group, libc::SIGKILL) };
+                return;
+            }
+            if exited {
+                std::thread::sleep(left.min(GROUP_POLL));
+            } else {
+                attachment.life.wait(left.min(GROUP_POLL));
+            }
         }
     }
 
@@ -410,6 +485,13 @@ fn attach(
     let mut pty = tty::new(&options, window_size(cols, rows), 0)?;
     #[cfg(unix)]
     let pid = Some(pty.child().id());
+    #[cfg(unix)]
+    let tty = {
+        use std::os::fd::AsRawFd;
+        crate::unix_proc::tty_name(pty.file().as_raw_fd()).unwrap_or_default()
+    };
+    #[cfg(windows)]
+    let tty = String::new();
     #[cfg(windows)]
     let pid = pty.child_watcher().pid().map(|p| p.get());
     #[cfg(windows)]
@@ -451,6 +533,7 @@ fn attach(
         poller,
         pid,
         life,
+        tty,
         #[cfg(windows)]
         process,
     })
@@ -681,17 +764,26 @@ impl Reader {
     }
 
     /// The pane was dropped while its child runs: SIGHUP the child's process group, and SIGKILL
-    /// it if it has not exited after `SHUTDOWN_GRACE`, so the reap in `Pty::drop` cannot block
-    /// this thread forever. Runs here, not in the dropping caller.
+    /// the group if the child, or anything else in the group, still runs after `SHUTDOWN_GRACE`,
+    /// so the reap in `Pty::drop` cannot block this thread forever and no descendant that ignores
+    /// SIGHUP outlives the pane. Runs here, not in the dropping caller.
     #[cfg(unix)]
     fn end_child(&mut self) {
         // The tty is not read any more; left in the poller, its data would wake every wait.
         self.hang_up();
-        let group = -(self.pty.child().id() as libc::pid_t);
-        unsafe { libc::kill(group, libc::SIGHUP) };
-        if !self.wait_child(SHUTDOWN_GRACE) {
-            unsafe { libc::kill(group, libc::SIGKILL) };
-            self.wait_child(SHUTDOWN_GRACE);
+        let group = self.pty.child().id() as libc::pid_t;
+        unsafe { libc::kill(-group, libc::SIGHUP) };
+        let deadline = std::time::Instant::now() + SHUTDOWN_GRACE;
+        let exited = self.wait_child(SHUTDOWN_GRACE);
+        // Reaped: the group id stays reserved only while the group has a member.
+        while exited && group_alive(group) && std::time::Instant::now() < deadline {
+            std::thread::sleep(GROUP_POLL);
+        }
+        if !exited || group_alive(group) {
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+            if !exited {
+                self.wait_child(SHUTDOWN_GRACE);
+            }
         }
     }
 
@@ -786,6 +878,14 @@ impl Reader {
         }
         Ok(())
     }
+}
+
+/// Whether any process is in process group `group`.
+#[cfg(unix)]
+fn group_alive(group: libc::pid_t) -> bool {
+    // EPERM: a member exists that this process may not signal.
+    let probe = unsafe { libc::kill(-group, 0) };
+    probe == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(windows)]
@@ -1277,6 +1377,90 @@ mod tests {
         // Reaped: the pid no longer exists.
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    fn gone(pid: libc::pid_t) -> bool {
+        let end = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < end {
+            if unsafe { libc::kill(pid, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn kill_ends_a_descendant_that_ignores_sighup() {
+        // The root exits on SIGHUP at once; the sleep in its group ignores it.
+        let (tx, rx) = channel();
+        let pane = Pane::spawn(
+            "%13".into(),
+            sh(r#"sh -c 'trap "" HUP; echo "kid:$$:"; exec sleep 30' & wait"#),
+            1000,
+            tx,
+        )
+        .unwrap();
+        let text = wait_text(&pane, &rx, "kid:");
+        let kid: libc::pid_t = text
+            .split("kid:")
+            .nth(1)
+            .unwrap()
+            .split(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let start = Instant::now();
+        pane.kill(Duration::from_millis(300));
+        assert!(
+            start.elapsed() >= Duration::from_millis(250),
+            "returned before the group was empty"
+        );
+        assert!(gone(kid), "a descendant outlived kill");
+    }
+
+    #[test]
+    fn respawn_draws_into_the_same_grid_and_continues_the_sequence() {
+        let (tx, rx) = channel();
+        let mut spec = sh("echo first");
+        spec.cwd = Some("/".into());
+        let pane = Pane::spawn("%14".into(), spec, 1000, tx).unwrap();
+        assert!(wait_for(&rx, |e| matches!(e, PaneEvent::Exited { .. })));
+        let (_, seq) = pane.capture(None, false);
+        assert!(pane.root_pid().is_none());
+        pane.respawn(sh("pwd; echo second; sleep 2")).unwrap();
+        assert!(pane.root_pid().is_some());
+        // Not while the new child runs.
+        assert!(pane.respawn(sh("true")).is_err());
+        let text = wait_text(&pane, &rx, "second");
+        assert!(text.contains("first"), "{text:?}");
+        assert!(
+            text.contains("\n/\n"),
+            "the previous spawn directory: {text:?}"
+        );
+        assert!(pane.capture(None, false).1 > seq);
+        assert_eq!(pane.cwd().as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn title_can_be_set_and_modes_and_tty_are_read() {
+        let (tx, rx) = channel();
+        let pane = Pane::spawn(
+            "%15".into(),
+            sh(r#"printf '\033[?2004h\033[?1hready'; sleep 2"#),
+            1000,
+            tx,
+        )
+        .unwrap();
+        wait_text(&pane, &rx, "ready");
+        let mode = pane.mode();
+        assert!(mode.contains(TermMode::BRACKETED_PASTE) && mode.contains(TermMode::APP_CURSOR));
+        pane.set_title("set");
+        assert_eq!(pane.title(), "set");
+        assert!(pane.tty().starts_with("/dev/"), "{:?}", pane.tty());
     }
 
     #[test]

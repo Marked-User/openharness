@@ -73,10 +73,14 @@ export type HelloReply =
 
 export interface PaneInventoryRow {
   pane: string
-  rootPid: number
+  /** null once the pane's process has exited (a held, dead pane). */
+  rootPid: number | null
   cwd: string
   title: string
   dead: boolean
+  /** The `owner` and `label` given at `create`. */
+  owner: string
+  label: string | null
 }
 export interface PaneStateInfo {
   dead: boolean
@@ -88,7 +92,8 @@ export interface PaneStateInfo {
 export interface PaneInfo {
   command: string
   path: string
-  pid: number
+  /** null once the pane's process has exited. */
+  pid: number | null
   tty: string
 }
 
@@ -138,5 +143,6 @@ export type PtyResponse =
   | { id: number; ok: false; code: PtyErrorCode; reason: string }
 
 export type PtyEvent =
-  | { event: 'exit'; pane: string; status: number }
+  /** `status` is null when the host could not learn it. */
+  | { event: 'exit'; pane: string; status: number | null }
   | { event: 'title'; pane: string; title: string }
