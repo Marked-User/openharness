@@ -6,7 +6,7 @@ import { runInNewContext } from 'node:vm'
 export type HookReply = { status: number; body: string; interrupted?: 'aborted' | 'error' | 'close'; unfinished?: boolean }
   | { error: true; connected: boolean } | { timeout: true; connected: boolean }
 
-export function nativeHookTransport(platform: 'linux' | 'darwin', replies: HookReply[]) {
+export function nativeHookTransport(platform: 'linux' | 'darwin', replies: HookReply[], nativeOriginHeader?: string) {
   const source = readFileSync(new URL('../../hook/notify.mjs', import.meta.url), 'utf8')
   const start = source.indexOf('const DELIVERY_ID ='), end = source.indexOf('\nfunction secureStateDirectory(', start)
   if (start < 0 || end < 0) throw Error('Native hook transport source boundary is missing')
@@ -15,7 +15,7 @@ export function nativeHookTransport(platform: 'linux' | 'darwin', replies: HookR
   const openResponses: Array<(suffix: string) => void> = []
   let destroyed = 0
   const post = runInNewContext(`${source.slice(start, end)}\npost`, {
-    Buffer, process: { platform, uptime: () => 0.125 }, Date: { now: () => 1791676800125 },
+    Buffer, nativeOriginHeader, process: { platform, uptime: () => 0.125 }, Date: { now: () => 1791676800125 },
     setTimeout: (run: () => void) => { timers.add(run); return run }, clearTimeout: (run: () => void) => { timers.delete(run) },
     randomUUID: () => 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa',
     readHookCredential: () => '<hook-credential>', remainingBudget: () => 4000,

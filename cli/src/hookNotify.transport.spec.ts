@@ -3,6 +3,15 @@ import { nativeHookTransport } from './testing/nativeHookTransport.js'
 
 const body = { engine: 'codex', sessionId: '<session>', callerPid: 4100, tmuxPane: '%1' }
 
+it('keeps unavailable origin latched across failed connections without offline fallback', async () => {
+  const transport = nativeHookTransport('linux', [{ error: true, connected: false }, { timeout: true, connected: false }], 'unavailable-v1')
+  for (const path of ['session-start', 'turn-stop']) {
+    expect(await transport.post(19473, `/api/hook/${path}`, body)).toBe('held')
+  }
+  expect(transport.requests).toHaveLength(2)
+  for (const request of transport.requests) expect(request).toMatchObject({ options: { headers: { 'X-Harness-Hook-Origin': 'unavailable-v1' } } })
+})
+
 it('keeps a possibly delivered request out of offline fallback after a connection reset', async () => {
   const transport = nativeHookTransport('linux', [{ error: true, connected: true }])
   expect(await transport.post(19473, '/api/hook/session-start', body)).toBe('late')

@@ -335,3 +335,25 @@ and the intervening main changes leave their client, hook declarations and test
 inputs unchanged. They cannot be waived as baseline failures. The emitted
 Claude/Codex hook needs to retain its original caller before the short-lived
 shell exits, while the server still requires fresh native engine proof.
+
+Both build layouts now emit a standalone Claude/Codex client with the shared,
+descriptor-free origin reader. It freezes caller IDs before awaiting, uses the
+original hook deadline with one second reserved for transport and exit, and sends
+a bounded optional header. Older cores ignore that header and receive the former
+body. Unavailable capture stays latched: the new core returns an unowned hold,
+without native recapture, retained intake, callback or agent-wide ownership claim;
+the client says why and cannot enter offline registry fallback. Cursor keeps its
+existing matching. Direct `tsx` source execution still uses the raw legacy hook;
+source-script goldens do not exercise the emitted origin capture.
+
+Independent review approved this slice conditionally on acceptance. Types, 82
+client/origin/unchanged-golden cases and nine header HTTP cases pass in
+`20261014T044551.454661Z-49657` (5.2, 5.3 and 4.5 seconds). The actual emitted
+artifact tests replace the host kernel and tmux with fixtures, including caller
+reparenting, stalled boot evidence, missing credentials and an offline daemon.
+Private Darwin e2e `20261014T044648.813727Z-53354` passes six of seven cases,
+including both paused-core hooks, retained Claude Stop and ordinary restarts.
+It is not a passing aggregate: the Codex awkward-folder case hits a journal
+confirmation deadline before initial registration, then remains behind an
+unconfirmed claim. That recovery defect needs correction before another full
+acceptance run. Emitted-client Linux acceptance remains outstanding.

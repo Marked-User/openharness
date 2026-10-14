@@ -6,6 +6,7 @@ import { controlIdentity, type NativeControlRow } from '../../lib/nativeProcessC
 import { NativeEvidenceBudget } from './nativeEvidence.js'
 import { kernelBootId } from './nativeHookBoot.js'
 import { captureNativeHookOrigin, captureNativeHookClientOrigin, inspectNativeHookOrigin, nativeHookIdentityV1, nativeHookOriginCaller, nativeHookRouteV1,
+  encodeNativeHookOriginHeader, inspectNativeHookOriginHeader,
   type NativeHookOrigin } from './nativeHookOrigin.js'
 
 vi.mock('./nativeHookBoot.js', () => ({ kernelBootId: vi.fn() }))
@@ -30,6 +31,16 @@ beforeEach(() => {
   processes = new Map([[43, native(43, 42)], [42, native()]])
 })
 afterEach(() => vi.restoreAllMocks())
+
+it('round trips a bounded canonical legacy header without changing the native origin', async () => {
+  const origin = await capture(), header = encodeNativeHookOriginHeader(origin)
+  expect(inspectNativeHookOriginHeader(header)).toEqual(origin)
+  expect(header).toBe(Buffer.from(JSON.stringify(origin)).toString('base64url'))
+})
+
+it.each([undefined, [], '', 'unavailable-v1', 'a'.repeat(10_924), '====', 'Zh', 'e30', 'bm90LWpzb24'])('refuses a malformed legacy origin header %#', value => {
+  expect(() => inspectNativeHookOriginHeader(value)).toThrow()
+})
 
 it('captures a routed client only while it remains the original caller\'s exact child', async () => {
   processes.set(44, native(44, 43))

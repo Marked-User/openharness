@@ -41,6 +41,8 @@ import { homedir, uptime } from 'node:os'
 
 const BOOT_TOLERANCE_SEC = 120
 const HOOK_STARTED_AT = performance.now()
+const HOOK_SELF_PID = process.pid, HOOK_CALLER_PID = process.ppid
+let nativeOriginHeader
 // Self-imposed budget, well under the 10s timeout the vendor hook entries carry: a hook that overruns
 // stalls the user's turn, so every optional step checks `remainingBudget()` and gives up rather than
 // block. The override exists because that budget is a wall-clock assumption — on a loaded machine (a
@@ -280,10 +282,13 @@ function post(port, path, body, onResponse) {
   return new Promise((resolve) => {
     const payload = JSON.stringify(body)
     const credential = readHookCredential()
-    if (!credential) { resolve(false); return }
+    if (!credential) { resolve(nativeOriginHeader === 'unavailable-v1' ? 'held' : false); return }
     let connected = false, settled = false, deadline
     const finish = value => {
       if (settled) return
+      // Failed original capture cannot become an offline registry write or a
+      // later request with broader authority, even when the daemon is down.
+      if (nativeOriginHeader === 'unavailable-v1' && value === false) value = 'held'
       settled = true; clearTimeout(deadline); resolve(value)
     }
     const timeout = Math.max(1, Math.min(500, remainingBudget()))
@@ -301,6 +306,7 @@ function post(port, path, body, onResponse) {
           // a loaded machine, after the engine has moved on to its next prompt (src/hookServer.ts hookFiredAt).
           'X-Harness-Hook-Fired-At': String(FIRED_AT),
           'X-Harness-Hook-Delivery-Id': DELIVERY_ID,
+          ...(nativeOriginHeader ? { 'X-Harness-Hook-Origin': nativeOriginHeader } : {}),
         },
         timeout,
       },
@@ -444,7 +450,7 @@ function readHookCredential() {
 function terminalHookFields(tmuxPane) {
   const runtimeHints = []
   if (tmuxPane) runtimeHints.push({ backend: 'tmux', paneId: tmuxPane })
-  return { tmuxPane, runtimeHints, callerPid: process.ppid }
+  return { tmuxPane, runtimeHints, callerPid: HOOK_CALLER_PID }
 }
 
 function sleep(ms) {
@@ -1588,6 +1594,17 @@ async function main() {
   if (!tmuxPane) return
   // Before anything reads the data folder or posts: which daemon this pane is (routeToPaneOwner).
   if (await routeToPaneOwner(tmuxPane)) port = argPort()
+  // The emitted script injects the pure kernel reader. Direct source execution
+  // remains the legacy client; neither mode starts a daemon or a worker here.
+  if ((engine === 'claude' || engine === 'codex') && typeof __HARNESS_CAPTURE_HOOK_ORIGIN__ === 'function') {
+    try {
+      nativeOriginHeader = await __HARNESS_CAPTURE_HOOK_ORIGIN__(HOOK_SELF_PID, HOOK_CALLER_PID,
+        remainingBudget(1_000), join(paths().dataDir, 'runtime'))
+    } catch {
+      nativeOriginHeader = 'unavailable-v1'
+      process.stderr.write('[harness] Hook admission is held: the original native caller could not be confirmed.\n')
+    }
+  }
   const mutationFields = { engine, ...terminalHookFields(tmuxPane) }
   if (engine === 'cursor' && input.is_background_agent === true) return
   if (engine === 'codex' && isCodexSubagent(input, paths())) return
@@ -1878,7 +1895,7 @@ async function main() {
     ok = await post(port, '/api/hook/session-start', body)
     held ||= ok === 'held'
   }
-  if (held && ok !== true) process.stderr.write('[harness] Hook admission is held; this delivery could not be confirmed. The current conversation is unchanged.\n')
+  if (held && ok !== true && nativeOriginHeader !== 'unavailable-v1') process.stderr.write('[harness] Hook admission is held; this delivery could not be confirmed. The current conversation is unchanged.\n')
   if (ok === false && !held) await fallbackRegister(input, engine, tmuxPane)
 }
 

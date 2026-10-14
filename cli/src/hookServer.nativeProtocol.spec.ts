@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { nativeHookAcknowledgement } from './engines/kit/nativeHookClientProtocol.js'
 import { nativeHookOutboxShard } from './engines/kit/nativeHookOutbox.js'
+import { encodeNativeHookOriginHeader, inspectNativeHookOrigin } from './engines/kit/nativeHookOrigin.js'
 import type { HookServerHandlers, HookServerOptions } from './hookServer.js'
 
 const fault = vi.hoisted(() => ({ unavailable: false, afterRetain: undefined as (() => void) | undefined,
@@ -117,6 +118,53 @@ async function fixture(overrides: Partial<HookServerHandlers> = {}, capacity = 6
   }
   return { post, settle, registered, stopped, resolved, capture, started }
 }
+
+it('takes a legacy origin header after its caller exits while still requiring fresh native engine proof', async () => {
+  const proof = vi.fn<NonNullable<HookServerHandlers['readNativeHookOwner']>>(async () =>
+    ({ key, evidence: 'fixture-precise-native-process', verify() {} }))
+  const f = await fixture({ readNativeHookOwner: proof })
+  const { nativeOrigin: _origin, ...legacy } = body()
+  const header = encodeNativeHookOriginHeader(inspectNativeHookOrigin(origin))
+  await vi.waitFor(async () => {
+    expect(await f.post(JSON.stringify(legacy), { 'x-harness-hook-origin': header }, '/api/hook/session-start'))
+      .toEqual({ status: 200, body: { ok: true } })
+  }, { timeout: 4_000 })
+  expect(f.registered).toHaveBeenCalledOnce()
+  expect(f.capture).not.toHaveBeenCalled()
+  expect(proof).toHaveBeenCalled()
+  expect(proof.mock.calls[0][1]).toEqual({ key, identityV1: digest('engine'), source: 'caller' })
+  proof.mockRejectedValue(Error('fixture engine was replaced'))
+  expect(await f.post(JSON.stringify(legacy), { 'x-harness-hook-origin': header,
+    'x-harness-hook-delivery-id': 'fixture-header-new-delivery' }, '/api/hook/session-start'))
+    .toMatchObject({ status: 202, body: { pending: false, retry: true, detail: expect.stringContaining('engine was replaced') } })
+  expect(f.registered).toHaveBeenCalledOnce()
+  expect(f.capture).not.toHaveBeenCalled()
+}, 10_000)
+
+it.each(['session-start', 'turn-stop', 'turn-start', 'tool-start', 'session-end'])('holds unavailable legacy origin on %s without retaining or recapturing it', async path => {
+  const held = vi.fn(), prompt = vi.fn(), f = await fixture({ onAdmissionHeld: held, onPromptSubmitted: prompt })
+  const { nativeOrigin: _origin, ...legacy } = body()
+  expect(await f.post(JSON.stringify(legacy), { 'x-harness-hook-origin': 'unavailable-v1' }, `/api/hook/${path}`))
+    .toMatchObject({ status: 202, body: { pending: false, retry: true, detail: expect.stringContaining('not retained') } })
+  expect(f.capture).not.toHaveBeenCalled()
+  expect(f.resolved).not.toHaveBeenCalled()
+  expect(f.registered).not.toHaveBeenCalled()
+  expect(f.stopped).not.toHaveBeenCalled()
+  expect(held).not.toHaveBeenCalled()
+  expect(prompt).not.toHaveBeenCalled()
+  expect(readdirSync(join(root, 'data'))).not.toContain('native-hook-deliveries')
+})
+
+it.each(['malformed', 'conflicting body', 'different caller'])('rejects a %s legacy origin header before any owner resolution', async problem => {
+  const f = await fixture(), input: Record<string, unknown> = body()
+  if (problem !== 'conflicting body') delete input.nativeOrigin
+  if (problem === 'different caller') input.callerPid = 5200
+  const header = problem === 'malformed' ? 'invalid' : encodeNativeHookOriginHeader(inspectNativeHookOrigin(origin))
+  expect(await f.post(JSON.stringify(input), { 'x-harness-hook-origin': header }, '/api/hook/session-start'))
+    .toEqual({ status: 400, body: { error: 'invalid hook body' } })
+  expect(f.capture).not.toHaveBeenCalled()
+  expect(f.resolved).not.toHaveBeenCalled()
+})
 
 it('confirms exact retained wire identity and recovers a lost completed reply after engine exit and row removal', async () => {
   const f = await fixture(), raw = JSON.stringify(body())

@@ -36,7 +36,8 @@ import { openNativeHookStorage, type NativeHookStorage } from './engines/kit/nat
 import { createNativeHookReplay } from './engines/kit/nativeHookReplay.js'
 import { sendNativeHookRequest } from './engines/kit/nativeHookTransport.js'
 import { bundledProcessImageHelper, invalidateProcessImageHelper } from './lib/nativeProcessImages.js'
-import { inspectNativeHookOrigin, nativeHookOriginCaller } from './engines/kit/nativeHookOrigin.js'
+import { inspectNativeHookOrigin, inspectNativeHookOriginHeader, NATIVE_HOOK_ORIGIN_UNAVAILABLE,
+  nativeHookOriginCaller } from './engines/kit/nativeHookOrigin.js'
 import { nativeHookAcknowledgement, nativeHookWireIdentity, type NativeHookAcknowledgement,
   type NativeHookWireIdentity } from './engines/kit/nativeHookClientProtocol.js'
 import type { NativeHookCaller, NativeHookCallerReader, NativeHookOwner, NativeHookOwnerProof, NativeHookOwnerReader } from './engines/kit/nativeHookOwner.js'
@@ -332,6 +333,16 @@ type BoundHookBody = RegisterInput & {
   toolUseId?: string
   toolName?: string
   input?: unknown
+}
+
+function legacyHookBody(input: unknown, originHeader: unknown): BoundHookBody | null {
+  if (!validHookBody(input)) return null
+  if (originHeader === undefined) return input
+  if (input.nativeOrigin !== undefined) return null
+  try {
+    const nativeOrigin = inspectNativeHookOriginHeader(originHeader)
+    return nativeOrigin.callerPid === input.callerPid ? { ...input, nativeOrigin } : null
+  } catch { return null }
 }
 
 async function verifiedBoundMutation(
@@ -1418,6 +1429,11 @@ export function startHookServer(
       if (hookOk && (closed || quiescing) && (url.startsWith('/api/hook/') || url.startsWith('/api/native-hook/'))) {
         json(202, { pending: false, retry: true, detail: 'Waiting for the daemon to finish stopping.' }); return
       }
+      if (hookOk && url.startsWith('/api/hook/') && req.headers['x-harness-hook-origin'] === NATIVE_HOOK_ORIGIN_UNAVAILABLE) {
+        const detail = 'Waiting for the original native hook caller to be confirmed; this delivery was not retained.'
+        console.warn(`[hooks] ${url} held · ${detail}`)
+        json(202, { pending: false, retry: true, detail }); return
+      }
 
       if (url.startsWith('/api/autonomous-device/')) {
         const peer = req.socket.remoteAddress
@@ -1493,8 +1509,9 @@ export function startHookServer(
         let body: BoundHookBody
         try {
           const parsed = JSON.parse(await readBody(req)) as unknown
-          if (!validHookBody(parsed)) { json(400, { error: 'invalid hook body' }); return }
-          body = parsed
+          const legacy = legacyHookBody(parsed, req.headers['x-harness-hook-origin'])
+          if (!legacy) { json(400, { error: 'invalid hook body' }); return }
+          body = legacy
         } catch { json(400, { error: 'bad json' }); return }
         await admitStart(body, { firedAt: hookFiredAt(req), deliveryId: req.headers['x-harness-hook-delivery-id'] }, json)
         return
@@ -1505,8 +1522,9 @@ export function startHookServer(
         let body: BoundHookBody
         try {
           const parsed = JSON.parse(await readBody(req)) as unknown
-          if (!validHookBody(parsed)) { json(400, { error: 'invalid hook body' }); return }
-          body = parsed
+          const legacy = legacyHookBody(parsed, req.headers['x-harness-hook-origin'])
+          if (!legacy) { json(400, { error: 'invalid hook body' }); return }
+          body = legacy
         } catch { json(400, { error: 'bad json' }); return }
         if (!await verifiedMutation(body)) { json(403, { error: 'UNBOUND_HOOK' }); return }
         if (body.sessionId) {
@@ -1522,8 +1540,9 @@ export function startHookServer(
         let body: BoundHookBody
         try {
           const parsed = JSON.parse(await readBody(req)) as unknown
-          if (!validHookBody(parsed)) { json(400, { error: 'invalid hook body' }); return }
-          body = parsed
+          const legacy = legacyHookBody(parsed, req.headers['x-harness-hook-origin'])
+          if (!legacy) { json(400, { error: 'invalid hook body' }); return }
+          body = legacy
         } catch { json(400, { error: 'bad json' }); return }
         if (!await verifiedMutation(body)) { json(403, { error: 'UNBOUND_HOOK' }); return }
         if (body.sessionId && body.toolUseId && body.toolName) {
@@ -1544,8 +1563,9 @@ export function startHookServer(
         let body: BoundHookBody
         try {
           const parsed = JSON.parse(await readBody(req)) as unknown
-          if (!validHookBody(parsed)) { json(400, { error: 'invalid hook body' }); return }
-          body = parsed
+          const legacy = legacyHookBody(parsed, req.headers['x-harness-hook-origin'])
+          if (!legacy) { json(400, { error: 'invalid hook body' }); return }
+          body = legacy
         } catch { json(400, { error: 'bad json' }); return }
         if (!await verifiedMutation(body)) { json(403, { error: 'UNBOUND_HOOK' }); return }
         if (body.sessionId) handlers.onTurnStart?.({ sessionId: body.sessionId })
@@ -1558,8 +1578,9 @@ export function startHookServer(
         let body: BoundHookBody
         try {
           const parsed = JSON.parse(await readBody(req)) as unknown
-          if (!validHookBody(parsed)) { json(400, { error: 'invalid hook body' }); return }
-          body = parsed
+          const legacy = legacyHookBody(parsed, req.headers['x-harness-hook-origin'])
+          if (!legacy) { json(400, { error: 'invalid hook body' }); return }
+          body = legacy
         } catch { json(400, { error: 'bad json' }); return }
         const delivery = req.headers['x-harness-hook-delivery-id']
         if (body.engine === 'claude' && handlers.captureTurnStop && typeof delivery === 'string'

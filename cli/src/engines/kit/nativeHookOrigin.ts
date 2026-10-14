@@ -27,6 +27,7 @@ export interface NativeHookOrigin {
 }
 export interface NativeHookOriginOwner { key: string; identityV1: string }
 const MAX_ORIGIN_BYTES = 8_192
+export const NATIVE_HOOK_ORIGIN_UNAVAILABLE = 'unavailable-v1'
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 const pid = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 1 && Number(value) <= 0x7fffffff
 const parentPid = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 0x7fffffff
@@ -84,6 +85,22 @@ export function inspectNativeHookOrigin(input: unknown): NativeHookOrigin {
   }
   if (!input.ancestry.length && !input.runtime) return nativeUnavailable('the original native hook caller could not be retained')
   return structuredClone(input) as unknown as NativeHookOrigin
+}
+
+/** Legacy cores ignore this optional header; they reject new JSON body fields.
+ * Canonical bounded bytes make one captured origin identical across both POSTs. */
+export function encodeNativeHookOriginHeader(origin: NativeHookOrigin): string {
+  return Buffer.from(JSON.stringify(inspectNativeHookOrigin(origin))).toString('base64url')
+}
+export function inspectNativeHookOriginHeader(header: unknown): NativeHookOrigin {
+  if (typeof header !== 'string' || header.length > Math.ceil(MAX_ORIGIN_BYTES * 4 / 3)
+    || !/^[A-Za-z0-9_-]+$/.test(header)) return nativeUnavailable('the native hook origin header is malformed')
+  const bytes = Buffer.from(header, 'base64url')
+  if (bytes.toString('base64url') !== header) return nativeUnavailable('the native hook origin header is not canonical')
+  let origin: unknown
+  try { origin = JSON.parse(bytes.toString('utf8')) }
+  catch { return nativeUnavailable('the native hook origin header is not JSON') }
+  return inspectNativeHookOrigin(origin)
 }
 
 /** The capture may stop above the engine; it may never skip an unreadable edge.
