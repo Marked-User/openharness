@@ -10,16 +10,17 @@
  * stale, never shorter, and never wakes anything.
  */
 import { idKey, type PictureState } from './gridAnnotation.js'
+import { LAST_KNOWN_MAX_AGE_SECONDS, MODEL_RETENTION_SECONDS } from './gridProtocol.js'
 import type { OfflineReading } from './gridPresence.js'
 import type { LastKnown, ReadNode } from './gridReader.js'
 
 /**
  * How long a model must be missing from awake answers before it leaves the list — one node TTL (120s on
  * the master) plus one 30s heartbeat from a pre-0.3.48 provider. A just-woken master has not heard from
- * its providers, so without this the read that follows a wake blanks every list. ⚠️ Cross-repo timing
- * (the lockstep register); the public repo's pin finds it by this exact name.
+ * its providers, so without this the read that follows a wake blanks every list. The wire contract's
+ * (`gridProtocol.ts`, `timing`); the public repo's pin finds it by this exact name.
  */
-export const GRID_MODEL_RETENTION_MS = 150_000
+export const GRID_MODEL_RETENTION_MS = MODEL_RETENTION_SECONDS * 1000
 
 /**
  * …and across at least this many awake answers. Implied today — the window is measured from the FIRST
@@ -43,9 +44,9 @@ const AWAKE_CONTINUITY_MS = 45_000
 
 /**
  * A sleep record older than this is ignored: the master forgets node rows after 30 days asleep, so an
- * older record lists models nobody serves any more. ⚠️ Cross-repo timing, found by this exact name.
+ * older record lists models nobody serves any more. The wire contract's (`timing`), found by this exact name.
  */
-export const GRID_LAST_KNOWN_MAX_AGE_MS = 29 * 24 * 60 * 60 * 1000
+export const GRID_LAST_KNOWN_MAX_AGE_MS = LAST_KNOWN_MAX_AGE_SECONDS * 1000
 
 /** Engines that are a router rather than a model (`grid-router` serves `auto`) are never offered. */
 const ROUTER_ENGINE = 'grid-router'
