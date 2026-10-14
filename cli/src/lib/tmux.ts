@@ -7,6 +7,7 @@ import type { ProcessIdentity } from './registry.js'
 import { ENGINE_EXIT_PANE_OPTION } from './engineExitOption.js'
 import { psEnv } from './childLocale.js'
 import { neutralizePasteControls } from './pasteText.js'
+import { submitContent, submitSettleMs } from './submitTiming.js'
 import { patientDeadline, patientExec } from './patientExec.js'
 import { inTmuxRoom } from './tmuxControlGate.js'
 import { tmuxFeatures, type TmuxFeatures } from './tmuxVersion.js'
@@ -215,12 +216,6 @@ export async function tmuxPaneProcessTree(
   return found
 }
 
-// Short single-line messages need no settling delay, but still need bracketed-paste boundaries:
-// Codex treats Enter immediately after an unbracketed text burst as a pasted newline, not submit.
-const INJECT_FASTPATH_MAXLEN = 500
-// Base settle time before the submit Enter; grows with length (Claude needs time to ingest a big paste
-// and collapse it to `[Pasted text]` before a clean Enter counts as submit rather than paste content).
-const INJECT_PASTE_DELAY_BASE_MS = 400
 // A NAMED tmux buffer so we never clobber the user's default paste buffer; `-d` deletes it after paste.
 let injectBufferSequence = 0
 
@@ -476,11 +471,11 @@ async function pasteThroughBuffer(pane: string, content: string, bracketed: bool
  * in that gap, mid-turn, and the Enter would answer it.
  */
 export function sendToTmux(pane: string, text: string, beforeEnter?: () => Promise<string | null>, allowed?: () => boolean): Promise<boolean | { withheld: string }> {
-  const content = text.replace(/[\r\n]+$/, '') // strip trailing newlines so the submit Enter isn't doubled
+  const content = submitContent(text)
   return (async () => {
-    const needsSettle = content.length > INJECT_FASTPATH_MAXLEN || /[\r\n]/.test(content)
+    const settle = submitSettleMs(content)
     if (!(await tmuxPasteText(pane, content, true, allowed))) return false
-    if (needsSettle) await sleep(Math.min(1500, INJECT_PASTE_DELAY_BASE_MS + Math.floor(content.length / 60)))
+    if (settle) await sleep(settle)
     const withheld = beforeEnter ? await beforeEnter() : null
     if (withheld) return { withheld }
     if (allowed && !allowed()) return { withheld: 'terminal control revoked' }

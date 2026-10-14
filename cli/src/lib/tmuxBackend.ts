@@ -68,42 +68,11 @@ import { DEFAULT_HOST_THEME, windowStyleOf, type HostTheme } from './hostTheme.j
 import { machineNames } from './machineNames.js'
 import { adoptLegacyHarnessSessions, isNoTmuxServerError, listTmuxPanes } from './tmuxAgentDiscovery.js'
 import { sameProcessIdentity, terminalRouteKey } from './terminalRuntime.js'
+import { TMUX_KEYS } from './terminalKeys.js'
 
 // Every tmux call here: a held event loop must not turn a timeout into a failure, or into an empty
 // answer that reads as a pane that was never made (patientExec.ts).
 const run = patientExec(execFile)
-
-const TMUX_KEYS: Record<TerminalLogicalKey, string> = {
-  enter: 'Enter',
-  escape: 'Escape',
-  tab: 'Tab',
-  backtab: 'BTab',
-  up: 'Up',
-  down: 'Down',
-  left: 'Left',
-  right: 'Right',
-  home: 'Home',
-  end: 'End',
-  backspace: 'BSpace',
-  delete: 'DC',
-  pageup: 'PPage',
-  pagedown: 'NPage',
-  'ctrl-c': 'C-c',
-  'ctrl-d': 'C-d',
-  'ctrl-u': 'C-u',
-  'ctrl-w': 'C-w',
-  space: 'Space',
-  '0': '0',
-  '1': '1',
-  '2': '2',
-  '3': '3',
-  '4': '4',
-  '5': '5',
-  '6': '6',
-  '7': '7',
-  '8': '8',
-  '9': '9',
-}
 
 /** Test seams for `prepare`: where tmux is looked for (`ensureTmuxOnPath`). */
 export interface TmuxBackendPrepareSeams {
