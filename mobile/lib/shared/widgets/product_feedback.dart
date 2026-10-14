@@ -73,7 +73,7 @@ class _ProductFeedbackState extends State<ProductFeedback> {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: 20),
+    padding: const EdgeInsets.only(top: 24),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -90,7 +90,7 @@ class _ProductFeedbackState extends State<ProductFeedback> {
         const SizedBox(height: 8),
         Wrap(
           spacing: 8,
-          runSpacing: 4,
+          runSpacing: 8,
           children: [
             for (final choice in (widget.outcome ? outcomes : choices).entries)
               OutlinedButton(
@@ -102,7 +102,7 @@ class _ProductFeedbackState extends State<ProductFeedback> {
               ),
           ],
         ),
-        if (_status != null) Text(_status!),
+        if (_status != null) ...[const SizedBox(height: 8), Text(_status!)],
       ],
     ),
   );
