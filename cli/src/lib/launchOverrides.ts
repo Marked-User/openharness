@@ -29,7 +29,7 @@ import {
   type GridLaunchRequest,
 } from './gridLaunchWire.js'
 import type { TerminalBackendCapabilities } from './terminalTypes.js'
-import { tmuxTooOldForSessionEnv } from './tmuxBackend.js'
+import { tmuxTooOldForSessionEnv } from './tmuxVersion.js'
 import { harnessEnvToClear } from '../dsh/launch.js'
 import type { DshLaunchAnswer } from '../dsh/launchWire.js'
 import { scmLaunchEnv } from '../scm/scmProjects.js'

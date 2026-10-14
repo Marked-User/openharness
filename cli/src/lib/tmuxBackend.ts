@@ -50,7 +50,17 @@ import { lookupPaneEngineProcess } from './paneEngineProcess.js'
 import { LSTART_MARKER_RE } from './processTable.js'
 import { env } from '../config/env.js'
 import { HARNESS_OWNER_OPTION, harnessPaneOwner, ownerCommand } from './harnessSessionLabel.js'
-import { TMUX_SESSION_ENV_MIN, tmuxFeatures, tmuxSupportsSessionEnv, type TmuxFeatures } from './tmuxVersion.js'
+import {
+  TMUX_FEATURE_MIN,
+  tmuxFeatures,
+  tmuxSupportsSessionEnv,
+  tmuxTooOldForEnv,
+  tmuxTooOldForSessionEnv,
+  type TmuxFeatures,
+} from './tmuxVersion.js'
+
+// Callers outside the backend (agent create) import the sentence from here.
+export { tmuxTooOldForSessionEnv }
 import { ensureTmuxOnPath, type TmuxPathOutcome } from './tmuxOnPath.js'
 import { isHarnessdVariable } from './harnessdEnv.js'
 import { isAgentSessionVariable } from './agentSessionEnv.js'
@@ -93,21 +103,6 @@ const TMUX_KEYS: Record<TerminalLogicalKey, string> = {
   '7': '7',
   '8': '8',
   '9': '9',
-}
-
-/** Why a launch with its own environment was refused on this tmux, in words a person can act on. */
-function tmuxTooOldForEnv(version: string, what: string): string {
-  return `this machine's tmux is older than ${version}, the first version that can give ${what} its own environment. Upgrade tmux.`
-}
-
-/**
- * The start of a refusal of a launch that needs its own environment (a grid, a harness) on a tmux older
- * than `TMUX_SESSION_ENV_MIN`, naming that version: the callers that check `capabilities().sessionEnv`
- * finish the sentence with what could not be done.
- */
-export function tmuxTooOldForSessionEnv(what: string): string {
-  return `this machine's tmux is older than ${TMUX_SESSION_ENV_MIN.major}.${TMUX_SESSION_ENV_MIN.minor}, `
-    + `which is the first version that can give ${what} its own environment`
 }
 
 /** Test seams for `prepare`: where tmux is looked for (`ensureTmuxOnPath`). */
@@ -230,7 +225,7 @@ export class TmuxBackend implements TerminalBackend<TmuxRuntimeRef> {
     // harness on an older tmux by name (`capabilities().sessionEnv`); whatever else reaches here with
     // variables on one is refused here, saying why, rather than handed to tmux to answer with its
     // usage text — and never moved into the argv, where a secret would show.
-    if (variables.length && !features.sessionEnv) return terminalActionNotStarted(tmuxTooOldForEnv('3.2', 'a new session'))
+    if (variables.length && !features.sessionEnv) return terminalActionNotStarted(tmuxTooOldForEnv(TMUX_FEATURE_MIN.sessionEnv, 'a new session'))
     const owner = this.owner()
     const args = ['new-session', '-d', '-P', '-F', '#{pane_id}']
     if (request.cwd) args.push('-c', request.cwd)
@@ -322,7 +317,7 @@ export class TmuxBackend implements TerminalBackend<TmuxRuntimeRef> {
    */
   async respawnRefusal(request: Pick<TerminalRespawnRequest, 'env'>): Promise<string | null> {
     // `respawn-pane -e` is tmux 3.0; refused before, for the reason `create` gives.
-    return Object.keys(request.env ?? {}).length && !(await this.features()).respawnEnv ? tmuxTooOldForEnv('3.0', 'a respawned pane') : null
+    return Object.keys(request.env ?? {}).length && !(await this.features()).respawnEnv ? tmuxTooOldForEnv(TMUX_FEATURE_MIN.respawnEnv, 'a respawned pane') : null
   }
 
   async respawn(runtime: TmuxRuntimeRef, request: TerminalRespawnRequest): Promise<TerminalActionResult> {
