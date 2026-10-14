@@ -428,8 +428,12 @@ export function startHookServer(
   type LinkedStop = (body: BoundHookBody, firedAt: number | undefined) => StopAcknowledgement | Promise<StopAcknowledgement>
   type PreparingIntake = { body: BoundHookBody; firedAt?: number; arrival: number; wire?: NativeHookWireIdentity; attempted: boolean }
   type Receipt = { fingerprint: string; status: number; reply: unknown; pending: boolean; bytes: number; linkedStop?: LinkedStop;
+    legacyOwner?: { agentId: string; scope: string };
+    legacyCapture?: Promise<unknown>;
     preparing?: { stopEffect?: CapturedStop; stopCurrent?: () => boolean; intake?: PreparingIntake } }
   const admissionReceipts = new Map<string, { scope: string; records: Map<string, Receipt> }>()
+  const legacyStops = new Map<string, Receipt>(), legacyStopRetries = new Map<string, () => void>()
+  let runningLegacyStops = 0
   const resolvingStops = new Map<string, { fingerprint: string; stop: LinkedStop }>()
   let receiptCount = 0, receiptBytes = 0
   const intakeReservations = new Set<string>()
@@ -575,7 +579,7 @@ export function startHookServer(
       context.restored.add(id)
     }
   }
-  const confirmedSnapshot = async (context: DurableProcess, row: RegisteredSession) => {
+  const confirmedSnapshot = async (context: DurableProcess, row: RegisteredSession, ownerVerified?: (verify: () => void) => void) => {
     ready(context, false)
     context.confirming++
     try {
@@ -592,6 +596,7 @@ export function startHookServer(
       }
       const native = await handlers.readNativeHookOwner(row, context.owner)
       native.verify()
+      ownerVerified?.(native.verify)
     }
     snapshot.verify()
     const owner = registry.byAgent(row.agentId)
@@ -607,9 +612,10 @@ export function startHookServer(
     row.agentId, row.engine, row.processIdentity ? processIdentityKey(row.engine, row.processIdentity) : null,
     handlers.readNativeHookOwner && row.processIdentity ? nativeKeys.get(processIdentityKey(row.engine, row.processIdentity)) : null,
   ])
-  const verifiedMutation = async (body: BoundHookBody): Promise<RegisteredSession | null> => {
+  const verifiedMutation = async (body: BoundHookBody, retained?: { caller: NativeHookCaller | undefined },
+    confirmed?: (verify: () => void) => void): Promise<RegisteredSession | null> => {
     if (closed) return null
-    const caller = await captureCaller(body)
+    const caller = retained ? retained.caller : await captureCaller(body)
     const owner = await verifiedBoundMutation(body, handlers, caller)
     if (closed || !owner) return null
     const identity = paneReadIdentity(owner)
@@ -624,10 +630,12 @@ export function startHookServer(
         || [...intakeReservations].some(key => key.startsWith(`${context.key}\u0000`))) {
         throw new IdentityReadUnavailable('an earlier native hook has no confirmed outcome')
       }
-      const snapshot = await confirmedSnapshot(context, owner)
+      let verifyOwner = () => {}
+      const snapshot = await confirmedSnapshot(context, owner, verify => { verifyOwner = verify })
       if (snapshot.active || [...snapshot.deliveries.values()].some(delivery => !delivery.result)) {
         throw new IdentityReadUnavailable('an earlier native hook has no confirmed outcome')
       }
+      confirmed?.(() => { verifyOwner(); snapshot.verify() })
     } catch (error) {
       const reason = `Waiting for native hook recovery: ${error instanceof Error ? error.message : 'storage unavailable'}`.slice(0, 1024)
       try { const context = durableProcesses.get(durableKey(owner)); if (context) ready(context, false) } catch { /* Not restored yet. */ }
@@ -653,6 +661,108 @@ export function startHookServer(
         const row = registry.byRuntimeEngine({ backend: 'tmux', paneId: hint.paneId }, 'cursor')
         return row ? [[row.agentId, structuredClone(row)] as const] : []
       })).values()] : [])
+  }
+  const retainLegacyStop = async (body: BoundHookBody, id: string, firedAt: number | undefined): Promise<StopAcknowledgement> => {
+    const fingerprint = createHash('sha256').update(JSON.stringify([body, firedAt])).digest('hex')
+    const previous = legacyStops.get(id)
+    if (previous) {
+      if (previous.fingerprint !== fingerprint) return { status: 409, reply: { pending: false, error: 'HOOK_DELIVERY_CONFLICT' } }
+      await previous.legacyCapture
+      const receipt = legacyStops.get(id) ?? previous
+      return { status: receipt.status, reply: receipt.reply }
+    }
+    const owner = body.sessionId ? registry.bySession(body.sessionId) : undefined
+    if (!owner?.active || owner.engine !== body.engine || !owner.processIdentity) {
+      return { status: 403, reply: { error: 'UNBOUND_HOOK' } }
+    }
+    for (const [delivery, receipt] of legacyStops) {
+      const retained = receipt.legacyOwner!, row = registry.byAgent(retained.agentId)
+      if (admissionProcessScope(row) !== retained.scope) {
+        legacyStopRetries.delete(delivery); saveReceipt(legacyStops, delivery)
+      }
+    }
+    const bytes = 2 * (JSON.stringify(body).length + JSON.stringify(owner).length) + 2_048
+    if (receiptCount >= receiptCapacity || receiptBytes + bytes > bytesCapacity) {
+      return { status: 429, reply: { pending: false, error: 'HOOK_ADMISSION_BUSY', detail: 'Hook acknowledgement storage is full; this Stop was not retained.' } }
+    }
+    const legacyOwner = { agentId: owner.agentId, scope: admissionProcessScope(owner)! }, sessionId = body.sessionId!
+    // Capture core turn authority synchronously before native ownership or journal
+    // admission waits. No retry may borrow the turn that replaced this one.
+    const notCancelled = handlers.captureAdmissionStop?.(owner) ?? (() => true)
+    const effect = handlers.captureTurnStop!(structuredClone(owner), { sessionId, status: body.status, firedAt })
+    const original = structuredClone(body)
+    const caller = (async () => ({ caller: await captureCaller(original) }))().catch(error => ({ error }))
+    let running = false, started = false, reported = false
+    const current = () => !closed && !isRecentlyDeleted(owner.agentId) && !isRecentlyDeleted(sessionId)
+      && admissionProcessScope(registry.byAgent(owner.agentId)) === legacyOwner.scope
+      && registry.byAgent(owner.agentId)?.sessionId === sessionId
+    const holdKey = `legacy-stop:${id}`
+    const hold = (detail: string) => {
+      if (!current()) return
+      const reply = { pending: false, retry: true, detail: detail.slice(0, 1024) }
+      saveReceipt(legacyStops, id, { fingerprint, status: 202, reply, pending: false, bytes, legacyOwner, legacyCapture: caller })
+      const holds = admissionHolds.get(owner.agentId) ?? new Map<string, string>()
+      if (holds.get(holdKey) !== reply.detail) {
+        holds.set(holdKey, reply.detail); admissionHolds.set(owner.agentId, holds); publishHold(owner.agentId)
+      }
+    }
+    const finish = () => {
+      legacyStopRetries.delete(id)
+      saveReceipt(legacyStops, id, { fingerprint, status: 200, reply: { ok: true, duplicate: true }, pending: false, bytes: 256, legacyOwner })
+      const holds = admissionHolds.get(owner.agentId)
+      if (holds?.delete(holdKey)) {
+        if (!holds.size) admissionHolds.delete(owner.agentId)
+        publishHold(owner.agentId)
+      }
+    }
+    let verify: () => void = () => { throw new IdentityReadUnavailable('the original Stop admission is not confirmed') }
+    const confirm = async () => {
+      const captured = await caller
+      if ('error' in captured) throw captured.error
+      if (!current()) throw new IdentityReadUnavailable('the original Stop owner changed')
+      const fresh = await verifiedMutation(original, captured, proof => { verify = () => {
+        if (!current()) throw new IdentityReadUnavailable('the original Stop owner changed')
+        proof()
+      } })
+      if (!fresh || fresh.agentId !== owner.agentId || !current()) throw new IdentityReadUnavailable('the original Stop owner changed')
+      verify()
+    }
+    const attempt = () => {
+      if (closed || running || runningLegacyStops >= 4) return
+      if (!current() || !notCancelled()) { finish(); return }
+      legacyStopRetries.delete(id); legacyStopRetries.set(id, attempt)
+      running = true; runningLegacyStops++
+      void (async () => {
+        try {
+          if (!started) {
+            await confirm()
+            if (!reported) {
+              reported = true
+              console.log(`[hooks] ${sid(sessionId)} turn-stop${body.status ? ` · status=${body.status}` : ''}`)
+              if (handlers.stopHookDelayMs) await new Promise(resolve => setTimeout(resolve, handlers.stopHookDelayMs))
+            }
+            if (!current() || !notCancelled()) { finish(); return }
+            await confirm()
+            if (!notCancelled()) { finish(); return }
+            started = true
+          }
+          const outcome = await effect({ current, verify: () => verify(), confirm })
+          if (closed) return
+          if (outcome === 'completed' || outcome === 'superseded') finish()
+          else hold('Waiting for the original Stop turn to be confirmed; Cancel can resolve this hold.')
+        } catch (error) {
+          if (!notCancelled()) finish()
+          else hold(`Waiting for the original Stop admission: ${error instanceof Error ? error.message : 'native evidence unavailable'}`)
+        } finally { running = false; runningLegacyStops-- }
+      })()
+    }
+    hold('Waiting for the original Stop admission; this notification is retained only by this core.')
+    legacyStopRetries.set(id, attempt); attempt()
+    // Replying ends notify.mjs and its short-lived shell on Linux. Keep that
+    // ancestry alive for the one original capture; a retry cannot reconstruct it.
+    await caller
+    const receipt = legacyStops.get(id)
+    return receipt ? { status: receipt.status, reply: receipt.reply } : { status: 403, reply: { error: 'UNBOUND_HOOK' } }
   }
   /** A completed phase needs no live engine. This lookup has no allocation or
    * dispatch capability and cannot upgrade a legacy receipt into the v1 protocol. */
@@ -1198,6 +1308,7 @@ export function startHookServer(
   }
   const recoveryPass = () => {
     if (closed) return
+    for (const retry of [...legacyStopRetries.values()]) { if (runningLegacyStops >= 4) break; retry() }
     {
       const rows = registry.list().filter(row => row.active && row.processIdentity && row.engine !== 'terminal')
       for (let offset = 0; offset < rows.length && recovering.size < 4; offset++) {
@@ -1430,6 +1541,11 @@ export function startHookServer(
           body = parsed
         } catch { json(400, { error: 'bad json' }); return }
         const delivery = req.headers['x-harness-hook-delivery-id']
+        if (body.engine === 'claude' && handlers.captureTurnStop && typeof delivery === 'string'
+          && /^[a-zA-Z0-9_-]{16,96}$/.test(delivery)) {
+          const reply = await retainLegacyStop(body, delivery, hookFiredAt(req))
+          json(reply.status, reply.reply); return
+        }
         if (typeof delivery === 'string') {
           const pending = resolvingStops.get(delivery)?.stop ?? [...admissionReceipts.values()]
             .map(history => history.records.get(delivery)?.linkedStop).find(Boolean)
@@ -1787,6 +1903,7 @@ export function startHookServer(
   const server = http.createServer(handle)
   const stopRecovery = () => {
     closed = true; clearTimeout(recoveryTimer); admissions.close(); waitingAttaches.clear()
+    legacyStopRetries.clear()
     void clientReplay.close().catch(error => console.warn('[hooks] client replay cleanup remains held', error))
     for (const context of durableProcesses.values()) context.journal.close()
     void closeStorage().catch(error => console.warn('[hooks] storage cleanup remains held', error))

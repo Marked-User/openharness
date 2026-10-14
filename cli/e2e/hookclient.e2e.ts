@@ -228,6 +228,36 @@ setInterval(() => {}, 1000)
   })
 
 
+  it('completes the original Claude Stop from the shipped client after its prompt admission recovers', async () => {
+    const d = await fresh(), client = await LocalClient.connect(d)
+    const agent = await create(d, client, 'claude', 'held-claude-stop')
+    await turn(client, agent.id, 'before held Stop')
+    const file = join(d.dataDir, 'registry.json'), backup = file + '.fixture-backup'
+    const from = client.frames.length, hookFrom = d.hookLog().length
+    renameSync(file, backup); mkdirSync(file)
+    try {
+      const opened = client.next(isTurn('turn_started', agent.id), 30_000, 'the original held-admission turn')
+      await type(d, agent.tmuxPane, '!stopgate')
+      expect((await opened).payload?.userMessage).toBe('!stopgate')
+      await until('the native prompt to remain visibly held', async () =>
+        (await row(client, agent.id))?.identityHold?.includes('durable hook admission'), 20_000)
+      writeFileSync(join(d.root, 'release-stop'), '')
+      await until('the shipped Stop client to exit while its registration remains held', () =>
+        ran(hooksSince(d, hookFrom), / Stop /), 15_000)
+      expect(client.frames.slice(from).filter(isTurn('turn_ended', agent.id))).toHaveLength(0)
+    } finally { rmdirSync(file); renameSync(backup, file) }
+    try {
+      await expect.poll(() => client.frames.slice(from).filter(isTurn('turn_ended', agent.id)).length,
+        { timeout: 20_000, message: 'the retained Stop closes its original turn after admission' }).toBe(1)
+      await until('the Stop admission hold to clear', async () => {
+        const current = await row(client, agent.id)
+        return current && !current.identityHold && !current.interpretationHold
+      }, 20_000)
+      expect(d.log()).toContain(`${agent.sessionId.slice(0, 8)} force-closed by Stop hook`)
+      expect((await row(client, agent.id))?.sessionId).toBe(agent.sessionId)
+    } finally { client.close() }
+  })
+
   it.each([
     { state: 'running', source: 'unmarked' },
     { state: 'paused', source: 'unmarked' },

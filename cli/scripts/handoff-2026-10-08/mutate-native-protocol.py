@@ -11,6 +11,15 @@ catalog = 'src/engines/kit/nativeHookCatalog.ts'
 http = 'src/hookServer.nativeProtocol.spec.ts'
 storage = 'src/engines/kit/nativeHookCatalog.spec.ts'
 mutations = [
+    ('lost legacy reply requires another client request', server,
+     'if (!local) { recovered.add(context.key); return }',
+     'if (true) { recovered.add(context.key); return }', http, 'locally held prompt after initial'),
+    ('local intake ignores acknowledgement capacity', server,
+     'const provisional = !cached && receiptCount < receiptCapacity && receiptBytes + retainedBytes <= bytesCapacity',
+     'const provisional = !cached', http, 'bounds locally held intake'),
+    ('later local intake overtakes its cold predecessor', server,
+     '(!history.records.has(id) || history.records.get(id)?.preparing)',
+     '(history.records.get(id)?.preparing)', http, 'cold durable intake before a later local request'),
     ('legacy mutation competes with an unfinished admission', server,
      'if (context.confirming || context.claims.size\n'
      '        || history && history.scope === scopeOf(owner) && [...history.records.values()].some(receipt => receipt.pending || receipt.preparing)\n'

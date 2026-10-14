@@ -7,6 +7,7 @@ import type { RegisteredSession } from '../../lib/registry.js'
 import { Watcher, type TailHold } from '../../watcher/watcher.js'
 import { createIngest } from './ingest.js'
 import { createCancel } from '../turns/cancel.js'
+import { createTurnHooks, STOP_HOOK_GRACE_MS } from '../turns/turnHooks.js'
 import { createAttach, type AttachDeps } from './attach.js'
 import { loadEngine } from '../../engines/inProcess.js'
 import { createSessionNormalizers } from './normalizers.js'
@@ -497,6 +498,37 @@ describe('attaching a session', () => {
     ready = true
     expect(await run.attach.attachSession(row)).toBe(true)
     expect(run.deps.terminalGone).toHaveBeenCalled()
+  })
+
+  it.each([false, true])('preserves the deferred reset=%s decision and the captured legacy Stop turn through native recovery', async reset => {
+    let ready = true
+    const run = setup({ nativeRecoveryReady: () => ready })
+    const row = session('claude', transcript([CLAUDE_PROMPT]))
+    await run.attach.attachSession(row)
+    run.normalizers.noteTurnStart(row.sessionId)
+    const original = run.normalizers.liveParsers.get(row.sessionId)!
+    expect(original.snapshot().turnOpen).toBe(true)
+    const emit = vi.fn(), stopped = vi.fn()
+    const hooks = createTurnHooks({ resolve: () => row, normalizers: run.normalizers, emit,
+      drain: async () => {}, onCursorTaskStart: vi.fn(), cursorTaskHooks: { wait: async () => {} },
+      cursorSubagents: { closeParent: vi.fn() }, announceTurnAborted: vi.fn(), armAgyIdleWatch: vi.fn(),
+      clearAgyIdleWatch: vi.fn(), mirror: { noteEngineStopped: stopped }, dataDir: '/fixture',
+    })
+    ready = false
+    await run.attach.attachSession(row, reset)
+    const stop = hooks.captureStop(row, { sessionId: row.sessionId }, run.attach.captureAdmissionStop(row))
+    expect(run.normalizers.liveParsers.get(row.sessionId)).toBe(original)
+    ready = true
+    await run.attach.attachSession(row)
+    expect(run.normalizers.liveParsers.get(row.sessionId) === original).toBe(!reset)
+    vi.useFakeTimers()
+    const result = stop()
+    await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+    expect(await result).toBe(reset ? 'held' : 'completed')
+    expect(stopped).toHaveBeenCalledTimes(reset ? 0 : 1)
+    expect(emit).toHaveBeenCalledTimes(reset ? 0 : 1)
+    expect(run.normalizers.sessionTurnOpen(row.sessionId)).toBe(reset)
+    run.attach.forget(row.sessionId)
   })
 
   it('revokes a started attach when native recovery loses authority during its first await', async () => {

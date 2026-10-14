@@ -67,6 +67,158 @@ describe('turn hooks', () => {
   beforeEach(() => vi.useFakeTimers())
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
 
+  describe('a legacy Claude Stop retained before admission', () => {
+    function retained(over: Partial<TurnHookDeps> = {}, status?: string) {
+      const session = { agentId: 'a1', sessionId: 's1', engine: 'claude', transcriptPath: '/fixture/original.jsonl', evidenceRevision: 1 } as RegisteredSession
+      const run = setup('claude', { resolve: id => id === 's1' ? session : undefined, ...over })
+      const state = { turnOpen: true, opened: 1, pendingTools: new Map() } as unknown as TurnState
+      setState(run, state); run.normalizers.noteTurnStart('s1')
+      let cancelled = false, alive = true
+      const stop = run.hooks.captureStop(session, { sessionId: 's1', firedAt: 1_000, status }, () => !cancelled)
+      const execution = { current: () => alive, verify: vi.fn(), confirm: vi.fn(async () => {}) }
+      return { ...run, session, state, stop, execution, cancel: () => { cancelled = true }, shutdown: () => { alive = false } }
+    }
+
+    it('waits for admission, then completes the original turn once with refreshed proof after each drain', async () => {
+      const run = retained()
+      await vi.advanceTimersByTimeAsync(500)
+      const result = run.stop(run.execution)
+      await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+      expect(await result).toBe('completed')
+      expect(run.execution.confirm).toHaveBeenCalledTimes(2)
+      expect(run.state.turnOpen).toBe(false)
+      expect(run.deps.emit).toHaveBeenCalledExactlyOnceWith('s1', END)
+      expect(run.deps.mirror.noteEngineStopped).toHaveBeenCalledExactlyOnceWith('s1')
+      expect(await run.stop(run.execution)).toBe('completed')
+      expect(run.deps.drain).toHaveBeenCalledTimes(2)
+    })
+
+    it.each([undefined, 'error'])('keeps a no-original-turn notification from closing a later reconstructed question (%s)', async status => {
+      const run = setup('claude')
+      const stop = run.hooks.captureStop(run.deps.resolve('s1')!, { sessionId: 's1', status }, () => true)
+      const question = { turnOpen: true, opened: 2, pendingTools: new Map() } as unknown as TurnState
+      setState(run, question); run.normalizers.noteTurnStart('s1')
+      expect(await stop()).toBe('completed')
+      expect(question.turnOpen).toBe(true)
+      expect(run.deps.drain).not.toHaveBeenCalled()
+      expect(run.deps.emit).not.toHaveBeenCalled()
+      expect(run.deps.mirror.noteEngineStopped).not.toHaveBeenCalled()
+    })
+
+    it('keeps an already closed arrival inert even if its existing parser later opens a turn', async () => {
+      const run = setup('claude'), state = { turnOpen: false, pendingTools: new Map() } as unknown as TurnState
+      setState(run, state)
+      const stop = run.hooks.captureStop(run.deps.resolve('s1')!, { sessionId: 's1' }, () => true)
+      state.turnOpen = true
+      expect(await stop()).toBe('completed')
+      expect(state.turnOpen).toBe(true)
+      expect(run.deps.mirror.noteEngineStopped).not.toHaveBeenCalled()
+    })
+
+    it.each(['identityHold', 'interpretationHold'] as const)('does not infer idle from a missing parser while %s is recorded', async field => {
+      const session = { agentId: 'a1', sessionId: 's1', engine: 'claude', [field]: 'original source unavailable' } as unknown as RegisteredSession
+      const run = setup('claude', { resolve: () => session })
+      let cancelled = false
+      const stop = run.hooks.captureStop(session, { sessionId: 's1' }, () => !cancelled)
+      delete session[field]
+      setState(run, { turnOpen: true, pendingTools: new Map() } as unknown as TurnState)
+      expect(await stop()).toBe('held')
+      expect(run.deps.mirror.noteEngineStopped).not.toHaveBeenCalled()
+      expect(run.deps.emit).not.toHaveBeenCalled()
+      cancelled = true
+      expect(await stop()).toBe('superseded')
+    })
+
+    it.each(['Cancel', 'new turn', 'new prompt', 'new owner', 'missing owner', 'parser', 'path', 'revision', 'identity', 'interpretation'] as const)(
+      'keeps %s from inheriting a retained Stop or its recap effect', async changed => {
+        let missing = false
+        const run = retained({ resolve: id => missing ? undefined : session })
+        const session = run.session
+        if (changed === 'Cancel') run.cancel()
+        if (changed === 'new turn') run.normalizers.noteTurnStart('s1')
+        if (changed === 'new prompt') run.hooks.onPromptHook('s1', 2_000)
+        if (changed === 'new owner') session.agentId = 'a2'
+        if (changed === 'missing owner') missing = true
+        if (changed === 'parser') setState(run, { ...run.state })
+        if (changed === 'path') session.transcriptPath = '/fixture/replacement.jsonl'
+        if (changed === 'revision') session.evidenceRevision!++
+        if (changed === 'identity') session.identityHold = 'unavailable'
+        if (changed === 'interpretation') session.interpretationHold = 'unavailable'
+        expect(await run.stop(run.execution)).toBe(['parser', 'path', 'revision', 'identity', 'interpretation'].includes(changed) ? 'held' : 'superseded')
+        expect(run.state.turnOpen).toBe(true)
+        expect(run.deps.drain).not.toHaveBeenCalled()
+        expect(run.deps.mirror.noteEngineStopped).not.toHaveBeenCalled()
+      })
+
+    it.each(['Cancel', 'successor', 'shutdown', 'deadline', 'rejection'] as const)('fences a delayed drain after %s, StopFailure included', async changed => {
+      let release!: () => void, reject!: (error: Error) => void
+      const run = retained({ drain: () => new Promise<void>((done, fail) => { release = done; reject = fail }) }, 'error')
+      const result = run.stop(run.execution)
+      await vi.advanceTimersByTimeAsync(0)
+      if (changed === 'Cancel') run.cancel()
+      if (changed === 'successor') run.state.opened = 2
+      if (changed === 'shutdown') run.shutdown()
+      if (changed === 'rejection') reject(Error('fixture drain unavailable'))
+      await vi.advanceTimersByTimeAsync(changed === 'deadline' ? STOP_COMPLETION_WAIT_MS : 25)
+      expect(await result).toBe(changed === 'Cancel' || changed === 'successor' ? 'superseded' : 'held')
+      release(); await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS * 2)
+      expect(run.state.turnOpen).toBe(true)
+      expect(run.deps.emit).not.toHaveBeenCalled()
+      expect(run.deps.mirror.noteEngineStopped).not.toHaveBeenCalled()
+    })
+
+    it('keeps a failed confirmation held and never repeats the attempted effect', async () => {
+      const run = retained()
+      run.execution.confirm.mockRejectedValue(Error('fixture ownership unavailable'))
+      const result = run.stop(run.execution)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(await result).toBe('held')
+      expect(await run.stop(run.execution)).toBe('held')
+      expect(run.execution.confirm).toHaveBeenCalledOnce()
+      expect(run.deps.mirror.noteEngineStopped).not.toHaveBeenCalled()
+    })
+
+    it('supports an already confirmed local Stop without an asynchronous confirmation callback', async () => {
+      const run = retained()
+      const result = run.stop({ current: run.execution.current, verify: run.execution.verify })
+      await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+      expect(await result).toBe('completed')
+      expect(run.state.turnOpen).toBe(false)
+    })
+
+    it('treats Cancel during a rejected drain or proof as superseding the original notification', async () => {
+      const drained = retained()
+      vi.mocked(drained.deps.drain).mockImplementation(async () => { drained.cancel(); throw Error('fixture read failed after Cancel') })
+      expect(await drained.stop(drained.execution)).toBe('superseded')
+      expect(drained.deps.emit).not.toHaveBeenCalled()
+      const proved = retained()
+      proved.execution.verify.mockImplementation(() => { proved.cancel(); throw Error('fixture proof failed after Cancel') })
+      expect(await proved.stop(proved.execution)).toBe('superseded')
+      expect(proved.deps.drain).not.toHaveBeenCalled()
+    })
+
+    it('does not publish the old completion when Cancel revokes it during the atomic close', async () => {
+      const run = retained(), parser = run.normalizers.liveParsers.get('s1')!
+      const close = parser.closeTurn.bind(parser)
+      vi.spyOn(parser, 'closeTurn').mockImplementation((...args) => { close(...args); run.cancel() })
+      const result = run.stop(run.execution)
+      await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+      expect(await result).toBe('superseded')
+      expect(run.state.turnOpen).toBe(false)
+      expect(run.deps.emit).not.toHaveBeenCalled()
+    })
+
+    it('contains failed final proof and a Cancel issued by that proof', async () => {
+      const failed = retained()
+      failed.execution.verify.mockImplementation(() => { throw Error('fixture proof changed') })
+      expect(await failed.stop(failed.execution)).toBe('held')
+      const cancelled = retained()
+      cancelled.execution.verify.mockImplementation(cancelled.cancel)
+      expect(await cancelled.stop(cancelled.execution)).toBe('superseded')
+      expect(cancelled.deps.drain).not.toHaveBeenCalled()
+    })
+  })
+
   describe('a Stop captured by its native registration', () => {
     function captured(engine: 'cursor' | 'commandcode' = 'cursor', over: Partial<TurnHookDeps> = {}) {
       const run = setup(engine, { holdStop: vi.fn(() => true), afterStop: vi.fn(), ...over })

@@ -75,6 +75,7 @@ beforeEach(async () => {
   mkdirSync(join(home, 'sessions'), { recursive: true }); mkdirSync(join(root, 'data'))
   for (const [key, value] of Object.entries({ HOME: root, ADAPTER_DATA_DIR: join(root, 'data'),
     ADAPTER_RUNTIME_DIR: join(root, 'runtime'), CODEX_HOME: home, CLAUDE_CONFIG_DIR: join(root, 'claude'),
+    CLAUDE_PROJECTS_DIR: join(root, 'claude', 'projects'),
     COMMANDCODE_HOME: join(root, 'commandcode'), GROK_HOME: join(root, 'grok'),
     AGY_HOME: join(root, 'agy'), COPILOT_HOME: join(root, 'copilot') })) vi.stubEnv(key, value)
   writeFileSync(join(root, 'data', 'engine-homes.json'), '{}')
@@ -1308,6 +1309,186 @@ function boundCursorStop() {
   return { owner, body: { engine: 'cursor', sessionId: A, transcriptPath: undefined, tmuxPane: '%3', hookEvent: 'stop', prompt: undefined },
     delivery: { id: 'fixture-stop-owned-completion', firedAt: Date.now() } }
 }
+
+function boundClaudeStop() {
+  const directory = join(root, 'claude', 'projects', 'fixture')
+  mkdirSync(directory, { recursive: true })
+  const transcriptPath = join(directory, `${A}.jsonl`)
+  writeFileSync(transcriptPath, JSON.stringify({ type: 'user', cwd: root, sessionId: A, isSidechain: false }) + '\n')
+  const owner = registry.openProcessAgent({ engine: 'claude', tmuxPane: '%3', cwd: root,
+    processIdentity: { pid: 7103, startMarker: 'fixture-claude', executable: '<claude>' } })!.entry
+  expect(registry.register({ engine: 'claude', sessionId: A, transcriptPath, tmuxPane: '%3', cwd: root, processIdentity: owner.processIdentity! })?.entry.sessionId).toBe(A)
+  return { owner, body: { engine: 'claude', sessionId: A, transcriptPath, tmuxPane: '%3', cwd: root, hookEvent: 'Stop', prompt: undefined },
+    delivery: { id: 'fixture-legacy-stop-original', firedAt: Date.now() } }
+}
+
+it('retains a legacy Stop through pending registration and confirms its original effect without a client retry', async () => {
+  const { owner, body, delivery } = boundClaudeStop()
+  let blocked = true
+  const stopped = vi.fn(), effect = vi.fn(async (execution) => { execution.verify(); stopped(); return 'completed' as const })
+  const capture = vi.fn(() => effect), legacy = vi.fn()
+  const f = await httpFixture(() => blocked, undefined, { captureTurnStop: capture, onTurnStop: legacy }, undefined, true)
+  expect((await f.post({ ...body, hookEvent: 'UserPromptSubmit', prompt: 'original' }, {
+    id: 'fixture-legacy-stop-predecessor', firedAt: delivery.firedAt - 1,
+  })).body).toEqual({ pending: true })
+  expect(await f.post(body, delivery, 'turn-stop')).toMatchObject({ status: 202, body: { pending: false, retry: true } })
+  expect(capture).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ agentId: owner.agentId }),
+    { sessionId: A, status: undefined, firedAt: delivery.firedAt })
+  expect(await f.post(body, delivery, 'turn-stop')).toMatchObject({ status: 202, body: { pending: false, retry: true } })
+  expect((await f.post({ ...body, status: 'error' }, delivery, 'turn-stop')).status).toBe(409)
+  expect(effect).not.toHaveBeenCalled()
+  blocked = false; f.startRecovery()
+  await vi.waitFor(() => expect(stopped).toHaveBeenCalledOnce(), { timeout: 4_000 })
+  await vi.waitFor(async () => expect((await f.post(body, delivery, 'turn-stop')).body).toEqual({ ok: true, duplicate: true }), { timeout: 4_000 })
+  expect(effect).toHaveBeenCalledOnce()
+  expect(capture).toHaveBeenCalledOnce()
+  expect(legacy).not.toHaveBeenCalled()
+  expect(f.registered).toHaveBeenCalledOnce()
+})
+
+it('completes the original legacy Stop after real deferred attach and registration recovery', async () => {
+  const { createAttach } = await import('../core/transcripts/attach.js')
+  const { createSessionNormalizers } = await import('../core/transcripts/normalizers.js')
+  const { createTurnHooks } = await import('../core/turns/turnHooks.js')
+  const { liveFor } = await import('../engines/live.js')
+  const { Watcher } = await import('../watcher/watcher.js')
+  const { owner, body, delivery } = boundClaudeStop()
+  writeFileSync(body.transcriptPath, readFileSync(body.transcriptPath, 'utf8') + JSON.stringify({
+    type: 'user', uuid: 'fixture-original-prompt', message: { role: 'user', content: 'original' },
+  }) + '\n')
+  const row = registry.byAgent(owner.agentId)!, normalizers = createSessionNormalizers(), watcher = new Watcher()
+  let blocked = true, f: Awaited<ReturnType<typeof httpFixture>> | undefined
+  const emit = vi.fn(), stopped = vi.fn()
+  const attach = createAttach({ liveFor, resolve: id => registry.byAgent(id), normalizers, watcher,
+    nativeRecoveryReady: entry => f?.recoveryReady(entry) ?? true,
+    terminalGone: async () => false, announceSession: vi.fn(), setInterpretationHold: () => false,
+    cursorDiscovery: { add: async () => {} }, device: () => undefined,
+    runtimeProfiles: { beginHydrate: () => ({ ingest: () => false, commit: () => false }),
+      transcriptFields: () => [], ingestConfig: async () => false, capturePane: async () => null,
+    } as unknown as import('../core/transcripts/attach.js').AttachDeps['runtimeProfiles'],
+    captureTerminal: async () => null, emit: vi.fn(), announceTurnAborted: vi.fn(),
+    questionWatcher: { start: vi.fn() }, terminalLabel: () => '<private-pane>',
+    dbs: { opencode: '', kilo: '', devin: '' }, devinHome: '', hermesDb: async () => '', concurrency: 1,
+  })
+  const turns = createTurnHooks({ resolve: id => registry.bySession(id), normalizers, emit, drain: id => watcher.pollSession(id),
+    onCursorTaskStart: vi.fn(), cursorTaskHooks: { wait: async () => {} }, cursorSubagents: { closeParent: vi.fn() },
+    announceTurnAborted: vi.fn(), armAgyIdleWatch: vi.fn(), clearAgyIdleWatch: vi.fn(),
+    mirror: { noteEngineStopped: stopped }, dataDir: join(root, 'data'),
+  })
+  try {
+    await attach.attachSession(row)
+    normalizers.noteTurnStart(A)
+    const original = normalizers.liveParsers.get(A)!
+    expect(original.snapshot().turnOpen).toBe(true)
+    const attached = vi.fn(async entry => { await attach.attachSession(entry) })
+    f = await httpFixture(() => blocked, undefined, {
+      onRegistered: attached, onNativeRecoveryReady: async entry => { await attach.attachSession(entry) },
+      captureAdmissionStop: attach.captureAdmissionStop,
+      captureTurnStop: (entry, stop) => turns.captureStop(entry, stop, attach.captureAdmissionStop(entry)),
+    }, undefined, true)
+    expect((await f.post({ ...body, hookEvent: 'UserPromptSubmit', prompt: 'original' }, {
+      id: 'fixture-composed-stop-predecessor', firedAt: delivery.firedAt - 1,
+    })).body).toEqual({ pending: true })
+    expect((await f.post(body, delivery, 'turn-stop')).status).toBe(202)
+    blocked = false; f.startRecovery()
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledExactlyOnceWith(A, [{ type: 'turn_ended', payload: {} }]), { timeout: 6_000 })
+    expect(attached).toHaveBeenCalledOnce()
+    expect(normalizers.liveParsers.get(A)).toBe(original)
+    expect(original.snapshot().turnOpen).toBe(false)
+    expect(stopped).toHaveBeenCalledOnce()
+  } finally { f?.stopRecovery(); attach.forget(A); await watcher.stop() }
+})
+
+it('keeps the first legacy Stop capture when a native owner read is unavailable and refreshes before dispatch', async () => {
+  const { body, delivery } = boundClaudeStop()
+  let unavailable = true
+  const effect = vi.fn(async (execution) => { await execution.confirm(); execution.verify(); return 'completed' as const })
+  const capture = vi.fn(() => effect), read = vi.fn(async () => {
+    if (unavailable) throw Error('fixture original process unavailable')
+    return { key: 'fixture-native-claude', evidence: 'fixture-claude-image', verify() {} }
+  })
+  const f = await httpFixture(undefined, undefined, { captureTurnStop: capture, readNativeHookOwner: read }, undefined, true)
+  expect(await f.post(body, delivery, 'turn-stop')).toMatchObject({ status: 202, body: { pending: false, retry: true } })
+  await vi.waitFor(() => expect(f.reasons.some(reason => reason?.includes('original process unavailable'))).toBe(true))
+  expect(effect).not.toHaveBeenCalled()
+  unavailable = false; f.startRecovery()
+  await vi.waitFor(async () => expect((await f.post(body, delivery, 'turn-stop')).status).toBe(200), { timeout: 4_000 })
+  expect(effect).toHaveBeenCalledOnce(); expect(capture).toHaveBeenCalledOnce()
+  expect(read.mock.calls.length).toBeGreaterThan(2)
+})
+
+it('never dispatches a retained legacy Stop after its server shuts down during ownership capture', async () => {
+  const { body, delivery } = boundClaudeStop()
+  let release!: () => void
+  const effect = vi.fn(async () => 'completed' as const)
+  const f = await httpFixture(undefined, undefined, { captureTurnStop: () => effect,
+    captureNativeHookCaller: async () => {
+      await new Promise<void>(resolve => { release = resolve })
+      return { owner: () => ({ key: 'fixture-claude', evidence: 'fixture-image' }) }
+    },
+  }, undefined, true)
+  const pending = f.post(body, delivery, 'turn-stop')
+  await vi.waitFor(() => expect(release).toBeDefined())
+  f.stopRecovery(); release()
+  expect((await pending).status).toBe(202)
+  await new Promise(resolve => setTimeout(resolve, 25))
+  expect(effect).not.toHaveBeenCalled()
+})
+
+it('keeps the original legacy Stop caller alive until its ancestry capture settles, duplicates included', async () => {
+  const { body, delivery } = boundClaudeStop()
+  let alive = true, release!: () => void
+  const effect = vi.fn(async () => 'completed' as const)
+  const capture = vi.fn(async () => {
+    await new Promise<void>(resolve => { release = resolve })
+    if (!alive) throw Error('fixture hook caller exited when its response arrived')
+    return { owner: () => ({ key: 'fixture-claude', evidence: 'fixture-image' }) }
+  })
+  const f = await httpFixture(undefined, undefined, { captureTurnStop: () => effect,
+    captureNativeHookCaller: capture,
+  }, undefined, true)
+  const first = f.post(body, delivery, 'turn-stop').then(reply => { alive = false; return reply })
+  await vi.waitFor(() => expect(release).toBeDefined())
+  const duplicate = f.post(body, delivery, 'turn-stop').then(reply => { alive = false; return reply })
+  await new Promise(resolve => setTimeout(resolve, 25))
+  expect(alive).toBe(true)
+  release()
+  expect((await first).status).toBe(202)
+  expect((await duplicate).status).toBe(202)
+  await vi.waitFor(() => expect(effect).toHaveBeenCalledOnce())
+  expect(capture).toHaveBeenCalledOnce()
+})
+
+it('lets Cancel retire only its unstarted legacy Stop while native recovery remains unavailable', async () => {
+  const { createAttach } = await import('../core/transcripts/attach.js')
+  const { createSessionNormalizers } = await import('../core/transcripts/normalizers.js')
+  const { owner, body, delivery } = boundClaudeStop()
+  const attach = createAttach({ normalizers: createSessionNormalizers(), resolve: registry.byAgent } as import('../core/transcripts/attach.js').AttachDeps)
+  const effect = vi.fn(async () => 'completed' as const)
+  const f = await httpFixture(undefined, undefined, { captureTurnStop: () => effect,
+    captureAdmissionStop: attach.captureAdmissionStop,
+    readNativeHookOwner: async () => { throw Error('fixture native evidence still unavailable') },
+  }, undefined, true)
+  expect((await f.post(body, delivery, 'turn-stop')).status).toBe(202)
+  await vi.waitFor(() => expect(f.reasons.at(-1)).toContain('original Stop admission'))
+  attach.beforeCancel(registry.byAgent(owner.agentId)!)
+  f.startRecovery()
+  await vi.waitFor(async () => expect((await f.post(body, delivery, 'turn-stop')).body).toEqual({ ok: true, duplicate: true }))
+  await vi.waitFor(() => expect(f.reasons.at(-1)).toContain('fixture native evidence still unavailable'))
+  expect(f.reasons.at(-1)).not.toContain('original Stop')
+  expect(f.recoveryReady(registry.byAgent(owner.agentId)!)).toBe(false)
+  expect(effect).not.toHaveBeenCalled()
+})
+
+it('bounds retained legacy Stops without claiming an overflow notification', async () => {
+  const { body, delivery } = boundClaudeStop()
+  const capture = vi.fn(() => vi.fn(async () => 'held' as const))
+  const f = await httpFixture(undefined, 1, { captureTurnStop: capture }, undefined, true)
+  expect((await f.post(body, delivery, 'turn-stop')).status).toBe(202)
+  expect(await f.post(body, { ...delivery, id: 'fixture-legacy-stop-overflow' }, 'turn-stop'))
+    .toMatchObject({ status: 429, body: { pending: false, error: 'HOOK_ADMISSION_BUSY' } })
+  expect(capture).toHaveBeenCalledOnce()
+})
 
 it('keeps completed linked Stop confirmations across restart without dispatching again', async () => {
   const { body, delivery } = boundCursorStop()

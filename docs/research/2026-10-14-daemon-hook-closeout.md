@@ -238,3 +238,32 @@ case remains blocking. macOS disk tests also lacked the required native helper;
 their workflow now builds the verified helper and requires its embedding before
 testing. Independent review approved that wiring; an exercised workflow remains
 required. No extra run was started to hide an unchanged failure.
+
+The legacy Claude Stop correction now retains a bounded local continuation with
+its original parser, turn, process and Cancel witness before admission waits. It
+does not claim durable ownership or activate a different installed client. Native
+ancestry capture finishes before the initial or duplicate HTTP response can end
+the caller. Fresh process and journal proof precede dispatch and follow transcript
+drains. Cancel can retire this local notification while an independent native
+recovery hold remains. Ordinary recovery attachment preserves its parser; a
+previously requested SessionStart reset remains a reset and grants no authority
+to an older Stop.
+
+Independent review identified those caller-lifetime, forced-reset and unavailable-
+admission Cancel paths; composed regressions now cover them. Types and 34 focused
+cases pass in `20261014T034732.603873Z-24449` (5.1/9.4 seconds). An initial composed
+fixture failed first on an unbound registry method and then on checking the
+engine-stopped callback before actual closure; its passing assertion now waits
+for the turn-ended effect. The shipped-client gate
+`20261014T035102.780285Z-40394` passes all three cases (74.4 seconds): an original
+Claude Stop through a real private registry outage with no terminal transcript
+record, a delayed Stop leaving the next question open, and installed hooks with
+an unusable routes path. These use private daemons, homes and tmux servers.
+
+New mutations cover early caller replies, Cancel, replaced parsers, missing turn
+observations, the actual main recovery attachment, local intake capacity and
+cold predecessor ordering. Their final run, full core coverage, affected HTTP
+acceptance, final runtime measurements, integrated review and new head checks are
+still pending. The earlier failed Linux and full end-to-end runs remain failures;
+this checkpoint is neither merge nor refactor completion. Publication remains
+unauthorized.

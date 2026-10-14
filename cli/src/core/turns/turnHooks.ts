@@ -29,7 +29,7 @@ export const STOP_COMPLETION_WAIT_MS = 5_000
 const PROMPT_HOOKS_KEPT = 512
 
 export type CapturedStopOutcome = 'completed' | 'superseded' | 'held'
-export interface StopExecution { current(): boolean; verify(): void }
+export interface StopExecution { current(): boolean; verify(): void; confirm?(): Promise<void> }
 export type CapturedStop = (execution?: StopExecution) => Promise<CapturedStopOutcome>
 export interface StopHook { sessionId: string; status?: string; firedAt?: number }
 
@@ -96,10 +96,77 @@ export function createTurnHooks({
   const onToolStart = ({ sessionId, toolUseId, toolName, input: toolInput }: { sessionId: string; toolUseId: string; toolName: string; input: unknown }): void => {
     if (toolName === 'Task') onCursorTaskStart(sessionId, toolUseId, toolInput)
   }
+  /** A legacy Claude notification can arrive while registration is still pending.
+   * Keep its arrival's parser and turn, including a proved no-open-turn observation,
+   * through that wait. A later attachment is never this notification's target. */
+  const captureDeclaredStop = (session: RegisteredSession, stop: StopHook, notCancelled: () => boolean): CapturedStop => {
+    const { sessionId, firedAt } = stop
+    const original = liveParsers.get(sessionId), arrived = original?.snapshot(), turn = normalizers.captureTurn(sessionId)
+    const noEffect = !arrived?.turnOpen && !session.identityHold && !session.interpretationHold
+    const binding = JSON.stringify([session.agentId, sessionId, session.engine])
+    const interpretation = JSON.stringify([session.transcriptPath, session.evidenceRevision])
+    let execution: StopExecution = { current: () => true, verify: () => {} }, deadline = Infinity
+    let completion: Promise<CapturedStopOutcome> | undefined
+    const state = (): 'current' | 'held' | 'superseded' => {
+      if (!notCancelled() || turn && !turn()) return 'superseded'
+      const latest = resolve(sessionId)
+      if (!latest || JSON.stringify([latest.agentId, latest.sessionId, latest.engine]) !== binding
+        || firedAt !== undefined && (promptFiredAt.get(sessionId) ?? 0) > firedAt) return 'superseded'
+      if (!execution.current() || performance.now() >= deadline) return 'held'
+      if (noEffect) return 'current'
+      if (!original || !arrived || liveParsers.get(sessionId) !== original
+        || latest.identityHold || latest.interpretationHold
+        || JSON.stringify([latest.transcriptPath, latest.evidenceRevision]) !== interpretation) return 'held'
+      return original.snapshot().identity === arrived.identity ? 'current' : 'superseded'
+    }
+    const confirmed = (): boolean => {
+      if (state() !== 'current') return false
+      execution.verify()
+      return state() === 'current'
+    }
+    const complete = async (): Promise<CapturedStopOutcome> => {
+      deadline = performance.now() + STOP_COMPLETION_WAIT_MS
+      if (!confirmed()) return state() === 'superseded' ? 'superseded' : 'held'
+      if (noEffect) return 'completed'
+      const context: HookTurnContext = { ...hookTurns,
+        turnState: id => id === sessionId && state() === 'current' ? original!.snapshot() : undefined,
+        closeTurn: (id, identity) => id === sessionId && confirmed() && hookTurns.closeTurn(id, identity),
+        noteEngineStopped: id => { if (id === sessionId && confirmed()) mirror.noteEngineStopped(id) },
+        emit: (id, events) => { if (id === sessionId && confirmed()) emit(id, events) },
+        drain: async id => { await drain(id); if (state() === 'current') await execution.confirm?.() },
+      }
+      const work = Promise.resolve(hooksFor(session.engine)!.onStop!(context, stop))
+      // Readers are optional workers. Their late completion is still observed,
+      // but cannot outlive this bounded core turn or resume after shutdown.
+      return new Promise<CapturedStopOutcome>((resolve) => {
+        let done = false, timer: ReturnType<typeof setTimeout> | undefined
+        const finish = (outcome: CapturedStopOutcome) => {
+          if (done) return
+          done = true; clearTimeout(timer); resolve(outcome)
+        }
+        const result = () => { const value = state(); return value === 'current' ? 'completed' : value }
+        work.then(() => finish(result()), () => finish(state() === 'superseded' ? 'superseded' : 'held'))
+        const check = () => {
+          const value = state()
+          if (value !== 'current') { finish(value); return }
+          timer = setTimeout(check, 25)
+        }
+        check()
+      })
+    }
+    return owner => {
+      if (state() === 'superseded') return Promise.resolve('superseded')
+      if (completion) return completion
+      if (owner) execution = owner
+      return completion = complete().catch(() => state() === 'superseded' ? 'superseded' : 'held')
+    }
+  }
   /** A registration already carries Cursor/Command Code's complete Stop. Capture its turn before
    *  admission waits, and let the registration's durable claim await this exact effect. A recovered
    *  parser is not evidence about which turn that original Stop meant to close. */
-  const captureStop = (session: RegisteredSession, { sessionId, status }: StopHook, notCancelled: () => boolean): CapturedStop => {
+  const captureStop = (session: RegisteredSession, stop: StopHook, notCancelled: () => boolean): CapturedStop => {
+    if (session.engine === 'claude') return captureDeclaredStop(session, stop, notCancelled)
+    const { sessionId, status } = stop
     const states = session.engine === 'cursor' ? cursorNormalizers : commandcodeNormalizers
     const original = states.get(sessionId)
     const turn = normalizers.captureTurn(sessionId)

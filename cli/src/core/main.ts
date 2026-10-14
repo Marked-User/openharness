@@ -1861,7 +1861,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onAdmissionHeld: engineHooks.onAdmissionHeld,
     readNativeHookOwner: nativeHookOwners,
     captureNativeHookCaller: nativeHookOwners.captureCaller,
-    onNativeRecoveryReady: entry => { void attachSession(entry, true).catch(error => console.warn('[hooks] recovered attach held', error)) },
+    onNativeRecoveryReady: entry => { void attachSession(entry).catch(error => console.warn('[hooks] recovered attach held', error)) },
     onAdmissionStop: attach.holdAdmissionStop,
     captureAdmissionStop: attach.captureAdmissionStop,
     captureTurnStop: (entry, body) => turnHooks.captureStop(entry, body, attach.captureAdmissionStop(entry)),
