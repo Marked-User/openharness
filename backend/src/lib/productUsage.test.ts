@@ -5,7 +5,7 @@ const db = vi.hoisted(() => ({
   productUsagePreference: { findUnique: vi.fn(), upsert: vi.fn() },
   analyticsMachineState: { findFirst: vi.fn() },
   productUsageReceipt: { create: vi.fn(), findUnique: vi.fn() },
-  productUsageTotal: { upsert: vi.fn(), update: vi.fn() },
+  productUsageTotal: { upsert: vi.fn(), update: vi.fn(), groupBy: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn() },
   userDailyPresence: { deleteMany: vi.fn() }, userDailyClientPresence: { deleteMany: vi.fn() },
   userDailyRemoteUsage: { deleteMany: vi.fn() }, userDailyDevicePresence: { deleteMany: vi.fn() },
   machineDailyPresence: { deleteMany: vi.fn() }, agentDailyPresence: { deleteMany: vi.fn() },
@@ -111,11 +111,39 @@ it('the legacy delete path erases all six linked activity collections', async ()
     expect(db[name].deleteMany).toHaveBeenCalledWith({ where: { userId: 'account' } })
 })
 
-it('installs database expiry for receipts, totals and every linked daily history', async () => {
+it('installs required unique keys independently of schema push, then expiry for all histories', async () => {
   await ensureProductUsageExpiry()
-  expect(db.$runCommandRaw).toHaveBeenCalledTimes(10)
-  expect(db.$runCommandRaw.mock.calls[0][0]).toMatchObject({ createIndexes: 'product_usage_receipts', indexes: [{ expireAfterSeconds: 0 }] })
-  expect(db.$runCommandRaw.mock.calls[2][0]).toMatchObject({ createIndexes: 'user_daily_presence', indexes: [{ expireAfterSeconds: 35 * 86400 }] })
+  expect(db.$runCommandRaw).toHaveBeenCalledTimes(12)
+  expect(db.$runCommandRaw.mock.calls[0][0]).toMatchObject({ createIndexes: 'product_usage_preferences', indexes: [{ key: { userId: 1 }, unique: true }] })
+  expect(db.$runCommandRaw.mock.calls[1][0]).toMatchObject({ createIndexes: 'product_usage_totals', indexes: [{ key: { dayUtc: 1, metric: 1 }, unique: true }] })
+  expect(db.$runCommandRaw.mock.calls[2][0]).toMatchObject({ createIndexes: 'product_usage_receipts', indexes: [{ expireAfterSeconds: 0 }] })
+  expect(db.$runCommandRaw.mock.calls[4][0]).toMatchObject({ createIndexes: 'user_daily_presence', indexes: [{ expireAfterSeconds: 35 * 86400 }] })
+  expect(db.productUsageTotal.groupBy).not.toHaveBeenCalled()
+})
+
+it('merges duplicate counters transactionally before installing their unique key', async () => {
+  db.$runCommandRaw.mockResolvedValueOnce({}).mockRejectedValueOnce({ meta: { message: 'E11000 duplicate key' } })
+  db.productUsageTotal.groupBy.mockResolvedValue([{ dayUtc: now, metric: 'relay_turns_started' }])
+  db.productUsageTotal.findMany.mockResolvedValue([{ id: 'keep', value: 2 }, { id: 'duplicate', value: 5 }])
+  await ensureProductUsageExpiry()
+  expect(db.$transaction).toHaveBeenCalledOnce()
+  expect(db.productUsageTotal.update).toHaveBeenCalledWith({ where: { id: 'keep' }, data: { value: { increment: 5 } } })
+  expect(db.productUsageTotal.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['duplicate'] } } })
+})
+
+it('retries a conflicting repair but fails startup for unrelated database failures', async () => {
+  db.$runCommandRaw.mockResolvedValueOnce({}).mockRejectedValueOnce({ meta: { code: 11000 } })
+  db.$transaction.mockRejectedValueOnce({ code: 'P2034' })
+  await expect(ensureProductUsageExpiry()).resolves.toBeUndefined()
+  db.$runCommandRaw.mockRejectedValueOnce(new Error('permission denied'))
+  await expect(ensureProductUsageExpiry()).rejects.toThrow('permission denied')
+})
+
+it('bounds duplicate repair work and refuses to claim readiness without a unique key', async () => {
+  db.$runCommandRaw.mockResolvedValueOnce({}).mockRejectedValue({ meta: { code: 11000 } })
+  db.productUsageTotal.groupBy.mockResolvedValue([])
+  await expect(ensureProductUsageExpiry()).rejects.toThrow('aggregate key is not ready')
+  expect(db.$transaction).toHaveBeenCalledTimes(10)
 })
 
 it('setup ingestion never reads an account and expires after yesterday', async () => {

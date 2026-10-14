@@ -222,6 +222,10 @@ legacy account-cohort retention percentage or an industry benchmark.
 
 Ship the backend and its worker together, verify the unique and TTL indexes using synthetic reports,
 then ship the CLI and settings surfaces with a visible release note explaining the default and switch.
+The worker installs measurement keys explicitly even when the general Prisma schema push declines
+an unrelated change. It transactionally combines duplicate day/metric totals from a deployment race
+before creating their unique index; this bounded repair touches only aggregate counters and preserves
+their sum. A missing key or failed repair stops worker startup rather than claiming readiness.
 The daily decision workflow and release note are in [the measurement guide](../docs/product-measurement.md).
 Mixed-version coverage remains explicit until clients update. The existing `usage:report` command
 below reads the bounded **historical** tables; its current-day counts cease when new history writes stop.
