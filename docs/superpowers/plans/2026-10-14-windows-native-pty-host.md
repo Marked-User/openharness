@@ -1979,6 +1979,49 @@ git add cli pty .github/workflows/ci.yml && git commit -m "feat(cli): ptyhost ba
 
 ---
 
+### Task 15b: Open restart, swap, restore and adoption to every backend
+
+*Added during execution (2026-10-15).* Task 13's review found that every restart-shaped path is still gated to
+tmux: `core/agents/restart.ts` answers `RESTART_UNSUPPORTED_BACKEND` for a row without a tmux runtime,
+`swap.ts`/`retarget.ts` take `TmuxBackend`/`TmuxRuntimeRef`, restore runs only on tmux (`core/main.ts` restore
+wiring) and `newPane.ts` checks the native hold only on tmux. The spec requires restart, fork, swap and resume
+on Windows. Task 4 also carried three sites that still read `tmuxPane` as a tmux pane id.
+
+**Files:**
+- Modify: `cli/src/lib/terminalBackend.ts` (`isHeld?` joins the optional restart primitives)
+- Modify: `cli/src/core/agents/restart.ts`, `swap.ts`, `retarget.ts`, `newPane.ts`, `externalResume.ts`,
+  `cli/src/lib/restartAgent.ts`, `cli/src/lib/restoreAgents.ts`, `cli/src/core/main.ts` (restore and
+  external-resume wiring, `paneRuntime`, `onTerminalHandoff`), `cli/src/core/terminals/sessions.ts`,
+  `cli/src/core/terminals/requests.ts`, `cli/src/messages/service.ts`
+- Test: the specs of each modified module; `cli/src/lib/ptyHostBackend.restart.spec.ts` (new, real host)
+
+**Interfaces:**
+- `TerminalBackend` gains `isHeld?(runtime: Ref, token: string): Promise<boolean | 'unknown'>` (TmuxBackend and
+  PtyHostBackend already implement it).
+- A backend can restart when it implements `holdOpen` and `respawn`; the gate is that capability, never the
+  backend name. The error for a backend without them stays `RESTART_UNSUPPORTED_BACKEND`.
+- Every restart-shaped path takes `TerminalBackend` and the session's own runtime (`primaryRuntime` or the
+  runtime the row was placed on), never a hand-built `{ backend: 'tmux', paneId }`.
+- `paneRuntime(pane)` in `main.ts` is replaced by the session's runtime; the messages inbox and terminal handoff
+  key on `terminalRouteKey(runtime)` instead of the bare pane id, so equal `%N` ids on two backends never collide.
+
+- [ ] **Step 1: Write the failing tests**
+  - restart/swap/retarget specs: a row whose only runtime is `{ backend: 'ptyhost', instance: 'p1', paneId: '%3' }`
+    with a fake backend that implements `holdOpen`/`respawn` restarts through that backend (the fake records the
+    calls; tmux is never asked); a fake backend without them still answers `RESTART_UNSUPPORTED_BACKEND`.
+  - restoreAgents/newPane specs: the native-hold check (`isHeld`) is asked of the row's own backend.
+  - sessions/requests specs: `visitStatus` and `terminal_info` ask the row's own backend.
+  - messages/service spec: two rows with `%3` on different backends get distinct inbox keys.
+  - `ptyHostBackend.restart.spec.ts` (runs only with `HARNESS_PTY_BIN`): create a pane running `/bin/sh`, holdOpen,
+    kill the shell's pid, respawn with `/bin/sh -c 'echo again; exec /bin/sh'` — the same pane id now shows
+    `again` and the earlier output is still in its scrollback.
+- [ ] **Step 2: Run to fail** — `cd cli && npx vitest run <the specs above>`; expected: FAIL.
+- [ ] **Step 3: Implement** as specified. Keep every tmux behavior and reason string unchanged.
+- [ ] **Step 4: Verify** — `cd cli && npx tsc --noEmit && npm run test:core && npm run test:resume && npm run test:tmux-real && npx vitest run src/architecture.spec.ts`, and the real-host spec with `HARNESS_PTY_BIN=../pty/target/debug/harness-pty`. Baseline failures only.
+- [ ] **Step 5: Checkpoint** — commit `feat(cli): restart, swap, restore and adoption on every backend`.
+
+---
+
 ## Phase 4: Windows
 
 ### Task 16: Job Object per pane (vendored alacritty patch + `job.rs`)
