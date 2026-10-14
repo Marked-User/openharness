@@ -169,6 +169,15 @@ describe('quotaRefusal', () => {
     expect(quotaRefusal(`some warning first\n${QUOTA_REFUSAL}`)).toBe(QUOTA_MESSAGE)
   })
 
+  it('reads the sentence for an owner whose live grids fill the plan', async () => {
+    // grid-apis `_free_limit_message(None)`: no deleted grid is counting, so the sentence names no date.
+    const { quotaRefusal } = await import('./gridEnsure.js')
+    const live = 'Free plan allows one network; upgrade to create more'
+    const line = 'POST https://api-grid.autonomous.ai/v1/grid/managed-networks failed (402): ' +
+      JSON.stringify({ detail: { error_code: 'free_network_limit', message: live } })
+    expect(quotaRefusal(line)).toBe(live)
+  })
+
   it('is not fooled by another refusal', async () => {
     const { quotaRefusal } = await import('./gridEnsure.js')
     expect(quotaRefusal('POST …/managed-networks failed (402): {"detail":"Insufficient balance"}')).toBeNull()

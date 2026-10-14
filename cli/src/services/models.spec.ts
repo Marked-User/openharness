@@ -639,6 +639,15 @@ describe('the models service', () => {
         access.ensure.mockReset()
       })
 
+      it('an account grid the Free plan refused fails a Use with the control plane’s own sentence', async () => {
+        const sentence = 'Free plan allows one network; upgrade to create more'
+        access.ensure.mockResolvedValue({ status: 'signed-in', name: 'kelvin-1a2b3c4d', detail: sentence, ownGrid: 'refused' })
+        const { ask } = setup([], named)
+        expect(await ask('grid_fleet_model_start', { modelId: 'org/Model-GGUF' })).toEqual({ error: sentence })
+        expect(local.act).not.toHaveBeenCalled()
+        access.ensure.mockReset()
+      })
+
       it('says why in its own words when grid gives none, and takes a grid already there or adopted as ready', async () => {
         const { ask } = setup([], named)
         access.ensure.mockResolvedValueOnce({ status: 'no-cli', name: null, detail: '' })

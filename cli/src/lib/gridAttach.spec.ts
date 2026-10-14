@@ -287,6 +287,15 @@ describe('createGridAccess — grid set up when a feature asks', () => {
     expect(attempt.mock.calls[1]).toEqual([{ ownGrid: true, signedInThisRun: true }])
   })
 
+  it('an own grid the Free plan refused is asked for again next time', async () => {
+    // The plan can change between two asks (an upgrade, a deleted grid aging out), so a refusal is not
+    // remembered any more than a failure is.
+    const { attempt, grid } = access([result('signed-in', 'refused'), result('signed-in', 'created')])
+    expect((await grid.ensure({ ownGrid: true })).ownGrid).toBe('refused')
+    expect((await grid.ensure({ ownGrid: true })).ownGrid).toBe('created')
+    expect(attempt).toHaveBeenCalledTimes(2)
+  })
+
   it('forgets everything once grid holds no sign-in — a `grid logout` run by hand', async () => {
     let signedIn = true
     const { attempt, grid } = access([result('signed-in', 'created'), result('signed-in', 'existed')], () => signedIn)
