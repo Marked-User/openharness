@@ -2020,6 +2020,31 @@ on Windows. Task 4 also carried three sites that still read `tmuxPane` as a tmux
 - [ ] **Step 4: Verify** — `cd cli && npx tsc --noEmit && npm run test:core && npm run test:resume && npm run test:tmux-real && npx vitest run src/architecture.spec.ts`, and the real-host spec with `HARNESS_PTY_BIN=../pty/target/debug/harness-pty`. Baseline failures only.
 - [ ] **Step 5: Checkpoint** — commit `feat(cli): restart, swap, restore and adoption on every backend`.
 
+### Task 15c: Resume and stop on every backend
+
+*Added during execution (2026-10-15).* After Task 15b, `cli/src/lib/resumeAgentService.ts` still looks for a
+tmux runtime (resume answers `TMUX_UNAVAILABLE` on ptyhost) and `cli/src/lib/stopAgentService.ts` closes only tmux
+panes. The spec requires resume and stop on Windows. `core/engines/hooks.ts:126` is also uncovered (pre-existing,
+hidden while baseline failures stopped the coverage report).
+
+**Files:**
+- Modify: `cli/src/lib/resumeAgentService.ts`, `cli/src/lib/stopAgentService.ts`, their wiring in `cli/src/core/main.ts`
+- Test: `cli/src/lib/resumeAgentService.spec.ts`, `cli/src/lib/stopAgentService.spec.ts`, `cli/src/core/engines/hooks.spec.ts`,
+  `cli/src/lib/ptyHostBackend.restart.spec.ts` (extend with resume/stop against the real host)
+
+**Interfaces:**
+- Both services take the session's own runtime and `terminals.backendFor(runtime)`; the tmux path keeps its calls,
+  order, authority checks and reason strings. A row with no runtime on a configured backend keeps today's
+  "unavailable" answer; the error code names the backend that is missing (`TMUX_UNAVAILABLE` stays for tmux rows).
+
+- [ ] **Step 1: Write the failing tests** — a ptyhost-only row resumes through its backend (inventory, `checkSessionRuntime`
+  with its runtime, respawn with the resume command) and stops through its backend (kill / held-pane close), with tmux
+  never asked; a mixed row still uses tmux for tmux work; `hooks.ts:126` covered.
+- [ ] **Step 2: Run to fail.**
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Verify** — `npx tsc --noEmit && npm run test:core && npm run test:resume && npm run test:tmux-real`, the real-host spec, and a full-suite comparison with the baseline.
+- [ ] **Step 5: Checkpoint** — commit `feat(cli): resume and stop on every backend`.
+
 ---
 
 ## Phase 4: Windows
