@@ -1,4 +1,4 @@
-// The Recap screen (Classic Index): the head and band of the Agent screen with the tokens, then "SAVED RESULT" and the whole
+// The Recap screen (Classic Index): the head and band of the Agent screen with the tokens, then the whole
 // recap as wrapped text, scrolled by one 42 px line per step when it is longer than the space. Talk below.
 #include "pod/classic/ci.h"
 #include "pod/pod_view_shared.h"
@@ -8,10 +8,10 @@
 
 #include "pod/pod_mem.h"
 
-enum { LABEL_Y = 324, TEXT_Y = 357, LINE = 42, BODY_W = 656, ROWS_ALL = 64, RECAP_WORDS = 50 };
+enum { TEXT_Y = 324, LINE = 42, BODY_W = 656, ROWS_ALL = 64, RECAP_WORDS = 50 };
 
 static EXT_RAM_BSS_ATTR char pod_recap_rows[ROWS_ALL][POD_ROW_MAX];
-// The rows that fit between the label and the transport.
+// The rows that fit between the band and the transport.
 static int body_rows(void) { return (CI_TRANS_Y - 2 - TEXT_Y) / LINE; }
 // The recap's sentences joined with spaces; returns the bytes written (cap includes the NUL).
 int pod_recap_join(const pod_agent_t *a, char *out, size_t cap)
@@ -85,14 +85,13 @@ uint32_t pod_view_recap_next_ms(const pod_nav_t *nav, const pod_model_t *m, uint
 void pod_view_recap(pod_out_frame_t *f, const pod_nav_t *nav, const pod_model_t *m, uint32_t now_ms)
 {
     ht_scene_t *s = f->scene;
-    ci_bar(f, "Recap", pod_nav_origin(nav, m), f->unread, true);
+    ci_bar(f, NULL, pod_nav_origin(nav, m), f->unread, true);
     const pod_agent_t *a = pod_view_agent_of(nav, m);
     if (!a) { ci_talk(f, false); return; }
     const pod_frame_t *fr = &nav->stack[nav->depth - 1];
     const pod_state_t st = pod_model_eff(m, a);
     ci_agent_head(f, m, a, st, now_ms, true);
     ci_talk(f, m->linked && (st == POD_IDLE || st == POD_WORKING || st == POD_DONE));
-    ci_caps(s, CI_MARGIN, LABEL_Y, "SAVED RESULT");
     if (!shows_recap(m, a)) {
         const char *msg = st == POD_IDLE || st == POD_DONE ? "No recap yet." : "The recap comes when this turn ends.";
         ci_text(s, CI_MARGIN, TEXT_Y, BODY_W, &ci_rg_32, CI_INK, msg);

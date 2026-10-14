@@ -35,8 +35,8 @@ int pod_wrap_hard(const char *text, const ht_pro_font_t *, int width, int max_ro
 // is cut to fit and ends with U+2026. Returns the rows used.
 int ci_wrap(const char *utf8, const ht_pro_font_t *f, int max_w, int max_lines, char rows[][POD_ROW_MAX]);
 
-// The bar, y 0-88: brand "Harness" when back is NULL, else a chevron and the back label (cut at 115 px); the title
-// centred on the screen; the bell and its count pill when `bell`. Adds BACK (0,0,173,88) when back != NULL and INBOX
+// The bar, y 0-88: brand "Harness" when back is NULL, else a chevron and the back label (cut at 115 px; with no title, at the bell's left edge - 16 and BACK widens to the
+// label); the title centred on the screen (none on Agent and Recap); the bell and its count pill when `bell`. Adds BACK (0,0,173,88) when back != NULL and INBOX
 // (632,0,88,88) when bell. Sets f->unread (0 without a bell) and f->bell_x (the bell's left edge, 0 without).
 void ci_bar(pod_out_frame_t *f, const char *title, const char *back, uint8_t unread, bool bell);
 // The footer, y 628-720: an optional green led and `left` (muted), `right_caps` right-aligned (either may be NULL).
@@ -45,7 +45,7 @@ void ci_foot(ht_scene_t *s, const char *left, bool led, const char *right_caps);
 void ci_talk(pod_out_frame_t *f, bool enabled);
 // The 56 px mark box at (x, y) with the 36 px logo, or the default mark for an engine without one.
 void ci_mark(ht_scene_t *s, int x, int y, const char *engine);
-// The metadata band, 88 px from y: state icon, word and elapsed on the left; Tokens (tokens_in >= 0) or Engine on the right.
+// The metadata band, 88 px from y: "Status" over the state icon, word and " · elapsed" (when known) on the left; Tokens (tokens_in >= 0) or Engine on the right.
 void ci_band(ht_scene_t *s, int y, pod_state_t st, int32_t elapsed_s, const char *engine, int32_t tokens_in, int32_t tokens_out,
              uint32_t now_ms);
 // The list meta word and its colour for a state. Returns 1 (0 for an unknown state, word "").

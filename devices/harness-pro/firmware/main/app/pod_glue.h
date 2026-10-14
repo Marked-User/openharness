@@ -18,7 +18,7 @@ enum { POD_TAP_SLOP = 24 };
 // Console gestures: hold this long to talk; slide down this far after it to cancel; the command bar's height and the
 // travel of a swipe down from it.
 enum { POD_HOLD_MS = 400, POD_BAR_H = 72, POD_BAR_SWIPE = 80, POD_BOTTOM_Y = 620, POD_EDGE_SWIPE = 80 };
-// Console Tab (cards and Recent's rows) and the Inbox fill the screen to its bottom margin, so their bottom zone (a swipe up goes
+// Console Tab and Recent (cards) and the Inbox fill the screen to its bottom margin, so their bottom zone (a swipe up goes
 // back) starts below the content instead of at POD_BOTTOM_Y: a swipe up from the last row or card scrolls or pages.
 enum { POD_LIST_BOTTOM_Y = 692 };
 enum { POD_PG_IDLE, POD_PG_DRAG, POD_PG_ANIM };

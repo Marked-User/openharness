@@ -209,17 +209,17 @@ static bool scrolls(const pod_ui_t *u)
 {
     const pod_frame_t *f = top(u);
     if (!f) return false;
-    if (u->nav.skin == POD_SKIN_CONSOLE)   // Overview pages sideways and a tab's cards page on a swipe (card_page); Recent's rows and
-        // the Inbox scroll; on Agent and Recap a drag scrolls the host's pane (host_scrolls)
-        return (f->view == POD_V_TAB && f->tab == POD_TAB_RECENT) || f->view == POD_V_INBOX || f->view == POD_V_AGENT || f->view == POD_V_RECAP;
+    if (u->nav.skin == POD_SKIN_CONSOLE)   // Overview pages sideways and a tab's (and Recent's) cards page on a swipe (card_page); the
+        // Inbox scrolls; on Agent and Recap a drag scrolls the host's pane (host_scrolls)
+        return f->view == POD_V_INBOX || f->view == POD_V_AGENT || f->view == POD_V_RECAP;
     return f->view == POD_V_TABS || f->view == POD_V_TAB || f->view == POD_V_RECAP || f->view == POD_V_INBOX;
 }
-// Console Tab (not Recent): its cards page on a vertical swipe, from anywhere but the bar and the bottom zone (their own swipes;
+// Console Tab and Recent: their cards page on a vertical swipe, from anywhere but the bar and the bottom zone (their own swipes;
 // the caller checks the zone, whose flag is cleared by then).
 static bool card_page(const pod_ui_t *u)
 {
     const pod_frame_t *f = top(u);
-    return u->nav.skin == POD_SKIN_CONSOLE && f && f->view == POD_V_TAB && f->tab != POD_TAB_RECENT && !u->bar;
+    return u->nav.skin == POD_SKIN_CONSOLE && f && f->view == POD_V_TAB && !u->bar;
 }
 // Whether a vertical drag on this screen scrolls the host's terminal pane (the scroll sink): Recap in both skins, and in Console the
 // Agent screen too, as on the round. The bar and the bottom zone keep their own swipes (u->bar, u->edge), so a drag there does not.
@@ -714,27 +714,24 @@ bool pod_ui_pet_on_screen(const pod_ui_t *u)
 }
 
 // The clock's period while the screen animates on a fixed beat: 300 ms while the Classic Tabs grid shows a Playing ribbon; 150 ms
-// while an agent works on Tab (Console: 66 ms while a row on screen works, its bars move; the equaliser is three rects, cheap to redraw); else a second (the elapsed clocks).
-static uint32_t unit_ms(const pod_ui_t *u, uint32_t now_ms)
+// while a listed agent works on Tab (Classic: the footer mark; Console: 66 ms while a row on screen works, its bars move; the equaliser is three rects, cheap to redraw); else a second (the elapsed clocks).
+static uint32_t unit_ms(const pod_ui_t *u)
 {
     if (u->pg_mode == POD_PG_ANIM && u->nav.skin != POD_SKIN_CONSOLE) return POD_PG_STEP_MS;   // Console's pages switch at once
     const pod_frame_t *f = top(u);
     if (u->model.linked && f && f->view == POD_V_TABS && u->nav.skin != POD_SKIN_CONSOLE && u->pg_mode == POD_PG_IDLE && pod_tabs_ribbon(&u->model, pg_page(u)))
         return POD_TABS_BAR_MS;   // the Playing ribbon's bars: three tiny rects
-    if (u->model.linked && f && f->view == POD_V_TAB && u->nav.skin == POD_SKIN_CONSOLE && f->tab != POD_TAB_RECENT) {   // a tab's cards
+    if (u->model.linked && f && f->view == POD_V_TAB && u->nav.skin == POD_SKIN_CONSOLE) {   // a tab's (or Recent's) cards
         const pod_agent_t *l[CS_PER_PAGE];
         int n = cs_tab_page(&u->nav, &u->model, l);
         for (int i = 0; i < n; i++)
             if (pod_model_eff(&u->model, l[i]) == POD_WORKING) return POD_CS_ANIM_MS;
-    } else if (u->model.linked && f && f->view == POD_V_TAB && u->nav.skin == POD_SKIN_CONSOLE) {   // Recent: the rows on screen
+    } else if (u->model.linked && f && f->view == POD_V_TAB) {   // Classic: the footer's mark moves while a listed agent works
         const pod_agent_t *l[POD_AGENTS_MAX];
-        int n = pod_nav_list(&u->nav, &u->model, l, POD_AGENTS_MAX), max = n > CS_ROWS_MAX ? n - CS_ROWS_MAX : 0;
-        int first = f->scroll < 0 ? 0 : f->scroll > max ? max : f->scroll;
-        for (int i = first; i < n && i < first + CS_ROWS_MAX; i++)
-            if (pod_model_eff(&u->model, l[i]) == POD_WORKING) return POD_CS_ANIM_MS;
-    } else if (u->model.linked && f && f->view == POD_V_TAB)
-        for (int i = 0; i < u->model.agent_count; i++)
-            if (pod_model_state(&u->model, &u->model.agents[i], now_ms) == POD_WORKING) return 150;
+        int n = pod_nav_list(&u->nav, &u->model, l, POD_AGENTS_MAX);
+        for (int i = 0; i < n; i++)
+            if (pod_model_eff(&u->model, l[i]) == POD_WORKING) return 150;
+    }
     return 1000;
 }
 
@@ -756,7 +753,7 @@ static uint32_t edge_ms(const pod_ui_t *u, uint32_t now_ms)
         edge = pod_view_next_ms(&u->nav, &u->model, now_ms);
         if (edge > 1000 - now_ms % 1000) edge = 1000 - now_ms % 1000;   // the elapsed clocks still tick on the second
     }
-    else { uint32_t unit = unit_ms(u, now_ms); edge = unit - now_ms % unit; }
+    else { uint32_t unit = unit_ms(u); edge = unit - now_ms % unit; }
     if (u->notice_on) {   // a notice clears on time, not at the pet's next step
         int32_t left = (int32_t)(u->notice_until - now_ms);
         if (left < 1) left = 1;

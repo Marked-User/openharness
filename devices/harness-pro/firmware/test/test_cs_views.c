@@ -307,40 +307,32 @@ int main(void) {
         N.stack[0].scroll = 0;
         pod_model_swarms(&M, sw, lists, counts, 3, "s0", NULL, 0);
 
-        // Recent: 8 agents, six rows of 104 px at a time (the screen down to its bottom margin); drag scroll shows the rest
+        // Recent: 8 agents as cards like a tab, newest first, two pages of four; the frame's scroll is the page
         pod_nav_act(&N, &M, POD_A_OPEN_TAB, POD_TAB_RECENT, now);
         fresh();
-        cs_view_recent(&F, &N, &M, now);
+        cs_view_tab(&F, &N, &M, now);
         const pod_agent_t *rl[POD_RECENT_MAX];
         int rn = pod_model_recent(&M, rl, POD_RECENT_MAX);
-        CHECK(rn == 8 && hits_of(POD_A_OPEN_AGENT) == 6);
-        for (int i = 0; i < 6; i++) { const pod_hit_t *h = nth_hit(POD_A_OPEN_AGENT, i); CHECK(!strcmp(h->id, rl[i]->id) && h->arg == i && h->y == 76 + i * 104 && h->h == 104); }
-        CHECK(76 + 6 * 104 <= POD_W - CS_FOOT_H);   // the last row ends above the bottom margin
-        CHECK(text_run("ask") && text_run("Recent") && text_run("Overview") && text_run("go to the ask") == NULL);
-        CHECK(hits_of(POD_A_BACK) == 1);
-        CHECK(!text_run("open") && !text_run("tabs") && !text_run("back") && !text_run("home"));   // no hint strip
-        CHECK(cs_runs(&F) <= 184);
-        CHECK(pod_scroll_pitch(&N) == 104 && pod_scroll_max(&N, &M) == 2);
-        {   // a WORKING agent has the four bars and no dot; the others a dot and no bars
-            int work = 0, bars = 0, green_dots = 0;
-            for (int i = 0; i < CS_ROWS_MAX; i++) work += pod_model_eff(&M, rl[i]) == POD_WORKING;
-            for (int i = 0; i < S.count; i++) {
-                const ht_run_t *r = &S.runs[i];
-                bars += r->pro_kind == K_RECT && r->w == 5 && r->fg == ht_rgb(CS_RUN);
-                green_dots += r->pro_kind == K_RECT_AA && r->w == 12 && r->y > CS_BAR_H && r->fg == ht_rgb(CS_RUN);   // the bar has its own
-            }
-            CHECK(work >= 2 && bars == 4 * work && green_dots == 0);
-            const ht_run_t *nm = text_run(rl[0]->name);   // the name sits in the 32 px face, the line in the 27 px
-            CHECK(nm && nm->pro_font == &cs_sb_32);
-            const ht_run_t *ln = text_run("Editing a file");
-            CHECK(ln && ln->pro_font == &cs_rg_27);
-            CHECK(text_run("Firmware"));   // Recent names each agent's tab
+        CHECK(rn == 8 && hits_of(POD_A_OPEN_AGENT) == 4 && cs_tab_pages(&N, &M) == 2);
+        for (int i = 0; i < 4; i++) {
+            const pod_hit_t *h = nth_hit(POD_A_OPEN_AGENT, i);
+            CHECK(!strcmp(h->id, rl[i]->id) && h->arg == i && h->w == CS_CARD_W && h->h == CS_CARD_H);
+            CHECK(h->x == CS_CARD_MARGIN + (i % 2) * (CS_CARD_W + CS_CARD_GAP) && h->y == CS_CARD_TOP + (i / 2) * (CS_CARD_H + CS_CARD_GAP));
         }
-        N.stack[N.depth - 1].scroll = 2;
+        CHECK(text_run("Recent") && text_run("Overview") && hits_of(POD_A_BACK) == 1 && !text_run("go to the ask"));
+        CHECK(!text_run("Editing a file"));   // no activity line, as on a tab's cards
+        CHECK(cs_runs(&F) <= 184);
+        CHECK(pod_scroll_pitch(&N) == 0 && pod_scroll_max(&N, &M) == 1);
+        {   // the state, in a word at each card's foot; the name in the 28 px face
+            const ht_run_t *nm = text_run(rl[0]->name);
+            CHECK(nm && nm->pro_font == &cs_md_28);
+            CHECK(text_run("Working") || text_run("Needs you") || text_run("Done") || text_run("Idle"));
+        }
+        N.stack[N.depth - 1].scroll = 1;
         fresh();
-        cs_view_recent(&F, &N, &M, now);
-        CHECK(hits_of(POD_A_OPEN_AGENT) == 6);
-        for (int i = 0; i < 6; i++) { const pod_hit_t *h = nth_hit(POD_A_OPEN_AGENT, i); CHECK(!strcmp(h->id, rl[2 + i]->id) && h->arg == 2 + i); }
+        cs_view_tab(&F, &N, &M, now);
+        CHECK(hits_of(POD_A_OPEN_AGENT) == 4);
+        for (int i = 0; i < 4; i++) { const pod_hit_t *h = nth_hit(POD_A_OPEN_AGENT, i); CHECK(!strcmp(h->id, rl[4 + i]->id) && h->arg == 4 + i); }
         N.stack[N.depth - 1].scroll = 0;
 
         // ---- Tab: the real pane split (3 panes, then 8) ----

@@ -244,7 +244,7 @@ void ci_agent_head(pod_out_frame_t *f, const pod_model_t *m, const pod_agent_t *
     ci_band(s, BAND_Y, st, el, a->engine, tokens && a->tokens_in >= 0 ? a->tokens_in : -1, a->tokens_out, now_ms);
 }
 
-// The caps label ("RIGHT NOW", "SAVED RESULT"): Bold 20, muted. One run, so no tracking (the mockup's 1 px adds about 8 px).
+// The caps label ("RIGHT NOW"): Bold 20, muted. One run, so no tracking (the mockup's 1 px adds about 8 px).
 void ci_caps(ht_scene_t *s, int x, int y, const char *label)
 {
     ht_pro_text(s, x, y, ht_pro_width(&ci_bd_20, label), &ci_bd_20, CI_MUTED, label);
@@ -265,7 +265,7 @@ void pod_view_agent(pod_out_frame_t *f, const pod_nav_t *nav, const pod_model_t 
 {
     ht_scene_t *s = f->scene;
     const pod_agent_t *a = pod_view_agent_of(nav, m);
-    ci_bar(f, "Task", pod_nav_origin(nav, m), f->unread, true);
+    ci_bar(f, NULL, pod_nav_origin(nav, m), f->unread, true);
     if (!a) { ci_talk(f, false); return; }
     const pod_state_t st = pod_model_eff(m, a);
     ci_agent_head(f, m, a, st, now_ms, false);

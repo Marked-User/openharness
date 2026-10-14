@@ -94,14 +94,33 @@ void ci_bar(pod_out_frame_t *f, const char *title, const char *back, uint8_t unr
     pod_grad_gray(s, 0, 0, POD_W, CI_BAR_H, C(0xf8f9f7), C(0xe9eae5));
     ht_pro_rect(s, 0, 0, POD_W, 1, 0, C(0xffffff));
     ht_pro_rect(s, 0, CI_BAR_H, POD_W, 1, 0, C(0xbcc4c1));
+    // The bell's geometry first: a bar without a title lets the back label run up to it.
+    const int right = POD_W - 24;
+    int bx = right, px = 0, pw = 0;
+    char cnt[8] = "";
+    if (bell) {
+        if (unread) {
+            snprintf(cnt, sizeof cnt, "%d", unread);
+            int tw = ht_pro_width(&ci_bd_24, cnt);
+            pw = tw + 10 > 34 ? tw + 10 : 34;
+            px = right - pw;
+            bx = px - 8;
+        }
+        bx -= 28;
+    }
+    const bool titled = title && *title;
     if (back) {
         pod_chevron(s, 32, 44, 9, CI_BLUE);
-        ci_text(s, 62, (CI_BAR_H - ci_rg_26.height) / 2, 115, &ci_rg_26, C(0x314449), back);
-        pod_hit_add(f, 0, 0, CI_BACK_W, CI_BAR_H, POD_A_BACK, 0);
+        int room = titled ? 115 : (bell ? bx : POD_W - CI_MARGIN) - 16 - 62, lw;
+        char cut[HT_TEXT_BYTES];
+        lw = fit_text(cut, sizeof cut, &ci_rg_26, room, back);
+        if (lw > 0) ht_pro_text(s, 62, (CI_BAR_H - ci_rg_26.height) / 2, lw, &ci_rg_26, C(0x314449), cut);
+        int hw = titled ? CI_BACK_W : imax(CI_BACK_W, 62 + lw + 16);
+        pod_hit_add(f, 0, 0, imin(hw, POD_W - CI_BELL_W), CI_BAR_H, POD_A_BACK, 0);
     } else {
         ci_text(s, 29, (CI_BAR_H - ci_bd_26.height) / 2, CI_BACK_W - 29, &ci_bd_26, CI_INK, "Harness");
     }
-    if (title && *title) {
+    if (titled) {
         char cut[HT_TEXT_BYTES];
         int w = fit_text(cut, sizeof cut, &ci_bd_30, 2 * (POD_W / 2 - CI_BACK_W), title);
         if (w > 0) ht_pro_text(s, (POD_W - w) / 2, (CI_BAR_H - ci_bd_30.height) / 2, w, &ci_bd_30, CI_INK, cut);
@@ -109,16 +128,11 @@ void ci_bar(pod_out_frame_t *f, const char *title, const char *back, uint8_t unr
     f->bell_x = 0;
     f->unread = bell ? unread : 0;
     if (!bell) return;
-    int right = POD_W - 24, bx = right;
     if (unread) {
-        char n[8];
-        snprintf(n, sizeof n, "%d", unread);
-        int tw = ht_pro_width(&ci_bd_24, n), w = tw + 10 > 34 ? tw + 10 : 34, px = right - w, py = (CI_BAR_H - 31) / 2;
-        ht_pro_rect_aa(s, px, py, w, 31, 15, CI_BLUE);
-        ht_pro_text(s, px + (w - tw) / 2, py + (31 - ci_bd_24.height) / 2, tw, &ci_bd_24, C(0xffffff), n);
-        bx = px - 8;
+        const int py = (CI_BAR_H - 31) / 2, tw = ht_pro_width(&ci_bd_24, cnt);
+        ht_pro_rect_aa(s, px, py, pw, 31, 15, CI_BLUE);
+        ht_pro_text(s, px + (pw - tw) / 2, py + (31 - ci_bd_24.height) / 2, tw, &ci_bd_24, C(0xffffff), cnt);
     }
-    bx -= 28;
     ci_bell_glyph(s, bx, (CI_BAR_H - 30) / 2, 30, C(0x314449));
     f->bell_x = (int16_t)bx;
     pod_hit_add(f, POD_W - CI_BELL_W, 0, CI_BELL_W, CI_BAR_H, POD_A_INBOX, 0);
@@ -206,20 +220,27 @@ void ci_band(ht_scene_t *s, int y, pod_state_t st, int32_t elapsed_s, const char
     ht_pro_rect(s, x0, y, x1 - x0, 1, 0, CI_RULE);
     ht_pro_rect(s, x0, y + h - 1, x1 - x0, 1, 0, CI_RULE);
     ht_pro_rect(s, split, y + 1, 1, h - 2, 0, C(0xd7ddd3));
-    // left: icon + state word, then the elapsed time
+    // left: the "Status" label over the state icon and word, then " · time" in the muted time colour when known
     const char *word; uint16_t listc;
     ci_state_word(st, &word, &listc);
     uint16_t ink = st == POD_WORKING || st == POD_DONE || st == POD_IDLE ? CI_GREEN : st == POD_ASKING ? CI_AMBER : CI_MUTED;
-    const int wy = y + 10, cy = wy + ci_rg_25.height / 2;
-    if (st == POD_WORKING) pod_eq(s, CI_MARGIN, cy - 10, CI_EQ, now_ms);
-    else if (st == POD_DONE) pod_tick(s, CI_MARGIN, cy - 8, CI_GREEN);
+    const int ly = y + 13, vy = y + 40, lmax = split - CI_MARGIN - 8, cy = vy + ci_rg_26.height / 2;
+    ci_text(s, CI_MARGIN, ly, lmax, &ci_rg_20, CI_MUTED, "Status");
+    int wx = CI_MARGIN + 26;
+    if (st == POD_WORKING) { pod_eq(s, CI_MARGIN, cy - 10, CI_EQ, now_ms); wx = CI_MARGIN + 35; }
+    else if (st == POD_DONE) { pod_tick(s, CI_MARGIN, cy - 8, CI_GREEN); wx = CI_MARGIN + 34; }
     else ht_pro_rect_aa(s, CI_MARGIN + 2, cy - 5, 10, 10, 5, ink);
-    ci_text(s, CI_MARGIN + 34, wy, split - CI_MARGIN - 34 - 8, &ci_rg_25, ink, word);
-    char el[16];
-    ci_fmt_elapsed(el, sizeof el, elapsed_s);
-    ci_text(s, CI_MARGIN, y + 48, split - CI_MARGIN - 8, &ci_rg_22, C(0x6b746c), el);
+    const int ww = imin(ht_pro_width(&ci_rg_26, word), split - 8 - wx);
+    ci_text(s, wx, vy, ww, &ci_rg_26, ink, word);
+    if (elapsed_s >= 0) {
+        char el[24];
+        el[0] = ' ';
+        snprintf(el + 1, sizeof el - 1, MIDDOT " ");
+        ci_fmt_elapsed(el + strlen(el), sizeof el - strlen(el), elapsed_s);
+        ci_text(s, wx + ww, vy, split - 8 - wx - ww, &ci_rg_26, C(0x6b746c), el);
+    }
     // right: Tokens, or Engine with its logo
-    const int vy = y + 44, vmax = POD_W - CI_MARGIN - rx;
+    const int vmax = POD_W - CI_MARGIN - rx;
     if (tokens_in >= 0) {
         char a[16], b[16], line[48];
         ci_fmt_tokens(a, sizeof a, tokens_in);
@@ -227,14 +248,14 @@ void ci_band(ht_scene_t *s, int y, pod_state_t st, int32_t elapsed_s, const char
             ci_fmt_tokens(b, sizeof b, tokens_out);
             snprintf(line, sizeof line, "%s in " MIDDOT " %s out", a, b);
         } else snprintf(line, sizeof line, "%s in", a);
-        ci_text(s, rx, y + 10, vmax, &ci_rg_20, CI_MUTED, "Tokens");
+        ci_text(s, rx, ly, vmax, &ci_rg_20, CI_MUTED, "Tokens");
         ci_text(s, rx, vy, vmax, &ci_rg_26, CI_INK, line);
     } else {
         char name[24];
         pod_engine_name(name, sizeof name, engine);
-        ci_text(s, rx, y + 10, vmax, &ci_rg_20, CI_MUTED, "Engine");
+        ci_text(s, rx, ly, vmax, &ci_rg_20, CI_MUTED, "Engine");
         int x = rx;
-        if (pod_logo_draw(s, x, y + 48, 28, engine)) x += 28 + 10;
+        if (pod_logo_draw(s, x, vy + 4, 28, engine)) x += 28 + 10;
         ci_text(s, x, vy, POD_W - CI_MARGIN - x, &ci_rg_26, CI_INK, name[0] ? name : EM_DASH);
     }
 }

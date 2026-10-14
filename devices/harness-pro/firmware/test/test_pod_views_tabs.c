@@ -154,6 +154,26 @@ static void build_shared(int tabs, int per) {
 
 // ---- the Recent and Tab lists --------------------------------------------------------------------------------
 
+// The footer's left: the mark (3 bars, CI_EQ, in the footer) + the count in Bold + "working", only when `n` agents work (n > 0).
+static int foot_eq_runs(void) {
+    int c = 0;
+    for (int i = 0; i < S.count; i++)
+        if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x2d6a51) && S.runs[i].w == 5 && S.runs[i].y >= FOOT_Y) c++;
+    return c;
+}
+static bool foot_working(int n) {
+    char num[8];
+    snprintf(num, sizeof num, "%d", n);
+    const ht_run_t *c = NULL, *w = NULL;
+    for (int i = 0; i < S.count; i++) {
+        const ht_run_t *r = &S.runs[i];
+        if (r->pro_kind != K_TEXT || r->y < FOOT_Y) continue;
+        if (r->pro_font == &ci_bd_23 && !strcmp(r->text, num)) c = r;
+        if (r->pro_font == &ci_rg_23 && !strcmp(r->text, "working")) w = r;
+    }
+    return c && w && c->fg == CI_INK_RGB && c->x < w->x && c->x > 32;
+}
+
 // No heading: the first row sits right under the bar (its title names the tab), and Back says where it came from.
 static void test_list_no_heading(void) {
     build(1, 3, true);
@@ -171,14 +191,16 @@ static void test_list_no_heading(void) {
     CHECK(find_text("Claude \xc2\xb7 mac") && find_text("Claude \xc2\xb7 mac")->pro_font == &ci_rg_23 && find_text("Claude \xc2\xb7 mac")->fg == CI_MUTED_RGB);
     CHECK(count_kind(K_IMAGE) >= 3 && S.count <= budget());
     CHECK(S.background == CI_GROUND_RGB);
-    // The footer: Scroll to browse, and the pane count.
-    CHECK(find_text("Scroll to browse") && find_text("3 PANES"));
+    // The footer: the working mark, "1" in Bold and "working" (t0k0 works), and the pane count.
+    CHECK(find_text("Scroll to browse") == NULL && find_text("3 PANES"));
+    CHECK(foot_working(1) && foot_eq_runs() == 3);
     // Recent: the agents that had a task, Back (no origin), "N AGENTS".
     pod_nav_init(&N);
     pod_nav_act(&N, &M, POD_A_OPEN_TAB, POD_TAB_RECENT, 0);
     render(5000);
     CHECK(find_text("Recent") && find_text("Recent")->y < LIST_Y0 && find_text("Back") && find_hit(POD_A_BACK, 0));
     CHECK(find_text("agent00") && find_text("agent02") && !find_text("agent01") && find_text("2 AGENTS"));   // t0k1 had no task
+    CHECK(foot_working(1) && foot_eq_runs() == 3);
     CHECK(find_text("Claude \xc2\xb7 mac") != NULL);   // no recap line any more: Engine and Machine
 }
 
@@ -207,7 +229,7 @@ static void test_list_five_rows(void) {
     CHECK(find_hit(POD_A_OPEN_AGENT, 3)->y == LIST_Y0 && find_hit(POD_A_OPEN_AGENT, 6)->y + ROW_H <= FOOT_Y);
 }
 
-// Working, Finished, Needs you, Ready and Offline: the word in its colour, the time above it (only working and done have one).
+// Working, Finished, Needs you and Offline: the word in its colour, the time above it (only working and done have one); Ready has no meta.
 static void test_list_meta_words(void) {
     build(1, 5, true);
     pod_model_turn(&M, "t0k0", "started", NULL, 0, 10);
@@ -219,28 +241,55 @@ static void test_list_meta_words(void) {
     pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
     render(4000);
     const ht_run_t *w = find_text("Working"), *d = find_text("Finished"), *q = find_text("Needs you"), *r = find_text("Ready"), *o = find_text("Offline");
-    CHECK(w && d && q && r && o);
+    CHECK(w && d && q && o);
     CHECK(w->fg == ht_rgb(0x377052) && q->fg == ht_rgb(0x956616));
-    CHECK(d->fg == CI_MUTED_RGB && r->fg == CI_MUTED_RGB && o->fg == CI_MUTED_RGB);
+    CHECK(d->fg == CI_MUTED_RGB && o->fg == CI_MUTED_RGB);
     CHECK(w->pro_font == &ci_bd_20 && o->pro_font == &ci_bd_20);
     CHECK(w->x + w->w == 720 - 32 && o->x + o->w == 720 - 32);   // right-aligned at the margin
     CHECK(find_text("0:48") && find_text("0:48")->pro_font == &ci_rg_22 && find_text("0:48")->y < d->y);   // the time over the word
     CHECK(find_text("0:03") != NULL);                            // the working row counts on from its start (4 s - 1 s)
+    CHECK(r == NULL);   // Ready (t0k3): no time, no dash, no word
+    for (int i = 0; i < S.count; i++) {
+        const ht_run_t *t = &S.runs[i];
+        if (t->pro_kind == K_TEXT && t->y >= LIST_Y0 + 3 * ROW_H && t->y < LIST_Y0 + 4 * ROW_H) CHECK(t->x + t->w < 400);   // only the name and "Engine · Machine"
+    }
     const ht_run_t *dash = find_text("\xe2\x80\x94");
     CHECK(dash && dash->y < q->y);                               // asking, ready and offline: no time
     CHECK(S.count <= budget());
 }
 
+// The footer counts the working agents of the whole list (not only the rows on screen); none: "None working", no mark.
+static void test_list_footer_working(void) {
+    build(1, 7, true);
+    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
+    render(1000);
+    const ht_run_t *none = find_exact("None working");
+    CHECK(none && none->y >= FOOT_Y && none->x == 32 && none->fg == CI_MUTED_RGB && foot_eq_runs() == 0 && find_text("7 PANES"));
+    CHECK(!find_exact("working") && !foot_working(0));
+    pod_model_turn(&M, ids[0][5], "started", NULL, 0, 0);   // below the fold
+    pod_model_turn(&M, ids[0][6], "started", NULL, 0, 0);
+    render(1000);
+    CHECK(foot_working(2) && foot_eq_runs() == 3 && !find_exact("None working") && find_text("7 PANES"));
+    const ht_run_t *eq = NULL;
+    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x2d6a51) && S.runs[i].y >= FOOT_Y) { eq = &S.runs[i]; break; }
+    CHECK(eq && eq->x >= 32 && eq->x < 40);
+    render(1000 + 150);   // the bars move
+    int moved = 0;
+    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x2d6a51) && S.runs[i].y >= FOOT_Y && S.runs[i].y != eq->y) moved++;
+    CHECK(moved > 0);
+}
+
 // A 60-character name ends in "…" and stops before the meta column; so does a long machine name.
 static void test_list_long_name_ellipsis(void) {
     build(1, 1, true);
+    pod_model_turn(&M, ids[0][0], "started", NULL, 0, 0);   // working: it has a meta column
     char longname[80];
     for (int i = 0; i < 60; i++) longname[i] = (char)('a' + i % 26);
     longname[60] = 0;
     pod_model_agent(&M, ids[0][0], longname, "claude", "a-very-long-machine-name-that-keeps-going-and-going-on");
     pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
     render(0);
-    const ht_run_t *n = NULL, *sub = NULL, *word = find_text("Ready");
+    const ht_run_t *n = NULL, *sub = NULL, *word = find_text("Working");
     for (int i = 0; i < S.count; i++) {
         if (S.runs[i].pro_kind != K_TEXT) continue;
         if (!strncmp(S.runs[i].text, "abcdef", 6)) n = &S.runs[i];
@@ -274,7 +323,7 @@ static void test_list_empty_tab(void) {
     const ht_run_t *h = find_text("No panes yet.");
     CHECK(h && h->pro_font == &ci_rg_43 && h->fg == CI_INK_RGB && near_(h->x + h->w / 2, 360));
     CHECK(find_text("This tab is managed in Harness.") && find_text("This tab is managed in Harness.")->pro_font == &ci_rg_25);
-    CHECK(find_exact("No panes") != NULL && find_exact("No panes")->y >= FOOT_Y && find_text("Scroll to browse") == NULL);
+    CHECK(find_exact("No panes") != NULL && find_exact("No panes")->y >= FOOT_Y && find_text("Scroll to browse") == NULL && foot_eq_runs() == 0);
     for (int i = 0; i < F.hit_count; i++) CHECK(F.hits[i].action != POD_A_OPEN_AGENT);
     CHECK(find_hit(POD_A_BACK, 0) != NULL && find_text("Empty") && find_text("Empty")->y < LIST_Y0);
     pod_nav_init(&N);
@@ -786,6 +835,7 @@ static void tabs_test_stale_working(void) {
 }
 
 int main(void) {
+    test_list_footer_working();
     test_tabs_grid_geometry();
     test_tabs_selected_ring();
     test_tabs_ribbon_only_when_working();
@@ -812,3 +862,4 @@ int main(void) {
     printf("test_pod_views_tabs: %d checks ok (most runs in a Tabs frame: %d of %d)\n", checks, max_runs, HT_RUNS);
     return 0;
 }
+

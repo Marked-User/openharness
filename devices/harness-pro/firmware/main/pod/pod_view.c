@@ -56,7 +56,7 @@ int pod_scroll_pitch(const pod_nav_t *nav)
     if (!top) return 0;
     if (nav->skin == POD_SKIN_CONSOLE && top->view == POD_V_INBOX) return cs_inbox_pitch();
     if (nav->skin == POD_SKIN_CONSOLE && top->view == POD_V_RECAP) return CS_RECAP_ROW;
-    if (nav->skin == POD_SKIN_CONSOLE && top->view == POD_V_TAB) return CS_ROW_H;
+    if (nav->skin == POD_SKIN_CONSOLE && top->view == POD_V_TAB) return 0;   // cards page on a swipe; nothing scrolls by pixels
     return top->view == POD_V_TABS ? pod_tabs_pitch() :
            top->view == POD_V_TAB ? pod_tab_pitch() :
            top->view == POD_V_INBOX ? pod_inbox_pitch() :
@@ -68,7 +68,7 @@ int pod_scroll_max(const pod_nav_t *nav, const pod_model_t *m)
     if (!top) return 0;
     if (nav->skin == POD_SKIN_CONSOLE && top->view == POD_V_INBOX) return cs_inbox_max_row(m);
     if (nav->skin == POD_SKIN_CONSOLE && top->view == POD_V_RECAP) return cs_recap_max_row(nav, m);
-    if (nav->skin == POD_SKIN_CONSOLE && top->view == POD_V_TAB) return cs_rows_max(nav, m);
+    if (nav->skin == POD_SKIN_CONSOLE && top->view == POD_V_TAB) return cs_tab_pages(nav, m) - 1;
     if (nav->skin == POD_SKIN_CONSOLE && top->view == POD_V_TABS) return (pod_tabs_pages_of(nav, m) - 1) * 2;
     return top->view == POD_V_TABS ? pod_tabs_max_row(m) :
            top->view == POD_V_TAB ? pod_tab_max_row(nav, m) :

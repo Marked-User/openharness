@@ -36,6 +36,18 @@ static const pod_hit_t *find_hit(pod_action_t a) {
     for (int i = 0; i < F.hit_count; i++) if (F.hits[i].action == a) return &F.hits[i];
     return NULL;
 }
+// Whether the band's left value carries " · time".
+static bool band_dot(void) {
+    for (int i = 0; i < S.count; i++)
+        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ci_rg_26 && S.runs[i].y > 221 && S.runs[i].y < 221 + 88 && !strncmp(S.runs[i].text, " \xc2\xb7", 3)) return true;
+    return false;
+}
+// Whether the bar draws a Bold 30 title.
+static bool no_bold_title(void) {
+    for (int i = 0; i < S.count; i++)
+        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ci_bd_30) return false;
+    return true;
+}
 static int count_cells(void) {
     int n = 0;
     for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == POD_CELL) n++;
@@ -405,11 +417,14 @@ static void test_agent_working_body(void) {
     push_steps("c", 3, 20);
     open_view("c", POD_V_AGENT);
     render(3000);
-    CHECK(find_in(&ci_bd_30, "Task") && find_in(&ci_rg_26, "Desktop") && find_hit(POD_A_BACK));   // the back label is the origin tab
+    CHECK(!find_in(&ci_bd_30, "Task") && no_bold_title() && find_in(&ci_rg_26, "Desktop") && find_hit(POD_A_BACK));   // no title; the back label is the origin tab
     CHECK(find_in(&ci_rg_41, "agent-c") && find_in(&ci_rg_41, "agent-c")->x == 152);
     CHECK(find_in(&ci_rg_23, "Desktop \xc2\xb7 Mac Studio"));
     CHECK(has_pet104("claude", POD_SCENE_WORK, 3000));
-    CHECK(find_in(&ci_rg_25, "Working") && find_in(&ci_rg_22, "2:") && find_in(&ci_rg_26, "Claude"));   // the band: elapsed 2:14, Engine (no tokens)
+    CHECK(find_in(&ci_rg_20, "Status") && find_in(&ci_rg_26, "Working") && find_in(&ci_rg_26, " \xc2\xb7 2:") && find_in(&ci_rg_26, "Claude"));   // the band: Status, "Working · 2:14", Engine (no tokens)
+    const ht_run_t *stl = find_in(&ci_rg_20, "Status"), *enl = find_in(&ci_rg_20, "Engine"), *stv = find_in(&ci_rg_26, "Working"), *stt = find_in(&ci_rg_26, " \xc2\xb7 2:");
+    CHECK(stl->fg == CI_MUTED && stl->x == 32 && stl->y == enl->y && stv->y == find_in(&ci_rg_26, "Claude")->y && stv->y > stl->y);
+    CHECK(stt->fg == ht_rgb(0x6b746c) && stt->x >= stv->x + stv->w - 1 && stt->x <= stv->x + stv->w + 1);
     const ht_run_t *label = find_in(&ci_bd_20, "RIGHT NOW");
     CHECK(label && label->fg == CI_MUTED && label->x == 32);
     const ht_run_t *act = find_in(&ci_rg_32, "Editing touch");
@@ -471,7 +486,7 @@ static void test_agent_asking(void) {
     open_view("x", POD_V_AGENT);
     render(3000);
     CHECK(has_pet104("codex", POD_SCENE_ASK, 3000));
-    CHECK(find_in(&ci_rg_25, "Needs you")->fg == CI_AMBER && find_in(&ci_rg_22, "\xe2\x80\x94"));   // elapsed unknown: a dash
+    CHECK(find_in(&ci_rg_26, "Needs you")->fg == CI_AMBER && !band_dot());   // elapsed unknown: no time and no dangling dot
     bool box = false, bar = false;
     for (int i = 0; i < S.count; i++) {
         const ht_run_t *r = &S.runs[i];
@@ -516,7 +531,7 @@ static void offline_setup(void) {
 static void test_agent_offline(void) {
     offline_setup();
     render(3000);
-    CHECK(find_in(&ci_rg_41, "Stylist") && find_in(&ci_rg_25, "Offline")->fg == CI_MUTED);
+    CHECK(find_in(&ci_rg_41, "Stylist") && find_in(&ci_rg_26, "Offline")->fg == CI_MUTED && find_in(&ci_rg_20, "Status"));
     CHECK(find_in(&ci_rg_32, "That machine is offline.") && find_in(&ci_rg_23, "Reconnect Diego's Mac in Harness to continue."));
     CHECK(!find_in(&ci_bd_20, "RIGHT NOW") && !find_hit(POD_A_TALK) && find_in(&ci_rg_28, "Talk"));
     // The pet cannot fade (cells and arcs): the head is the pale cover with the logo at 50%, and no pet run at all.
@@ -537,7 +552,7 @@ static void test_agent_idle_copy(void) {
     open_view("m", POD_V_AGENT);
     render(3000);
     CHECK(has_pet104("muse", POD_SCENE_REST, 3000));
-    CHECK(find_in(&ci_rg_25, "Ready") && find_in(&ci_rg_22, "\xe2\x80\x94"));
+    CHECK(find_in(&ci_rg_26, "Ready")->fg == CI_GREEN && !find_in(&ci_rg_22, "\xe2\x80\x94") && !band_dot());
     const ht_run_t *a = find_in(&ci_rg_32, "Ready when you are."), *b = find_in(&ci_rg_23, "Send a new voice instruction to this agent.");
     CHECK(a && a->fg == CI_INK && b && b->fg == CI_MUTED && b->y > a->y && a->x == 32);
     CHECK(find_hit(POD_A_TALK) && !find_in(&ci_bd_20, "RIGHT NOW") && !find_in(&ci_rg_20, "Updated"));
@@ -581,7 +596,7 @@ static void test_agent_vietnamese_activity_wraps(void) {
     }
     CHECK(nm && nm->x == 152 && nm->x + nm->w <= 688 && ends_with(nm->text, "\xe2\x80\xa6") && utf8_valid(nm->text));
     CHECK(who && who->x == 152 && who->x + who->w <= 688 && ends_with(who->text, "\xe2\x80\xa6") && utf8_valid(who->text));
-    CHECK(back && back->w <= 115 && ends_with(back->text, "\xe2\x80\xa6") && utf8_valid(back->text));
+    CHECK(back && back->w > 115 && back->x + back->w <= F.bell_x - 16 && utf8_valid(back->text));   // the room is up to the bell; cut (with U+2026) only past it
     CHECK(!strstr(nm->text, "\n") && who->y > nm->y + 40);
 }
 
@@ -612,21 +627,55 @@ static void test_agent_unknown_engine_mark(void) {
     }
 }
 
+// No title on Agent and Recap: the back label (the tab's name) may use the room up to the bell (left edge - 16); BACK follows it.
+static const ht_run_t *back_label(void) {
+    for (int i = 0; i < S.count; i++)
+        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ci_rg_26 && S.runs[i].y < CI_BAR_H) return &S.runs[i];
+    return NULL;
+}
+static void test_back_label_room(void) {
+    build();
+    snprintf(M.tabs[0].name, sizeof M.tabs[0].name, "%s", "Firmware projects");
+    for (int v = 0; v < 2; v++) {
+        open_view(v ? "d" : "c", v ? POD_V_RECAP : POD_V_AGENT);
+        render(3000);
+        const ht_run_t *l = back_label();
+        const pod_hit_t *b = find_hit(POD_A_BACK), *in = find_hit(POD_A_INBOX);
+        CHECK(l && !strcmp(l->text, "Firmware projects") && l->w > 115 && l->x + l->w <= F.bell_x - 16);   // whole, wider than 115 px
+        CHECK(b && in && b->w >= 173 && b->w >= l->x + l->w - b->x && b->x + b->w <= in->x && no_bold_title());
+    }
+    char name[CABLE_NAME_MAX];
+    memset(name, 0, sizeof name);
+    for (int i = 0; i < CABLE_NAME_MAX - 1 && i < 60; i++) name[i] = 'W';
+    snprintf(M.tabs[0].name, sizeof M.tabs[0].name, "%s", name);
+    open_view("c", POD_V_AGENT);
+    render(3000);
+    const ht_run_t *l = back_label();
+    size_t n = l ? strlen(l->text) : 0;
+    const pod_hit_t *b = find_hit(POD_A_BACK);
+    CHECK(l && n > 3 && !strcmp(l->text + n - 3, "\xe2\x80\xa6") && l->w > 115 && l->x + l->w <= F.bell_x - 16 && F.bell_x - 16 - (l->x + l->w) < 40);
+    CHECK(b && b->x + b->w <= 632 && b->w >= 173);
+    pod_model_unread_add(&M, "c", "agent-c", "Done", 48, 100);   // a pill narrows the room: the label still clears the bell
+    render(3000);
+    l = back_label();
+    CHECK(l && l->x + l->w <= F.bell_x - 16);
+}
+
 static void test_recap_tokens_or_engine(void) {
     build();
     open_view("d", POD_V_RECAP);
     render(3000);
-    CHECK(find_in(&ci_bd_30, "Recap") && find_in(&ci_rg_26, "Desktop") && find_hit(POD_A_BACK));
+    CHECK(!find_in(&ci_bd_30, "Recap") && no_bold_title() && find_in(&ci_rg_26, "Desktop") && find_hit(POD_A_BACK));
     CHECK(find_in(&ci_rg_20, "Engine") && find_in(&ci_rg_26, "Claude") && !find_in(&ci_rg_20, "Tokens"));
     CHECK(has_pet104("claude", POD_SCENE_REST, 3000));
-    CHECK(find_in(&ci_rg_25, "Finished") && find_in(&ci_bd_20, "SAVED RESULT"));
-    CHECK(find_in(&ci_rg_22, "\xe2\x80\x94"));   // no elapsed time was sent
+    CHECK(find_in(&ci_rg_26, "Finished") && !any_text_has("SAVED RESULT") && !any_text_has("Saved result"));
+    CHECK(!find_in(&ci_rg_22, "\xe2\x80\x94") && !band_dot());   // no elapsed time was sent: no time, no dangling dot
     pod_model_turn_stats(&M, "d", -1, -1, -1, 10100, 2300);
     pod_model_turn(&M, "d", "activity", "Wrapping up", 48, 25);
     pod_model_turn(&M, "d", "done", NULL, 0, 30);
     render(3000);
     CHECK(find_in(&ci_rg_20, "Tokens") && find_in(&ci_rg_26, "10.1k in \xc2\xb7 2.3k out") && !find_in(&ci_rg_20, "Engine"));
-    CHECK(find_in(&ci_rg_22, "0:48"));
+    CHECK(find_in(&ci_rg_26, "Finished") && find_in(&ci_rg_26, " \xc2\xb7 0:48"));
     const ht_run_t *body = find_in(&ci_rg_32, "First line.");
     CHECK(body && body->fg == CI_INK && body->x == 32 && strstr(body->text, "Second line.") && strstr(body->text, "Third line."));   // joined, one row
     CHECK(find_hit(POD_A_TALK) && pod_recap_max_row(&N, &M) == 0);
@@ -646,7 +695,7 @@ static void test_recap_scrolls_by_line(void) {
     const int shown = count_in(&ci_rg_32, 300, CI_TRANS_Y), max = pod_recap_max_row(&N, &M);
     CHECK(shown == 6 && max == 30 - 6 && pod_scroll_max(&N, &M) == max);
     const ht_run_t *first = find_in(&ci_rg_32, "Sentence-01-"), *second = find_in(&ci_rg_32, "Sentence-02-");
-    CHECK(first && second && second->y - first->y == 42 && first->y > find_in(&ci_bd_20, "SAVED RESULT")->y);
+    CHECK(first && second && second->y - first->y == 42 && first->y == 324 && first->y > find_in(&ci_rg_26, "Finished")->y);   // the body starts where the eyebrow was
     for (int i = 0; i < S.count; i++)
         if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ci_rg_32 && S.runs[i].y > 300) CHECK(S.runs[i].y + ci_rg_32.height <= CI_TRANS_Y && S.runs[i].w <= 656);
     const ht_run_t *lastrow = NULL;   // more below: the last visible row ends with the ellipsis
@@ -783,6 +832,7 @@ static void test_wrap_long_word(void) {
 
 int main(void) {
     test_agent_working_body();
+    test_back_label_room();
     test_agent_updated_minutes();
     test_agent_asking();
     test_agent_offline();

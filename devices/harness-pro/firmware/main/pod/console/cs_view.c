@@ -9,8 +9,7 @@ void cs_render(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, uint32_
     f->scene->background = ht_rgb(CS_GROUND);   // the scene's own clear colour: no 720 x 720 ground rect to overdraw
     const pod_frame_t *top = nav->depth ? &nav->stack[nav->depth - 1] : NULL;
     if (!top || top->view == POD_V_TABS) cs_view_overview(f, nav, m, now_ms);
-    else if (top->view == POD_V_TAB && top->tab == POD_TAB_RECENT) cs_view_recent(f, nav, m, now_ms);
-    else if (top->view == POD_V_TAB && top->tab >= 0 && top->tab < m->tab_count) cs_view_tab(f, nav, m, now_ms);
+    else if (top->view == POD_V_TAB && (top->tab == POD_TAB_RECENT || (top->tab >= 0 && top->tab < m->tab_count))) cs_view_tab(f, nav, m, now_ms);
     else if (top->view == POD_V_AGENT) cs_view_agent(f, nav, m, now_ms);
     else if (top->view == POD_V_RECAP) cs_view_recap(f, nav, m, now_ms);
     else if (top->view == POD_V_TALK) cs_view_talk(f, nav, m, now_ms);
