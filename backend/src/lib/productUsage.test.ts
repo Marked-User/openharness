@@ -127,3 +127,10 @@ it('setup ingestion never reads an account and expires after yesterday', async (
   expect(await ingestSetupUsage({ ...setup, day: '2026-10-11' }, now)).toMatchObject({ reason: 'EXPIRED' })
   expect(await ingestSetupUsage({ ...setup, day: '2026-10-12' }, now)).toMatchObject({ accepted: true })
 })
+
+it('keeps the native app collectors and anonymous transport identical', () => {
+  for (const file of ['product_measurement.dart', 'setup_transport.dart', 'setup_usage_choice.dart']) {
+    expect(readFileSync(new URL(`../../../desktop/lib/measurement/${file}`, import.meta.url), 'utf8'))
+      .toBe(readFileSync(new URL(`../../../mobile/lib/measurement/${file}`, import.meta.url), 'utf8'))
+  }
+})

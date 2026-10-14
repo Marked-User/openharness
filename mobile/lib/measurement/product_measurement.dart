@@ -67,7 +67,9 @@ class ProductMeasurement extends ChangeNotifier {
 
   bool get sharing => _account != null && _enabled == true;
   bool get _setupAllowed =>
-      signedOutSharing && (_account == null || _enabled == true);
+      surface != 'web' &&
+      signedOutSharing &&
+      (_account == null || _enabled == true);
 
   Future<void> setSignedOutSharing(bool enabled) async {
     _guestEpoch++;
@@ -246,8 +248,9 @@ class ProductMeasurement extends ChangeNotifier {
     if (account != null && read != null) {
       try {
         final choice = await read();
-        if (_disposed || account != _account || choiceEpoch != _accountEpoch)
+        if (_disposed || account != _account || choiceEpoch != _accountEpoch) {
           return;
+        }
         savedChoice(choice);
       } catch (_) {
         _enabled = null;

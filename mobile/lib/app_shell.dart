@@ -256,13 +256,18 @@ class RootShell extends ConsumerWidget {
           AppStatus.unauthenticated => signedOutScreen(app),
           AppStatus.authenticated => authenticatedScreen(app),
         };
-        if (app.productMeasurement.surface == 'web' || app.status == AppStatus.authenticated ||
-            (app.status == AppStatus.bootstrapping && !app.signingIn))
+        if (app.productMeasurement.surface == 'web' ||
+            app.status == AppStatus.authenticated ||
+            (app.status == AppStatus.bootstrapping && !app.signingIn)) {
           return screen;
+        }
         return Column(
           children: [
             Expanded(child: screen),
-            SetupUsageChoice(measurement: app.productMeasurement),
+            SafeArea(
+              top: false,
+              child: SetupUsageChoice(measurement: app.productMeasurement),
+            ),
           ],
         );
       },

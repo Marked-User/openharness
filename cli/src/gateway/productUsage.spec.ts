@@ -269,3 +269,17 @@ it('does not upload before persistence or block observers on a slow disk, and fe
   expect(sent).toHaveLength(0)
   expect(JSON.parse(readFileSync(file, 'utf8')).days).toEqual({})
 })
+
+it('drops a corrupt oversized pending report without sending an oversized request', async () => {
+  await usage.stop()
+  writeFileSync(file, JSON.stringify({ revision: 0, pending: {
+    schemaVersion: 1, revision: 0, id: '12345678-1234-4234-8234-123456789012', day: '2026-10-12',
+    counters: Object.fromEntries(PRODUCT_USAGE_METRICS.map(metric => [metric, 100000])),
+  } }))
+  usage = createProductUsage({ file, now: () => now, request })
+  await usage.sync()
+  expect(sent).toHaveLength(0)
+  usage.observe('turn_started', 'PRIVATE_AGENT', false); await usage.sync()
+  expect(totals().turns_started).toBe(1)
+  expect(Buffer.byteLength(JSON.stringify(sent[0]))).toBeLessThan(8192)
+})

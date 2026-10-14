@@ -4,11 +4,13 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness/shared/theme/app_theme.dart' as grid;
 
-import '../lib/measurement/product_measurement.dart';
-import '../lib/measurement/setup_usage_choice.dart';
-import '../lib/measurement/task_feedback.dart';
-import '../lib/shared/widgets/product_feedback.dart';
+import 'package:harness/measurement/product_measurement.dart';
+import 'package:harness/measurement/setup_usage_choice.dart';
+import 'package:harness/measurement/task_feedback.dart';
+import 'package:harness/shared/widgets/product_feedback.dart';
+
 import 'support/real_fonts.dart';
 
 void main() {
@@ -33,7 +35,7 @@ void main() {
           RepaintBoundary(
             key: boundary,
             child: MaterialApp(
-              theme: ThemeData(brightness: brightness),
+              theme: grid.buildAppTheme(brightness: brightness),
               builder: (context, child) => MediaQuery(
                 data: MediaQuery.of(context)
                     .copyWith(textScaler: TextScaler.linear(scale)),

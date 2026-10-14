@@ -21,7 +21,11 @@ class PrivacySection extends StatelessWidget {
       title: 'Privacy',
       subtitle: 'Choose what you share to help improve Harness.',
       child: notifier.isGuest
-          ? SetupUsageChoice(measurement: notifier.productMeasurement)
+          ? notifier.productMeasurement.surface == 'web'
+                ? const Text(
+                    'Product usage sharing is available after sign-in.',
+                  )
+                : SetupUsageChoice(measurement: notifier.productMeasurement)
           : ProductUsagePreference(
               key: ObjectKey(notifier.api),
               request: ({bool? enabled}) async {

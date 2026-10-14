@@ -3,7 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import '../lib/measurement/product_measurement.dart';
+import 'package:harness/measurement/product_measurement.dart';
 
 void main() {
   late ProductMeasurement usage;
@@ -98,8 +98,9 @@ void main() {
       usage.begin(ProductFlow.signIn)(ProductOutcome.ok);
       await usage.flush();
       final first = jsonEncode(reports.single);
-      for (final flow in ProductFlow.values)
+      for (final flow in ProductFlow.values) {
         usage.begin(flow)(ProductOutcome.failed);
+      }
       await usage.flush();
       expect(jsonEncode(reports.last), first);
       fail = false;
@@ -178,6 +179,24 @@ void main() {
       expect(reports.single['counters'], {
         'ui_desktop_remote_connect_started': 64,
       });
+    },
+  );
+  test(
+    'web never queues signed-out setup even if a caller enables it',
+    () async {
+      final web = ProductMeasurement(
+        surface: 'web',
+        automatic: false,
+        sendSetup: (r) async {
+          setup.add(r);
+          return {'accepted': true};
+        },
+      );
+      await web.setSignedOutSharing(true);
+      web.begin(ProductFlow.signIn)(ProductOutcome.ok);
+      await web.flush();
+      web.dispose();
+      expect(setup, isEmpty);
     },
   );
 }
