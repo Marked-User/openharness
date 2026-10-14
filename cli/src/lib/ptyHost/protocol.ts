@@ -43,23 +43,66 @@ export interface Frame {
  * Accumulates socket chunks and yields complete frames. A frame whose length
  * exceeds MAX_FRAME (8 MiB) or whose kind is unknown makes `push` throw; the
  * reader is then unusable and the connection must be dropped.
+ *
+ * Chunks wait in a list and each byte is copied once more, into its frame: joining the
+ * whole backlog on every chunk would make an 8 MiB frame read in 1 KiB chunks quadratic.
  */
 export class FrameReader {
-  private buf: Buffer = Buffer.alloc(0)
+  private chunks: Buffer[] = []
+  /** Bytes of `chunks[0]` already consumed. */
+  private offset = 0
+  private size = 0
 
   push(chunk: Uint8Array): Frame[] {
-    this.buf = this.buf.length === 0 ? Buffer.from(chunk) : Buffer.concat([this.buf, chunk])
+    // A copy: the caller may reuse its buffer once push returns.
+    if (chunk.length > 0) {
+      this.chunks.push(Buffer.from(chunk))
+      this.size += chunk.length
+    }
     const frames: Frame[] = []
-    while (this.buf.length >= 5) {
-      const kind = this.buf.readUInt8(0)
-      const len = this.buf.readUInt32BE(1)
+    while (this.size >= 5) {
+      const head = this.peekHeader()
+      const kind = head.readUInt8(0)
+      const len = head.readUInt32BE(1)
       if (len > MAX_FRAME) throw new Error('frame too large')
       if (FrameKind[kind] === undefined) throw new Error(`unknown frame kind ${kind}`)
-      if (this.buf.length < 5 + len) break
-      frames.push({ kind: kind as FrameKind, payload: Buffer.from(this.buf.subarray(5, 5 + len)) })
-      this.buf = this.buf.subarray(5 + len)
+      if (this.size < 5 + len) break
+      this.take(5)
+      frames.push({ kind: kind as FrameKind, payload: this.take(len) })
     }
     return frames
+  }
+
+  private peekHeader(): Buffer {
+    const first = this.chunks[0]
+    if (first.length - this.offset >= 5) return first.subarray(this.offset, this.offset + 5)
+    const head = Buffer.allocUnsafe(5)
+    let at = 0
+    let offset = this.offset
+    for (let i = 0; at < 5; i++, offset = 0) {
+      at += this.chunks[i].copy(head, at, offset, Math.min(this.chunks[i].length, offset + 5 - at))
+    }
+    return head
+  }
+
+  /** Remove `n` bytes (n <= size) from the front, as a buffer of their own. */
+  private take(n: number): Buffer {
+    const out = Buffer.allocUnsafe(n)
+    let at = 0
+    let used = 0
+    while (at < n) {
+      const first = this.chunks[used]
+      const copied = first.copy(out, at, this.offset, Math.min(first.length, this.offset + n - at))
+      at += copied
+      this.offset += copied
+      if (this.offset === first.length) {
+        used++
+        this.offset = 0
+      }
+    }
+    if (used > 0) this.chunks.splice(0, used)
+    this.size -= n
+    return out
   }
 }
 
@@ -116,6 +159,8 @@ export type PtyOp =
   | { op: 'processes' }
   | { op: 'setEngineExit'; pane: string; status: number }
 
+export type PtyOpName = PtyOp['op']
+export type PtyOpOf<K extends PtyOpName> = Extract<PtyOp, { op: K }>
 export type PtyRequest = { id: number } & PtyOp
 
 export interface PtyOpReplies {
@@ -124,7 +169,8 @@ export interface PtyOpReplies {
   inventory: { panes: PaneInventoryRow[] }
   titles: { titles: Record<string, string> }
   paneState: { state: PaneStateInfo | 'gone' }
-  paneInfo: { info: PaneInfo | null }
+  /** A pane the host does not have is a `no_pane` failure, never a null `info`. */
+  paneInfo: { info: PaneInfo }
   capture: { text: string }
   write: Record<string, never>
   paste: Record<string, never>
@@ -138,8 +184,9 @@ export interface PtyOpReplies {
   setEngineExit: Record<string, never>
 }
 
-export type PtyResponse =
-  | ({ id: number; ok: true } & Record<string, unknown>)
+/** The reply line to a request for op `K`. */
+export type PtyResponse<K extends PtyOpName = PtyOpName> =
+  | ({ id: number; ok: true } & PtyOpReplies[K])
   | { id: number; ok: false; code: PtyErrorCode; reason: string }
 
 export type PtyEvent =

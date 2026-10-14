@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   encodeFrame,
@@ -7,6 +8,7 @@ import {
   PTY_PROTOCOL,
   type HelloLine,
   type PtyOp,
+  type PtyOpOf,
 } from './protocol.js'
 
 describe('ptyHost protocol framing', () => {
@@ -49,6 +51,47 @@ describe('ptyHost protocol framing', () => {
     expect(out.payload.length).toBe(MAX_FRAME)
   })
 
+  it('reads an 8 MiB frame fed in 1 KiB chunks in linear time', () => {
+    const payload = Buffer.alloc(MAX_FRAME, 7)
+    const frame = encodeFrame(FrameKind.Output, payload)
+    const reader = new FrameReader()
+    const started = performance.now()
+    let got: ReturnType<FrameReader['push']> = []
+    for (let at = 0; at < frame.length; at += 1024) got = got.concat(reader.push(frame.subarray(at, at + 1024)))
+    // Joining the whole backlog per chunk (8192 chunks) took over 3 s on an M-series Mac; linear
+    // reading takes tens of milliseconds.
+    expect(performance.now() - started).toBeLessThan(1_000)
+    expect(got).toHaveLength(1)
+    expect(got[0].payload.equals(payload)).toBe(true)
+  })
+
+  it('reads frames whose header and payload span many chunks, one byte at a time', () => {
+    const frames = [
+      encodeFrame(FrameKind.Output, Buffer.from('abc')),
+      encodeFrame(FrameKind.Pause, Buffer.alloc(0)),
+      encodeFrame(FrameKind.Ack, Buffer.from('{"ok":true}')),
+    ]
+    const wire = Buffer.concat(frames)
+    const reader = new FrameReader()
+    const got = []
+    for (const byte of wire) got.push(...reader.push(Buffer.from([byte])))
+    expect(got.map(f => [f.kind, f.payload.toString()])).toEqual([
+      [FrameKind.Output, 'abc'],
+      [FrameKind.Pause, ''],
+      [FrameKind.Ack, '{"ok":true}'],
+    ])
+    expect(reader.push(Buffer.alloc(0))).toEqual([])
+  })
+
+  it('does not keep a reference to the caller\'s chunk', () => {
+    const chunk = Buffer.from(encodeFrame(FrameKind.Output, Buffer.from('xyz')))
+    const reader = new FrameReader()
+    reader.push(chunk.subarray(0, 6))
+    chunk.fill(0)
+    const [out] = reader.push(Buffer.from('yz'))
+    expect(out.payload.toString()).toBe('xyz')
+  })
+
   it('rejects unknown frame kinds', () => {
     expect(() => new FrameReader().push(Buffer.from([99, 0, 0, 0, 0]))).toThrow(/unknown frame kind/)
   })
@@ -75,5 +118,61 @@ describe('ptyHost protocol messages', () => {
     expect(wire[1].expectedHeldToken).toBe('u')
     expect(wire[2].graceMs).toBe(10)
     expect(wire[3].historyLines).toBe(3)
+  })
+})
+
+/**
+ * The type of each field of an op, for every field the TypeScript type declares, optional ones
+ * included (`-?`): the compiler rejects a table that misses or invents a field.
+ */
+type FieldType = 'string' | 'number' | 'boolean' | 'string[]' | 'env'
+type OpFields = { [K in PtyOp['op']]: { [F in keyof Omit<PtyOpOf<K>, 'op'>]-?: FieldType } }
+const OP_FIELDS: OpFields = {
+  create: { command: 'string[]', cwd: 'string', env: 'env', cols: 'number', rows: 'number', owner: 'string', label: 'string', hold: 'boolean' },
+  kill: { pane: 'string', graceMs: 'number' },
+  inventory: {},
+  titles: {},
+  paneState: { pane: 'string' },
+  paneInfo: { pane: 'string' },
+  capture: { pane: 'string', historyLines: 'number', ansi: 'boolean', visible: 'boolean' },
+  write: { pane: 'string', data: 'string' },
+  paste: { pane: 'string', text: 'string', bracketed: 'boolean' },
+  key: { pane: 'string', key: 'string' },
+  setTitle: { pane: 'string', title: 'string' },
+  holdOpen: { pane: 'string', token: 'string' },
+  releaseHold: { pane: 'string' },
+  respawn: { pane: 'string', command: 'string[]', cwd: 'string', env: 'env', expectedHeldToken: 'string' },
+  jobPids: { pane: 'string' },
+  processes: {},
+  setEngineExit: { pane: 'string', status: 'number' },
+}
+
+function typeOf(value: unknown): FieldType | 'other' {
+  if (Array.isArray(value)) return value.every(v => typeof v === 'string') ? 'string[]' : 'other'
+  if (value !== null && typeof value === 'object') {
+    return Object.values(value).every(v => typeof v === 'string') ? 'env' : 'other'
+  }
+  const t = typeof value
+  return t === 'string' || t === 'number' || t === 'boolean' ? t : 'other'
+}
+
+describe('ptyHost protocol fixture shared with Rust', () => {
+  // pty/tests/ops_fixture.rs parses the same file into the host's `Request`.
+  const fixture = JSON.parse(
+    readFileSync(new URL('../../../../pty/tests/fixtures/ops.json', import.meta.url), 'utf8'),
+  ) as Array<Record<string, unknown>>
+
+  it('has one request per op', () => {
+    expect(fixture.map(r => r.op).sort()).toEqual(Object.keys(OP_FIELDS).sort())
+  })
+
+  it.each(fixture.map(r => [r.op, r] as const))('%s carries exactly the fields PtyOp declares', (op, request) => {
+    const { id, op: _op, ...fields } = request
+    expect(typeof id).toBe('number')
+    const declared = OP_FIELDS[op as PtyOp['op']]
+    expect(Object.keys(fields).sort()).toEqual(Object.keys(declared).sort())
+    for (const [name, type] of Object.entries(declared)) expect([name, typeOf(fields[name])]).toEqual([name, type])
+    const asOp = { op, ...fields } as PtyOp
+    expect(Object.keys(JSON.parse(JSON.stringify({ id, ...asOp }))).sort()).toEqual(Object.keys(request).sort())
   })
 })
