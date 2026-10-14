@@ -6813,61 +6813,78 @@ class AppNotifier extends ChangeNotifier {
       onAuthFailure: _signedOutAtRuntime,
       onLocalFailure: _onLocalFailure,
       onEvent: _handleEvent,
-      onStatus: (machineId, nextStatus) {
-        final machine = machineStates[machineId];
-        if (machine == null) return;
-        // A refusal being settled against the device log ([_settleTrust]) is still connecting.
-        final settling =
-            nextStatus == ConnectionStatus.disconnected &&
-            _trustSettling.contains(machineId);
-        _measureConnection(
-          machineId,
-          settling ? ConnectionStatus.connecting : nextStatus,
-          machine.isLocalMachine
-              ? ProductFlow.workspaceConnect
-              : ProductFlow.remoteConnect,
-        );
-        machine.connectionStatus = settling
-            ? ConnectionStatus.connecting
-            : nextStatus;
-        if (nextStatus == ConnectionStatus.connected) {
-          _onMachineConnected(machineId, machine);
-          _refreshDeviceLogAfterReconnect();
-        } else if (nextStatus == ConnectionStatus.reconnecting ||
-            nextStatus == ConnectionStatus.disconnected) {
-          _stopAgentSyncTimer(machineId);
-          _clearMachineActivity(machine);
-          if (machine.isLocalMachine) {
-            machine.transportMode = MachineTransportMode.localOffline;
-            dial.disconnect();
-          }
-          // Same reasoning as above, mirrored: capture pendingOfflineAgentId from the currently-open
-          // terminal (if any) so the connected branch above can reattach it, for every machine — this
-          // used to be local-only, which is why a remote machine's terminal never came back on its own
-          // after `harness start` on that machine, even though the guide screen promised it would.
-          //
-          // NOT while the machine is unlinked. NO_PEER_LINK is the local CLI failing a lookup in its
-          // own peer table (remoteRelay.ts `dial`) before anything is dialled, so neither that close
-          // nor the one `_startLinkRetry`'s `closeMachine` fires every few seconds says anything about
-          // whether the OTHER computer is up — our socket never reaches it. Forcing nodeOnline false
-          // here overwrote the REST `/api/machines` status, the one signal that does, and painted
-          // every unlinked machine as off. Keyed on the sticky flag rather than the 4404 close on
-          // purpose: the retry loop's own close() lands as a plain `disconnected` too. needsLink is
-          // set by onLocalFailure, which runs before this branch for 4404 (see WsConn._onDone).
-          if (!machine.needsLink && !settling) {
-            unawaited(
-              _applyNodeStatus(
-                machine,
-                false,
-                why: 'socket ${nextStatus.name}',
-              ),
-            );
-          }
-        }
-        notifyListeners();
-      },
+      onStatus: _onConnectionStatus,
     );
   }
+
+  void _onConnectionStatus(String machineId, ConnectionStatus nextStatus) {
+    final machine = machineStates[machineId];
+    if (machine == null) return;
+    // A refusal being settled against the device log ([_settleTrust]) is still connecting.
+    final settling =
+        nextStatus == ConnectionStatus.disconnected &&
+        _trustSettling.contains(machineId);
+    // An unlinked machine is redialled every 5 s by the link retry and refused at once each time
+    // (4404 NO_PEER_LINK): measured per dial, one such machine read as ~720 failed connects an hour,
+    // and prod's first day showed 1,197 of 1,233 remote connects "failed", nearly all under a second.
+    // The dial that found it unlinked is already open and still ends as one failure; the retry's
+    // dials are not new attempts. A dial after linking (needsLink cleared first) is measured again.
+    final retryingLink =
+        machine.needsLink &&
+        (nextStatus == ConnectionStatus.connecting ||
+            nextStatus == ConnectionStatus.reconnecting);
+    if (!retryingLink) {
+      _measureConnection(
+        machineId,
+        settling ? ConnectionStatus.connecting : nextStatus,
+        machine.isLocalMachine
+            ? ProductFlow.workspaceConnect
+            : ProductFlow.remoteConnect,
+      );
+    }
+    machine.connectionStatus = settling
+        ? ConnectionStatus.connecting
+        : nextStatus;
+    if (nextStatus == ConnectionStatus.connected) {
+      _onMachineConnected(machineId, machine);
+      _refreshDeviceLogAfterReconnect();
+    } else if (nextStatus == ConnectionStatus.reconnecting ||
+        nextStatus == ConnectionStatus.disconnected) {
+      _stopAgentSyncTimer(machineId);
+      _clearMachineActivity(machine);
+      if (machine.isLocalMachine) {
+        machine.transportMode = MachineTransportMode.localOffline;
+        dial.disconnect();
+      }
+      // Same reasoning as above, mirrored: capture pendingOfflineAgentId from the currently-open
+      // terminal (if any) so the connected branch above can reattach it, for every machine — this
+      // used to be local-only, which is why a remote machine's terminal never came back on its own
+      // after `harness start` on that machine, even though the guide screen promised it would.
+      //
+      // NOT while the machine is unlinked. NO_PEER_LINK is the local CLI failing a lookup in its
+      // own peer table (remoteRelay.ts `dial`) before anything is dialled, so neither that close
+      // nor the one `_startLinkRetry`'s `closeMachine` fires every few seconds says anything about
+      // whether the OTHER computer is up — our socket never reaches it. Forcing nodeOnline false
+      // here overwrote the REST `/api/machines` status, the one signal that does, and painted
+      // every unlinked machine as off. Keyed on the sticky flag rather than the 4404 close on
+      // purpose: the retry loop's own close() lands as a plain `disconnected` too. needsLink is
+      // set by onLocalFailure, which runs before this branch for 4404 (see WsConn._onDone).
+      if (!machine.needsLink && !settling) {
+        unawaited(
+          _applyNodeStatus(
+            machine,
+            false,
+            why: 'socket ${nextStatus.name}',
+          ),
+        );
+      }
+    }
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  void connectionStatusForTest(String machineId, ConnectionStatus status) =>
+      _onConnectionStatus(machineId, status);
 
   /// The machine list is being fetched and there is nothing to show meanwhile.
   ///

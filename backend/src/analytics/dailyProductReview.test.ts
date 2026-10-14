@@ -71,3 +71,14 @@ it('does not turn old collector work into zero D28 retention during rollout', ()
   expect(cohort([...rows, row('2026-09-14', 'measurement_v2_installation_days', 10)]))
     .toMatchObject({ measurementAvailable: true, returned: 0, percent: 0 })
 })
+
+it('reports a read the apps make on their own as reliability only, even from clients that still send its reach', () => {
+  const r = dailyProductReview([
+    row('2026-10-12', 'history_requests', 41179), row('2026-10-12', 'history_installation_days', 72),
+    row('2026-10-12', 'history_first_installations', 72), row('2026-10-12', 'search_requests', 86),
+    row('2026-10-12', 'search_installation_days', 19),
+  ], new Date('2026-10-13'))
+  expect(r.features.find(f => f.action === 'history')).toMatchObject({ requests: 41179, automatic: true,
+    installationDays: null, firstMeasuredInstallations: null, repeatInstallationDays: null })
+  expect(r.features.find(f => f.action === 'search')).toMatchObject({ automatic: false, installationDays: 19 })
+})

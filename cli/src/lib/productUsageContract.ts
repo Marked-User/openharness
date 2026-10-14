@@ -8,6 +8,9 @@ export const PRODUCT_FEEDBACK = [...PRODUCT_FEEDBACK_REASONS, ...PRODUCT_FEEDBAC
 export const PRODUCT_USAGE_ACTIONS = ['create', 'resume', 'restart', 'model_change', 'history',
   'fork', 'close', 'delete', 'search', 'history_page', 'store_list', 'store_install', 'store_update', 'store_remove',
   'model_list', 'model_download', 'model_start', 'model_stop', 'browser_open'] as const
+/** Reads the apps make on their own (an agent's recent turns after each update, the Store and model
+ * lists on connect, picker previews): measured for reliability, never as a feature someone used. */
+export const PRODUCT_USAGE_AUTOMATIC_ACTIONS: readonly typeof PRODUCT_USAGE_ACTIONS[number][] = ['history', 'history_page', 'store_list', 'model_list']
 export const PRODUCT_USAGE_FEATURE_MEASURES = ['installation_days', 'first_installations', 'repeat_installation_days'] as const
 export const PRODUCT_USAGE_SURFACES = ['desktop', 'phone', 'web'] as const
 export const PRODUCT_USAGE_FLOWS = ['setup', 'setup_harness', 'setup_tmux', 'setup_clipboard', 'sign_in',

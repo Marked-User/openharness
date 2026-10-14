@@ -181,6 +181,21 @@ it('accepts only known scalar counters and stops diagnostics with the privacy ch
   expect(totals()).toEqual({ create_requests: 1, create_installation_days: 1, create_first_installations: 1, measurement_v2_installation_days: 1 })
 })
 
+it('counts a read the apps make on their own for reliability only, never as a feature someone used', async () => {
+  // agent_recent after every agent update, dsh_list on every connect, the pickers' model lists and
+  // session previews: prod's first day read 41,179 "history" requests across 72 "history"
+  // installation-days, almost every active one, without anyone opening a history.
+  await usage.sync()
+  for (const metric of ['history_requests', 'history_ok', 'history_under_1s', 'history_page_requests',
+    'store_list_requests', 'model_list_requests', 'model_list_failed'] as const) usage.counter(metric)
+  usage.counter('search_requests')
+  await usage.sync()
+  expect(totals()).toEqual({ measurement_v2_installation_days: 1,
+    history_requests: 1, history_ok: 1, history_under_1s: 1, history_page_requests: 1,
+    store_list_requests: 1, model_list_requests: 1, model_list_failed: 1,
+    search_requests: 1, search_installation_days: 1, search_first_installations: 1 })
+})
+
 it('tracks a durable launch through polls without persisting its receipt or counting polls as attempts', async () => {
   await usage.sync()
   const id = 'PRIVATE_CREATION_CANARY'

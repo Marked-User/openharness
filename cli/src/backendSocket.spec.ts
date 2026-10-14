@@ -2439,18 +2439,19 @@ describe('BackendSocket outbound queue', () => {
     vi.advanceTimersByTime(15_000)
     expect(kinds(ws)).toEqual(['open', 'ping'])
 
-    // A second window is a session in its own right — up at once, floor or not.
+    // A second connection while one is attached is the same app session: the desktop holds one per
+    // machine and redials on every reconnect, so it opens nothing new.
     expect(socket.registerLocalClient('local:2', sink)).toBe(true)
-    expect(kinds(ws)).toEqual(['open', 'ping', 'open'])
+    expect(kinds(ws)).toEqual(['open', 'ping'])
     // Registering the same window twice is refused, and says nothing.
     expect(socket.registerLocalClient('local:2', sink)).toBe(false)
-    expect(kinds(ws)).toHaveLength(3)
+    expect(kinds(ws)).toHaveLength(2)
 
     // Every window gone: the tick falls silent.
     await socket.unregisterLocalClient('local:1')
     await socket.unregisterLocalClient('local:2')
     vi.advanceTimersByTime(120_000)
-    expect(kinds(ws)).toHaveLength(3)
+    expect(kinds(ws)).toHaveLength(2)
 
     // A window that came and went while the link was down was never a session the backend can hear
     // about — the next link is told nothing. Both remaining windows gone first, so the count is clean.
@@ -4110,5 +4111,30 @@ describe('relay down-frames are default-deny: sealed, or the backend\'s own', ()
     expect(onMessage).toHaveBeenCalledWith('a1', 'hi')
     await dispatch({ type: 'message', payload: { content: 'task in A', agentId: 'a1', tabId: 'swarm-a' } }, 'local:app', 'local')
     expect(onMessage).toHaveBeenLastCalledWith('a1', 'task in A')
+  })
+})
+
+describe('opening the app', () => {
+  // The desktop app holds one local connection per machine it shows, and dials again on every
+  // reconnect and every five-second link retry: counted per connection, prod's first day read 5,675
+  // desktop opens across 68 active installations.
+  it('counts a surface opening once, however many connections its windows hold', async () => {
+    const socket = new BackendSocket('fixture')
+    const opened: string[] = []
+    socket.useGateway({ holdRequests: () => {}, serveThisComputerOnly: () => {}, localClients: () => {},
+      windowOpened: (surface: string) => { opened.push(surface) } } as never)
+    const sink = { sendFrame: () => true, sendBinary: () => true }
+    for (const id of ['local:a', 'local:b', 'local:c']) socket.registerLocalClient(id, sink)
+    socket.registerLocalClient('local:tui', sink, { surface: 'tui' })
+    socket.registerLocalClient('local:tool', sink, { tool: true })
+    expect(opened).toEqual(['desktop', 'tui'])
+
+    await socket.unregisterLocalClient('local:b')
+    socket.registerLocalClient('local:b2', sink)
+    expect(opened).toEqual(['desktop', 'tui'])
+
+    for (const id of ['local:a', 'local:b2', 'local:c']) await socket.unregisterLocalClient(id)
+    socket.registerLocalClient('local:again', sink)
+    expect(opened).toEqual(['desktop', 'tui', 'desktop'])
   })
 })

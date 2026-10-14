@@ -3,7 +3,7 @@ import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ProductUsageLaunchSignal } from '../lib/productUsageSignals.js'
-import { PRODUCT_USAGE_ACTIONS, PRODUCT_USAGE_DAYS, PRODUCT_USAGE_MAX_COUNT, PRODUCT_USAGE_METRICS,
+import { PRODUCT_USAGE_ACTIONS, PRODUCT_USAGE_AUTOMATIC_ACTIONS, PRODUCT_USAGE_DAYS, PRODUCT_USAGE_MAX_COUNT, PRODUCT_USAGE_METRICS,
   type ProductUsageChoice, type ProductUsageMetric, type ProductUsageReport } from '../lib/productUsageContract.js'
 
 const DAY = 86_400_000
@@ -11,7 +11,9 @@ const MAX_QUEUE_BYTES = 256 * 1024
 // A report stays below the server's 8 KiB body bound even with the complete vocabulary.
 const MAX_REPORT_METRICS = 64
 const metricSet = new Set<string>(PRODUCT_USAGE_METRICS)
-const requestActions = new Map(PRODUCT_USAGE_ACTIONS.map(action => [`${action}_requests`, action]))
+// Feature reach is a person's use; the reads the apps make on their own count only their reliability.
+const requestActions = new Map(PRODUCT_USAGE_ACTIONS.filter(action => !PRODUCT_USAGE_AUTOMATIC_ACTIONS.includes(action))
+  .map(action => [`${action}_requests`, action]))
 const key = (now: number) => new Date(now).toISOString().slice(0, 10)
 const week = (now: number) => { const d = new Date(now); return key(now - ((d.getUTCDay() + 6) % 7) * DAY) }
 type Counters = Partial<Record<ProductUsageMetric, number>>

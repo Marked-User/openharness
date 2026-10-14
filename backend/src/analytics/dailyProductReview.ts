@@ -1,4 +1,4 @@
-import { PRODUCT_FEEDBACK, PRODUCT_FEEDBACK_REASONS, PRODUCT_FEEDBACK_OUTCOMES, PRODUCT_USAGE_ACTIONS, PRODUCT_USAGE_FLOWS, PRODUCT_USAGE_SURFACES } from '../types/productUsage.js'
+import { PRODUCT_FEEDBACK, PRODUCT_FEEDBACK_REASONS, PRODUCT_FEEDBACK_OUTCOMES, PRODUCT_USAGE_ACTIONS, PRODUCT_USAGE_AUTOMATIC_ACTIONS, PRODUCT_USAGE_FLOWS, PRODUCT_USAGE_SURFACES } from '../types/productUsage.js'
 import { DAILY_PRODUCT_METRICS } from './dailyProductUsage.js'
 
 type Row = { dayUtc: Date; metric: string; value: number }
@@ -124,12 +124,19 @@ export function dailyProductReview(rows: Row[], now: Date) {
       launchAttempts: c.launch_started ?? null, observedLaunchesCreated: c.launch_created ?? null,
       interpretation: 'Post-sign-in first-use signals; these stage counts are not one signup cohort or a signup conversion rate. Already installed clients enter measurement when updated.' },
     feedback: Object.fromEntries(PRODUCT_FEEDBACK.map(answer => [answer, c[`feedback_${answer}`] ?? 0])),
-    features: PRODUCT_USAGE_ACTIONS.map(action => ({ action, requests: c[`${action}_requests`] ?? 0,
-      installationDays: c[`${action}_installation_days`] ?? null,
-      firstMeasuredInstallations: c[`${action}_first_installations`] ?? null,
-      repeatInstallationDays: c[`${action}_repeat_installation_days`] ?? null,
-      interpretation: 'An operation was requested, possibly automatically. Reach is installation-days, not unique people, UI clicks or successful feature use.',
-    })),
+    features: PRODUCT_USAGE_ACTIONS.map(action => {
+      // The apps make these reads on their own; clients before the split still send their reach.
+      const automatic = PRODUCT_USAGE_AUTOMATIC_ACTIONS.includes(action)
+      const reach = (measure: string) => automatic ? null : c[`${action}_${measure}`] ?? null
+      return { action, automatic, requests: c[`${action}_requests`] ?? 0,
+        installationDays: reach('installation_days'),
+        firstMeasuredInstallations: reach('first_installations'),
+        repeatInstallationDays: reach('repeat_installation_days'),
+        interpretation: automatic
+          ? 'Requested by the apps on their own (after updates, on connect, for previews): reliability and latency only, not feature use.'
+          : 'An operation was requested, possibly automatically. Reach is installation-days, not unique people, UI clicks or successful feature use.',
+      }
+    }),
     measurementHealth: { updatedInstallationDays: c.measurement_v2_installation_days ?? null,
       queuePruning: c.measurement_queue_pruned ?? 0, turnObservationOverflow: c.turn_observation_overflow ?? 0,
       interpretation: 'Loss signals establish incomplete coverage; no loss signal does not prove complete collection.',
