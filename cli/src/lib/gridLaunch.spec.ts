@@ -786,9 +786,9 @@ describe('web tools (grid ADR 0041)', () => {
 
   it("takes Claude Code's built-in web tools away on every grid launch, web tools or not", () => {
     // `WebSearch` is an Anthropic SERVER tool (`web_search_20250305`) that no grid runs, and
-    // `WebFetch` summarises through a haiku call on the same base URL, which the relay answers
-    // `503 no_providers_available`. Both are dead on a grid, with or without a replacement, and a
-    // model offered a dead tool reaches for it first.
+    // `WebFetch` summarises through a haiku call on the same base URL, which the relay refuses
+    // (`404 model_not_found`, or `503 no_providers_available` on a grid with no engine yet). Both are
+    // dead on a grid, with or without a replacement, and a model offered a dead tool reaches for it first.
     for (const override of [OVERRIDE, WITH_MODEL, WITH_MCP]) {
       expect(launchOf('claude', override).args).toContain('--disallowedTools=WebSearch,WebFetch')
     }
