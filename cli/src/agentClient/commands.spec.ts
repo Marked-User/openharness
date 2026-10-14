@@ -305,7 +305,11 @@ describe('harness show', () => {
     expect(h.err.at(-1)).toBe('"review" could be review-a (review-a, idle), review-b (review-b, idle). Use more of the name, or the id.')
     expect(await showCommand(['solo'], h.deps)).toBe(EXIT.failed)
     expect(await showCommand(['nobody'], h.deps)).toBe(EXIT.failed)
-    expect(h.err.at(-1)).toBe('No harness named "nobody" on this machine. `harness ps` lists them.')
+    expect(h.err.at(-1)).toBe('No harness named "nobody" on this machine. `harness ps` lists them. One on another of your machines: add --machine <name> (`harness ps --machine <name>` lists those).')
+    // An MCP client has no `--machine` to give.
+    const mcp = harness(d, { pane: undefined, env: { HARNESS_VIA_MCP: '1' } })
+    expect(await showCommand(['nobody'], mcp.deps)).toBe(EXIT.failed)
+    expect(mcp.err.at(-1)).toBe('No harness named "nobody" on this machine. `harness_list` lists them.')
   })
 
   it('prefers a live harness over a stopped one of the same name', async () => {
@@ -1144,5 +1148,164 @@ describe('an agent asking again for a harness it already has', () => {
     await origin.created('m', { id: 'k5', name: 'cx' }, 'c5')
     expect(h.ledger.pendingOf({ machineId: 'm', agentId: 'lead' }, NOW)).toEqual([])
     expect(h.ledger.parentOf({ machineId: 'm', agentId: 'k5' })?.child).toEqual({ machineId: 'm', agentId: 'k5', name: 'cx', creationId: 'c5' })
+  })
+})
+
+describe('a harness on another machine, named with --machine', () => {
+  // The lamp (lamp-4ace, 2026-10-14 21:36): a program outside Harness ran `harness new claude @office lamp-first-task`,
+  // then could not read the answer with `show` or `wait`. It is the person here: no pane, no agent in its shell.
+  const machines = async () => [
+    { machineId: 'm', label: 'studio', status: 'online', current: true },
+    { machineId: 'office-id', label: 'office', status: 'online', current: false },
+    { machineId: 'mini-id', label: 'Mac mini', status: 'online', current: false },
+  ]
+  const answered = [{ events: [ev('user_message', { content: 'What is 2+2?' }), ev('text_delta', { content: 'Four.' })], hasMore: false }]
+  const lamp = () => {
+    const d = new FakeDaemon(), office = new FakeDaemon('office-id')
+    office.frames = [frame('lamp-first-task', { engine: 'claude' })]
+    office.pages.set('s-lamp-first-task', answered)
+    return { d, office, h: harness(d, { pane: undefined, machines, others: { 'office-id': office } }) }
+  }
+
+  it('shows it through that machine, which a name alone does not reach', async () => {
+    const { d, office, h } = lamp()
+    expect(await showCommand(['lamp-first-task'], h.deps)).toBe(EXIT.failed)
+    expect(h.err[0]).toMatch(/^No harness named "lamp-first-task" on this machine\. .*add --machine <name>/)
+    expect(await showCommand(['--machine', 'office', 'lamp-first-task', '--json'], h.deps)).toBe(EXIT.ok)
+    expect(JSON.parse(h.out.join('\n'))).toMatchObject({ name: 'lamp-first-task', machine: 'office', state: 'idle', startedBy: 'person', ask: 'What is 2+2?', answer: 'Four.' })
+    expect(office.requests.map((r) => r.type)).toEqual(['agents_list', 'agent_close', 'session_get'])
+    expect(office.closed).toBe(true)
+    expect(d.closed).toBe(true)
+    // The option after the name or before it, `--machine=`, a name's start, and a machine by its id or the start of its
+    // name.
+    h.out.length = 0
+    expect(await showCommand(['lamp', '--machine=office-id'], h.deps)).toBe(EXIT.ok)
+    expect(h.out[0]).toBe('lamp-first-task · Claude Code · office · idle · started by person')
+    expect(h.out).toContain('Four.')
+    // More of the answer is asked for on that machine too, as it was named.
+    h.out.length = 0
+    expect(await showCommand(['--machine', 'off', 'lamp-first-task', '--chars', '2'], h.deps)).toBe(EXIT.ok)
+    expect(h.out.at(-1)).toBe('… 3 more characters: harness show --machine off lamp-first-task --chars 5')
+  })
+
+  it('refuses the old @machine with what to type, before asking any machine', async () => {
+    const { d, office, h } = lamp()
+    expect(await showCommand(['@office', 'lamp-first-task'], h.deps)).toBe(EXIT.usage)
+    expect(h.err[0]).toBe('Name the machine with --machine office.')
+    expect(await waitCommand(['lamp-first-task', '@Mac mini'], h.deps)).toBe(EXIT.usage)
+    expect(h.err).toContain('Name the machine with --machine "Mac mini".')
+    expect(await psCommand(['@'], h.deps)).toBe(EXIT.usage)
+    expect(h.err).toContain('Name the machine with --machine <name>.')
+    expect(d.requests).toEqual([])
+    expect(office.requests).toEqual([])
+  })
+
+  it('reads this machine as without --machine, and says what it cannot find there or which machine it does not know', async () => {
+    const { d, office, h } = lamp()
+    d.frames = [frame('here')]
+    expect(await showCommand(['--machine', 'studio', 'here', '--json'], h.deps)).toBe(EXIT.ok)
+    expect(JSON.parse(h.out.join('\n'))).toMatchObject({ name: 'here', machine: 'studio' })
+    expect(office.requests).toEqual([])
+    expect(await showCommand(['--machine', 'office', 'nobody'], h.deps)).toBe(EXIT.failed)
+    expect(h.err.at(-1)).toBe('No harness named "nobody" on office. `harness ps --machine office` lists them.')
+    expect(await showCommand(['--machine', 'nowhere', 'x', '--json'], h.deps)).toBe(EXIT.failed)
+    expect(JSON.parse(h.out.at(-1)!)).toEqual({ error: 'UNKNOWN_MACHINE', detail: 'No machine called “nowhere”. Yours: studio, office, Mac mini.' })
+    // A machine that is not linked here says so.
+    expect(await showCommand(['--machine', 'mini', 'x'], h.deps)).toBe(EXIT.failed)
+    expect(h.err.at(-1)).toBe('not linked')
+    expect(await showCommand(['x', '--machine'], h.deps)).toBe(EXIT.usage)
+    expect(await showCommand(['--machine', '--json', 'x'], h.deps)).toBe(EXIT.usage)
+    expect(await showCommand(['--machine=', 'x'], h.deps)).toBe(EXIT.usage)
+    expect(h.err.filter((l) => l === '--machine needs a value.')).toHaveLength(3)
+    expect(await showCommand(['--machine', 'office', '--machine', 'mini', 'x'], h.deps)).toBe(EXIT.usage)
+    expect(h.err).toContain('Name one machine.')
+    // Without the account's machines to resolve it against, it is refused rather than guessed.
+    const bare = harness(d, { pane: undefined })
+    expect(await showCommand(['--machine', 'office', 'x'], bare.deps)).toBe(EXIT.failed)
+    expect(bare.err).toEqual(['Harness could not list your machines here.'])
+  })
+
+  it('waits on it through that machine, every name there, and names the next step with its machine', async () => {
+    const { office, h } = lamp()
+    office.frames.push(frame('second'))
+    office.screens.set('lamp-first-task', ['working', 'idle'])
+    office.pages.set('s-second', answered)
+    expect(await waitCommand(['--machine', 'office', 'lamp-first-task,second'], h.deps)).toBe(EXIT.ok)
+    expect(h.out).toEqual(['lamp-first-task: idle · read it: harness show --machine office lamp-first-task', 'second: idle · read it: harness show --machine office second'])
+    expect(office.closed).toBe(true)
+    // A machine with a space in its name is quoted.
+    const mini = new FakeDaemon('mini-id')
+    mini.frames = [frame('gpu')]
+    mini.pages.set('s-gpu', answered)
+    const spaced = harness(new FakeDaemon(), { pane: undefined, machines, others: { 'mini-id': mini } })
+    expect(await waitCommand(['--machine', 'Mac mini', 'gpu'], spaced.deps)).toBe(EXIT.ok)
+    expect(spaced.out).toEqual(['gpu: idle · read it: harness show --machine "Mac mini" gpu'])
+  })
+
+  it('lists that machine\'s harnesses, asking it what each is about', async () => {
+    const { d, office, h } = lamp()
+    d.frames = [frame('local-one')]
+    expect(await psCommand(['--machine', 'office'], h.deps)).toBe(EXIT.ok)
+    const text = h.out.join('\n')
+    expect(text).toMatch(/^NAME +AGENT/)
+    expect(text).toMatch(/lamp-first-task +Claude Code +idle +person /)
+    expect(text).toContain('lamp-first-task recap')
+    expect(text).not.toContain('local-one')
+    expect(office.requests.filter((r) => r.type === 'agent_recent').map((r) => r.payload.agentId)).toEqual(['lamp-first-task'])
+    expect(d.requests.filter((r) => r.type === 'agent_recent')).toEqual([])
+    expect(office.closed).toBe(true)
+    h.out.length = 0
+    expect(await psCommand(['--machine', 'office', '--json'], h.deps)).toBe(EXIT.ok)
+    expect(JSON.parse(h.out.join('\n'))).toMatchObject({ you: null, machine: 'office', harnesses: [{ name: 'lamp-first-task', machine: 'office' }] })
+    office.frames = []
+    h.out.length = 0
+    expect(await psCommand(['--machine', 'office'], h.deps)).toBe(EXIT.ok)
+    expect(h.out).toEqual(['No harnesses on office.'])
+    expect(await psCommand(['--machine', 'office', 'x'], h.deps)).toBe(EXIT.usage)
+    expect(h.err[0]).toBe('harness ps takes no names. To read one: harness show --machine office x')
+  })
+
+  it('closes one there as here: the person anything, an agent only what it started', async () => {
+    const { d, office, h } = lamp()
+    expect(await closeCommand(['--machine', 'office', 'lamp-first-task'], h.deps)).toBe(EXIT.ok)
+    expect(h.out).toEqual(['Closed lamp-first-task. Its conversation is kept.'])
+    expect(office.requests.at(-1)).toMatchObject({ type: 'agent_close', payload: { agentId: 'lamp-first-task', mode: 'idle' } })
+    // One still working is waited for on its machine.
+    office.extra.agent_close = (p) => (p.mode === 'inspect' ? { activity: 'working' } : { error: 'SESSION_NOT_IDLE', activity: 'working' })
+    expect(await closeCommand(['--machine', 'office', 'lamp-first-task'], h.deps)).toBe(EXIT.failed)
+    expect(h.err.at(-1)).toBe('lamp-first-task is working. Wait for it (harness wait --machine office lamp-first-task), or close it anyway with --now.')
+    delete office.extra.agent_close
+    // An agent in a pane here: `--machine office` gives it no more than it has here.
+    d.frames = [frame('lead', { engine: 'claude' })]
+    office.frames.push(frame('kid'))
+    const agent = harness(d, { machines, others: { 'office-id': office } })
+    expect(await closeCommand(['--machine', 'office', 'lamp-first-task'], agent.deps)).toBe(EXIT.failed)
+    expect(agent.err[0]).toBe('You did not start lamp-first-task, so you may not close it. Only the person can.')
+    started(agent.ledger, 'lead', 'kid', 'office-id')
+    expect(await closeCommand(['--machine', 'office', 'kid'], agent.deps)).toBe(EXIT.ok)
+    expect(office.requests.at(-1)).toMatchObject({ type: 'agent_close', payload: { agentId: 'kid' } })
+  })
+
+  it('follows an agent\'s harness that has not started on that machine, and only that machine\'s', async () => {
+    const d = new FakeDaemon(), office = new FakeDaemon('office-id')
+    d.frames = [frame('lead', { engine: 'claude' })]
+    const launching = () => ({ state: 'pending', held: { service: 'launch', detail: 'Waiting for launch preparation.' } })
+    office.extra.agent_create_status = launching
+    d.extra.agent_create_status = launching
+    const h = harness(d, { machines, others: { 'office-id': office } })
+    const asked = (name: string, creationId: string, machineId: string) => h.ledger.append({
+      at: NOW, depth: 1, by: { machineId: 'm', agentId: 'lead', name: 'lead', engine: 'claude' }, creation: { machineId, creationId, name, engine: 'codex' },
+    })
+    asked('far', 'c1', 'office-id'); asked('near', 'c2', 'm')
+    expect(await psCommand(['--machine', 'office'], h.deps)).toBe(EXIT.ok)
+    const text = h.out.join('\n')
+    expect(text).toMatch(/\nfar +Codex +starting +you /)
+    expect(text).toContain('far has not started yet: it is starting (Waiting for launch preparation). It starts by itself; wait for it with harness wait --machine office far.')
+    expect(text).not.toContain('near')
+    expect(await showCommand(['--machine', 'office', 'far'], h.deps)).toBe(EXIT.failed)
+    expect(h.err.at(-1)).toBe('far has not started yet: it is starting (Waiting for launch preparation). It starts by itself; wait for it with harness wait --machine office far.')
+    // `near` is starting on this machine, not office.
+    expect(await showCommand(['--machine', 'office', 'near'], h.deps)).toBe(EXIT.failed)
+    expect(h.err.at(-1)).toBe('No harness named "near" on office. `harness ps --machine office` lists them.')
   })
 })

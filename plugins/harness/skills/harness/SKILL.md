@@ -67,8 +67,8 @@ the person can watch and step in.
 ## The verbs
 
 ```
-harness ps [--all]                                  # the harnesses here
-harness new [agent] [@machine] [folder | project] --name <name> -- <task>
+harness ps [--all] [--machine <name>]               # the harnesses here, or on another machine
+harness new [agent] [--machine <name>] [folder | project] --name <name> -- <task>
 harness wait <name>[,<name>…] [--any] [--timeout 30m]
 harness show <name> [--chars N]                     # its state, the last ask and its answer
 harness send <name> "text"                          # a teammate in this tab, while Agent Messages are on
@@ -78,7 +78,8 @@ harness close <name> [--now]                        # when you are done with one
 - **Always `--name`** what you start (`--name reviewer`): an unnamed harness takes its session's title, which
   changes. Every verb also takes the start of an id.
 - `agent` is `claude` (the default), `codex`, or another agent installed on that machine. The folder defaults
-  to the current directory.
+  to the current directory. `--machine <name>` starts it on another of the person's machines (`harness machines`
+  lists them); `show`, `wait` and `close` then find it by its name.
 - For scratch or new work, give a project name (`harness new codex review -- …`, which makes `~/harnesses/review`)
   rather than a folder of your own: Claude Code and Codex ask the person to trust a folder Harness did not make.
 - Put the whole task in `-- <task>`: what to do, where, what done looks like, and what to answer with. A task

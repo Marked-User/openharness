@@ -335,7 +335,7 @@ export function startAgentMessages(core: CoreApi, options: MessagesOptions = {})
   }
 
   /**
-   * Another of the owner's machines started a harness here for one of its agents (`harness new @this-machine`): kept
+   * Another of the owner's machines started a harness here for one of its agents (`harness new --machine <this machine>`): kept
    * in this machine's record too, so the new harness's depth and this machine's limits count it.
    */
   function started(payload: Record<string, unknown>): Record<string, unknown> {

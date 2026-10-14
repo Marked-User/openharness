@@ -78,7 +78,7 @@ export const TOOLS: Tool[] = [
       // (a clean VM, CLI 0.3.75, 2026-10-11). Both given, `harness new` says to name one.
       const folder = str(a.folder), project = str(a.project)
       const where = folder ? [isAbsolute(folder) || folder.startsWith('~') ? folder : resolve(cwd, folder)] : []
-      return ['new', str(a.agent) || 'claude', ...(str(a.machine) ? [`@${str(a.machine)}`] : []), ...where,
+      return ['new', str(a.agent) || 'claude', ...(str(a.machine) ? ['--machine', str(a.machine)] : []), ...where,
         ...(project || !folder ? ['--new', ...(project ? [project] : [])] : []),
         '--name', str(a.name), '--task', typeof a.task === 'string' ? a.task : '']
     },

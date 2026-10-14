@@ -15,10 +15,11 @@ describe('harness new: the words', () => {
     })
   })
 
-  it('reads agent, @machine and a folder in any order', () => {
-    const typed = parseNewArgs(['codex', '@mini', '~/code/auth'], env)
+  it('reads agent, --machine and a folder in any order', () => {
+    const typed = parseNewArgs(['codex', '--machine', 'mini', '~/code/auth'], env)
     expect(typed).toMatchObject({ agent: 'codex', machine: 'mini', cwd: '~/code/auth', projectName: null })
-    expect(parseNewArgs(['~/code/auth', '@mini', 'codex'], env)).toEqual(typed)
+    expect(parseNewArgs(['~/code/auth', '--machine', 'mini', 'codex'], env)).toEqual(typed)
+    expect(parseNewArgs(['codex', '--machine', 'Mac mini'], env)).toMatchObject({ machine: 'Mac mini' })
     // On this machine ~ and relative paths are resolved here, from where it was run.
     expect(parseNewArgs(['codex', '~/code/auth'], env).cwd).toBe('/home/me/code/auth')
     expect(parseNewArgs(['codex', './api'], env).cwd).toBe('/work/repo/api')
@@ -30,27 +31,36 @@ describe('harness new: the words', () => {
     expect(parseNewArgs(['codex', '--new'], env)).toMatchObject({ cwd: null, projectName: '' })
     expect(parseNewArgs(['--new', 'my game', 'codex'], env)).toMatchObject({ agent: 'codex', projectName: 'my game' })
     // Another machine has no "here": with nothing named it is a new project there.
-    expect(parseNewArgs(['codex', '@mini'], env)).toMatchObject({ machine: 'mini', cwd: null, projectName: '' })
+    expect(parseNewArgs(['codex', '--machine', 'mini'], env)).toMatchObject({ machine: 'mini', cwd: null, projectName: '' })
+  })
+
+  it('refuses the old @machine, saying what to type, rather than making a project called "@office" here', () => {
+    // `harness new claude @office lamp-first-task` named office until 2026-10-14; read as a word now, it would be this
+    // machine and a project of that name.
+    expect(() => parseNewArgs(['claude', '@office', 'lamp-first-task'], env)).toThrow(new NewUsageError('Name the machine with --machine office.'))
+    expect(() => parseNewArgs(['claude', '@Mac mini'], env)).toThrow(new NewUsageError('Name the machine with --machine "Mac mini".'))
+    expect(() => parseNewArgs(['@'], env)).toThrow(new NewUsageError('Name the machine with --machine <name>.'))
+    expect(() => parseNewArgs(['codex', '--new', '@office'], env)).toThrow(new NewUsageError('Name the machine with --machine office.'))
   })
 
   it('takes the task after --, or as --task, with nothing to quote', () => {
     expect(parseNewArgs(['codex', '--', 'fix', 'the', 'flaky', 'login', 'test'], env)).toMatchObject({ agent: 'codex', prompt: 'fix the flaky login test', cwd: '/work/repo' })
     expect(parseNewArgs(['--task', 'write the README'], env).prompt).toBe('write the README')
     // Words after -- are never read as an agent, a machine or a folder.
-    expect(parseNewArgs(['--', '@mini', '~/x'], env)).toMatchObject({ agent: 'claude', machine: null, prompt: '@mini ~/x' })
+    expect(parseNewArgs(['--', '@mini', '--machine', '~/x'], env)).toMatchObject({ agent: 'claude', machine: null, prompt: '@mini --machine ~/x' })
   })
 
   it('reads a path the shell already expanded as the other machine\'s home', () => {
-    // `harness new codex @mini ~/code/auth`, unquoted: zsh hands over /home/me/code/auth.
-    expect(parseNewArgs(['codex', '@mini', '/home/me/code/auth'], env).cwd).toBe('~/code/auth')
-    expect(parseNewArgs(['codex', '@mini', '/home/me'], env).cwd).toBe('~')
-    expect(parseNewArgs(['codex', '@mini', '/srv/app'], env).cwd).toBe('/srv/app')
+    // `harness new codex --machine mini ~/code/auth`, unquoted: zsh hands over /home/me/code/auth.
+    expect(parseNewArgs(['codex', '--machine', 'mini', '/home/me/code/auth'], env).cwd).toBe('~/code/auth')
+    expect(parseNewArgs(['codex', '--machine', 'mini', '/home/me'], env).cwd).toBe('~')
+    expect(parseNewArgs(['codex', '--machine', 'mini', '/srv/app'], env).cwd).toBe('/srv/app')
     // On this machine an absolute path is just that.
     expect(parseNewArgs(['codex', '/home/me/code/auth'], env).cwd).toBe('/home/me/code/auth')
   })
 
   it('says what is wrong instead of guessing', () => {
-    for (const argv of [['a', 'b', 'c'], ['@'], ['@a', '@b'], ['/x', '/y'], ['codex', 'game', '/x'], ['--mode', 'yolo'], ['--prompt'], ['--wat'], ['-x'], ['codex', '..'], ['codex', '@mini', './rel']]) {
+    for (const argv of [['a', 'b', 'c'], ['--machine'], ['--machine', '--json'], ['--machine', ' '], ['--machine', 'a', '--machine', 'b'], ['/x', '/y'], ['codex', 'game', '/x'], ['--mode', 'yolo'], ['--prompt'], ['--wat'], ['-x'], ['codex', '..'], ['codex', '--machine', 'mini', './rel']]) {
       // `codex ..` is a folder, not an error; every other row must throw.
       if (argv.join(' ') === 'codex ..') { expect(parseNewArgs(argv, env).cwd).toBe('/work'); continue }
       expect(() => parseNewArgs(argv, env), argv.join(' ')).toThrow(NewUsageError)
@@ -65,8 +75,8 @@ describe('harness new: the words', () => {
     // Here, in a folder, or on another machine (its home): as before.
     expect(parseNewArgs(['terminal'], env)).toMatchObject({ agent: 'terminal', cwd: env.cwd, projectName: null })
     expect(parseNewArgs(['terminal', '~/code'], env)).toMatchObject({ cwd: `${env.home}/code`, projectName: null })
-    expect(parseNewArgs(['terminal', '@mini'], env)).toMatchObject({ machine: 'mini', cwd: null, projectName: '' })
-    expect(newAgentPayload(parseNewArgs(['terminal', '@mini'], env), null)).not.toHaveProperty('projectSource')
+    expect(parseNewArgs(['terminal', '--machine', 'mini'], env)).toMatchObject({ machine: 'mini', cwd: null, projectName: '' })
+    expect(newAgentPayload(parseNewArgs(['terminal', '--machine', 'mini'], env), null)).not.toHaveProperty('projectSource')
   })
 
   it('sends what the app sends', () => {
@@ -198,12 +208,41 @@ describe('harness new: the daemon', () => {
   it('asks another machine where its home is before using ~', async () => {
     const socket = new FakeSocket((frame) => frame.type === 'fs_list_dir' ? { path: '/Users/mini', entries: [] }
       : frame.type === 'agent_create' ? { state: 'created', agent: { id: 'a2', name: 'auth' } } : null)
-    const d = deps(['codex', '@mini', '~/code/auth', '--json'], socket)
+    const d = deps(['codex', '--machine', 'mini', '~/code/auth', '--json'], socket)
     expect(await newCommand(d)).toBe(0)
     expect(socket.sent[0]!.payload.machineId).toBe('m1')
     expect(socket.sent.map((frame) => frame.type)).toEqual(['machine_select', 'fs_list_dir', 'agent_create'])
     expect(socket.sent[2]!.payload.cwd).toBe('/Users/mini/code/auth')
     expect(JSON.parse(d.out[0]!)).toMatchObject({ ok: true, machineId: 'm1', agent: { id: 'a2' } })
+  })
+
+  it('tells a person or a program that started one on another machine how to read it and wait for it from here', async () => {
+    // The lamp (lamp-4ace, 2026-10-14 21:36), a program outside Harness: `harness new claude @office lamp-first-task`
+    // told it only ⌘O, and `show` and `wait` without the machine looked on the lamp alone.
+    const created = (agent: Record<string, unknown>) => new FakeSocket((frame) => frame.type === 'agent_create' ? { state: 'created', agent } : null)
+    const lamp = deps(['claude', '--machine', 'mini', 'lamp-first-task', '--', 'What is 2+2?'], created({ id: 'a9b8c7d6e5', name: 'lamp-first-task' }))
+    expect(await newCommand(lamp)).toBe(0)
+    expect(lamp.out).toEqual([
+      'Created lamp-first-task on Mac mini.',
+      'Open it in Harness with ⌘O.',
+      'Read it: harness show --machine mini lamp-first-task · wait for it: harness wait --machine mini lamp-first-task',
+    ])
+    // A machine named with a space is quoted; a harness whose name is a sentence is called by its id.
+    const spaced = deps(['claude', '--machine', 'Mac mini', 'scratch'], created({ id: 'a9b8c7d6e5', name: 'Claude harness 10-14 9:36' }))
+    expect(await newCommand(spaced)).toBe(0)
+    expect(spaced.out.at(-1)).toBe('Read it: harness show --machine "Mac mini" a9b8c7d6 · wait for it: harness wait --machine "Mac mini" a9b8c7d6')
+    // This computer, named or not, is read without one, as before.
+    const here = deps(['claude', '--machine', 'MacBook'], created({ id: 'h1', name: 'here' }))
+    expect(await newCommand(here)).toBe(0)
+    expect(here.out.at(-1)).toBe('Open it in Harness with ⌘O.')
+  })
+
+  it('refuses the old @machine before asking anything of a machine, and says what to type', async () => {
+    const socket = new FakeSocket(() => null)
+    const old = deps(['claude', '@office', 'lamp-first-task', '--', 'What is 2+2?'], socket)
+    expect(await newCommand(old)).toBe(2)
+    expect(old.err[0]).toBe('Name the machine with --machine office.')
+    expect(socket.sent).toEqual([])
   })
 
   it('reads a store harness\'s engine off the machine, and will not create one that is not installed', async () => {
@@ -505,13 +544,13 @@ describe('harness new: the daemon', () => {
     const here = created('kid')
     expect(await newCommand(deps(['codex', '--', 'review it'], here, { origin: async () => origin }))).toBe(0)
     expect(here.sent[1]!.payload).toMatchObject({ startedBy: 'agent', parentAgentId: 'lead-agent' })
-    // `@this computer` is still here.
+    // `--machine <this computer>` is still here.
     const named = created('kid2')
-    expect(await newCommand(deps(['codex', '@MacBook', '--', 'go'], named, { origin: async () => origin }))).toBe(0)
+    expect(await newCommand(deps(['codex', '--machine', 'MacBook', '--', 'go'], named, { origin: async () => origin }))).toBe(0)
     expect(named.sent.find((frame) => frame.type === 'agent_create')!.payload.parentAgentId).toBe('lead-agent')
     // Another machine has no harness by that id: it records only that an agent started it.
     const far = created('far')
-    expect(await newCommand(deps(['codex', '@mini', '~/w', '--', 'go'], far, { origin: async () => origin }))).toBe(0)
+    expect(await newCommand(deps(['codex', '--machine', 'mini', '~/w', '--', 'go'], far, { origin: async () => origin }))).toBe(0)
     const farCreate = far.sent.find((frame) => frame.type === 'agent_create')!.payload
     expect(farCreate.startedBy).toBe('agent')
     expect(farCreate).not.toHaveProperty('parentAgentId')
@@ -699,7 +738,7 @@ describe('harness new: a folder the engine would ask about', () => {
     expect(await newCommand(person)).toBe(0)
     expect(person.out).toEqual([`Created mine on this computer in ${scratch}.`, 'Open it in Harness with ⌘O.'])
     // Another machine's folders and settings are not here to read.
-    const far = deps(['claude', '@mini', scratch], creating({ id: 'f1', name: 'far' }), { origin: async () => origin, env: c.env, home: c.home })
+    const far = deps(['claude', '--machine', 'mini', scratch], creating({ id: 'f1', name: 'far' }), { origin: async () => origin, env: c.env, home: c.home })
     expect(await newCommand(far)).toBe(0)
     expect(far.out).toEqual([`Created far on Mac mini in ${scratch}.`, 'Read it: harness show it'])
     // A store harness lays its template into an empty folder, which is then trusted; one with content is still asked about.

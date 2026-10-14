@@ -44,7 +44,7 @@ and the person's view of it.
 
 ```
 harness ps [--all]                                  # the harnesses here: state, who started each, what each is about
-harness new [agent] [@machine] [folder] --name N -- <task>     # exists; now knows when an agent runs it
+harness new [agent] [--machine <name>] [folder] --name N -- <task>   # exists; now knows when an agent runs it
 harness show <name> [--chars N]                     # its state, the last ask and the answer
 harness wait <name>[,<name>…] [--any] [--timeout 30m]
 harness send <name>[,<name>…] "text"                # exists (Agent Messages): teammates in its tab, while it is on, only
@@ -407,8 +407,12 @@ No core change, no new service.
   Two starts at the same moment from one harness can both pass the limits: they count what was recorded before.
 - **`send`**: nothing of its own. A harness messages another only in a tab the two share, while Agent Messages are
   on, like any teammate (`harness send` also takes the start of an id there).
-- **Another machine.** `new @mini` works as before; `show`, `wait` and `close` find a harness the caller started
-  there through its record and reach it over the paired relay.
+- **Another machine.** `new --machine mini` (it was `new @mini` until 2026-10-14); `show`, `wait` and `close` find a
+  harness the caller started there through its record and reach it over the paired relay. Anyone, a person or a
+  program outside Harness, names the machine for the rest: `ps`, `show`, `wait` and `close` take `--machine <name>`
+  too. A program on the lamp started `lamp-first-task` on office and could not read its answer, since only an
+  agent's starts are recorded (2026-10-14). `@mini` is refused with what to type instead, so a script that still
+  says it fails rather than starting a project called "@mini" here.
 
 ### Agent Messages off means off (owner, October 11, 2026)
 

@@ -63,7 +63,7 @@ import { apiCommand, apiUsage } from './lib/apiCommand.js'
 import { connectionsCommand, connectionsUsage } from './lib/connectors/command.js'
 import { remoteCommand } from './remoteCommand.js'
 import { tuiCommand } from './tui/index.js'
-import { newCommand } from './lib/newCommand.js'
+import { newCommand, type NewMachine } from './lib/newCommand.js'
 import { gridSetupCommand } from './lib/gridSetupCommand.js'
 import { WebSocket as NewCommandSocket } from 'ws'
 import { describeMasterStatus, readStatusFile } from './harnessd/master.js'
@@ -138,7 +138,7 @@ Machine:
   harness service status       what launchd or systemd has registered, and whether it runs (--json)
   harness logs export          zip the last 7 days of logs (app, CLI, dial, daemon) to the Desktop
   harness tui                  all of Harness in this terminal: swarms, panes, every machine (⌥O ⌥P ⌥N)
-  harness new [agent] [@machine] [folder|name] [-- task]
+  harness new [agent] [--machine <name>] [folder|name] [-- task]
                                make a harness from a shell: \`harness new\` is claude here; see \`harness new -h\`
   harness machines             list the machines on this account (this computer's is marked)
   harness search <words>       find the conversation on this computer that said them: every turn of
@@ -149,6 +149,8 @@ Machine:
   harness show <name>          a harness's state and last turn: what it was asked and what it answered
   harness wait <name>[,<name>] wait until they stop working (--any, --timeout 30m); exit 3 = needs the person
   harness close <name> [--now] save a harness's screen and stop it; an agent closes only what it started
+                               new, ps, show, wait and close take --machine <name> for another of your
+                               machines: \`harness show --machine office x\`
   harness mcp                  the agent verbs as an MCP server on stdin/stdout, for agents that use MCP
   harness settings [<name> on|off]  what agents may do (agents-start-agents, pull-request-line, agent-messages): your account's experiments in Settings ▸ Experimental, each off by default
   harness machines delete <id> remove ANOTHER machine (refuses this one; use \`harness logout\`)
@@ -2277,6 +2279,17 @@ function machineLabel(machine: OwnerMachineRow): string {
   return machine.name?.trim() || machine.hostname?.trim() || '(unnamed)'
 }
 
+/** The account's machines as `--machine` resolves them (`harness new`, `ps`, `show`, `wait`, `close`), and `remote` lists them. */
+async function ownedMachines(): Promise<NewMachine[]> {
+  const { session, headers } = await controlPlaneAuth()
+  return (await fetchMachines(headers)).map((machine) => ({
+    machineId: machine.machineId,
+    label: machineLabel(machine),
+    status: machine.status || 'unknown',
+    current: machine.machineId === session.machineId,
+  }))
+}
+
 /** True when `id` names this machine — accepts the short prefix the list prints, not just the full id. */
 function matchesMachineId(machineId: string, id: string): boolean {
   return machineId === id || machineId.startsWith(id)
@@ -2527,7 +2540,7 @@ switch (cmd) {
     openUrlCommand(rest).then(code => { process.exitCode = code }).catch(() => { process.exitCode = 1 })
     break
   case 'ps':
-    psCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    psCommand(rest, { machines: ownedMachines }).then(code => { process.exitCode = code }).catch(onError)
     break
   case 'settings':
     settingsCommand(rest, { port: daemonPort() }).then(code => { process.exitCode = code }).catch(onError)
@@ -2538,13 +2551,13 @@ switch (cmd) {
     break
   }
   case 'show':
-    showCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    showCommand(rest, { machines: ownedMachines }).then(code => { process.exitCode = code }).catch(onError)
     break
   case 'wait':
-    waitCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    waitCommand(rest, { machines: ownedMachines }).then(code => { process.exitCode = code }).catch(onError)
     break
   case 'close':
-    closeCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    closeCommand(rest, { machines: ownedMachines }).then(code => { process.exitCode = code }).catch(onError)
     break
   case 'orchestrator':
     orchestratorCommand(rest).then(code => { process.exitCode = code }).catch(onError)
@@ -2655,15 +2668,7 @@ switch (cmd) {
       port: daemonPort(),
       localMachineId: wantedDaemonIdentity(),
       daemonRunning: isDaemonRunning, unreachable: () => daemonUnreachableText(),
-      listMachines: async () => {
-        const { session, headers } = await controlPlaneAuth()
-        return (await fetchMachines(headers)).map((machine) => ({
-          machineId: machine.machineId,
-          label: machineLabel(machine),
-          status: machine.status || 'unknown',
-          current: machine.machineId === session.machineId,
-        }))
-      },
+      listMachines: ownedMachines,
       connect: (url) => new NewCommandSocket(url),
       output: (line) => console.log(line),
       error: (line) => console.error(line),
@@ -2682,15 +2687,7 @@ switch (cmd) {
       localMachineId: wantedDaemonIdentity(),
       port: daemonPort(),
       daemonRunning: isDaemonRunning, unreachable: () => daemonUnreachableText(),
-      listMachines: async () => {
-        const { session, headers } = await controlPlaneAuth()
-        return (await fetchMachines(headers)).map((machine) => ({
-          machineId: machine.machineId,
-          label: machineLabel(machine),
-          status: machine.status || 'unknown',
-          current: machine.machineId === session.machineId,
-        }))
-      },
+      listMachines: ownedMachines,
       isLinked: (machineId) => new MachinePeerStore().get(machineId) !== null,
       link: (machineId, password) => linkMachineWithPassword(machineId, password),
       promptPassword,

@@ -80,7 +80,7 @@ describe('harness mcp', () => {
     expect(r.calls.map((c) => c.argv)).toEqual([
       ['ps'], ['ps', '--all'],
       ['new', 'claude', '/work/here/app', '--name', 'reviewer', '--task', 'review it\nall of it'],
-      ['new', 'codex', '@mini', '/abs', '--name', 'gpu', '--task', 'train'],
+      ['new', 'codex', '--machine', 'mini', '/abs', '--name', 'gpu', '--task', 'train'],
       ['new', 'claude', '~/p', '--name', 'n', '--task', 'x'],
       ['wait', 'a,b', '--timeout', '45s'], ['wait', 'a', '--any', '--timeout', '600s'], ['wait', 'a', '--timeout', '2s'],
       ['show', 'a'], ['show', 'a', '--chars', '99'],
@@ -104,7 +104,7 @@ describe('harness mcp', () => {
     await answer(call('harness_start', { task: 'go', name: 'both', folder: 'app', project: 'p' }), d)
     expect(r.calls.map((c) => c.argv)).toEqual([
       ['new', 'claude', '--new', 'opinion', '--name', 'opinion', '--task', 'a second opinion'],
-      ['new', 'codex', '@mini', '--new', '--name', 'quick', '--task', 'go'],
+      ['new', 'codex', '--machine', 'mini', '--new', '--name', 'quick', '--task', 'go'],
       ['new', 'claude', '/work/here/app', '--new', 'p', '--name', 'both', '--task', 'go'],
     ])
     // As `harness new` reads them: a new project, one named by the clock, and a refusal to guess between the two.

@@ -93,16 +93,21 @@ the hook it installs.
 `harness new` makes a session from a shell, in the words the app's box uses, over this same socket:
 
 ```
-harness new                          claude, in the current directory
-harness new codex @mini ~/code/auth  codex, on the machine called mini, in that folder
-harness new codex my-game            codex, in a new project ~/harnesses/my-game
+harness new                                   claude, in the current directory
+harness new codex --machine mini ~/code/auth  codex, on the machine called mini, in that folder
+harness new codex my-game                     codex, in a new project ~/harnesses/my-game
 harness new --plan --prompt "fix the flaky login test"
 ```
 
-Words may come in any order: `@` marks the machine (id, name, or an unambiguous start of a word in
-it), a path looks like a path, the first other word is the agent and a second names a new project.
-`--mode auto|ask|plan|full`, `--name`, `--new [name]` and `--json` are the rest. There is still no
+Words may come in any order: a path looks like a path, the first other word is the agent and a
+second names a new project. `--machine <name>` picks the machine (id, name, or an unambiguous start
+of a word in it); `@mini`, the old way, is refused with what to type instead. `--mode
+auto|ask|plan|full`, `--name`, `--new [name]` and `--json` are the rest. There is still no
 `harness split`: panes are arranged in the app.
+
+`harness ps`, `show`, `wait` and `close` take `--machine <name>` too, to read, wait for or close a
+harness on another of your machines: `harness new claude --machine office --name check -- …`, then
+`harness wait --machine office check` and `harness show --machine office check`.
 
 ## Your devices
 

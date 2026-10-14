@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { readdir, readFile, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { step, VIA_MCP_ENV } from '../agentClient/commands.js'
+import { addressOf, atMachineRefusal, machineOption, step, VIA_MCP_ENV } from '../agentClient/commands.js'
 import { folderTrust } from '../engines/launchPrep.js'
 import { ENGINES, type AgentEngine } from '../engines/types.js'
 import { engineName } from '../messages/model.js'
@@ -18,19 +18,19 @@ const ENGINE_NAMES: ReadonlySet<string> = new Set(ENGINES)
  *
  *     harness new                          claude, here
  *     harness new codex                    codex, here
- *     harness new codex @mini ~/code/auth  codex, on mini, in that folder
- *     harness new codex my-game            codex, in a new project ~/harnesses/my-game
- *     harness new --new                    a new project named after the agent and the time
+ *     harness new codex --machine mini ~/code/auth  codex, on mini, in that folder
+ *     harness new codex my-game                     codex, in a new project ~/harnesses/my-game
+ *     harness new --new                             a new project named after the agent and the time
  *
  * A new terminal tab asks nothing and opens where you were; so does this. With no folder named it
  * works in the directory it was run from, which is what `cd repo && harness new` means to anyone who
  * has typed `code .` — and the one thing the app's box cannot know. The order of the words is free:
- * `@` marks the machine, a path looks like a path, the first other word is the agent and the second
- * names a new project.
+ * `--machine` names the machine, a path looks like a path, the first other word is the agent and the
+ * second names a new project.
  */
 export interface NewArgs {
   agent: string
-  /** A machine's label or id as typed after `@`, or null for this one. */
+  /** A machine's label or id as given to `--machine`, or null for this one. */
   machine: string | null
   /** The folder to work in, absolute; null when a new project is asked for instead. */
   cwd: string | null
@@ -50,12 +50,12 @@ export class NewUsageError extends Error {}
 export class NewHelpRequested extends Error {}
 
 export const NEW_USAGE = [
-  'Usage: harness new [agent] [@machine] [folder | project-name] [options]',
+  'Usage: harness new [agent] [--machine <name>] [folder | project-name] [options]',
   '',
   '  agent          claude (default), codex, opencode, …, or a store harness like owner/name',
-  '  @machine       a machine\'s name or id; this one when left out',
+  '  --machine <m>  a machine\'s name or id; this one when left out',
   '  folder         a path (/abs, ~/x, ./x, .): work there. Left out: the current directory.',
-  '                 With @machine, a path under THIS home is read as the same path under its home,',
+  '                 With --machine, a path under THIS home is read as the same path under its home,',
   '                 because the shell has already turned ~/x into /Users/you/x by the time it gets here',
   '  project-name   any other second word: a new project ~/harnesses/<name> on that machine.',
   '                 For scratch or new work give one (harness new codex review -- …), not a folder',
@@ -104,18 +104,23 @@ export function parseNewArgs(argv: string[], env: { cwd: string; home: string })
     else if (word === '--mode') { mode = value(word, i); modeGiven = true; i++ }
     else if (word === '--prompt' || word === '--task') { prompt = value(word, i); i++ }
     else if (word === '--name') { name = value(word, i); i++ }
+    else if (word === '--machine') {
+      if (machine !== null) throw new NewUsageError('Name one machine.')
+      machine = value(word, i).trim()
+      if (!machine) throw new NewUsageError('--machine needs a value.')
+      i++
+    }
     else if (word === '--new') {
+      // `--new @office`: the old machine word is refused below, never taken for the project's name.
       const next = argv[i + 1]
       if (next !== undefined && !next.startsWith('-') && !next.startsWith('@') && !looksLikePath(next)) { projectName = next; i++ }
       else projectName = ''
     }
     // Any dash: `-x` read as an agent called "-x" turns a typo into a confusing refusal from the machine.
     else if (word.startsWith('-')) throw new NewUsageError(`Unknown option ${word}.`)
-    else if (word.startsWith('@')) {
-      if (word.length === 1) throw new NewUsageError('Name a machine after @.')
-      if (machine !== null) throw new NewUsageError('Name one machine.')
-      machine = word.slice(1)
-    }
+    // `@office` named the machine until every command took `--machine`. Taken as a word now, it would quietly be a new
+    // project called "@office" on this machine: refused, with what to type instead.
+    else if (word.startsWith('@')) throw new NewUsageError(atMachineRefusal(word))
     else if (looksLikePath(word)) {
       if (folder !== null) throw new NewUsageError('Name one folder.')
       folder = word
@@ -195,12 +200,12 @@ export function newAgentPayload(args: NewArgs, cwd: string | null, baseEngine = 
 
 export interface NewMachine { machineId: string; label: string; status: string; current: boolean }
 
-/** The machine `@word` means: an exact id, else a label, case-blind; ambiguity is an error, not a guess. */
+/** The machine `--machine <word>` means: an exact id, else a label, case-blind; ambiguity is an error, not a guess. */
 export function resolveNewMachine(word: string, machines: NewMachine[]): NewMachine {
   const byId = machines.find((machine) => machine.machineId === word)
   if (byId) return byId
   const wanted = word.toLowerCase()
-  // The whole name, else its start, else a word in it: `@mini` is "Mac mini" to the person typing.
+  // The whole name, else its start, else a word in it: `--machine mini` is "Mac mini" to the person typing.
   const tiers = [
     (label: string) => label === wanted,
     (label: string) => label.startsWith(wanted),
@@ -593,6 +598,13 @@ export async function newCommand(deps: NewCommandDeps): Promise<number> {
         deps.output(`Created ${name} on ${machineLabel}${where}.`)
         if (trustNote) deps.output(trustNote)
         deps.output(origin ? origin.next(agent) : 'Open it in Harness with ⌘O.')
+        // Started on another machine by a person or a program, it is read and waited for through that machine, named as
+        // it was here. The lamp (lamp-4ace, 2026-10-14 21:36), a program outside Harness, started `lamp-first-task` on
+        // office this way and was told only ⌘O, which it has not got.
+        if (!origin && !local && args.machine !== null) {
+          const at = `${machineOption(args.machine)} ${addressOf({ machineId: '', agentId: String(agent.id ?? ''), name: String(agent.name ?? ''), engine: '' })}`
+          deps.output(`Read it: ${step(env, 'show', at)} · wait for it: ${step(env, 'wait', at)}`)
+        }
       }
       return 0
     } finally { session.close() }
