@@ -15,6 +15,20 @@ void main() {
       'fonts.css',
     ]);
   });
+  test('names the modules and data a page\'s own scripts load', () {
+    const html = '''<script type="module">import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+      import { OrbitControls } from "./controls.js"; import 'side-effect.js'; export { x } from "./x.js";
+      const lazy = await import("./lazy.js"); fetch('data.json').then(r => r.json());
+      const label = "import nothing from here";</script><p>import "prose" is not a script</p>''';
+    expect(outsideResources(html), [
+      'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js',
+      './controls.js',
+      'side-effect.js',
+      './x.js',
+      './lazy.js',
+      'data.json',
+    ]);
+  });
   test('a page that carries everything inside it loads nothing', () {
     expect(
       outsideResources(

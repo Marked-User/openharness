@@ -27,6 +27,21 @@ final _cssImport = RegExp(
   caseSensitive: false,
 );
 
+/// What a page's own scripts load: modules (`import … from "…"`, `import "…"`, `export … from "…"`,
+/// `import("…")`) and `fetch("…")`. A module from a CDN is the usual way a one-file page still needs
+/// the network (three.js from jsdelivr), and the sandbox blocks it.
+final _scriptBody = RegExp(
+  r'<script\b[^>]*>([\s\S]*?)</script>',
+  caseSensitive: false,
+);
+final _scriptLoads = [
+  RegExp(
+    r'''\b(?:import|export)\s*(?:[\w$*{}\s,]+?\s*from\s*)?["']([^"'\n]+)["']''',
+  ),
+  RegExp(r'''\bimport\s*\(\s*["']([^"'\n]+)["']\s*\)'''),
+  RegExp(r'''\bfetch\s*\(\s*["'`]([^"'`\n]+)["'`]'''),
+];
+
 String? _attribute(String tag, String name) {
   final match = RegExp(
     '\\s$name\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s>]+))',
@@ -56,6 +71,13 @@ List<String> outsideResources(String html) {
   }
   for (final match in _cssImport.allMatches(html)) {
     add(match[1]);
+  }
+  for (final script in _scriptBody.allMatches(html)) {
+    for (final pattern in _scriptLoads) {
+      for (final match in pattern.allMatches(script[1]!)) {
+        add(match[1]!.trim());
+      }
+    }
   }
   return found.toList();
 }
