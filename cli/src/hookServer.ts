@@ -31,6 +31,7 @@ import { isTrustedLocal, listenLocalSocket, type LocalSocketServer } from './lib
 import { currentBootId } from './lib/bootId.js'
 import { secureStateDirectory } from './lib/secureState.js'
 import type { NativeHookClaim, NativeHookDelivery } from './engines/kit/nativeHookJournal.js'
+import type { CapturedStop, CapturedStopOutcome, StopHook } from './core/turns/turnHooks.js'
 import { openNativeHookStorage, type NativeHookStorage } from './engines/kit/nativeHookStorage.js'
 import { createNativeHookReplay } from './engines/kit/nativeHookReplay.js'
 import { sendNativeHookRequest } from './engines/kit/nativeHookTransport.js'
@@ -112,6 +113,8 @@ export interface HookServerHandlers {
   onAdmissionStop?: (entry: RegisteredSession, unmatched: boolean) => boolean
   /** Captured before a same-conversation registration waits; Cancel or forget supersedes that Stop. */
   captureAdmissionStop?: (entry: RegisteredSession) => () => boolean
+  /** Snapshot the original turn before admission yields; completion covers the whole Stop effect. */
+  captureTurnStop?: (entry: RegisteredSession, body: StopHook) => CapturedStop
   onPromptSubmitted?: (agentId: string, prompt: string) => void
   /** A session's UserPromptSubmit hook, and when its engine ran it (`X-Harness-Hook-Fired-At`): what a Stop
    *  that arrives late is told apart from the turn the prompt opened by (core/turns/turnHooks.ts). */
@@ -420,7 +423,8 @@ export function startHookServer(
   const recoveryHolds = new Map<string, string>()
   type StopAcknowledgement = { status: number; reply: unknown }
   type LinkedStop = (body: BoundHookBody, firedAt: number | undefined) => StopAcknowledgement | Promise<StopAcknowledgement>
-  type Receipt = { fingerprint: string; status: number; reply: unknown; pending: boolean; bytes: number; linkedStop?: LinkedStop }
+  type Receipt = { fingerprint: string; status: number; reply: unknown; pending: boolean; bytes: number; linkedStop?: LinkedStop;
+    preparing?: { stopEffect?: CapturedStop; stopCurrent?: () => boolean } }
   const admissionReceipts = new Map<string, { scope: string; records: Map<string, Receipt> }>()
   const resolvingStops = new Map<string, { fingerprint: string; stop: LinkedStop }>()
   let receiptCount = 0, receiptBytes = 0
@@ -743,11 +747,14 @@ export function startHookServer(
     // must match this exact process/conversation before the witness applies.
     const preliminary = carriesStop && body.sessionId ? registry.bySession(body.sessionId) : undefined
     const stopScope = preliminary?.engine === engine ? scopeOf(preliminary) : undefined
-    const stopWitness = stopScope ? handlers.captureAdmissionStop?.(preliminary!) : undefined
-    let deferred = false
+    const priorReceipt = preliminary && admissionReceipts.get(preliminary.agentId)?.records.get(deliveryId)
+    const stopWitness = priorReceipt?.preparing?.stopCurrent
+      ?? (stopScope && !priorReceipt ? handlers.captureAdmissionStop?.(preliminary!) : undefined)
+    let stopEffect = priorReceipt?.preparing?.stopEffect ?? (stopScope && !priorReceipt && !native.recovery ? handlers.captureTurnStop?.(preliminary!, {
+      sessionId: body.sessionId!, status: body.status, firedAt: admissionOrder.firedAt,
+    }) : undefined)
     if (carriesStop) resolvingStops.set(deliveryId, { fingerprint, stop: (stop, firedAt) => {
       if (stopProvenance(stop, firedAt) !== originalStop) return conflict
-      deferred = true
       return { status: 202, reply: { pending: false, retry: true, detail: 'Waiting for the engine process record; Stop admission is not queued yet.' } }
     } })
     let processAgent: RegisteredSession | null
@@ -772,7 +779,7 @@ export function startHookServer(
         // as for a transcript not yet written below, and the wait goes on here.
         // Hermes admission has a separate bounded queue after resolution. Do not
         // claim a slot before one exists: its hook client can retry this live hold.
-        onWait: () => { deferred = true; answer(202, { pending: false, retry: true, detail: 'Waiting for the engine process record; admission is not queued yet.' }) },
+        onWait: () => { answer(202, { pending: false, retry: true, detail: 'Waiting for the engine process record; admission is not queued yet.' }) },
       })
       : body.tmuxPane ? registry.byPaneEngine(body.tmuxPane, engine) ?? null : null
     } finally { if (carriesStop) resolvingStops.delete(deliveryId) }
@@ -796,7 +803,7 @@ export function startHookServer(
       answer(202, { pending: false, retry: true, detail }); return
     }
     const scope = scopeOf(processAgent)!
-    if (carriesStop && stopScope !== scope) deferred = true
+    if (stopScope !== scope || processAgent.sessionId !== body.sessionId) stopEffect = undefined
     if (scopeOf(registry.byAgent(processAgent.agentId)) !== scope) { ignore('stale_hook'); return }
     // Pending jobs and completed receipts survive routing observations within
     // this process incarnation. Native hints are rechecked before every commit.
@@ -810,8 +817,8 @@ export function startHookServer(
     // Include the retained process snapshot and closure overhead, and reserve
     // against concurrent HTTP requests before any intake becomes daemon-owned.
     const retainedBytes = 2 * (JSON.stringify(body).length + JSON.stringify(processAgent).length) + 2_048
-    let reservation: string | undefined
-    let durable: NativeHookDelivery
+    let reservation: string | undefined, countedReservation = false
+    let durable: NativeHookDelivery, earlierPreparing = false
     try {
       if (closed) return
       const snapshot = await confirmedSnapshot(context, processAgent)
@@ -821,10 +828,19 @@ export function startHookServer(
         || known.intake.conversationId !== (body.sessionId ?? ''))) {
         answer(conflict.status, conflict.reply); return
       }
-      if (!known?.result && !history.records.has(deliveryId)) {
+      const cached = history.records.get(deliveryId)
+      if (cached && cached.fingerprint !== fingerprint) { answer(conflict.status, conflict.reply); return }
+      for (const [id, delivery] of snapshot.deliveries) {
+        if (id === deliveryId) break
+        if (!delivery.result && history.records.get(id)?.preparing) earlierPreparing = true
+      }
+      if (!known?.result && (!cached || cached.preparing)) {
         const key = `${context.key}\u0000${deliveryId}`
-        if (intakeReservations.has(key) || receiptCount + reservedCount >= receiptCapacity
-          || receiptBytes + reservedBytes + retainedBytes > bytesCapacity) {
+        if (intakeReservations.has(key)) {
+          answer(202, { pending: false, retry: true, detail: 'Waiting for the original native hook intake to be confirmed.' }); return
+        }
+        if (!cached && (receiptCount + reservedCount >= receiptCapacity
+          || receiptBytes + reservedBytes + retainedBytes > bytesCapacity)) {
           if (known) {
             recovered.delete(context.key)
             recoveryHeld(processAgent.agentId, 'Waiting for capacity to resume this retained native hook.')
@@ -833,7 +849,19 @@ export function startHookServer(
           } else answer(429, { pending: false, error: 'HOOK_ADMISSION_BUSY', detail: 'Hook acknowledgement storage is full; this delivery was not queued.' })
           return
         }
-        intakeReservations.add(key); reservedCount++; reservedBytes += retainedBytes; reservation = key
+        intakeReservations.add(key); reservation = key
+        if (!cached) {
+          reservedCount++; reservedBytes += retainedBytes; countedReservation = true
+          // Retention can publish bytes and then fail its confirmation. Keep the FIRST live
+          // witness under the same bounded receipt budget so this core can retry it. Cold recovery
+          // has no such witness and never captures its replacement parser as the original turn.
+          saveReceipt(history.records, deliveryId, { fingerprint, status: 202,
+            reply: { pending: false, retry: true, detail: 'Waiting for the original native hook intake to be confirmed.' },
+            pending: false, bytes: retainedBytes,
+            preparing: { stopEffect: !known ? stopEffect : undefined,
+              stopCurrent: processAgent.sessionId === body.sessionId && stopScope === scope ? stopWitness : undefined } })
+          reservedCount--; reservedBytes -= retainedBytes; countedReservation = false
+        }
       }
       if (!known?.result) ready(context, false)
       durable = await context.journal.retain({ id: deliveryId, fingerprint, agentId: processAgent.agentId,
@@ -841,6 +869,9 @@ export function startHookServer(
         ...(context.owner ? { owner: context.owner } : {}),
         ...(native.wire ? { wire: native.wire } : {}),
         payload: { ...originalBody } })
+      // A retry/recovery may find an intake from before this core existed. Its current parser cannot
+      // become the original turn witness. An existing local receipt below keeps its original latch.
+      if (!durable.created) stopEffect = history.records.get(deliveryId)?.preparing?.stopEffect
       ownership = 'owned'
       verifyOwnership = () => { snapshot.verifyAuthority(); durable.verify() }
     } catch (error) {
@@ -852,20 +883,39 @@ export function startHookServer(
       }
       return
     } finally {
-      if (reservation) { intakeReservations.delete(reservation); reservedCount--; reservedBytes -= retainedBytes }
+      if (reservation) intakeReservations.delete(reservation)
+      if (countedReservation) { reservedCount--; reservedBytes -= retainedBytes }
     }
     if (durable.result) {
       if (typeof durable.result.status !== 'number' || !durable.result.reply) {
         ownership = undefined
         answer(202, { pending: false, retry: true, detail: 'Waiting for a complete native hook outcome.' }); return
       }
+      if (carriesStop && (history.records.has(deliveryId) || receiptCount + reservedCount < receiptCapacity
+        && receiptBytes + reservedBytes + retainedBytes <= bytesCapacity)) saveReceipt(history.records, deliveryId, {
+        fingerprint, status: durable.result.status, reply: durable.result.reply, pending: false, bytes: retainedBytes,
+        linkedStop: (stop, firedAt) => {
+          if (stopProvenance(stop, firedAt) !== originalStop || stop.transcriptPath !== originalBody.transcriptPath) return conflict
+          return durable.result!.stop === 'completed' || durable.result!.stop === 'superseded'
+            ? { status: 200, reply: { ok: true, duplicate: true } }
+            : { status: 202, reply: { pending: false, retry: true, detail: 'Waiting for the original Stop outcome.' } }
+        },
+      })
       ownership = 'complete'; answer(durable.result.status, durable.result.reply); return
     }
     const completed = history.records.get(deliveryId)
-    if (completed) {
+    if (completed && !completed.preparing) {
       if (completed.fingerprint === fingerprint) answer(completed.status, completed.reply)
       else answer(409, { pending: false, error: 'HOOK_DELIVERY_CONFLICT' })
       return
+    }
+    // A later same-conversation intake must not enter the live queue ahead of a retained input
+    // whose first confirmation failed. Otherwise it waits for that predecessor while occupying
+    // the predecessor's queue position. Recovery admits preparing inputs in their durable order.
+    if (earlierPreparing) {
+      recovered.delete(context.key)
+      recoveryHeld(processAgent.agentId, 'Waiting for the earlier retained native hook intake to be confirmed.')
+      answer(200, { pending: true }); return
     }
     let inspectionIdentity: string | undefined
     let prepared: RegisterInput = body
@@ -873,14 +923,14 @@ export function startHookServer(
     let committed: ReturnType<typeof registry.register> = null
     let claim: NativeHookClaim | undefined, notified = false
     let verifyNativeOwner = () => {}
-    let settled = false, stopRetained = false, stopUnmatched = false, stopInvocationClaimed = false
+    let settled = false, stopRetained = false
+    let stopOutcome: CapturedStopOutcome | undefined, terminalResult: Record<string, unknown> | undefined
     const stopCurrent = processAgent.sessionId === body.sessionId && stopScope === scope ? stopWitness : undefined
-    let followupFingerprint: string | undefined, committedIdentity: string | undefined
+    let followupFingerprint: string | undefined
     const live = () => registry.byAgent(processAgent.agentId)
     const current = () => !closed && !isRecentlyDeleted(processAgent.agentId) && !isRecentlyDeleted(body.sessionId)
       && live()?.active !== false && scopeOf(live()) === scope
     const held = (reason: string) => {
-      deferred = true
       const holds = admissionHolds.get(processAgent.agentId) ?? new Map<string, string>()
       holds.set(deliveryId, reason); admissionHolds.set(processAgent.agentId, holds)
       publishHold(processAgent.agentId)
@@ -901,40 +951,13 @@ export function startHookServer(
       answer(status, reply)
     }
     const linkedStop: LinkedStop = async (stop, firedAt) => {
-      if (stopProvenance(stop, firedAt) !== originalStop) return conflict
+      if (stopProvenance(stop, firedAt) !== originalStop || stop.transcriptPath !== originalBody.transcriptPath) return conflict
       const sent = createHash('sha256').update(JSON.stringify(stop)).digest('hex')
       if (followupFingerprint && sent !== followupFingerprint) return conflict
       followupFingerprint = sent
-      // The registration itself owns this native Stop, even if its second
-      // HTTP delivery outruns source recovery. Never close a later live turn.
-      if (stopCurrent && !stopCurrent()) stopInvocationClaimed = true
-      if (stopInvocationClaimed) return { status: 200, reply: { ok: true, duplicate: true } }
-      if (!settled || stopRetained) {
-        deferred = true
-        return { status: 200, reply: { pending: true } }
-      }
-      const owner = await verifiedMutation(stop)
-      if (stopCurrent && !stopCurrent()) stopInvocationClaimed = true
-      if (stopInvocationClaimed) return { status: 200, reply: { ok: true, duplicate: true } }
-      if (stopRetained) return { status: 200, reply: { pending: true } }
-      if (!current() || live()?.sessionId !== body.sessionId) {
-        return { status: 403, reply: { error: 'UNBOUND_HOOK' } }
-      }
-      if (!owner || paneReadIdentity(owner) !== committedIdentity) {
-        // The original delivery still belongs to this process/conversation,
-        // but its parser or routing was rebuilt. Preserve completion without
-        // applying it to whichever turn the replacement happened to load.
-        stopRetained = handlers.onAdmissionStop?.(live()!, true) ?? false
-        return stopRetained ? { status: 200, reply: { pending: true } }
-          : { status: 202, reply: { pending: false, retry: true, detail: 'Waiting for core ownership of the unmatched Stop.' } }
-      }
-      if (!stopInvocationClaimed) {
-        // Claim after the final authority fence, before optional async drains.
-        stopInvocationClaimed = true
-        handlers.onTurnStop?.({ sessionId: owner.sessionId, status: stop.status,
-          transcriptPath: stop.transcriptPath, ...(firedAt ? { firedAt } : {}) })
-        return { status: 200, reply: { ok: true } }
-      }
+      // Confirmation only. Registration owns the single Stop effect; an ordinary ok would also make
+      // the legacy client delete every queued task for this session, including a successor turn's.
+      if (!settled || stopOutcome !== 'completed' && stopOutcome !== 'superseded') return { status: 200, reply: { pending: true } }
       return { status: 200, reply: { ok: true, duplicate: true } }
     }
     const prepare = (): AdmissionDecision<string | undefined> | null => {
@@ -956,9 +979,6 @@ export function startHookServer(
     const commit = (hermesHome: string | undefined): AdmissionDecision<string | undefined> => {
       if (!current() || paneReadIdentity(live()) !== inspectionIdentity) return { kind: 'hold', reason: 'Waiting for fresh evidence after the binding changed.' }
       if (handlers.hookAdmissionBlocked?.(processAgent.agentId)) return { kind: 'hold', reason: 'Waiting for Stop to settle before admitting the hook.' }
-      const prior = live()
-      const before = prior && { sessionId: prior.sessionId, transcriptPath: prior.transcriptPath,
-        held: !!(prior.identityHold || prior.interpretationHold) }
       committed = preparedRegistration!.commit(() => {
         if (!current() || paneReadIdentity(live()) !== inspectionIdentity || handlers.hookAdmissionBlocked?.(processAgent.agentId)) {
           throw new IdentityReadUnavailable('the native hook owner changed before binding')
@@ -966,15 +986,6 @@ export function startHookServer(
         claim!.verify()
         verifyNativeOwner()
       })
-      if (stopCurrent && !stopCurrent()) stopInvocationClaimed = true
-      if (committed && carriesStop && !stopRetained && !stopInvocationClaimed) {
-        stopUnmatched ||= deferred || before?.sessionId !== committed.entry.sessionId
-          || before?.transcriptPath !== committed.entry.transcriptPath || before?.held === true
-        if (!handlers.onAdmissionStop && stopUnmatched) return { kind: 'hold', reason: 'Waiting for core ownership of the unmatched Stop.' }
-        stopRetained = handlers.onAdmissionStop?.(committed.entry, stopUnmatched) ?? false
-        if (stopUnmatched && !stopRetained) return { kind: 'hold', reason: 'Waiting for core ownership of the unmatched Stop.' }
-      }
-      if (committed) committedIdentity = paneReadIdentity(committed.entry)
       return committed ? { kind: 'accept', value: hermesHome } : { kind: 'reject', reason: 'invalid_session_registration' }
     }
     const notify = () => {
@@ -1056,6 +1067,18 @@ export function startHookServer(
             if (result.kind === 'hold') return result
             decision = result
           }
+          if (decision.kind === 'accept' && carriesStop && !terminalResult) {
+            if (stopCurrent && !stopCurrent()) stopOutcome = 'superseded'
+            else if (stopEffect) {
+              claim.verify()
+              stopOutcome = await stopEffect({ current, verify: () => claim!.verify() })
+            }
+            if (!current()) return { kind: 'hold', reason: 'Waiting for the original native hook owner.' }
+            if (stopOutcome !== 'completed' && stopOutcome !== 'superseded') {
+              if (!stopRetained) stopRetained = handlers.onAdmissionStop?.(committed!.entry, true) ?? false
+              return { kind: 'hold', reason: 'Waiting for the original Stop turn to be confirmed; Cancel can resolve this hold.' }
+            }
+          }
           const status = decision.kind === 'accept' || decision.reason !== 'invalid_session_registration' ? 200 : 400
           const reply = decision.kind === 'accept' ? { ok: true } : status === 400 ? { error: 'invalid session registration' }
             : { ignored: true, reason: decision.reason }
@@ -1063,7 +1086,9 @@ export function startHookServer(
           // interpretation. Dispatch them while this effect still owns the slot,
           // before a successor can confirm its terminal record and overtake it.
           if (decision.kind === 'accept' && !notified) { claim.verify(); notified = true; notify() }
-          await claim.finish({ status, reply, accepted: decision.kind === 'accept', arrival: admissionOrder.arrival })
+          terminalResult ??= { status, reply, accepted: decision.kind === 'accept', arrival: admissionOrder.arrival,
+            ...(carriesStop && decision.kind === 'accept' ? { stop: stopOutcome } : {}) }
+          await claim.finish(terminalResult)
           ownership = undefined
           context.claims.delete(deliveryId); context.restored.add(deliveryId)
           // Completion is final even if restoring the next frontier fails. A
@@ -1093,9 +1118,10 @@ export function startHookServer(
         // Synchronous native admission settles in this turn's microtasks. A
         // queued predecessor or asynchronous source gets an owned pending reply.
         if (engine === 'hermes') answer(200, { pending: true })
-        else setTimeout(() => { if (!settled) deferred = true; answer(200, { pending: true }) }, 100)
+        else setTimeout(() => { answer(200, { pending: true }) }, 100)
       } else {
-        saveReceipt(history.records, deliveryId)
+        saveReceipt(history.records, deliveryId, { fingerprint, status: 200, reply: { pending: true }, pending: false,
+          bytes: retainedBytes, preparing: { stopEffect, stopCurrent } })
         recovered.delete(context.key)
         const detail = 'Waiting for capacity to resume this retained native hook.'
         recoveryHeld(processAgent.agentId, detail)
@@ -1114,7 +1140,8 @@ export function startHookServer(
         return
       }
       const pending = [...snapshot.deliveries.values()].find(delivery => !delivery.result
-        && !admissionReceipts.get(delivery.intake.agentId)?.records.has(delivery.intake.id))
+        && (!admissionReceipts.get(delivery.intake.agentId)?.records.has(delivery.intake.id)
+          || admissionReceipts.get(delivery.intake.agentId)?.records.get(delivery.intake.id)?.preparing))
       if (!pending) { recovered.add(context.key); return }
       if (!validHookBody(pending.intake.payload)) throw new IdentityReadUnavailable('the retained native hook body is invalid')
       await admitStart(structuredClone(pending.intake.payload), { deliveryId: pending.intake.id, firedAt: pending.intake.firedAt,
@@ -1136,11 +1163,12 @@ export function startHookServer(
           let known = nativeKeys.get(scope)
           if (!handlers.readNativeHookOwner) known = durableKey(row)
           const context = known && durableProcesses.get(known)
+          const receipts = [...admissionReceipts.get(row.agentId)?.records.values() ?? []]
           // The live queue already retries its retained inputs. A second local
           // recovery writer must not confirm an in-flight claim underneath it.
           if (recovering.has(scope) || known && (recovering.has(known) || recovered.has(known))
-            || context && context.confirming
-            || [...admissionReceipts.get(row.agentId)?.records.values() ?? []].some(receipt => receipt.pending)
+            || context && (context.confirming || context.claims.size > 0)
+            || receipts.some(receipt => receipt.pending) && !receipts.some(receipt => receipt.preparing)
             || known && [...intakeReservations].some(key => key.startsWith(`${known}\u0000`))) continue
           recovering.add(scope)
           void (async () => {

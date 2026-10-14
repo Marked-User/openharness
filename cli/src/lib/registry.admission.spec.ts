@@ -92,6 +92,7 @@ afterEach(async () => {
   fault.nativeWritten.clear()
   fault.rename = false; fault.directorySync = false; fault.renamed = false; fault.afterProof = undefined; fault.beforeVerify = undefined
   vi.restoreAllMocks(); vi.doUnmock('../engines/transcriptBindings.js'); vi.doUnmock('../engines/kit/nativeHookJournal.js')
+  vi.doUnmock('../core/engines/pendingAdmission.js')
   vi.unstubAllEnvs(); vi.resetModules(); rmSync(root, { recursive: true, force: true })
 })
 
@@ -469,7 +470,7 @@ async function httpFixture(blocked: (agentId: string) => boolean = () => false, 
   overrides: Partial<HookServerHandlers> = {}, admissionBytesCapacity?: number, deferNativeRecovery = false) {
   const { startHookServer } = await import('../hookServer.js')
   const { readHookCredential } = await import('./hookAuth.js')
-  const prompts: string[] = [], registered = vi.fn(), reasons: Array<string | undefined> = []
+  const prompts: string[] = [], registered = vi.fn<HookServerHandlers['onRegistered']>(), reasons: Array<string | undefined> = []
   const started = await startHookServer(0, { onRegistered: registered, onSessionEnd: () => {},
     hookAdmissionBlocked: blocked,
     onPromptSubmitted: (_id, text) => prompts.push(text),
@@ -489,7 +490,7 @@ async function httpFixture(blocked: (agentId: string) => boolean = () => false, 
     })
     return { status: response.status, body: await response.json() }
   }
-  return { post, prompts, registered, reasons, startRecovery: started.startRecovery, recoveryReady: started.recoveryReady }
+  return { post, prompts, registered, reasons, startRecovery: started.startRecovery, stopRecovery: started.stopRecovery, recoveryReady: started.recoveryReady }
 }
 
 async function afterTerminal(run: (journal: ReturnType<typeof import('../engines/kit/nativeHookJournal.js')['createNativeHookJournal']>) => Promise<void>) {
@@ -1126,7 +1127,9 @@ it.each(['cursor', 'commandcode'] as const)('retains %s Stop before recovered re
   // Native binding is durable now, but a refused completion claim remains pending.
   expect(registry.byAgent(owner.agentId)?.sessionId).toBe(A)
   retain = true
-  await vi.waitFor(() => expect(order).toContain('attach'), { timeout: 3_000 })
+  // Retaining an uncertain Stop is not completion. Its claim still prevents attachment.
+  await new Promise(resolve => setTimeout(resolve, 1_100))
+  expect(order).not.toContain('attach')
   expect(onTurnStop).not.toHaveBeenCalled()
   expect((await f.post(body, delivery, 'turn-stop')).body).toEqual({ pending: true })
   expect((await f.post({ ...body, status: 'done' }, delivery, 'turn-stop')).status).toBe(409)
@@ -1139,16 +1142,17 @@ it('claims an immediate already-bound linked Stop once, including concurrent ret
     processIdentity: { pid: 7103, startMarker: 'fixture-start', executable: '<engine>' } })!.entry
   registry.register({ engine: 'cursor', sessionId: A, tmuxPane: '%3', cwd: root, processIdentity: owner.processIdentity! })
   const onTurnStop = vi.fn()
-  const f = await httpFixture(() => false, 65_536, { onTurnStop, onAdmissionStop: (_row, unmatched) => {
-    expect(unmatched).toBe(false); return false
-  } })
+  const onAdmissionStop = vi.fn(() => false)
+  const f = await httpFixture(() => false, 65_536, { onTurnStop, onAdmissionStop,
+    captureTurnStop: (_row, body) => async () => { onTurnStop(body); return 'completed' } })
   const delivery = { id: 'fixture-stop-delivery-02', firedAt: Date.now() }
   const body = { engine: 'cursor', sessionId: A, transcriptPath: undefined, tmuxPane: '%3', hookEvent: 'stop', prompt: undefined }
   expect((await f.post(body, delivery)).body).toEqual({ ok: true })
   expect((await Promise.all([f.post(body, delivery, 'turn-stop'), f.post(body, delivery, 'turn-stop')])).map(value => value.body))
-    .toEqual([{ ok: true }, { ok: true, duplicate: true }])
+    .toEqual([{ ok: true, duplicate: true }, { ok: true, duplicate: true }])
   expect((await f.post(body, delivery, 'turn-stop')).body).toEqual({ ok: true, duplicate: true })
-  expect(onTurnStop).toHaveBeenCalledExactlyOnceWith({ sessionId: A, status: undefined, transcriptPath: undefined, firedAt: delivery.firedAt })
+  expect(onTurnStop).toHaveBeenCalledExactlyOnceWith({ sessionId: A, status: undefined, firedAt: delivery.firedAt })
+  expect(onAdmissionStop).not.toHaveBeenCalled()
 })
 
 it.each([false, true])('retains an overtaking Stop after process resolution recovers, with onWait: %s', async waiting => {
@@ -1191,16 +1195,13 @@ it.each([false, true])('keeps a held delivery through route changes and requires
   expect(f.registered).toHaveBeenCalledOnce()
 })
 
-it('holds a same-owner linked Stop after interpretation recovered, without closing its later turn', async () => {
+it('confirms a completed Stop after interpretation recovered without closing its later turn', async () => {
   const owner = registry.openProcessAgent({ engine: 'cursor', tmuxPane: '%3', cwd: root,
     processIdentity: { pid: 7103, startMarker: 'fixture-start', executable: '<engine>' } })!.entry
   registry.register({ engine: 'cursor', sessionId: A, tmuxPane: '%3', cwd: root, processIdentity: owner.processIdentity! })
-  const onTurnStop = vi.fn(), holds: boolean[] = []
-  const f = await httpFixture(() => false, 65_536, { onTurnStop, onAdmissionStop: (row, unmatched) => {
-    holds.push(unmatched)
-    if (unmatched) row.interpretationHold = 'Stop could not be matched to its turn'
-    return unmatched
-  } })
+  const onTurnStop = vi.fn(), onAdmissionStop = vi.fn(() => true)
+  const f = await httpFixture(() => false, 65_536, { onTurnStop, onAdmissionStop,
+    captureTurnStop: (_row, body) => async () => { onTurnStop(body); return 'completed' } })
   const delivery = { id: 'fixture-stop-recovered-01', firedAt: Date.now() }
   const body = { engine: 'cursor', sessionId: A, transcriptPath: undefined, tmuxPane: '%3', hookEvent: 'stop', prompt: undefined }
   expect((await f.post(body, delivery)).body).toEqual({ ok: true })
@@ -1209,15 +1210,10 @@ it('holds a same-owner linked Stop after interpretation recovered, without closi
   row.evidenceRevision = (row.evidenceRevision ?? 0) + 1
   delete row.identityHold
   row.evidenceRevision++
-  expect((await f.post(body, delivery, 'turn-stop')).body).toEqual({ pending: true })
-  expect(row.interpretationHold).toContain('could not be matched')
-  expect(holds).toEqual([false, true])
-  expect(onTurnStop).not.toHaveBeenCalled()
-  // A later Cancel clears interpretation; a duplicate must not recreate the old obligation.
-  delete row.interpretationHold
-  expect((await f.post(body, delivery, 'turn-stop')).body).toEqual({ pending: true })
+  expect((await f.post(body, delivery, 'turn-stop')).body).toEqual({ ok: true, duplicate: true })
   expect(row.interpretationHold).toBeUndefined()
-  expect(holds).toEqual([false, true])
+  expect(onAdmissionStop).not.toHaveBeenCalled()
+  expect(onTurnStop).toHaveBeenCalledOnce()
 })
 
 it.each(['before-followup', 'during-followup', 'during-registration', 'during-initial-resolution', 'during-native-capture'] as const)('Cancel supersedes original Stop %s without closing a newer turn', async phase => {
@@ -1236,13 +1232,17 @@ it.each(['before-followup', 'during-followup', 'during-registration', 'during-in
   const onAdmissionStop = vi.fn(() => false)
   const f = await httpFixture(() => false, 65_536, { onTurnStop, onAdmissionStop,
     captureAdmissionStop: attach.captureAdmissionStop,
+    captureTurnStop: (entry, body) => {
+      const current = attach.captureAdmissionStop(entry)
+      return async () => { if (!current()) return 'superseded'; onTurnStop(); return 'completed' }
+    },
     ...(phase === 'during-native-capture' ? { captureNativeHookCaller: async () => {
       await new Promise<void>(resolve => { finish = resolve })
       return { owner: () => ({ key: 'fixture-original-cursor', evidence: 'fixture-original-cursor' }) }
     } } : {}),
     resolveHookAgent: async () => {
       resolutions++
-      if (phase === 'during-followup' && resolutions === 2 || phase === 'during-initial-resolution' && resolutions === 1) {
+      if (phase === 'during-initial-resolution' && resolutions === 1) {
         await new Promise<void>(resolve => { finish = resolve })
       }
       return structuredClone(registry.byAgent(row.agentId)!)
@@ -1254,7 +1254,6 @@ it.each(['before-followup', 'during-followup', 'during-registration', 'during-in
   if (phase === 'during-initial-resolution' || phase === 'during-native-capture') await vi.waitFor(() => expect(finish).toBeDefined())
   else expect((await registration).body).toEqual(phase === 'during-registration' ? { pending: true } : { ok: true })
   const followup = phase === 'during-followup' ? f.post(body, delivery, 'turn-stop') : undefined
-  if (followup) await vi.waitFor(() => expect(finish).toBeDefined())
   attach.beforeCancel(row)
   laterTurnOpen = true
   if (phase === 'during-initial-resolution' || phase === 'during-native-capture') {
@@ -1269,40 +1268,192 @@ it.each(['before-followup', 'during-followup', 'during-registration', 'during-in
   await registration
   if (phase === 'during-registration') await vi.waitFor(() => expect(f.registered).toHaveBeenCalledOnce(), { timeout: 3_000 })
   expect((await (followup ?? f.post(body, delivery, 'turn-stop'))).body).toEqual({ ok: true, duplicate: true })
-  expect(onTurnStop).not.toHaveBeenCalled()
-  expect(onAdmissionStop).toHaveBeenCalledTimes(['during-registration', 'during-initial-resolution', 'during-native-capture'].includes(phase) ? 0 : 1)
+  expect(onTurnStop).toHaveBeenCalledTimes(['before-followup', 'during-followup'].includes(phase) ? 1 : 0)
+  expect(onAdmissionStop).not.toHaveBeenCalled()
   expect(laterTurnOpen).toBe(true)
   attach.forget(A)
 })
 
-it('rechecks the completion claim after a concurrent duplicate waits across recovery', async () => {
+it('keeps concurrent confirmations pending until the one actual Stop effect completes', async () => {
   const owner = registry.openProcessAgent({ engine: 'cursor', tmuxPane: '%3', cwd: root,
     processIdentity: { pid: 7103, startMarker: 'fixture-start', executable: '<engine>' } })!.entry
   registry.register({ engine: 'cursor', sessionId: A, tmuxPane: '%3', cwd: root, processIdentity: owner.processIdentity! })
-  const finishes: Array<() => void> = [], onAdmissionStop = vi.fn(() => false)
-  let resolutions = 0
-  const onTurnStop = vi.fn(() => {
-    const row = registry.byAgent(owner.agentId)!
-    row.evidenceRevision = (row.evidenceRevision ?? 0) + 1
-  })
-  const f = await httpFixture(() => false, 65_536, { onTurnStop, onAdmissionStop,
-    resolveHookAgent: async () => {
-      if (++resolutions > 1) await new Promise<void>(resolve => finishes.push(resolve))
-      return structuredClone(registry.byAgent(owner.agentId)!)
-    } })
+  let finish!: () => void
+  const onAdmissionStop = vi.fn(() => false), onTurnStop = vi.fn()
+  const effect = vi.fn(async () => { onTurnStop(); await new Promise<void>(resolve => { finish = resolve }); return 'completed' as const })
+  const f = await httpFixture(() => false, 65_536, { onTurnStop, onAdmissionStop, captureTurnStop: () => effect })
   const delivery = { id: 'fixture-stop-concurrent-01', firedAt: Date.now() }
   const body = { engine: 'cursor', sessionId: A, transcriptPath: undefined, tmuxPane: '%3', hookEvent: 'stop', prompt: undefined }
-  expect((await f.post(body, delivery)).body).toEqual({ ok: true })
-  const first = f.post(body, delivery, 'turn-stop')
-  await vi.waitFor(() => expect(finishes).toHaveLength(1))
-  const duplicate = f.post(body, delivery, 'turn-stop')
-  await vi.waitFor(() => expect(finishes).toHaveLength(2))
-  finishes[0]()
-  expect((await first).body).toEqual({ ok: true })
-  finishes[1]()
-  expect((await duplicate).body).toEqual({ ok: true, duplicate: true })
+  expect((await f.post(body, delivery)).body).toEqual({ pending: true })
+  expect(f.registered).not.toHaveBeenCalled()
+  expect((await Promise.all([f.post(body, delivery, 'turn-stop'), f.post(body, delivery, 'turn-stop')])).map(reply => reply.body))
+    .toEqual([{ pending: true }, { pending: true }])
+  finish()
+  await vi.waitFor(() => expect(f.registered).toHaveBeenCalledOnce())
+  expect((await f.post(body, delivery, 'turn-stop')).body).toEqual({ ok: true, duplicate: true })
+  expect(effect).toHaveBeenCalledOnce()
   expect(onTurnStop).toHaveBeenCalledOnce()
-  expect(onAdmissionStop).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ sessionId: A }), false)
+  expect(onAdmissionStop).not.toHaveBeenCalled()
+})
+
+function boundCursorStop() {
+  const owner = registry.openProcessAgent({ engine: 'cursor', tmuxPane: '%3', cwd: root,
+    processIdentity: { pid: 7103, startMarker: 'fixture-start', executable: '<engine>' } })!.entry
+  registry.register({ engine: 'cursor', sessionId: A, tmuxPane: '%3', cwd: root, processIdentity: owner.processIdentity! })
+  return { owner, body: { engine: 'cursor', sessionId: A, transcriptPath: undefined, tmuxPane: '%3', hookEvent: 'stop', prompt: undefined },
+    delivery: { id: 'fixture-stop-owned-completion', firedAt: Date.now() } }
+}
+
+it('keeps completed linked Stop confirmations across restart without dispatching again', async () => {
+  const { body, delivery } = boundCursorStop()
+  const stop = vi.fn(async () => 'completed' as const)
+  const before = await httpFixture(undefined, undefined, { captureTurnStop: () => stop })
+  expect((await before.post(body, delivery)).body).toEqual({ ok: true })
+  expect(stop).toHaveBeenCalledOnce()
+  await new Promise<void>(resolve => server!.close(() => resolve()))
+  const replacement = vi.fn(async () => 'completed' as const)
+  const recovered = await httpFixture(undefined, undefined, { captureTurnStop: () => replacement })
+  expect((await recovered.post(body, delivery)).body).toEqual({ ok: true })
+  expect((await recovered.post(body, delivery, 'turn-stop')).body).toEqual({ ok: true, duplicate: true })
+  expect((await recovered.post({ ...body, status: 'changed' }, delivery, 'turn-stop')).status).toBe(409)
+  expect(replacement).not.toHaveBeenCalled()
+})
+
+it('holds an interrupted Stop effect after restart instead of dispatching against the replacement turn', async () => {
+  const { owner, body, delivery } = boundCursorStop()
+  let finish!: () => void
+  const before = await httpFixture(undefined, undefined, { captureTurnStop: () => async () => {
+    await new Promise<void>(resolve => { finish = resolve }); return 'held'
+  } })
+  expect((await before.post(body, delivery)).body).toEqual({ pending: true })
+  await new Promise<void>(resolve => server!.close(() => resolve()))
+  finish()
+  const replacement = vi.fn(async () => 'completed' as const)
+  const recovered = await httpFixture(undefined, undefined, { captureTurnStop: () => replacement })
+  expect((await recovered.post(body, delivery)).body).toEqual({ pending: true })
+  expect((await recovered.post(body, delivery, 'turn-stop')).body).toEqual({ pending: true })
+  await vi.waitFor(() => expect(recovered.reasons.some(reason => reason?.includes('unconfirmed') || reason?.includes('interrupted'))).toBe(true))
+  expect(recovered.recoveryReady(registry.byAgent(owner.agentId)!)).toBe(false)
+  expect(replacement).not.toHaveBeenCalled()
+  expect(recovered.registered).not.toHaveBeenCalled()
+})
+
+it.each([false, true])('retains the first live Stop latch through uncertain intake only in its original core (restart=%s)', async restart => {
+  const { body, delivery } = boundCursorStop()
+  vi.doMock('../engines/kit/nativeHookJournal.js', async original => {
+    const actual = await original<typeof import('../engines/kit/nativeHookJournal.js')>()
+    let failed = false
+    return { ...actual, createNativeHookJournal: (options: Parameters<typeof actual.createNativeHookJournal>[0]) => {
+      const journal = actual.createNativeHookJournal(options)
+      return { ...journal, retain: async (...args: Parameters<typeof journal.retain>) => {
+        const retained = await journal.retain(...args)
+        if (!failed) { failed = true; throw new Error('fixture intake confirmation outcome lost') }
+        return retained
+      } }
+    } }
+  })
+  const firstStop = vi.fn(async () => 'completed' as const), firstCapture = vi.fn(() => firstStop)
+  const before = await httpFixture(undefined, undefined, { captureTurnStop: firstCapture }, undefined, true)
+  expect(await before.post(body, delivery)).toMatchObject({ status: 202, body: { retry: true } })
+  expect(firstStop).not.toHaveBeenCalled()
+  if (restart) {
+    await new Promise<void>(resolve => server!.close(() => resolve()))
+    const replacement = vi.fn(async () => 'completed' as const)
+    const recovered = await httpFixture(undefined, undefined, { captureTurnStop: () => replacement }, undefined, true)
+    expect((await recovered.post(body, delivery)).body).toEqual({ pending: true })
+    expect(recovered.reasons.some(reason => reason?.includes('original Stop turn'))).toBe(true)
+    expect(replacement).not.toHaveBeenCalled()
+    expect(firstStop).not.toHaveBeenCalled()
+  } else {
+    expect((await before.post(body, delivery)).body).toEqual({ ok: true })
+    expect(firstCapture).toHaveBeenCalledOnce()
+    expect(firstStop).toHaveBeenCalledOnce()
+    expect((await before.post(body, delivery, 'turn-stop')).body).toEqual({ ok: true, duplicate: true })
+  }
+})
+
+it('retries the exact Stop result after failed terminal persistence without repeating the effect', async () => {
+  const { body, delivery } = boundCursorStop()
+  const stop = vi.fn(async () => 'completed' as const)
+  const f = await httpFixture(undefined, undefined, { captureTurnStop: () => stop })
+  fault.beforeNativeSync = text => { if (text?.includes('"kind":"result"')) fault.nativeSync = true }
+  expect((await f.post(body, delivery)).body).toEqual({ pending: true })
+  expect(stop).toHaveBeenCalledOnce()
+  expect((await f.post(body, delivery, 'turn-stop')).body).toEqual({ pending: true })
+  fault.beforeNativeSync = undefined; fault.nativeSync = false
+  await vi.waitFor(async () => expect((await f.post(body, delivery, 'turn-stop')).body).toEqual({ ok: true, duplicate: true }), { timeout: 3_000 })
+  expect(stop).toHaveBeenCalledOnce()
+})
+
+it('recovers an uncertain predecessor before a later intake without another producer retry', async () => {
+  const { body, delivery } = boundCursorStop()
+  vi.doMock('../engines/kit/nativeHookJournal.js', async original => {
+    const actual = await original<typeof import('../engines/kit/nativeHookJournal.js')>()
+    let failed = false
+    return { ...actual, createNativeHookJournal: (options: Parameters<typeof actual.createNativeHookJournal>[0]) => {
+      const journal = actual.createNativeHookJournal(options)
+      return { ...journal, retain: async (...args: Parameters<typeof journal.retain>) => {
+        const retained = await journal.retain(...args)
+        if (!failed) { failed = true; throw new Error('fixture intake confirmation outcome lost') }
+        return retained
+      } }
+    } }
+  })
+  const stop = vi.fn(async () => 'completed' as const), capture = vi.fn(() => stop)
+  const f = await httpFixture(undefined, undefined, { captureTurnStop: capture }, undefined, true)
+  expect(await f.post(body, delivery)).toMatchObject({ status: 202, body: { retry: true } })
+  expect((await f.post({ ...body, hookEvent: 'session-start' }, {
+    id: 'fixture-stop-later-intake', firedAt: delivery.firedAt + 1,
+  })).body).toEqual({ pending: true })
+  expect(stop).not.toHaveBeenCalled()
+  f.startRecovery()
+  await vi.waitFor(() => expect(f.registered).toHaveBeenCalledTimes(2), { timeout: 4_000 })
+  expect(f.registered.mock.calls.map(call => call[1].hookEvent)).toEqual(['stop', 'session-start'])
+  expect(capture).toHaveBeenCalledOnce()
+  expect(stop).toHaveBeenCalledOnce()
+  expect((await f.post(body, delivery, 'turn-stop')).body).toEqual({ ok: true, duplicate: true })
+})
+
+it('keeps the original Stop capture when its retained intake cannot enter the full live queue', async () => {
+  const { body, delivery } = boundCursorStop()
+  let queue!: ReturnType<typeof import('../core/engines/pendingAdmission.js')['createPendingAdmissions']>
+  vi.doMock('../core/engines/pendingAdmission.js', async original => {
+    const actual = await original<typeof import('../core/engines/pendingAdmission.js')>()
+    return { ...actual, createPendingAdmissions: (options: Parameters<typeof actual.createPendingAdmissions>[0]) => {
+      queue = actual.createPendingAdmissions({ ...options, capacity: 1 })
+      vi.spyOn(queue, 'submit')
+      return queue
+    } }
+  })
+  let blocked = true
+  const stop = vi.fn(async () => 'completed' as const), capture = vi.fn(() => stop)
+  const f = await httpFixture(() => blocked, undefined, { captureTurnStop: capture }, undefined, true)
+  expect((await f.post({ ...body, hookEvent: 'session-start' }, {
+    id: 'fixture-stop-earlier-queued', firedAt: delivery.firedAt - 1,
+  })).body).toEqual({ pending: true })
+  expect((await f.post(body, delivery)).body).toEqual({ pending: true })
+  expect(vi.mocked(queue.submit).mock.results.map(result => result.value)).toContain(false)
+  blocked = false; f.startRecovery()
+  await vi.waitFor(() => expect(f.registered).toHaveBeenCalledTimes(2), { timeout: 4_000 })
+  expect(capture).toHaveBeenCalledOnce()
+  expect(stop).toHaveBeenCalledOnce()
+  expect((await f.post(body, delivery, 'turn-stop')).body).toEqual({ ok: true, duplicate: true })
+})
+
+it('does not publish an unmatched Stop hold after its owning server shuts down', async () => {
+  const { body, delivery } = boundCursorStop()
+  let release!: () => void
+  const held = vi.fn(() => true)
+  const f = await httpFixture(undefined, undefined, { onAdmissionStop: held, captureTurnStop: () => async execution => {
+    await new Promise<void>(resolve => { release = resolve })
+    expect(execution!.current()).toBe(false)
+    return 'held'
+  } })
+  expect((await f.post(body, delivery)).body).toEqual({ pending: true })
+  f.stopRecovery(); release()
+  await new Promise(resolve => setTimeout(resolve, 25))
+  expect(held).not.toHaveBeenCalled()
+  expect(f.registered).not.toHaveBeenCalled()
 })
 
 it.each(['records', 'bytes'] as const)('never lets a linked Stop bypass refused admission at %s capacity', async capacity => {

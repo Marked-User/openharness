@@ -298,6 +298,7 @@ setInterval(() => {
       await until('the private Cursor process', async () => (await d.capture(pane)).includes('fixture-cursor-ready'), 20_000)
       const callerPid = Number(readFileSync(pidFile, 'utf8'))
       const firstTurn = client.next(isTurn('turn_started', agentId), 30_000, 'the observed Cursor turn')
+      await until('the private Cursor process to be recorded', () => rowOnDisk(d, agentId)?.processIdentity?.pid === callerPid, 20_000)
       const response = await fetch(`http://127.0.0.1:${d.port}/api/hook/session-start`, { method: 'POST',
         headers: { 'content-type': 'application/json', 'x-harness-hook-token': d.hookCredential() },
         body: JSON.stringify({ engine: 'cursor', hookEvent: 'sessionStart', sessionId, tmuxPane: pane, cwd, callerPid, transcriptPath }) })

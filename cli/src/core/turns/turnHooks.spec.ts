@@ -4,7 +4,7 @@ import { removePendingCursorTasks } from '../engines/cursorTasks.js'
 import type { TurnState } from '../../lib/normalize.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { createSessionNormalizers } from '../transcripts/normalizers.js'
-import { createTurnHooks, STOP_HOOK_GRACE_MS, type TurnHookDeps } from './turnHooks.js'
+import { createTurnHooks, STOP_HOOK_GRACE_MS, STOP_COMPLETION_WAIT_MS, type TurnHookDeps } from './turnHooks.js'
 import { engineHooks } from '../../engines/hooks.js'
 import type { HookTurnContext } from '../../engines/facets/hooks.js'
 
@@ -18,6 +18,7 @@ const ABORT = [{ type: 'turn_ended', payload: { aborted: true } }]
 const engineState = (turnOpen = true) => {
   const state = {
     turnOpen,
+    pendingTaskIds: () => new Set(['original-task']),
     openTurn: vi.fn(() => [{ type: 'turn_started', payload: { userMessage: '' } }]),
     closeTurn: vi.fn(() => { state.turnOpen = false; return END }),
     abortTurn: vi.fn(() => { state.turnOpen = false; return ABORT }),
@@ -65,6 +66,279 @@ const put = (map: Map<string, unknown>, state: unknown) => map.set('s1', state)
 describe('turn hooks', () => {
   beforeEach(() => vi.useFakeTimers())
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
+
+  describe('a Stop captured by its native registration', () => {
+    function captured(engine: 'cursor' | 'commandcode' = 'cursor', over: Partial<TurnHookDeps> = {}) {
+      const run = setup(engine, { holdStop: vi.fn(() => true), afterStop: vi.fn(), ...over })
+      const state = engineState()
+      const map = engine === 'cursor' ? run.normalizers.cursorNormalizers : run.normalizers.commandcodeNormalizers
+      put(map, state)
+      run.normalizers.noteTurnStart('s1')
+      let cancelled = false
+      const stop = run.hooks.captureStop(run.deps.resolve('s1')!, { sessionId: 's1' }, () => !cancelled)
+      return { ...run, state, map, stop, cancel: () => { cancelled = true } }
+    }
+
+    it('waits for tasks and the original parser, and retries a completed result without closing twice', async () => {
+      let release!: () => void
+      const wait = new Promise<void>(resolve => { release = resolve })
+      const run = captured('cursor', { drain: vi.fn(() => wait) })
+      const completed = vi.fn()
+      const first = run.stop().then(completed)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(run.deps.cursorTaskHooks.wait).toHaveBeenCalledOnce()
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+      expect(completed).not.toHaveBeenCalled()
+      release()
+      await first
+      expect(completed).toHaveBeenCalledWith('completed')
+      expect(await run.stop()).toBe('completed')
+      expect(run.state.closeTurn).toHaveBeenCalledOnce()
+      const fence = vi.mocked(run.deps.cursorSubagents.closeParent).mock.calls[0][2]!
+      expect(fence()).toBe(true)
+      run.normalizers.noteTurnStart('s1')
+      expect(fence()).toBe(true)
+      expect(removePendingCursorTasks).toHaveBeenLastCalledWith('/data', 's1', fence, new Set(['original-task']))
+      vi.mocked(removePendingCursorTasks).mockClear()
+      await vi.advanceTimersByTimeAsync(2_500)
+      expect(removePendingCursorTasks).not.toHaveBeenCalled()
+    })
+
+    it.each(['task', 'drain'] as const)('does not close a successor which starts during the %s wait', async waiting => {
+      let release!: () => void
+      const wait = new Promise<void>(resolve => { release = resolve })
+      const run = captured('cursor', waiting === 'task' ? { cursorTaskHooks: { wait: () => wait } } : { drain: () => wait })
+      const result = run.stop()
+      await vi.advanceTimersByTimeAsync(0)
+      run.normalizers.noteTurnStart('s1')
+      release()
+      expect(await result).toBe('superseded')
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+      expect(run.deps.emit).not.toHaveBeenCalled()
+    })
+
+    it('holds unknown or rebuilt interpretation, and allows explicit Cancel to resolve the held effect', async () => {
+      const absent = setup('cursor')
+      expect(await absent.hooks.captureStop(absent.deps.resolve('s1')!, { sessionId: 's1' }, () => true)()).toBe('held')
+      const run = captured()
+      put(run.map, engineState())
+      expect(await run.stop()).toBe('held')
+      expect(run.deps.holdStop).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 's1' }), true)
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+      run.cancel()
+      expect(await run.stop()).toBe('superseded')
+      const changed = captured()
+      changed.normalizers.forget('s1')
+      expect(await changed.stop()).toBe('held')
+    })
+
+    it('holds a failed drain without retrying it as a new Stop', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const run = captured('cursor', { drain: vi.fn(async () => { throw new Error('read unavailable') }) })
+      expect(await run.stop()).toBe('held')
+      expect(await run.stop()).toBe('held')
+      expect(run.deps.drain).toHaveBeenCalledOnce()
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+    })
+
+    it.each(['Cancel', 'successor'] as const)('does not install a hold when the drain fails after %s', async superseded => {
+      let reject!: (error: Error) => void
+      const run = captured('cursor', { drain: () => new Promise((_resolve, fail) => { reject = fail }) })
+      const result = run.stop()
+      await vi.advanceTimersByTimeAsync(0)
+      if (superseded === 'Cancel') run.cancel()
+      else run.normalizers.noteTurnStart('s1')
+      reject(new Error('late drain failure'))
+      expect(await result).toBe('superseded')
+      expect(run.deps.holdStop).not.toHaveBeenCalled()
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+    })
+
+    it('lets Cancel release a stalled drain and ignores its later completion', async () => {
+      let release!: () => void
+      const run = captured('cursor', { drain: () => new Promise(resolve => { release = resolve }) })
+      const result = run.stop()
+      await vi.advanceTimersByTimeAsync(0)
+      run.cancel()
+      await vi.advanceTimersByTimeAsync(25)
+      expect(await result).toBe('superseded')
+      release()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+      expect(run.deps.holdStop).not.toHaveBeenCalled()
+    })
+
+    it.each(['deadline', 'shutdown'] as const)('revokes a stalled Stop on %s and never acts when the reader returns', async reason => {
+      let release!: () => void, active = true
+      const run = captured('cursor', { drain: vi.fn(() => new Promise<void>(resolve => { release = resolve })) })
+      const result = run.stop({ current: () => active, verify: vi.fn() })
+      await vi.advanceTimersByTimeAsync(0)
+      if (reason === 'shutdown') active = false
+      await vi.advanceTimersByTimeAsync(STOP_COMPLETION_WAIT_MS)
+      expect(await result).toBe('held')
+      expect(run.deps.holdStop).toHaveBeenCalledTimes(reason === 'deadline' ? 1 : 0)
+      release()
+      expect(await run.stop()).toBe('held')
+      expect(run.deps.drain).toHaveBeenCalledOnce()
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+    })
+
+    it.each(['drain', 'verification'] as const)('checks elapsed time at %s completion even before an overdue timer runs', async phase => {
+      let elapsed = 0, release!: () => void
+      vi.spyOn(performance, 'now').mockImplementation(() => elapsed)
+      const run = captured('cursor', phase === 'drain' ? {
+        drain: () => new Promise<void>(resolve => { release = resolve }),
+      } : {})
+      const result = run.stop({ current: () => true, verify: () => { elapsed = STOP_COMPLETION_WAIT_MS } })
+      if (phase === 'drain') {
+        await vi.advanceTimersByTimeAsync(0)
+        elapsed = STOP_COMPLETION_WAIT_MS
+        release()
+      }
+      expect(await result).toBe('held')
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+      expect(run.deps.cursorSubagents.closeParent).not.toHaveBeenCalled()
+      expect(run.deps.holdStop).toHaveBeenCalledOnce()
+    })
+
+    it('finishes original task-file cleanup before confirming Stop and keeps its exact-ID closure through reattachment', async () => {
+      let release!: () => void, active = true
+      vi.mocked(removePendingCursorTasks).mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve }))
+      const run = captured(), confirmed = vi.fn()
+      const result = run.stop({ current: () => active, verify: vi.fn() }).then(confirmed)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(run.state.closeTurn).toHaveBeenCalledOnce()
+      expect(confirmed).not.toHaveBeenCalled()
+      release(); await result
+      expect(confirmed).toHaveBeenCalledWith('completed')
+      const fence = vi.mocked(run.deps.cursorSubagents.closeParent).mock.calls[0][2]!
+      expect(removePendingCursorTasks).toHaveBeenLastCalledWith('/data', 's1', fence, new Set(['original-task']))
+      put(run.map, engineState()); run.normalizers.noteTurnStart('s1')
+      expect(fence()).toBe(true)
+      active = false
+      expect(fence()).toBe(false)
+    })
+
+    it.each(['gone', 'rebound', 'source', 'identity', 'interpretation'] as const)('does not borrow a %s binding after capture', async changed => {
+      const session = { agentId: 'a1', sessionId: 's1', engine: 'cursor' } as RegisteredSession
+      const resolve = vi.fn((): RegisteredSession | undefined => session)
+      const run = captured('cursor', { resolve })
+      if (changed === 'gone') resolve.mockReturnValue(undefined)
+      if (changed === 'rebound') session.agentId = 'replacement'
+      if (changed === 'source') session.transcriptPath = '/fixture/replacement.jsonl'
+      if (changed === 'identity') session.identityHold = 'native source unavailable'
+      if (changed === 'interpretation') session.interpretationHold = 'reader unavailable'
+      expect(await run.stop()).toBe(['gone', 'rebound'].includes(changed) ? 'superseded' : 'held')
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+    })
+
+    it('contains a task wait that rejects after shutdown has already released its Stop', async () => {
+      let reject!: (error: Error) => void, active = true
+      const run = captured('cursor', { cursorTaskHooks: { wait: () => new Promise<void>((_, fail) => { reject = fail }) } })
+      const result = run.stop({ current: () => active, verify: vi.fn() })
+      active = false
+      await vi.advanceTimersByTimeAsync(25)
+      expect(await result).toBe('held')
+      reject(new Error('late Task failure'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+      expect(run.deps.holdStop).not.toHaveBeenCalled()
+    })
+
+    it('lets Cancel overtake a just-settled failed interpretation without installing an obsolete hold', async () => {
+      const session = { agentId: 'a1', sessionId: 's1', engine: 'cursor' } as RegisteredSession
+      let release!: () => void
+      const work = new Promise<void>(resolve => { release = resolve })
+      const run = captured('cursor', { resolve: () => session, drain: () => work })
+      const result = run.stop()
+      await vi.advanceTimersByTimeAsync(0)
+      session.interpretationHold = 'source changed while reading'
+      void work.then(run.cancel)
+      release()
+      expect(await result).toBe('superseded')
+      expect(run.deps.holdStop).not.toHaveBeenCalled()
+    })
+
+    it.each([false, true])('announces a captured Cursor error only when it has no closing output (%s)', async empty => {
+      const run = captured()
+      if (empty) run.state.closeTurn.mockReturnValueOnce([])
+      const stop = run.hooks.captureStop(run.deps.resolve('s1')!, { sessionId: 's1', status: 'error' }, () => true)
+      expect(await stop()).toBe('completed')
+      expect(run.deps.announceTurnAborted).toHaveBeenCalledTimes(empty ? 1 : 0)
+      expect(run.deps.cursorSubagents.closeParent).toHaveBeenCalledWith('s1', true, expect.any(Function), new Set(['original-task']))
+    })
+
+    it.each(['held', 'superseded'] as const)('keeps incomplete task cleanup %s without repeating a closed turn', async outcome => {
+      let release!: () => void
+      vi.mocked(removePendingCursorTasks).mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve }))
+      const run = captured(), result = run.stop()
+      await vi.advanceTimersByTimeAsync(0)
+      if (outcome === 'superseded') run.cancel()
+      else await vi.advanceTimersByTimeAsync(STOP_COMPLETION_WAIT_MS)
+      release()
+      expect(await result).toBe(outcome)
+      expect(await run.stop()).toBe(outcome)
+      expect(run.state.closeTurn).toHaveBeenCalledOnce()
+    })
+
+    it('rechecks cancellation during final ownership verification before closing Cursor', async () => {
+      const run = captured()
+      expect(await run.stop({ current: () => true, verify: run.cancel })).toBe('superseded')
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+    })
+
+    it.each(['grace', 'second drain', 'final verification'] as const)('rechecks Command Code authority during %s', async phase => {
+      for (const outcome of ['held', 'superseded'] as const) {
+        const session = { agentId: 'a1', sessionId: 's1', engine: 'commandcode' } as RegisteredSession
+        let release!: () => void, reads = 0, verifications = 0
+        const run = captured('commandcode', { resolve: () => session, drain: () => ++reads === 2 && phase === 'second drain'
+          ? new Promise<void>(resolve => { release = resolve }) : Promise.resolve() })
+        const revoke = () => { if (outcome === 'superseded') run.cancel(); else session.identityHold = 'original source unavailable' }
+        const result = run.stop({ current: () => true, verify: () => { if (++verifications === 2 && phase === 'final verification') revoke() } })
+        await vi.advanceTimersByTimeAsync(0)
+        if (phase === 'grace') revoke()
+        await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+        if (phase === 'second drain') { revoke(); release() }
+        expect(await result).toBe(outcome)
+        expect(run.state.closeTurn).not.toHaveBeenCalled()
+      }
+    })
+
+    it('keeps a native Command Code completion discovered by the final drain', async () => {
+      let reads = 0
+      const run = captured('commandcode', { drain: async () => { if (++reads === 2) run.state.turnOpen = false } })
+      const result = run.stop()
+      await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+      expect(await result).toBe('completed')
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+    })
+
+    it('finishes Command Code only after its grace and second drain', async () => {
+      const run = captured('commandcode')
+      const result = run.stop()
+      await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS - 1)
+      expect(run.state.closeTurn).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(await result).toBe('completed')
+      expect(run.deps.drain).toHaveBeenCalledTimes(2)
+      expect(run.state.closeTurn).toHaveBeenCalledOnce()
+      expect(run.deps.emit).toHaveBeenCalledWith('s1', END)
+    })
+
+    it('does not reopen a naturally ended Command Code turn or close a successor during grace', async () => {
+      const natural = captured('commandcode')
+      natural.state.turnOpen = false
+      expect(await natural.stop()).toBe('completed')
+      expect(natural.state.closeTurn).not.toHaveBeenCalled()
+      const replaced = captured('commandcode')
+      const result = replaced.stop()
+      await vi.advanceTimersByTimeAsync(1)
+      replaced.normalizers.noteTurnStart('s1')
+      await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+      expect(await result).toBe('superseded')
+      expect(replaced.state.closeTurn).not.toHaveBeenCalled()
+    })
+  })
 
   it('opens Command Code\'s turn on its first tool call, and nothing else\'s', () => {
     const cc = setup('commandcode')
@@ -492,6 +766,18 @@ it.each(['cursor', 'commandcode', 'copilot', 'agy', 'devin', 'grok'])('holds %s 
   expect(run.deps.drain).not.toHaveBeenCalled()
   expect(run.deps.emit).not.toHaveBeenCalled()
 })
+
+it.each([[false, 500], [true, undefined], [true, 500], [true, 2_000]] as const)(
+  'suppresses a held Claude Stop only with positive newer prompt evidence (prompt=%s, Stop=%s)', (prompt, firedAt) => {
+    const row = { agentId: 'a1', sessionId: 's1', engine: 'claude', interpretationHold: 'pending' } as RegisteredSession
+    const holdStop = vi.fn(() => true), run = setup('claude', { resolve: () => row, holdStop })
+    if (prompt) run.hooks.onPromptHook('s1', 1_000)
+    run.hooks.onTurnStop({ sessionId: 's1', firedAt })
+    expect(holdStop).toHaveBeenCalledTimes(prompt && firedAt === 500 ? 0 : 1)
+    expect(run.deps.drain).not.toHaveBeenCalled()
+    expect(run.deps.emit).not.toHaveBeenCalled()
+  },
+)
 
 it('rejects delayed engine emissions after its binding changes, even if the hold port rejects stale work', () => {
   let context!: HookTurnContext

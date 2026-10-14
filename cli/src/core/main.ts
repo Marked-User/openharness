@@ -1107,6 +1107,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // initialization immediately after the localhost server binds: events wait until it is armed below.
   const funnel = createEventFunnel({
     clients: backend,
+    onTurnStarted: normalizers.noteTurnStart,
     // Declared further down: read when a turn aborts, never now.
     agentIdFor: (sessionId) => agentIdFor(sessionId),
   })
@@ -1863,6 +1864,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onNativeRecoveryReady: entry => { void attachSession(entry, true).catch(error => console.warn('[hooks] recovered attach held', error)) },
     onAdmissionStop: attach.holdAdmissionStop,
     captureAdmissionStop: attach.captureAdmissionStop,
+    captureTurnStop: (entry, body) => turnHooks.captureStop(entry, body, attach.captureAdmissionStop(entry)),
     onRegistered: handleRegistered,
     onSessionEnd: engineHooks.onSessionEnd,
     // What the engines' own hooks say about a turn (core/turns/turnHooks.ts).

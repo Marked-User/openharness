@@ -63,6 +63,8 @@ type RecordValue = { version: 1; log?: 'native-hook-outbox'; processKey: string;
 type Read = ReturnType<typeof read>
 export interface NativeHookDelivery {
   intake: NativeHookIntake
+  /** Only this return from the exclusive intake publication is fresh. Never restored from disk. */
+  created?: true
   result?: Record<string, unknown>
   resultToken?: string
   acknowledgements?: Set<NativeHookPhase>
@@ -568,7 +570,7 @@ function createNativeHookLog({ directory, processKey, current = () => true,
       if (before.bytes + reservedBytes + inputBytes > maxBytes) held('journal byte capacity cannot retain terminal outcomes')
       await before.confirm()
       const verify = await append(before, { kind: 'intake', intake })
-      return { intake, verify, ...(kind === 'outbox' ? { acknowledgements: new Set<NativeHookPhase>() } : {}) }
+      return { intake, verify, created: true, ...(kind === 'outbox' ? { acknowledgements: new Set<NativeHookPhase>() } : {}) }
     }),
     acknowledge: (id: string, fingerprint: string, phase: NativeHookPhase): Promise<void> => operation('terminal', async () => {
       if (kind !== 'outbox') held('an effect journal cannot acknowledge a client phase')
