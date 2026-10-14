@@ -585,12 +585,36 @@ describe('PtyHostBackend host connection', () => {
     ])
     expect(await backend.inventory()).toEqual({ state: 'available', roots: [] })
     expect(again.events.size).toBe(1)
-    // A later loss starts again from 1 s.
+    // A loss after the connection stayed up 30 s starts again from 1 s.
+    await vi.advanceTimersByTimeAsync(30_000)
     again.lose()
     await vi.advanceTimersByTimeAsync(999)
     expect(launch).toHaveBeenCalledTimes(10)
     await vi.advanceTimersByTimeAsync(1)
     expect(launch).toHaveBeenCalledTimes(11)
+  })
+
+  it('a host that dies within 30 s of the connection keeps the growing delay', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    const hosts = [hostClient(10), hostClient(11), hostClient(12), hostClient(13)]
+    const { backend, launches } = reconnecting([...hosts])
+    await backend.prepare({ ownedPanes: new Map() })
+    const start = Date.now()
+    // Each host dies 29 s after the connection: the delays go on growing, 1 s, 2 s, 4 s.
+    for (const [index, host] of hosts.slice(0, 3).entries()) {
+      if (index > 0) await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(29_000)
+      host.lose()
+      const before = launches.length
+      await vi.advanceTimersByTimeAsync(2 ** index * 1_000 - 1)
+      expect(launches.length).toBe(before)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(launches.length).toBe(before + 1)
+    }
+    expect(launches.slice(1).map((at) => at - start)).toEqual([30_000, 61_000, 94_000])
+    expect(hosts[3].events.size).toBe(1)
   })
 
   it('says the host was replaced when the one it reconnects to has another pid, and forgets its panes', async () => {
@@ -612,7 +636,8 @@ describe('PtyHostBackend host connection', () => {
     expect(replaced).not.toHaveBeenCalled()
     expect(backend.known(created.runtime)).toEqual({ hold: true })
     same.lose()
-    await vi.advanceTimersByTimeAsync(1_000)
+    // Lost again at once: the next attempt is 2 s on.
+    await vi.advanceTimersByTimeAsync(2_000)
     expect(replaced).toHaveBeenCalledTimes(1)
     expect(backend.known(created.runtime)).toBeUndefined()
     expect(other.events.size).toBe(1)

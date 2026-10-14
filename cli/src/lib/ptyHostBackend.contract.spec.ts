@@ -77,6 +77,13 @@ async function readyBackend(home: string): Promise<PtyHostBackend> {
       expect(readDiscovery(home, PTY_PROTOCOL)!.pid).not.toBe(before.pid)
       expect(replaced).toHaveLength(1)
       expect(await backend.paneState(created.runtime)).toBe('gone')
+      // The new host never hands out an id the dead one used: the old runtime cannot name a new pane.
+      const fresh = await backend.create({ command: ['/bin/sh'] })
+      if (fresh.state !== 'succeeded') throw new Error(`create failed: ${JSON.stringify(fresh)}`)
+      expect(fresh.runtime.paneId).not.toBe(created.runtime.paneId)
+      expect(Number(fresh.runtime.paneId.slice(1))).toBeGreaterThan(Number(created.runtime.paneId.slice(1)))
+      expect(await backend.paneState(created.runtime)).toBe('gone')
+      expect((await backend.kill(fresh.runtime)).state).toBe('succeeded')
     } finally {
       backend.dispose()
       stopHost(home)

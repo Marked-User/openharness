@@ -24,7 +24,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -34,6 +33,7 @@ use base64::Engine;
 use serde_json::{Map, Value, json};
 
 use crate::pane::{Pane, PaneEvent, PaneSpec};
+use crate::pane_ids::PaneIds;
 use crate::protocol::Op;
 use crate::stream::{Registry, Subscriber};
 
@@ -130,7 +130,8 @@ struct PaneEntry {
 
 pub struct Panes {
     table: Mutex<HashMap<String, PaneEntry>>,
-    next_id: AtomicU64,
+    /// Pane numbers, never repeated for the host's home (pane_ids.rs).
+    ids: Mutex<PaneIds>,
     history_limit: usize,
     sink: Sender<(String, PaneEvent)>,
     /// The host's instance, for each child's `HARNESS_PANE`.
@@ -178,10 +179,32 @@ impl Panes {
         history_limit: usize,
         instance: impl Into<String>,
     ) -> (Panes, Receiver<(String, PaneEvent)>) {
+        Panes::with_ids(history_limit, instance, PaneIds::in_memory())
+    }
+
+    /// The table of the host serving `run_dir`: its pane ids follow every id an earlier host of
+    /// the same home handed out, so an old `<instance>:<id>` never names a new pane.
+    pub fn persistent(
+        history_limit: usize,
+        instance: impl Into<String>,
+        run_dir: &std::path::Path,
+    ) -> std::io::Result<(Panes, Receiver<(String, PaneEvent)>)> {
+        Ok(Panes::with_ids(
+            history_limit,
+            instance,
+            PaneIds::persistent(run_dir)?,
+        ))
+    }
+
+    fn with_ids(
+        history_limit: usize,
+        instance: impl Into<String>,
+        ids: PaneIds,
+    ) -> (Panes, Receiver<(String, PaneEvent)>) {
         let (sink, events) = mpsc::channel();
         let panes = Panes {
             table: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
+            ids: Mutex::new(ids),
             history_limit,
             sink,
             instance: instance.into(),
@@ -391,7 +414,10 @@ impl Panes {
                         .ok()
                         .map(|p| p.to_string_lossy().into_owned())
                 });
-                let id = format!("%{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+                let number = lock(&self.ids)
+                    .take()
+                    .map_err(|e| OpError::new("spawn_failed", format!("pane ids: {e}")))?;
+                let id = format!("%{number}");
                 let mut table = lock(&self.table);
                 let pane = Pane::spawn(
                     id.clone(),
@@ -641,6 +667,20 @@ mod tests {
             ))
             .unwrap();
         r["pane"].as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn pane_ids_never_repeat_for_a_home_across_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, _events) = Panes::persistent(1000, "p9", dir.path()).unwrap();
+        let old: Vec<u64> = (0..3)
+            .map(|_| pane_number(&create(&first, "sleep 30", false)))
+            .collect();
+        assert_eq!(old, [1, 2, 3]);
+        drop(first); // the host died
+        let (second, _events) = Panes::persistent(1000, "p9", dir.path()).unwrap();
+        let new = pane_number(&create(&second, "sleep 30", false));
+        assert!(old.iter().all(|&id| id < new), "{new} after {old:?}");
     }
 
     fn state(panes: &Panes, pane: &str) -> Value {

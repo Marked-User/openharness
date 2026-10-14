@@ -8,7 +8,7 @@
  *
  * The connection: when the host ends it (it exited, or dropped this daemon), the backend is unavailable (`inventory`
  * says so, and never lists nothing) and reconnects, through `ensurePtyHost`, after 1 s, then 2 s, 4 s … at most 30 s
- * apart. A host with another pid is another host: its predecessor's panes are gone, and `onHostReplaced` says so,
+ * apart; the delays start again from 1 s only for a connection that had stayed up 30 s. A host with another pid is another host: its predecessor's panes are gone, and `onHostReplaced` says so,
  * so the reconciler sees them absent and the resume path takes over. `dispose` drops the connection alone.
  */
 import { env } from '../config/env.js'
@@ -58,6 +58,11 @@ const KILL_GRACE_MS = 2000
 /** The first reconnect after the host connection ended, doubled after each failed one up to the last. */
 const RECONNECT_FIRST_MS = 1_000
 const RECONNECT_MAX_MS = 30_000
+/**
+ * How long a connection must have stayed up for its loss to start the delays again from the first: a host that
+ * dies soon after each start keeps the growing delay, rather than being restarted every second.
+ */
+const RECONNECT_STABLE_MS = 30_000
 
 export interface PtyHostBackendOptions {
   /** The host's `--home` (`HARNESS_PTY_DIR`): its discovery file and logs live there. */
@@ -117,6 +122,8 @@ export class PtyHostBackend implements TerminalBackend<PtyRuntimeRef> {
   private hostPid: number | null = null
   private reconnectTimer: NodeJS.Timeout | null = null
   private reconnectDelay = RECONNECT_FIRST_MS
+  /** When the current connection was made. */
+  private connectedAt = 0
   private disposed = false
 
   /** Called when a reconnect reached another host than before: every pane of the old one is gone. */
@@ -172,6 +179,7 @@ export class PtyHostBackend implements TerminalBackend<PtyRuntimeRef> {
     this.instance = client.instance
     const replaced = this.hostPid !== null && this.hostPid !== client.pid
     this.hostPid = client.pid
+    this.connectedAt = Date.now()
     // The panes recorded were the old host's.
     if (replaced) this.panes.clear()
     this.subscriptions.push(client.onEvent((event) => this.onEvent(event)))
@@ -189,7 +197,7 @@ export class PtyHostBackend implements TerminalBackend<PtyRuntimeRef> {
     if (client !== this.client) return
     this.detach()
     console.error('[terminal] ptyhost: lost the connection to the host; reconnecting')
-    this.reconnectDelay = RECONNECT_FIRST_MS
+    if (Date.now() - this.connectedAt >= RECONNECT_STABLE_MS) this.reconnectDelay = RECONNECT_FIRST_MS
     this.scheduleReconnect()
   }
 
