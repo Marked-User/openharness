@@ -34,6 +34,9 @@ const READ_CHUNK: usize = 64 * 1024;
 /// Bytes read per wakeup before going back to the poller, so input and control messages are not
 /// starved by a program that floods its output.
 const READ_PER_WAKEUP: usize = 1024 * 1024;
+/// How long a dropped pane's child gets after SIGHUP before SIGKILL.
+#[cfg(unix)]
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 #[cfg(unix)]
 const READ_WRITE_TOKEN: usize = 0; // alacritty's `tty::unix::PTY_READ_WRITE_TOKEN` (crate-private)
@@ -382,6 +385,18 @@ fn attach(
         env.entry("COLORTERM".into())
             .or_insert_with(|| "truecolor".into());
     }
+    // alacritty's Unix `tty::new` puts its window variables in the child's environment; panes
+    // should look like tmux panes, so `env -u` takes them out (as hn's local panes do). `env`
+    // execs the command: the pid stays the child's.
+    #[cfg(unix)]
+    let (program, args) = (
+        &"/usr/bin/env".to_owned(),
+        ["-u", "ALACRITTY_WINDOW_ID", "-u", "WINDOWID", "--", program]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>(),
+    );
     let options = Options {
         shell: Some(Shell::new(program.clone(), args.to_vec())),
         working_directory: spec.cwd.clone(),
@@ -517,6 +532,10 @@ struct Reader {
 impl Reader {
     fn run(mut self) {
         let end = self.event_loop();
+        #[cfg(unix)]
+        if let End::Shutdown = end {
+            self.end_child();
+        }
         if !(cfg!(unix) && self.eof) {
             let _ = self.pty.deregister(&self.poller);
         }
@@ -529,7 +548,8 @@ impl Reader {
             process,
             ..
         } = self;
-        // Unix: SIGHUP to the child, then reap it (alacritty's `Pty::drop`).
+        // Unix: SIGHUP to the child, then reap it (alacritty's `Pty::drop`; after `end_child` on
+        // a shutdown, so the reap cannot block).
         // Windows: ClosePseudoConsole; the console's processes get CTRL_CLOSE_EVENT.
         drop(pty);
         let status = match end {
@@ -657,6 +677,39 @@ impl Reader {
             self.writes.clear();
             self.written = 0;
             let _ = self.poller.delete(self.pty.file());
+        }
+    }
+
+    /// The pane was dropped while its child runs: SIGHUP the child's process group, and SIGKILL
+    /// it if it has not exited after `SHUTDOWN_GRACE`, so the reap in `Pty::drop` cannot block
+    /// this thread forever. Runs here, not in the dropping caller.
+    #[cfg(unix)]
+    fn end_child(&mut self) {
+        // The tty is not read any more; left in the poller, its data would wake every wait.
+        self.hang_up();
+        let group = -(self.pty.child().id() as libc::pid_t);
+        unsafe { libc::kill(group, libc::SIGHUP) };
+        if !self.wait_child(SHUTDOWN_GRACE) {
+            unsafe { libc::kill(group, libc::SIGKILL) };
+            self.wait_child(SHUTDOWN_GRACE);
+        }
+    }
+
+    /// Wait up to `timeout` for the child to exit, on the poller (SIGCHLD); whether it has.
+    #[cfg(unix)]
+    fn wait_child(&mut self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut events = Events::new();
+        loop {
+            if let Some(ChildEvent::Exited(_)) = self.pty.next_child_event() {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            events.clear();
+            let _ = self.poller.wait(&mut events, Some(left));
         }
     }
 
@@ -1193,5 +1246,50 @@ mod tests {
         )
         .unwrap();
         assert!(wait_for(&rx, |e| *e == PaneEvent::Exited { status: Some(0) }));
+    }
+
+    #[test]
+    fn dropping_a_pane_ends_a_child_that_ignores_sighup_and_its_reader() {
+        let (tx, rx) = channel();
+        let pane = Pane::spawn(
+            "%11".into(),
+            sh("trap '' HUP; echo ready; sleep 30"),
+            1000,
+            tx,
+        )
+        .unwrap();
+        wait_text(&pane, &rx, "ready");
+        let pid = pane.root_pid().unwrap() as libc::pid_t;
+        let start = Instant::now();
+        drop(pane);
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "drop blocked the caller"
+        );
+        // The reader thread holds the sink's only other sender: it is gone once the thread ends.
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                _ => assert!(Instant::now() < end, "reader thread still running"),
+            }
+        }
+        // Reaped: the pid no longer exists.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    #[test]
+    fn children_do_not_see_the_pty_library_window_variables() {
+        let (tx, rx) = channel();
+        let pane = Pane::spawn(
+            "%12".into(),
+            sh(r#"echo "w=${WINDOWID-unset} a=${ALACRITTY_WINDOW_ID-unset}"; sleep 2"#),
+            1000,
+            tx,
+        )
+        .unwrap();
+        let text = wait_text(&pane, &rx, "w=");
+        assert!(text.contains("w=unset a=unset"), "{text:?}");
     }
 }
