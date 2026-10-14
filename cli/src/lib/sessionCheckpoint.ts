@@ -38,6 +38,15 @@ async function databaseHistory(s: RegisteredSession): Promise<Record<string, unk
       break
     default: throw new SessionCheckpointError('This engine has no supported history checkpoint yet. The session is still open.')
   }
+  // OpenCode 2 keeps a conversation in `session_v2` and `session_message`; the v1 tables stay in the same file with
+  // only older conversations, so a v2 one read there was "not found" and could never be closed (2026-10-14). Read the
+  // v2 tables when they hold this session, as purgeAgentService does.
+  if (s.engine === 'opencode') {
+    const v2 = await sqliteReadAll(database, "SELECT name FROM sqlite_master WHERE type='table' AND name='session_v2';")
+    const held = v2.ok && v2.rows.length ? await sqliteReadAll(database, 'SELECT id FROM session_v2 WHERE id = ?;', [s.sessionId]) : null
+    if (!v2.ok || (held && !held.ok)) throw new SessionCheckpointError('Could not read the saved conversation. The session has not been closed.')
+    if (held?.rows.length) selections = [['session_v2', 'id = ?'], ['session_message', 'session_id = ?']]
+  }
   const tables: Record<string, unknown[]> = {}
   for (const [table, where] of selections) {
     const result = await sqliteReadAll(database, `SELECT * FROM ${table} WHERE ${where};`, [s.sessionId])

@@ -245,6 +245,12 @@ it.each(['opencode', 'kilo', 'hermes', 'devin'] as const)('exports %s through re
   await store.save(row)
   const saved = await manifest()
   expect(await readFile(join(directory, saved.file), 'utf8')).toContain('Stored in WAL')
+  // OpenCode first looks for its v2 tables (holding this session, here); every read is a SELECT of this conversation.
+  const probes = engine === 'opencode' ? sql.mock.calls.splice(0, 2) : []
+  expect(probes.map(([, query, params]) => [query, params ?? []])).toEqual(engine === 'opencode' ? [
+    ["SELECT name FROM sqlite_master WHERE type='table' AND name='session_v2';", []],
+    ['SELECT id FROM session_v2 WHERE id = ?;', ['conversation']],
+  ] : [])
   for (const [, query, params] of sql.mock.calls) {
     expect(query).toMatch(/^SELECT \* FROM /)
     expect(params).toEqual(['conversation'])
@@ -253,6 +259,13 @@ it.each(['opencode', 'kilo', 'hermes', 'devin'] as const)('exports %s through re
 it('treats a locked or missing database as a save failure, never an empty successful backup', async () => {
   row.engine = 'hermes'
   vi.mocked(sqliteReadAll).mockResolvedValue({ ok: false, reason: 'transient' })
+  await expect(store.save(row)).rejects.toThrow('Could not read')
+  expect(await readdir(directory)).toEqual([])
+  // OpenCode's look for its v2 tables fails the same way, whether at the table or at this session.
+  row.engine = 'opencode'
+  await expect(store.save(row)).rejects.toThrow('Could not read')
+  vi.mocked(sqliteReadAll).mockReset().mockResolvedValueOnce({ ok: true, via: 'builtin', rows: [{ name: 'session_v2' }] })
+    .mockResolvedValueOnce({ ok: false, reason: 'transient' })
   await expect(store.save(row)).rejects.toThrow('Could not read')
   expect(await readdir(directory)).toEqual([])
 })
