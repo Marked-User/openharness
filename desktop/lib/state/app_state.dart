@@ -13050,6 +13050,63 @@ class AppNotifier extends ChangeNotifier {
     }
   }
 
+  /// Delete Harness: unlike Stop, which keeps the conversation to reopen, this
+  /// stops a running harness and deletes its saved conversation for good, so it
+  /// leaves Open Harness too. The daemon's reviewed deletion (`agent_purge`):
+  /// reviewed first, then deleted under that review. Project files and
+  /// worktrees are kept. Null on success, or a message for the prompt.
+  Future<String?> purgeAgent(String machineId, String agentId) async {
+    final machine = machineStates[machineId];
+    final agent = machine?.agents
+        .where((agent) => agent.id == agentId)
+        .firstOrNull;
+    final createdAt = agent?.createdAt;
+    if (machine == null || agent == null || createdAt == null) {
+      return 'This harness is no longer listed. Refresh and try again.';
+    }
+    final sessionId = agent.sessionId;
+    final target = {
+      'agentId': agentId,
+      'sessionId': sessionId == null || sessionId.isEmpty ? null : sessionId,
+      'createdAt': createdAt.millisecondsSinceEpoch,
+    };
+    String refused(Object? code, Object? detail) =>
+        'Delete failed: ${detail is String && detail.isNotEmpty ? detail : code}';
+    try {
+      final review = await _conn(machineId).request(
+        'agent_purge',
+        payload: {...target, 'mode': 'inspect'},
+        timeout: const Duration(seconds: 30),
+      );
+      if (review['error'] != null) {
+        return refused(review['error'], review['detail']);
+      }
+      final reviewId = review['reviewId'];
+      if (reviewId is! String) return 'Could not review this harness for deletion.';
+      final result = await _conn(machineId).request(
+        'agent_purge',
+        payload: {...target, 'mode': 'delete', 'reviewId': reviewId},
+        timeout: const Duration(seconds: 60),
+      );
+      if (result['error'] != null) {
+        return refused(result['error'], result['detail']);
+      }
+      if (result['deleted'] != true) {
+        return 'Could not confirm the deletion. Refresh harnesses to check.';
+      }
+    } on WsRequestFailure catch (failure) {
+      return refused(failure.code, failure.detail);
+    } on WsRequestTimeout {
+      return 'Could not confirm the deletion. Refresh harnesses to check.';
+    } catch (_) {
+      return 'Could not delete the harness. Try again.';
+    }
+    await _removeAgent(machine, agentId);
+    unawaited(_loadMachineData(machine, force: true));
+    notifyListeners();
+    return null;
+  }
+
   bool _restartCurrent(AgentRestartAttempt attempt, {bool beforeSend = false}) {
     final machine = attempt._machine;
     final agent = attempt.agent;
