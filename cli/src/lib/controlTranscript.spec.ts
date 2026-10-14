@@ -318,7 +318,7 @@ it('retains a typed Stop hold when the native broker contains a failed grant che
   const { createNativeControls } = await import('../core/engines/nativeControls.js')
   const { engineNativeControlRequests } = await import('../engines/worker/nativeControlRequests.js')
   const { launch } = await import('../engines/codex/launch.js')
-  const { argvTokens } = await import('./tmux.js')
+  const { argvTokens } = await import('./processTable.js')
   const { createStopAgentService } = await import('./stopAgentService.js')
   const { StoppedAgentStore } = await import('./stoppedAgents.js')
   const { AgentRestartCoordinator } = await import('./restartAgent.js')

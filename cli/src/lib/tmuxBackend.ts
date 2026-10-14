@@ -30,7 +30,6 @@ import {
   captureTmuxPane,
   ENGINE_EXIT_PANE_OPTION,
   listPaneTitles,
-  LSTART_MARKER_RE,
   lookupPaneEngineProcess,
   sendKeyToTmux,
   sendLiteralToTmux,
@@ -40,6 +39,7 @@ import {
   setPaneMouseOn,
   setPaneStyle,
 } from './tmux.js'
+import { LSTART_MARKER_RE } from './processTable.js'
 import { env } from '../config/env.js'
 import { HARNESS_OWNER_OPTION, harnessPaneOwner, ownerCommand } from './harnessSessionLabel.js'
 import { tmuxFeatures, type TmuxFeatures } from './tmuxVersion.js'

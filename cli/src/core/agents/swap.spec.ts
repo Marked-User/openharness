@@ -4,7 +4,8 @@ import { checkPidRuntime, terminateDeletedAgent } from '../../lib/deleteAgentFal
 import { buildEngineLaunchArgv } from '../../lib/engineLaunch.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { processRows } from '../../lib/terminalAgentDiscovery.js'
-import { bypassPermissionActive, resolvePaneEngineProcess } from '../../lib/tmux.js'
+import { resolvePaneEngineProcess } from '../../lib/tmux.js'
+import { bypassPermissionActive } from '../../lib/processTable.js'
 import { AgentRestartCoordinator } from '../../lib/restartAgent.js'
 import { createPaneSwap, SWAP_SETTLE_MS, type PaneSwapDeps } from './swap.js'
 import type { NativeLaunch } from '../../engines/nativeLaunch.js'
@@ -14,8 +15,11 @@ vi.mock('../../lib/engineLaunch.js', async (real) => ({ ...await real<object>(),
 vi.mock('../../lib/terminalAgentDiscovery.js', async (real) => ({ ...await real<object>(), processRows: vi.fn(async () => null) }))
 vi.mock('../../lib/tmux.js', async (real) => ({
   ...await real<object>(),
-  bypassPermissionActive: vi.fn(() => true),
   resolvePaneEngineProcess: vi.fn(async () => null),
+}))
+vi.mock('../../lib/processTable.js', async (real) => ({
+  ...await real<object>(),
+  bypassPermissionActive: vi.fn(() => true),
 }))
 
 const runtime = { backend: 'tmux', paneId: '%4' } as never

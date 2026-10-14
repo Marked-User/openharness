@@ -23,11 +23,11 @@ vi.mock('node:child_process', async original => {
   const actual = await original<typeof import('node:child_process')>()
   return { ...actual, execFile: vi.fn(actual.execFile) }
 })
-vi.mock('./tmux.js', async original => ({ ...await original<object>(), processRows: vi.fn() }))
+vi.mock('./processTable.js', async original => ({ ...await original<object>(), processRows: vi.fn() }))
 vi.mock('../engines/kit/nativeDescriptors.js', async original => ({ ...await original<object>(), readDescriptorEvidence: vi.fn() }))
 vi.mock('./processEvidence.js', async () => {
   const { nativeConversationFixture } = await import('../testing/nativeConversationEvidence.js')
-  const { processRows } = await import('./tmux.js')
+  const { processRows } = await import('./processTable.js')
   const { readDescriptorEvidence } = await import('../engines/kit/nativeDescriptors.js')
   return { readProcessEvidence: (...args: Parameters<typeof import('./processEvidence.js')['readProcessEvidence']>) => {
     const sources = nativeConversationFixture(async () => [], processRows)
@@ -165,7 +165,7 @@ describe('complete bounded evidence before choosing a conversation', () => {
     const other = codex ? file(join(moved, 'sessions', `rollout-${OTHER}.jsonl`), header(OTHER))
       : file(join(moved, 'projects', 'work', `${OTHER}.jsonl`), body())
     if (codex) {
-      const { processRows } = await import('./tmux.js')
+      const { processRows } = await import('./processTable.js')
       const { readDescriptorEvidence } = await import('../engines/kit/nativeDescriptors.js')
       vi.mocked(processRows).mockResolvedValue([{ pid: 77, parentPid: 1, executable: 'codex', args: 'codex', startMarker: new Date(START).toString() }])
       vi.mocked(readDescriptorEvidence).mockImplementation(nativeConversationFixture(async () => [own, other]).descriptors)
@@ -382,7 +382,7 @@ it.each(['Stop', 'checkpointed Stop', 'unknown process', 'unknown descriptors', 
     runtimes: [{ backend: 'tmux', paneId: '%77' }],
     processIdentity: { pid: 77, executable: 'claude', startMarker: new Date(START).toISOString() },
   } as RegisteredSession
-  const tmux = await import('./tmux.js')
+  const tmux = await import('./processTable.js')
   vi.mocked(tmux.processRows).mockResolvedValue([{ ...row.processIdentity!, parentPid: 1, args: 'claude' }])
   let reason = 'process record is incomplete'
   if (action === 'Claude record switch' || action === 'Claude new record') {

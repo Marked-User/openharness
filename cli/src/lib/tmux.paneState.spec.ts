@@ -15,7 +15,8 @@ vi.mock('child_process', async (real) => {
   }
 })
 
-const { tmuxPaneState, lookupPaneEngineProcess, processRows } = await import('./tmux.js')
+const { tmuxPaneState, lookupPaneEngineProcess } = await import('./tmux.js')
+const { processRows } = await import('./processTable.js')
 
 describe('what tmux says about a pane', () => {
   afterEach(() => { answer.err = null; answer.stdout = ''; answer.stderr = '' })

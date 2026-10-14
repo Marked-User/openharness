@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ProcessRow } from './tmux.js'
+import type { ProcessRow } from './processTable.js'
 import { discoverTerminalAgentsFromSnapshot } from './terminalAgentDiscovery.js'
 import { terminalRouteKey } from './terminalRuntime.js'
 import type { TerminalRootObservation } from './terminalTypes.js'

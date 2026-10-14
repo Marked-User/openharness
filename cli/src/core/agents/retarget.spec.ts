@@ -38,6 +38,9 @@ vi.mock('../../lib/restartAgent.js', async (real) => ({
 vi.mock('../../lib/runtimeProfileWire.js', async (real) => ({ ...await real<object>(), parseRuntimeProfile: vi.fn(() => ({ engine: 'claude', model: 'opus' })) }))
 vi.mock('../../lib/tmux.js', async (real) => ({
   ...await real<object>(), clearPaneRemainOnExit: vi.fn(async () => {}),
+}))
+vi.mock('../../lib/processTable.js', async (real) => ({
+  ...await real<object>(),
   processLaunchArgs: vi.fn(async () => 'codex -c model_providers.grid.base_url=http://grid.local/v1'),
 }))
 vi.mock('../../lib/workspaceCheck.js', () => ({ workspaceMissing: vi.fn(() => null) }))

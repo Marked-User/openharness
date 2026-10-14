@@ -18,7 +18,8 @@ import type { registry, RegisteredSession } from '../../lib/registry.js'
 import type { SessionInputController } from '../../lib/sessionInput.js'
 import type { StoppedAgentStore } from '../../lib/stoppedAgents.js'
 import type { DiscoveredTerminalAgent } from '../../lib/terminalAgentDiscovery.js'
-import { bypassPermissionActive, permissionModeFromArgv, tmuxPaneState } from '../../lib/tmux.js'
+import { tmuxPaneState } from '../../lib/tmux.js'
+import { bypassPermissionActive, permissionModeFromArgv } from '../../lib/processTable.js'
 
 export interface DiscoveryDeps {
   registry: Pick<typeof registry,

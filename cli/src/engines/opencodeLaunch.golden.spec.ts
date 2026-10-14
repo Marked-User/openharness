@@ -13,7 +13,8 @@ vi.mock('../lib/createAgentPane.js', () => ({ createAndRegisterPane: async (inpu
   return { ok: false, error: 'RECORDED', detail: 'No pane is opened by this golden.' }
 } }))
 vi.mock('../lib/tmuxVersion.js', async real => ({ ...await real<object>(), tmuxSupportsSessionEnv: async () => true }))
-vi.mock('../lib/tmux.js', async real => ({ ...await real<object>(), clearPaneRemainOnExit: async () => {}, processArgs: async () => '' }))
+vi.mock('../lib/tmux.js', async real => ({ ...await real<object>(), clearPaneRemainOnExit: async () => {} }))
+vi.mock('../lib/processTable.js', async real => ({ ...await real<object>(), processArgs: async () => '' }))
 vi.mock('../lib/gatewayRuntime.js', async real => ({ ...await real<object>(), probeGatewayRuntime: async () => ({ kind: 'none' }) }))
 vi.mock('../lib/binaryOnPath.js', async real => {
   const actual = await real<typeof import('../lib/binaryOnPath.js')>()

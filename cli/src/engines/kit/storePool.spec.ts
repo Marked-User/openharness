@@ -11,9 +11,9 @@ const control = vi.hoisted(() => ({
   result: undefined as undefined | import('../../lib/sqliteRead.js').SqliteReadResult,
   now: undefined as number | undefined,
   queries: [] as Array<{ path: string; options: import('../../lib/sqliteRead.js').SqliteReadOptions }>,
-  processes: [] as import('../../lib/tmux.js').ProcessRow[],
+  processes: [] as import('../../lib/processTable.js').ProcessRow[],
 }))
-vi.mock('../../lib/tmux.js', async original => ({ ...await original<object>(), processRows: async () => control.processes }))
+vi.mock('../../lib/processTable.js', async original => ({ ...await original<object>(), processRows: async () => control.processes }))
 vi.mock('../../lib/processEvidence.js', async () => {
   const { nativeConversationFixture } = await import('../../testing/nativeConversationEvidence.js')
   return { readProcessEvidence: (...args: Parameters<typeof import('../../lib/processEvidence.js')['readProcessEvidence']>) =>

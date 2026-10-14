@@ -1,7 +1,8 @@
 /** Stop the exact discovered engine process while leaving the user's tmux pane and shell alive. */
 
 import type { RegisteredSession } from './registry.js'
-import { processRows, type RuntimeCheck } from './tmux.js'
+import { type RuntimeCheck } from './tmux.js'
+import { processRows } from './processTable.js'
 import { sameProcessIdentity } from './terminalRuntime.js'
 
 /** Delete has already removed the UI entry; signal the saved process immediately. */

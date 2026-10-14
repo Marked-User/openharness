@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RegisteredSession } from '../../lib/registry.js'
 import type { DiscoveredTerminalAgent } from '../../lib/terminalAgentDiscovery.js'
-import { bypassPermissionActive, permissionModeFromArgv, tmuxPaneState } from '../../lib/tmux.js'
+import { tmuxPaneState } from '../../lib/tmux.js'
+import { bypassPermissionActive, permissionModeFromArgv } from '../../lib/processTable.js'
 import { createDiscoveryHandlers, type DiscoveryDeps } from './discovery.js'
 
 vi.mock('../../lib/tmux.js', async (real) => ({ ...await real<object>(), tmuxPaneState: vi.fn(async () => 'gone') }))

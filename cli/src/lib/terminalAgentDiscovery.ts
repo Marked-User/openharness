@@ -21,7 +21,7 @@ import {
   processTreePids,
   resumeSessionId,
   type ProcessRow,
-} from './tmux.js'
+} from './processTable.js'
 import { processIdentityKey, processIdentityOf, sameProcessIdentity, terminalInstanceId, terminalPlacementKey, terminalRouteKey } from './terminalRuntime.js'
 import type {
   ProcessIdentity,
@@ -30,7 +30,7 @@ import type {
   TerminalRuntimeRef,
 } from './terminalTypes.js'
 
-export { processRows } from './tmux.js'
+export { processRows } from './processTable.js'
 
 export interface DiscoveredTerminalAgent {
   engine: AgentEngine
