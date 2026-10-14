@@ -20,6 +20,7 @@ const key = (now: number) => new Date(now).toISOString().slice(0, 10)
 const week = (now: number) => { const d = new Date(now); return key(now - ((d.getUTCDay() + 6) % 7) * DAY) }
 type Counters = Partial<Record<ProductUsageMetric, number>>
 interface State {
+  dayContexts: Record<string, ProductUsageContext>
   health: HealthState
   healthDay: string | null
   revision: number
@@ -40,7 +41,7 @@ interface State {
   days: Record<string, Counters>
   pending: ProductUsageReport | null
 }
-const fresh = (revision: number): State => ({ health: cleanHealthState(null, Date.now()), healthDay: null, revision, activeDay: null, workDay: null, workWeek: null,
+const fresh = (revision: number): State => ({ dayContexts: {}, health: cleanHealthState(null, Date.now()), healthDay: null, revision, activeDay: null, workDay: null, workWeek: null,
   workMonth: null, measurementDay: null, featureDays: {}, featuresUsed: [],
   workedBefore: false, respondedBefore: false, launchedBefore: false, firstLaunchAt: null,
   launchWorked: false, launchResponded: false, workDays: [], days: {}, pending: null })
@@ -91,7 +92,12 @@ export function createProductUsage(deps: ProductUsageDeps) {
       state.launchWorked = saved.launchWorked === true
       state.launchResponded = saved.launchResponded === true
       state.workDays = Array.isArray(saved.workDays) ? [...new Set(saved.workDays.filter(d => typeof d === 'string' && validDay(d)))].slice(-35) : []
-      for (const [day, counters] of Object.entries(saved.days ?? {})) if (validDay(day)) state.days[day] = clean(counters)
+      for (const [day, counters] of Object.entries(saved.days ?? {})) if (validDay(day)) {
+        state.days[day] = clean(counters)
+        const c = cleanUsageContext(saved.dayContexts?.[day])
+        if (c) state.dayContexts[day] = c
+        else if (context) state.dayContexts[day] = { ...context, release: 'unknown', platform: 'other' }
+      }
       const pending = saved.pending
       if (pending && pending.schemaVersion === 1 && pending.revision === state.revision && validDay(pending.day)
           && typeof pending.id === 'string' && /^[a-f0-9-]{36}$/.test(pending.id)) {
@@ -121,6 +127,7 @@ export function createProductUsage(deps: ProductUsageDeps) {
     clearTimeout(persistTimer); persistTimer = undefined
     for (const field of ['activeDay', 'workDay', 'workWeek', 'measurementDay'] as const) if (state[field] && !validDay(state[field]!)) state[field] = null
     for (const day of Object.keys(state.days)) if (!validDay(day)) delete state.days[day]
+    for (const day of Object.keys(state.dayContexts)) if (!state.days[day]) delete state.dayContexts[day]
     for (const action of PRODUCT_USAGE_ACTIONS) if (!validDay(state.featureDays[action] ?? '')) delete state.featureDays[action]
     state.workDays = state.workDays.filter(validDay)
     if (state.firstLaunchAt !== null && !validDay(key(state.firstLaunchAt))) state.firstLaunchAt = null
@@ -168,6 +175,14 @@ export function createProductUsage(deps: ProductUsageDeps) {
       ;(state.days[state.measurementDay] ??= {}).measurement_v2_installation_days = 1
     }
     const counters = state.days[day] ??= {}
+    if (context) {
+      const prior = state.dayContexts[day]
+      state.dayContexts[day] = !prior ? context : { ...context,
+        release: prior.release === context.release ? context.release : 'unknown',
+        platform: prior.platform === context.platform ? context.platform : 'other',
+        channel: prior.channel === 'production' && context.channel === 'production' ? 'production' : 'development' }
+      if ((counters[metric] ?? 0) >= PRODUCT_USAGE_MAX_COUNT) counters.health_cli_queue_capped = 1
+    }
     counters[metric] = Math.min(PRODUCT_USAGE_MAX_COUNT, (counters[metric] ?? 0) + 1)
     dirty()
   }
@@ -216,9 +231,10 @@ export function createProductUsage(deps: ProductUsageDeps) {
         const day = Object.keys(state.days).sort().find(d => validDay(d) && Object.keys(state.days[d]).length)
         if (!day) return
         const counters = Object.fromEntries(Object.entries(state.days[day]).slice(0, MAX_REPORT_METRICS)) as Counters
-        state.pending = { schemaVersion: 1, revision: state.revision, id: uuid(), day, counters, ...(context ? { context } : {}) }
+        const reportContext = state.dayContexts[day] ?? context
+        state.pending = { schemaVersion: 1, revision: state.revision, id: uuid(), day, counters, ...(reportContext ? { context: reportContext } : {}) }
         for (const metric of Object.keys(counters)) delete state.days[day][metric as ProductUsageMetric]
-        if (!Object.keys(state.days[day]).length) delete state.days[day]
+        if (!Object.keys(state.days[day]).length) { delete state.days[day]; delete state.dayContexts[day] }
       }
       // Persist the immutable receipt before sending. A crash or ambiguous response retries that id.
       if (!await persist() || stopped || !enabled) return

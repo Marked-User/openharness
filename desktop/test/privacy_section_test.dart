@@ -19,6 +19,15 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  testWidgets('offers task feedback directly from the privacy controls', (tester) async {
+    await show(tester, ({bool? enabled}) async => {'enabled': true, 'revision': 0});
+    await tester.tap(find.text('Rate task outcome'));
+    await tester.pumpAndSettle();
+    expect(find.text('Did you finish what you wanted?'), findsOneWidget);
+    expect(find.text('Partly completed'), findsOneWidget);
+    expect(find.textContaining('without your task or its contents'), findsWidgets);
+  });
+
   testWidgets(
     'shows the saved preference and turns sharing off for the account',
     (tester) async {

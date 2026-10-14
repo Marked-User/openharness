@@ -3340,8 +3340,9 @@ class AppNotifier extends ChangeNotifier {
       productRuntimeHealth?.ready();
       productMeasurement.milestone(ProductHealthMeasure.funnelWorkspaceReady);
     }
-    if (status == AppStatus.unauthenticated)
+    if (status == AppStatus.unauthenticated) {
       productMeasurement.milestone(ProductHealthMeasure.funnelSignInSeen);
+    }
   }
 
   // Connection keys already belong to the app. Only fixed outcomes reach measurement, never the key.
@@ -18199,8 +18200,9 @@ class AppNotifier extends ChangeNotifier {
 
   @override
   void dispose() {
-    if (identical(CrashLog.healthError, _measurementError))
+    if (identical(CrashLog.healthError, _measurementError)) {
       CrashLog.healthError = null;
+    }
     productRuntimeHealth?.dispose();
     productConnections.clear();
     _measurementResumes.clear();

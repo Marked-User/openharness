@@ -1,4 +1,3 @@
-
 import 'dart:async';
 import 'dart:math';
 
@@ -41,7 +40,8 @@ typedef ProductReportRequest = Future<Map<String, dynamic>> Function(
 typedef ProductChoiceRequest = Future<Map<String, dynamic>> Function();
 
 /// Fixed counters only: no event log, identifiers, errors, request/response objects or content.
-/// Nothing is saved. Signed-out sharing is an explicit choice for this app session; a close/crash can lose queued counts.
+/// Counters stay in RAM. The separate runtime observer saves only last-run control flags locally.
+/// Signed-out sharing is an explicit choice for this app session; a close/crash can lose queued counts.
 /// Requests and retries are serialized and never awaited by a product action.
 class ProductMeasurement extends ChangeNotifier {
   ProductMeasurement({
@@ -454,6 +454,9 @@ class ProductMeasurement extends ChangeNotifier {
         }
         if (result['accepted'] == true || result['reason'] == 'EXPIRED') {
           _pending.remove(channel);
+          if (result['reason'] == 'EXPIRED' && channel == 'ui') {
+            health(ProductHealthMeasure.reportExpired);
+          }
         }
         if (result['accepted'] != true &&
             result['reason'] != 'EXPIRED' &&

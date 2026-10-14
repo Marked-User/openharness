@@ -116,10 +116,11 @@ class _WebPanePanelState extends State<WebPanePanel> {
   }
 
   void _remoteLoaded() {
-    if (_remote?.image != null)
+    if (_remote?.image != null) {
       _finishLoad?.call(ProductOutcome.ok);
-    else if (_remote?.error != null)
+    } else if (_remote?.error != null) {
       _finishLoad?.call(ProductOutcome.failed);
+    }
   }
 
   /// The appearance last stamped on the page, so a rebuild that changed nothing runs no script.

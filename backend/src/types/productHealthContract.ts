@@ -8,7 +8,7 @@ export const HEALTH_FAILURES = ['setup', 'auth', 'unavailable', 'invalid', 'not_
 export const HEALTH_FLOWS = ['app_start', 'workspace_ready', 'viewer_load', 'update_apply', 'update_relaunch',
   'connect_user', 'connect_auto', 'resume_recovery'] as const
 export const HEALTH_MEASURES = [
-  'collector_days', 'report_failed', 'report_rejected', 'report_expired', 'queue_capped', 'observation_overflow',
+  'collector_days', 'report_failed', 'report_rejected', 'report_expired', 'report_late', 'queue_capped', 'observation_overflow',
   'unclean_restart', 'framework_error', 'async_error',
   'rss_under_256m', 'rss_256m_to_1g', 'rss_over_1g',
   'cpu_under_10pct', 'cpu_10pct_to_50pct', 'cpu_over_50pct',
@@ -23,7 +23,6 @@ export const HEALTH_MEASURES = [
   'interactive_turns_started', 'tool_turns_started', 'unclassified_turns_started',
   'interactive_work_days', 'first_interactive_work', 'first_work_d1_return', 'first_work_d7_return', 'first_work_d28_return',
   'week_worked_1day', 'week_worked_2to3days', 'week_worked_4to5days', 'week_worked_6to7days',
-  'request_observation_lost',
 ] as const
 export const PRODUCT_HEALTH_METRICS = [
   ...(['cli', 'desktop'] as const).flatMap(surface => HEALTH_MEASURES.map(m => `health_${surface}_${m}` as const)),

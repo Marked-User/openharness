@@ -26,6 +26,29 @@ const totals = () => {
   return result
 }
 
+it('keeps upgrade backlogs unattributed and fences explicit-work intent on unavailable consent', async () => {
+  await usage.stop()
+  const context = { surface: 'cli', release: '0.3.95', platform: 'macos', channel: 'production' } as const
+  usage = createProductUsage({ file, now: () => now, request, context })
+  await usage.sync()
+  usage.launch({ id: 'PRIVATE_USER_INTENT', phase: 'work_requested', origin: 'interactive' })
+  usage.observe('turn_started', 'PRIVATE_USER_INTENT', false)
+  usage.observe('turn_ended', 'PRIVATE_USER_INTENT', false)
+  await usage.stop()
+  usage = createProductUsage({ file, now: () => now, request, context: { ...context, release: '0.3.96' } })
+  await usage.sync(); await usage.sync()
+  const workReport = (sent as { counters: Record<string, number>; context: typeof context }[]).find(r => r.counters.health_cli_interactive_work_days)
+  expect(workReport?.context.release).toBe('unknown')
+  expect(totals().health_cli_first_interactive_work).toBe(1)
+  usage.launch({ id: 'PRIVATE_STALE_INTENT', phase: 'work_requested', origin: 'interactive' })
+  request.mockResolvedValueOnce({ status: 503, body: {} })
+  await usage.sync(); await usage.sync()
+  usage.observe('turn_started', 'PRIVATE_STALE_INTENT', false); await usage.sync()
+  expect(totals().health_cli_unclassified_turns_started).toBe(1)
+  expect(JSON.stringify(sent)).not.toContain('PRIVATE')
+  expect(readFileSync(file, 'utf8')).not.toContain('PRIVATE')
+})
+
 it('keeps first-launch 24-hour value counts on their original cohort day across restart, without an identity', async () => {
   await usage.sync()
   now = Date.parse('2026-10-12T23:30:00Z')

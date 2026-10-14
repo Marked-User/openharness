@@ -9,7 +9,9 @@ class ProductConnections {
   final _failures = <String, ProductHealthMeasure>{};
 
   void refused(String key, ProductHealthMeasure failure) {
-    if (_pending.containsKey(key) || _manual.containsKey(key)) _failures.putIfAbsent(key, () => failure);
+    if (_pending.containsKey(key) || _manual.containsKey(key)) {
+      _failures.putIfAbsent(key, () => failure);
+    }
   }
 
   void Function(ProductOutcome) manual(String key) {
@@ -30,7 +32,9 @@ class ProductConnections {
       if (_manual[key] == ticket) {
         _manual.remove(key);
         final failure = _failures.remove(key);
-        if (outcome == ProductOutcome.failed && failure != null) measurement.health(failure);
+        if (outcome == ProductOutcome.failed && failure != null) {
+          measurement.health(failure);
+        }
       }
       finish(outcome);
     };

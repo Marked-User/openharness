@@ -4,6 +4,7 @@ enum ProductHealthMeasure {
   reportFailed('report_failed'),
   reportRejected('report_rejected'),
   reportExpired('report_expired'),
+  reportLate('report_late'),
   queueCapped('queue_capped'),
   observationOverflow('observation_overflow'),
   uncleanRestart('unclean_restart'),
@@ -55,8 +56,7 @@ enum ProductHealthMeasure {
   weekWorked1day('week_worked_1day'),
   weekWorked2to3days('week_worked_2to3days'),
   weekWorked4to5days('week_worked_4to5days'),
-  weekWorked6to7days('week_worked_6to7days'),
-  requestObservationLost('request_observation_lost');
+  weekWorked6to7days('week_worked_6to7days');
 
   const ProductHealthMeasure(this.wire);
   final String wire;

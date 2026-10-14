@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:cryptography/dart.dart' show DartSha256;
 import 'package:flutter/scheduler.dart';
 
@@ -52,7 +53,11 @@ class ProductRuntimeHealth {
     _accountId = account;
     final scope = account == null
         ? null
-        : const DartSha256().hashSync(utf8.encode(account)).bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+        : const DartSha256()
+              .hashSync(utf8.encode(account))
+              .bytes
+              .map((b) => b.toRadixString(16).padLeft(2, '0'))
+              .join();
     if (_scope == scope) return;
     final previous = _scope;
     _scope = scope;
@@ -146,6 +151,7 @@ class ProductRuntimeHealth {
     _pending = Map.of(value);
     _saving ??= _drain().whenComplete(() {
       _saving = null;
+      if (_pending != null) _save(_pending!);
     });
   }
 

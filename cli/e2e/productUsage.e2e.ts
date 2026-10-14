@@ -39,7 +39,7 @@ it('reports only local counters from a real turn, and the account switch stops t
   const agentId = created.agent.id
   const turn = async () => {
     const ended = client!.next(frame => frame.type === 'turn_ended' && frame.agentId === agentId, 45000)
-    client!.send('message', { agentId, content: 'PRIVATE_PROMPT_CANARY: say hello' })
+    client!.send('message', { agentId, content: 'PRIVATE_PROMPT_CANARY: say hello', usageIntent: 'interactive' })
     await ended
   }
   await until('agent ready', async () => {
@@ -61,6 +61,9 @@ it('reports only local counters from a real turn, and the account switch stops t
   expect(sum('launch_created')).toBe(1)
   expect(sum('launch_failed')).toBe(1)
   expect(sum('turns_with_response')).toBeGreaterThan(0)
+  expect(sum('health_cli_interactive_work_days')).toBe(1)
+  expect(sum('health_cli_first_interactive_work')).toBe(1)
+  expect(sum('request_app_message_started')).toBeGreaterThan(0)
   const wire = JSON.stringify(backend.productUsage.reports)
   for (const privateValue of ['PRIVATE_', creationId, machine.machineId, machine.computerId, machine.token, agentId, cwd, 'userMessage', 'payload']) expect(wire).not.toContain(privateValue)
   expect((await fetch(settings, { method: 'POST', headers: { 'content-type': 'application/json', 'x-adapter-local': '1' }, body: '{"enabled":false}' })).status).toBe(200)

@@ -1,4 +1,4 @@
-import { PRODUCT_USAGE_METRICS, PRODUCT_USAGE_ACTIONS } from '../types/productUsage.js'
+import { PRODUCT_USAGE_METRICS, PRODUCT_USAGE_SETUP_METRICS, PRODUCT_USAGE_ACTIONS } from '../types/productUsage.js'
 import { cleanUsageContext, type ProductUsageContext } from '../types/productHealthContract.js'
 
 const allowed = new Set<string>(PRODUCT_USAGE_METRICS)
@@ -7,18 +7,21 @@ const allowed = new Set<string>(PRODUCT_USAGE_METRICS)
 export function healthBreakdowns(context: ProductUsageContext | undefined, metric: string): string[] {
   const c = cleanUsageContext(context)
   if (!c || c.channel !== 'production' || !allowed.has(metric)) return []
+  // Backdated returns describe an earlier cohort; the current reporting release did not enroll it.
+  if (/^(d\d+_returning_|first_launch_(work|response)_24h_|health_cli_(first_work_d\d+_return|week_worked_))/.test(metric)) return []
   return [`breakdown:release:${c.surface}:${c.release}:${metric}`, `breakdown:platform:${c.surface}:${c.platform}:${metric}`]
 }
 
 type Row = { dayUtc: Date; metric: string; value: number }
 export function dailyProductHealth(rows: Row[], now: Date) {
   const today = now.toISOString().slice(0, 10)
+  const readable = new Set<string>([...PRODUCT_USAGE_METRICS, ...PRODUCT_USAGE_SETUP_METRICS])
   const days = new Map<string, Record<string, number>>()
   const groups = new Map<string, { day: string; dimension: string; surface: string; bucket: string; counters: Record<string, number> }>()
   for (const row of rows) {
     if (!Number.isSafeInteger(row.value) || row.value < 0) continue
     const day = row.dayUtc.toISOString().slice(0, 10)
-    if (allowed.has(row.metric)) {
+    if (readable.has(row.metric)) {
       const c = days.get(day) ?? {}; c[row.metric] = (c[row.metric] ?? 0) + row.value; days.set(day, c)
     } else {
       const m = /^breakdown:(release|platform):(cli|desktop):([^:]+):(.+)$/.exec(row.metric)
@@ -42,6 +45,12 @@ export function dailyProductHealth(rows: Row[], now: Date) {
         interpretation: 'Start and result reports can arrive separately or cross a choice/day boundary. A difference is incomplete observation, not a failed action.' }
     }),
     signals: Object.fromEntries(Object.entries(c).filter(([k]) => k.startsWith('health_') || k.startsWith('request_'))),
+    activation: ['setup_desktop', 'health_desktop'].map(prefix => ({
+      population: prefix === 'setup_desktop' ? 'Voluntary signed-out setup episodes' : 'Consented signed-in app sessions',
+      milestones: Object.fromEntries(['setup_seen', 'sign_in_seen', 'workspace_ready', 'first_work', 'first_response'].map(step => [step, c[`${prefix}_funnel_${step}`] ?? null])),
+      waitBuckets: Object.fromEntries(['first_work', 'first_response'].flatMap(step => ['under_1m', '1m_to_5m', 'over_5m'].map(bucket => [`${step}_${bucket}`, c[`${prefix}_${step}_${bucket}`] ?? null]))),
+      definition: 'Locally deduplicated episodes, not a joined per-person funnel. Stages can cross UTC days; no daily conversion ratio is inferred.',
+    })),
     firstWorkRetention: [1, 7, 28].map(lag => {
       const mature = Date.parse(day) + (lag + 1) * 86400000 <= Date.parse(today)
       const denominator = c.health_cli_first_interactive_work ?? null
@@ -65,6 +74,8 @@ export function dailyProductHealth(rows: Row[], now: Date) {
       sources: 'app/tool describe the request transport; automatic identifies fixed polling operations. Only explicitly marked composer submissions establish interactive work. Raw terminal work remains unclassified.',
       retention: 'Return after first measured interactive work on this installation, not signup retention; resets and missing reports affect coverage.',
       stability: 'Unclean prior runs can be force quits or power loss, not proven crashes. Resource buckets cover the measured process only. Main-frame load is not a judgment of rendered content.',
+      timing: 'App start is process launch to first consented observation of a connected workspace; sign-in and preference delay are included. One in 60 rendered frames is sampled; idle freezes and exits before reporting can be missed.',
+      habit: 'Weekly work-day bins describe completed UTC weeks from installations that report again; non-returners may be missing. First-work returns are specific to explicitly marked composer work, not all human activity.',
       privacy: 'Fixed aggregate totals; no identity or content joins. Sparse margins require 20 collector observations, which are not 20 distinct people. No guarantee of anonymity is inferred from that threshold.',
     } }
 }

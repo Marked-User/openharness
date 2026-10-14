@@ -43,6 +43,40 @@ linked to the account so the switch works everywhere.
 
 ## Runtime and storage budget
 
+Desktop/CLI health adds separate marginal totals for the numeric public release and broad OS
+(`macos`, `linux`, `windows`, `other`). The two dimensions are never stored together or joined to
+the optional people records. The daily report suppresses margin labels and counts below 20
+collector observations; these are not 20 distinct people and this is not a claim of anonymity.
+Source/dev builds send a development context that ingestion drops without writing totals or receipts.
+Legacy clients without context remain separately unattributed. Mixed-release queued days use
+`unknown`; immutable in-flight receipts preserve their original context. Backdated returns are
+excluded from release/platform margins so a return's release cannot be mistaken for its cohort's.
+
+`health` in `usage:daily` reports consented setup/workspace/first-work/first-response milestones,
+coarse waits, request-source reconciliation, explicit composer-work D1/D7/D28 cohorts, weekly work-day
+bins, process health, and collector loss/rejection/late-report signals. Milestones describe local
+app episodes, can cross UTC days, and do not establish a joined signup conversion rate. First-work
+cohorts use explicit composer messages; terminal keystrokes and automatic work remain unclassified.
+Weekly bins cover completed weeks from installations that report again, so non-returners can be missing.
+
+Native Desktop observes main-frame/first-frame viewer loading, updater apply acknowledgements and
+the next observed version, explicit versus automatic connections, and resume-to-observed-work.
+The startup bucket measures launch to the first consented observation of a connected workspace,
+including preference/sign-in delay. One in 60 rendered frames supplies a coarse duration bucket;
+it cannot reliably detect an idle freeze. Error hooks pass only framework/async categories.
+Desktop RSS and gateway RSS/CPU sample once per minute; they describe those processes, not the
+whole machine or agents. Sampling adds no core timer, process enumeration, or subprocess.
+
+Desktop's only new disk state is the last consented run's version, clean-exit/update flags, choice
+revision and a local-only account-scope hash. One serialized asynchronous write plus one latest
+pending value bounds disk work. It is cleared on sign-out/off and never enters a report. An unclean
+run can mean a force quit or power loss, and only becomes observable if the app returns. Update
+flags are best effort; analytics never delays exit. Gateway work-day flags expire after 35 days;
+a local yes/no marker prevents an old installation from being counted as newly activated again.
+All new fields are allowlisted; no URLs, raw error strings, stack traces, device specifications,
+task/session IDs or content are accepted. Feedback is voluntary and shown/answered/dismissed
+counts are unlinked to the task and to the separate fixed-choice answer totals.
+
 The daemon collector belongs to the gateway service, ordinarily a separate process. The core
 forwards fixed counters with a 64 KiB optional-traffic backpressure limit, never waits for reporting,
 and never wakes a service just to send measurement. Existing lifecycle broadcasts supply scalar
