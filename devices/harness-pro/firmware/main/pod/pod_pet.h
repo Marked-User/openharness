@@ -16,11 +16,6 @@ unsigned pod_pet_runs(const char *engine, pod_scene_t scene);
 // started_ms and holds its last step.
 void pod_pet_draw(ht_scene_t *s, int x, int y, int side, const char *engine, pod_scene_t scene,
                   uint32_t clock_ms, uint32_t started_ms);
-// The pet's own small loop for a state (idle, working, done, asking), centred in the square like REST, with none of the scenes'
-// props: the Console Overview's cards. At the stored size (zoom 8, the rasteriser's fast path) once side >= the frame's larger
-// side / 0.88. False, drawing nothing, when the engine has no pet. pod_pet_loop_next_ms: ms to its next change (1000 when still).
-bool pod_pet_draw_loop(ht_scene_t *s, int x, int y, int side, const char *engine, ht_pet_state_t state, uint32_t clock_ms);
-uint32_t pod_pet_loop_next_ms(const char *engine, ht_pet_state_t state, uint32_t clock_ms);
 // The same on a ground of ground_rgb (0xRRGGBB): the listening waves fade toward it instead of white.
 void pod_pet_draw_on(ht_scene_t *s, int x, int y, int side, const char *engine, pod_scene_t scene,
                      uint32_t clock_ms, uint32_t started_ms, uint32_t ground_rgb);

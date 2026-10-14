@@ -10,7 +10,8 @@
 #include "pro_canvas.h"
 
 #define C(rgb) ht_rgb(rgb)
-enum { HERO_BOTTOM = 240, PADX = 28, BOX_W = 170, BOX_H = 130, MUTED_LBL = CS_DIM, EQ_N = 30, EQ_H = 30, LOGO = 28 };
+enum { HERO_BOTTOM = 240, PADX = 28, BOX_W = 170, BOX_H = 130,   // BOX: the pet's place (no box is drawn)
+       MUTED_LBL = CS_DIM, EQ_N = 30, EQ_H = 30, LOGO = 28 };
 
 const char *cs_parent_name(const pod_nav_t *nav, const pod_model_t *m)
 {
@@ -35,20 +36,14 @@ void cs_spin(ht_scene_t *s, int cx, int cy, unsigned rgb, uint32_t now_ms)
     pod_arc(s, cx * 16, cy * 16, 10 * 16, 3 * 16, (int)((360 - now_ms % 900 * 360 / 900) % 360), 50, C(rgb));
 }
 
-static pod_scene_t scene_for(pod_state_t st)
-{
-    return st == POD_WORKING ? POD_SCENE_WORK : st == POD_ASKING ? POD_SCENE_ASK : POD_SCENE_REST;
-}
-
 int cs_hero(pod_out_frame_t *f, const pod_nav_t *nav, const pod_model_t *m, const pod_agent_t *a, uint32_t now_ms)
 {
     (void)nav;
     ht_scene_t *s = f->scene;
     pod_state_t st = pod_model_eff(m, a);
     const int by = CS_BAR_H + 20;
-    unsigned border = st == POD_ASKING ? CS_ASK_EDGE : st == POD_DONE ? CS_EDGE : CS_BORDER;
-    ht_pro_rect_aa_stroke(s, PADX, by, BOX_W, BOX_H, 20, C(border), C(st == POD_ASKING ? CS_ASK_FILL : CS_SURFACE));
-    pod_pet_draw(s, PADX + (BOX_W - 112) / 2, by + (BOX_H - 112) / 2, 112, a->engine, scene_for(st), now_ms, 0);
+    // the pet straight on the ground, no box around it (a pet-less engine: its logo or the ">_" outline, as on the cards)
+    cs_card_art(s, PADX + BOX_W / 2, by + BOX_H / 2, BOX_H, m, a, CS_GROUND, now_ms);
 
     const int x = PADX + BOX_W + 24, w = POD_W - PADX - x;
     char name[sizeof a->name];

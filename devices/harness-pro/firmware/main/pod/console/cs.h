@@ -55,20 +55,22 @@ int cs_rows(pod_out_frame_t *, const pod_model_t *, const pod_agent_t *const lis
 int cs_rows_max(const pod_nav_t *, const pod_model_t *);
 void cs_view_overview(pod_out_frame_t *, const pod_nav_t *, pod_model_t *, uint32_t now_ms);
 // Overview cards. cs_card_lead: the agent that speaks for cover c (0 = Recent, else tab c - 1), among its first CS_CARD_AGENTS:
-// the first working, else asking, failed, done, idle; NULL with none. cs_card_loop: the pet loop a card draws for it (WORKING,
-// ASKING, else IDLE, drawn still).
+// the first working, else asking, failed, done, idle; NULL with none. cs_card_scene: the pet scene a card plays for it (WORK, ASK,
+// else REST), the agent screen's scenes.
 enum { CS_CARD_AGENTS = POD_PANES_MAX };   // every pane of a tab (Recent holds at most POD_RECENT_MAX)
 // The card grid Overview and Tab share: 2 x 2 cards of CS_CARD_W x CS_CARD_H from (CS_CARD_MARGIN, CS_CARD_TOP), CS_CARD_GAP apart;
 // a card's art is centred in its CS_CARD_ART_Y .. + CS_CARD_ART_H band.
+// CS_CARD_PET: the pet's square on a card, wide enough that every pet's scenes (Claude cooking is the widest) draw at their stored
+// size, zoom 8, the cell rasteriser's fast path; the scenes' ink is far smaller than the square and stays inside the art band.
 enum { CS_CARD_W = 338, CS_CARD_H = 296, CS_CARD_GAP = 12, CS_CARD_MARGIN = 16, CS_CARD_TOP = CS_BAR_H + 14, CS_CARD_ART_Y = 74,
-       CS_CARD_ART_H = 164 };
-// A card's art centred on (cx, cy): the agent's pet loop (cs_card_loop; still while idle), else its 72 px logo, else a ">_" outline
-// on `fill`.
-void cs_card_art(ht_scene_t *, int cx, int cy, const pod_model_t *, const pod_agent_t *, unsigned fill, uint32_t now_ms);
+       CS_CARD_ART_H = 164, CS_CARD_PET = 206 };
+// An agent's art centred on (cx, cy), straight on the ground (no box): its pet playing its state's scene (cs_card_scene) in a
+// side x side square, else its 72 px logo, else a ">_" outline on `fill`. Cards pass CS_CARD_PET; the agent screen its hero size.
+void cs_card_art(ht_scene_t *, int cx, int cy, int side, const pod_model_t *, const pod_agent_t *, unsigned fill, uint32_t now_ms);
 const pod_agent_t *cs_card_lead(const pod_model_t *, int c);
-ht_pet_state_t cs_card_loop(const pod_model_t *, const pod_agent_t *);
-// Whether the cards on screen (Overview's page, or the card Tab's page) draw a moving pet (working or asking; a resting pet is
-// still), and the ms to the next step of any of them (never sooner than POD_CS_ANIM_MS's beat). False / 1000 on other screens.
+pod_scene_t cs_card_scene(const pod_model_t *, const pod_agent_t *);
+// Whether the cards on screen (Overview's page, or the card Tab's page) draw a pet (every scene moves, rest included), and the ms
+// to the next step of any of them (never sooner than POD_CS_ANIM_MS's beat). False / 1000 on other screens.
 bool cs_cards_move(const pod_nav_t *, const pod_model_t *);
 uint32_t cs_cards_next_ms(const pod_nav_t *, const pod_model_t *, uint32_t now_ms);
 void cs_view_recent(pod_out_frame_t *, const pod_nav_t *, pod_model_t *, uint32_t now_ms);
@@ -108,7 +110,7 @@ void cs_toast(pod_out_frame_t *, const pod_model_t *, const pod_unread_t *u, uin
 int cs_recap_max_row(const pod_nav_t *, const pod_model_t *);
 int cs_inbox_pitch(void);
 int cs_inbox_max_row(const pod_model_t *);
-// Shared by the agent screens. cs_hero: the header (variant C): the 170 x 130 pet box, the name (34 px), "state . m:ss" and the
+// Shared by the agent screens. cs_hero: the header (variant C): the pet (no box) in its 170 x 130 place, the name (34 px), "state . m:ss" and the
 // 28 px logo with the machine; returns its bottom (240). cs_back_hit: the bar's one crumb goes back a level. cs_parent_name: the screen one level up ("Overview", a tab's name, "Recent" or "Inbox"). cs_label: a small
 // caps heading centred on cy. cs_spin: a 24 px spinner turning with now_ms.
 int cs_hero(pod_out_frame_t *, const pod_nav_t *, const pod_model_t *, const pod_agent_t *, uint32_t now_ms);

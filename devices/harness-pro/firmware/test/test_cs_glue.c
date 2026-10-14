@@ -972,7 +972,8 @@ static void wake_rates(void) {
         uint32_t n = wakes_in(2000, 10000, &mn);
         CHECK(n > 10 && n <= 10000 / 66 + 1 && mn >= 1);
     }
-    for (int k = 0; k < 4; k++) {   // nobody works or asks: Overview (its pets rest, drawn still), Tab, Recent and Inbox wake once a second
+    for (int k = 0; k < 4; k++) {   // nobody works or asks: Overview's and a Tab's cards still play their pets' rest scenes (never
+                                    // faster than 66 ms); Recent and the Inbox, with no pet, wake once a second
         fresh(POD_SKIN_CONSOLE);
         calm();
         pod_model_question_close(&U.model, "a4");
@@ -982,7 +983,8 @@ static void wake_rates(void) {
         else if (k == 3) act(POD_A_INBOX, 0);
         render(1000);
         uint32_t n = wakes_in(2000, 10000, &mn);
-        CHECK(n == 10 && mn == 1000);
+        if (k < 2) CHECK(pod_ui_pet_on_screen(&U) && n > 10 && n <= 10000 / 66 + 1);
+        else CHECK(n == 10 && mn == 1000);
     }
     // an Overview with a Playing ribbon in Classic still polls at 300 ms; Console does not (its bar mark is the only motion)
     fresh(POD_SKIN_CLASSIC);

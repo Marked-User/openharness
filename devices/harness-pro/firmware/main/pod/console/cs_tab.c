@@ -49,7 +49,7 @@ static void card(pod_out_frame_t *f, const pod_model_t *m, const pod_agent_t *a,
     for (char *p = name; *p; p++) if (*p == '\n' || *p == '\r' || *p == '\t') *p = ' ';
     cs_text(s, left, hy, right - (tw ? tw + 12 : 0) - left, &cs_md_28, CS_INK, name);
 
-    cs_card_art(s, x + CS_CARD_W / 2, y + CS_CARD_ART_Y + CS_CARD_ART_H / 2, m, a, fill, now_ms);
+    cs_card_art(s, x + CS_CARD_W / 2, y + CS_CARD_ART_Y + CS_CARD_ART_H / 2, CS_CARD_PET, m, a, fill, now_ms);
 
     // the foot: the state in a word, centred (the working bars first)
     const char *word = st == 'g' ? "Working" : st == 'q' ? "Needs you" : st == 'd' ? "Done" : st == 'r' ? "Failed" :
