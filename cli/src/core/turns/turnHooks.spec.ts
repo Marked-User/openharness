@@ -200,15 +200,91 @@ describe('turn hooks', () => {
       expect(run.deps.mirror.noteEngineStopped).not.toHaveBeenCalled()
     })
 
-    it('keeps a failed confirmation held and never repeats the attempted effect', async () => {
+    it('retries a settled confirmation failure before any original Stop effect was dispatched', async () => {
       const run = retained()
-      run.execution.confirm.mockRejectedValue(Error('fixture ownership unavailable'))
+      run.execution.confirm.mockRejectedValueOnce(Error('fixture ownership temporarily unavailable'))
+      expect(await run.stop(run.execution)).toBe('held')
+      expect(run.deps.mirror.noteEngineStopped).not.toHaveBeenCalled()
+      const result = run.stop(run.execution)
+      await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+      expect(await result).toBe('completed')
+      expect(run.state.turnOpen).toBe(false)
+      expect(run.deps.emit).toHaveBeenCalledExactlyOnceWith('s1', END)
+      expect(run.deps.mirror.noteEngineStopped).toHaveBeenCalledExactlyOnceWith('s1')
+      expect(await run.stop(run.execution)).toBe('completed')
+      expect(run.execution.confirm).toHaveBeenCalledTimes(3)
+    })
+
+    it('keeps a failed confirmation held after an original Stop effect was dispatched', async () => {
+      const run = retained()
+      run.execution.confirm.mockResolvedValueOnce(undefined).mockRejectedValue(Error('fixture ownership unavailable'))
+      const result = run.stop(run.execution)
+      await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+      expect(await result).toBe('held')
+      expect(run.stop.retryable?.()).toBe(false)
+      expect(await run.stop(run.execution)).toBe('held')
+      expect(run.execution.confirm).toHaveBeenCalledTimes(2)
+      expect(run.deps.mirror.noteEngineStopped).toHaveBeenCalledExactlyOnceWith('s1')
+      expect(run.deps.emit).not.toHaveBeenCalled()
+    })
+
+    it.each(['deadline', 'temporary hold'] as const)('waits for actual preparation after %s and never revives its late callbacks', async cause => {
+      const run = retained()
+      let release!: () => void
+      vi.mocked(run.deps.drain).mockImplementationOnce(() => new Promise<void>(done => { release = done }))
       const result = run.stop(run.execution)
       await vi.advanceTimersByTimeAsync(0)
+      if (cause === 'temporary hold') run.session.interpretationHold = 'fixture reader temporarily held'
+      await vi.advanceTimersByTimeAsync(cause === 'deadline' ? STOP_COMPLETION_WAIT_MS : 25)
       expect(await result).toBe('held')
+      expect(run.stop.retryable?.()).toBe(false)
       expect(await run.stop(run.execution)).toBe('held')
-      expect(run.execution.confirm).toHaveBeenCalledOnce()
+      expect(run.deps.drain).toHaveBeenCalledOnce()
+      delete run.session.interpretationHold
+      release(); await vi.advanceTimersByTimeAsync(0)
+      expect(run.stop.retryable?.()).toBe(true)
       expect(run.deps.mirror.noteEngineStopped).not.toHaveBeenCalled()
+      const retry = run.stop(run.execution)
+      await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+      expect(await retry).toBe('completed')
+      expect(run.deps.mirror.noteEngineStopped).toHaveBeenCalledExactlyOnceWith('s1')
+      expect(run.deps.emit).toHaveBeenCalledExactlyOnceWith('s1', END)
+    })
+
+    it('rejects late close callbacks from a revoked preparation while its retry owns the turn', async () => {
+      const run = retained()
+      let context!: HookTurnContext, release!: () => void
+      vi.spyOn(engineHooks.claude, 'onStop').mockImplementationOnce(value => {
+        context = value
+        expect(context.closeTurn('other-session', run.normalizers.liveParsers.get('s1')!.snapshot().identity)).toBe(false)
+        return new Promise<void>(done => { release = done })
+      })
+      const first = run.stop(run.execution)
+      await vi.advanceTimersByTimeAsync(0)
+      const identity = run.normalizers.liveParsers.get('s1')!.snapshot().identity
+      run.session.interpretationHold = 'fixture preparation held'
+      await vi.advanceTimersByTimeAsync(25)
+      expect(await first).toBe('held')
+      delete run.session.interpretationHold
+      release(); await vi.advanceTimersByTimeAsync(0)
+      const retry = run.stop(run.execution)
+      expect(context.closeTurn('s1', identity)).toBe(false)
+      expect(run.state.turnOpen).toBe(true)
+      await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+      expect(await retry).toBe('completed')
+      expect(run.deps.emit).toHaveBeenCalledExactlyOnceWith('s1', END)
+    })
+
+    it('never retries an original Stop effect whose callback throws after entry', async () => {
+      const run = retained()
+      vi.mocked(run.deps.mirror.noteEngineStopped).mockImplementation(() => { throw Error('fixture effect outcome unknown') })
+      expect(await run.stop(run.execution)).toBe('held')
+      expect(run.stop.retryable?.()).toBe(false)
+      expect(await run.stop(run.execution)).toBe('held')
+      expect(run.deps.mirror.noteEngineStopped).toHaveBeenCalledOnce()
+      expect(run.deps.emit).not.toHaveBeenCalled()
+      run.cancel()
+      expect(await run.stop(run.execution)).toBe('superseded')
     })
 
     it('supports an already confirmed local Stop without an asynchronous confirmation callback', async () => {

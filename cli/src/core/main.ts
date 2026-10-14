@@ -1145,8 +1145,9 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // Following a session: its history read into its engine's normalizer, then its tail
   // (core/transcripts/attach.ts).
   let nativeRecoveryReady: (row: RegisteredSession) => boolean = () => false
+  let nativeTranscriptReady: (row: RegisteredSession) => boolean = () => false
   const attach = createAttach({
-    nativeRecoveryReady: row => nativeRecoveryReady(row),
+    nativeRecoveryReady: row => nativeTranscriptReady(row),
     setInterpretationHold: registry.setInterpretationHold.bind(registry),
     announceSession,
     liveFor,
@@ -1829,7 +1830,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onNotice: (listener) => experimentHooks.onNotice(listener), messagesChanged: () => ports.messages?.settingsChanged() })
   const nativeHookOwners = createNativeHookOwnerReader()
   const { server: hookServer, port: hookPort, localSocket, startRecovery: recoverNativeHooks,
-    stopRecovery: stopNativeHooks, drainAndStopRecovery: drainNativeHooks, recoveryReady } = await startHookServer(daemonPort(), {
+    stopRecovery: stopNativeHooks, drainAndStopRecovery: drainNativeHooks, recoveryReady, transcriptReady } = await startHookServer(daemonPort(), {
     onAutonomousDeviceRequest: async (method, target, body) => {
       // Until the pieces below are built; after, a piece that could not be is refused by the requests
       // that need it, and the rest (list, status, revoke) answer from the pairings.
@@ -1861,7 +1862,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onAdmissionHeld: engineHooks.onAdmissionHeld,
     readNativeHookOwner: nativeHookOwners,
     captureNativeHookCaller: nativeHookOwners.captureCaller,
-    onNativeRecoveryReady: entry => { void attachSession(entry).catch(error => console.warn('[hooks] recovered attach held', error)) },
+    onNativeTranscriptReady: entry => { void attachSession(entry).catch(error => console.warn('[hooks] recovered attach held', error)) },
     onAdmissionStop: attach.holdAdmissionStop,
     captureAdmissionStop: attach.captureAdmissionStop,
     captureTurnStop: (entry, body) => turnHooks.captureStop(entry, body, attach.captureAdmissionStop(entry)),
@@ -1922,6 +1923,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onStore: (method, path, body) => proxyBackend(method, path, body),
   }, { socketPath: localSocketPath(env.ADAPTER_DATA_DIR, env.PORT), allowPortFallback: true, deferNativeRecovery: true })
   nativeRecoveryReady = recoveryReady
+  nativeTranscriptReady = transcriptReady
   try { saveDaemonPort(env.ADAPTER_DATA_DIR, env.PORT, hookPort) } catch (error) {
     await localSocket?.close()
     hookServer.close()

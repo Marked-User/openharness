@@ -1,6 +1,6 @@
 import type { Server } from 'node:http'
 import type { HookServerHandlers } from '../hookServer.js'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -503,7 +503,7 @@ async function httpFixture(blocked: (agentId: string) => boolean = () => false, 
     return { status: response.status, body: await response.json() }
   }
   return { post, prompts, registered, reasons, startRecovery: started.startRecovery, stopRecovery: started.stopRecovery,
-    drainAndStopRecovery: started.drainAndStopRecovery, recoveryReady: started.recoveryReady }
+    drainAndStopRecovery: started.drainAndStopRecovery, recoveryReady: started.recoveryReady, transcriptReady: started.transcriptReady }
 }
 
 it.each(['queued successor', 'changed binding'])('recovers an undelivered claim with a %s without replay or stale rebinding', async change => {
@@ -569,6 +569,231 @@ it.each(['accepted', 'rejected'] as const)('does not publish a %s admission whos
   expect(f.registered).not.toHaveBeenCalled()
   expect(f.prompts).toEqual([])
   expect(ready).not.toHaveBeenCalled()
+})
+
+async function interruptedPrompt(over: Record<string, unknown> = {}, prefix = true) {
+  registry.register(input(A, transcript, '%2'))
+  const readNativeHookOwner: NonNullable<HookServerHandlers['readNativeHookOwner']> = async row => ({
+    key: `fixture-observation-${row.processIdentity!.pid}`, evidence: 'fixture-original-image', verify() {},
+  })
+  const first = await httpFixture(undefined, undefined, { readNativeHookOwner }, undefined, true)
+  if (prefix) {
+    const earlier = { id: 'fixture-cold-observation-binding', firedAt: Date.now() }
+    await first.post({ hookEvent: 'SessionStart' }, earlier)
+    await vi.waitFor(async () => expect((await first.post({ hookEvent: 'SessionStart' }, earlier)).body).toMatchObject({ ok: true }))
+    expect(first.registered).toHaveBeenCalledOnce()
+    first.registered.mockClear(); first.prompts.length = 0
+  }
+  let interrupted = false
+  fault.afterNativeLink = path => {
+    if (!interrupted && path.includes('.witnesses/') && JSON.parse(readFileSync(path, 'utf8')).event?.kind === 'claim') {
+      interrupted = true; fault.nativeSync = true
+    }
+  }
+  const order = { id: 'fixture-cold-observation-prompt', firedAt: Date.now() + 1 }
+  await first.post(over, order)
+  await vi.waitFor(() => expect(first.reasons.some(reason => reason?.includes('fixture native confirmation unavailable'))).toBe(true))
+  expect(interrupted).toBe(true)
+  expect(first.registered).not.toHaveBeenCalled()
+  expect(first.prompts).toEqual([])
+  expect(registry.bySession(A)?.agentId).toBe(source)
+  first.stopRecovery()
+  await new Promise<void>(resolve => server!.close(() => resolve()))
+  fault.nativeSync = false; fault.afterNativeLink = undefined
+  vi.resetModules(); observeNativeProof(); ({ registry } = await import('./registry.js')); registry.load()
+  const row = registry.byAgent(source)!
+  expect(row.sessionId).toBe(A)
+  expect(row.transcriptPath).toBe(transcript)
+  expect(row.identityHold).toBeUndefined()
+  const directory = join(root, 'data', 'native-hook-deliveries')
+  const history = join(directory, readdirSync(directory).find(name => /^[a-f0-9]{64}$/.test(name))!)
+  const journal = () => readdirSync(history + '.witnesses').filter(name => /^\d{8}\.json$/.test(name)).sort()
+    .map(name => readFileSync(join(history + '.witnesses', name), 'utf8'))
+  return { readNativeHookOwner, row, order, journal }
+}
+
+it('observes an existing transcript after a cold uncertain prompt without recovering its effect authority', async () => {
+  const { readNativeHookOwner, row, order, journal } = await interruptedPrompt()
+  const attached = vi.fn(), promptHook = vi.fn()
+  const recovered = await httpFixture(undefined, undefined, { readNativeHookOwner, onNativeTranscriptReady: attached,
+    onPromptHook: promptHook }, undefined, true)
+  const before = journal()
+  expect(JSON.parse(before.at(-1)!).event).toMatchObject({ kind: 'claim', id: order.id })
+  expect(recovered.transcriptReady(row)).toBe(false)
+  recovered.startRecovery()
+  await vi.waitFor(() => expect(recovered.transcriptReady(row)).toBe(true), { timeout: 4_000 })
+  expect(attached).toHaveBeenCalledExactlyOnceWith(row)
+  expect(recovered.recoveryReady(row)).toBe(false)
+  expect(recovered.reasons.at(-1)).toContain('interrupted by the previous core')
+  expect(recovered.registered).not.toHaveBeenCalled()
+  expect(recovered.prompts).toEqual([])
+  expect(promptHook).not.toHaveBeenCalled()
+  expect((await recovered.post({}, order)).body).toMatchObject({ pending: true })
+  expect(recovered.recoveryReady(row)).toBe(false)
+  expect(journal()).toEqual(before)
+  recovered.stopRecovery()
+  expect(recovered.transcriptReady(row)).toBe(false)
+}, 10_000)
+
+it('tails later native turns after a cold uncertain prompt while automatic Close stays held', async () => {
+  const { readNativeHookOwner, row, journal } = await interruptedPrompt()
+  const { createAttach } = await import('../core/transcripts/attach.js')
+  const { createSessionNormalizers } = await import('../core/transcripts/normalizers.js')
+  const { createAgentClosing } = await import('../core/agents/close.js')
+  const { createIngest } = await import('../core/transcripts/ingest.js')
+  const { liveFor } = await import('../engines/live.js')
+  const { Watcher } = await import('../watcher/watcher.js')
+  const normalizers = createSessionNormalizers(), watcher = new Watcher(), emit = vi.fn(), stop = vi.fn()
+  let f: Awaited<ReturnType<typeof httpFixture>> | undefined
+  const attach = createAttach({ liveFor, resolve: id => registry.byAgent(id), normalizers, watcher,
+    nativeRecoveryReady: entry => f?.transcriptReady(entry) ?? false,
+    terminalGone: async () => false, announceSession: vi.fn(), setInterpretationHold: () => false,
+    cursorDiscovery: { add: async () => {} }, device: () => undefined,
+    runtimeProfiles: { beginHydrate: () => ({ ingest: () => false, commit: () => false }),
+      transcriptFields: () => [], ingestConfig: async () => false, capturePane: async () => null,
+    } as unknown as import('../core/transcripts/attach.js').AttachDeps['runtimeProfiles'],
+    captureTerminal: async () => null, emit, announceTurnAborted: vi.fn(),
+    questionWatcher: { start: vi.fn() }, terminalLabel: () => '<private-pane>',
+    dbs: { opencode: '', kilo: '', devin: '' }, devinHome: '', hermesDb: async () => '', concurrency: 1,
+  })
+  createIngest({ liveFor, has: id => !!registry.bySession(id), bySession: id => registry.bySession(id),
+    normalizers, tokenUsage: { changed: vi.fn() }, device: () => undefined, runtimeProfiles: { ingest: vi.fn() },
+    announceTurnAborted: vi.fn(), emit, attachSession: attach.attachSession,
+  }).wireWatcher(watcher)
+  const closing = createAgentClosing({ registry, watcher, nativeRecoveryReady: entry => f!.recoveryReady(entry),
+    cleanupTabs: { refresh: async () => {}, isHidden: () => true, assertHidden: async () => {} },
+    captureTerminal: async () => null, readScreen: async () => null,
+    sessionTurnState: id => normalizers.sessionTurnState(id), openQuestions: { has: () => false },
+    terminals: { captureRetained: vi.fn() }, sessionCheckpoints: { save: vi.fn() },
+    stopAgent: stop, announceSession: vi.fn(), engineReady: async () => {},
+  }).closeAgentService
+  const before = journal()
+  try {
+    f = await httpFixture(undefined, undefined, { readNativeHookOwner,
+      onNativeTranscriptReady: async entry => { await attach.attachSession(entry) },
+      onAdmissionHeld: (id, reason) => { registry.byAgent(id)!.admissionHold = reason },
+    }, undefined, true)
+    await attach.attachSession(row)
+    expect(normalizers.liveParsers.has(A)).toBe(false)
+    f.startRecovery()
+    await vi.waitFor(() => expect(normalizers.liveParsers.has(A)).toBe(true))
+    const append = (payload: Record<string, unknown>) => writeFileSync(transcript,
+      readFileSync(transcript, 'utf8') + JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload }) + '\n')
+    append({ type: 'task_started', turn_id: 'fixture-later-native-turn' })
+    append({ type: 'user_message', message: 'a later native prompt' })
+    await watcher.pollSession(A)
+    expect(normalizers.sessionTurnState(A)).toBe(true)
+    append({ type: 'task_complete', turn_id: 'fixture-later-native-turn', last_agent_message: 'later native answer' })
+    await watcher.pollSession(A)
+    expect(normalizers.sessionTurnState(A)).toBe(false)
+    expect(emit.mock.calls.flatMap(([, events]) => events).map(event => event.type)).toContain('turn_ended')
+    expect(row.admissionHold).toContain('interrupted by the previous core')
+    expect(await closing.request({ agentId: row.agentId, sessionId: A,
+      createdAt: new Date(row.registeredAt).toISOString(), mode: 'idle' })).toMatchObject({ error: 'SESSION_NOT_IDLE', activity: 'unknown' })
+    expect(stop).not.toHaveBeenCalled()
+    expect(f.registered).not.toHaveBeenCalled()
+    expect(f.prompts).toEqual([])
+    expect(journal()).toEqual(before)
+  } finally { closing.dispose(); f?.stopRecovery(); attach.forget(A); await watcher.stop() }
+})
+
+it.each(['first binding', 'SessionStart', 'Stop', 'other conversation', 'other path', 'binding held'])(
+  'keeps transcript observation held for an uncertain %s', async kind => {
+    const over = kind === 'SessionStart' || kind === 'Stop' ? { hookEvent: kind }
+      : kind === 'other conversation' ? { sessionId: B, transcriptPath: join(home, 'sessions', 'other.jsonl') }
+      : kind === 'other path' ? { transcriptPath: join(home, 'sessions', 'other.jsonl') } : {}
+    // These sources remain complete evidence. Their relation to the stored binding is what differs.
+    if (kind === 'other conversation') writeFileSync(join(home, 'sessions', 'other.jsonl'), header(B))
+    if (kind === 'other path') writeFileSync(join(home, 'sessions', 'other.jsonl'), header())
+    const { readNativeHookOwner, row } = await interruptedPrompt(over, kind !== 'first binding')
+    if (kind === 'binding held') registry.setIdentityHold(row.agentId, 'fixture binding unavailable')
+    const attached = vi.fn()
+    const recovered = await httpFixture(undefined, undefined, { readNativeHookOwner, onNativeTranscriptReady: attached }, undefined, true)
+    expect(recovered.transcriptReady(row)).toBe(false)
+    recovered.startRecovery()
+    await vi.waitFor(() => expect(recovered.reasons.at(-1)).toContain('interrupted by the previous core'))
+    expect(recovered.transcriptReady(row)).toBe(false)
+    expect(recovered.recoveryReady(row)).toBe(false)
+    expect(attached).not.toHaveBeenCalled()
+    expect(recovered.registered).not.toHaveBeenCalled()
+  })
+
+it.each(['native proof', 'journal confirmation', 'binding during proof'])(
+  'refuses cold transcript observation when %s is unavailable or changes', async kind => {
+    const fixture = await interruptedPrompt()
+    const attached = vi.fn()
+    const readNativeHookOwner: NonNullable<HookServerHandlers['readNativeHookOwner']> = async (row, expected) => {
+      if (kind === 'native proof') throw Error('fixture observation native unavailable')
+      if (kind === 'binding during proof' && expected) registry.byAgent(source)!.cwd = '/fixture/changed-during-proof'
+      return fixture.readNativeHookOwner(row, expected)
+    }
+    if (kind === 'journal confirmation') fault.nativeSync = true
+    const recovered = await httpFixture(undefined, undefined, { readNativeHookOwner, onNativeTranscriptReady: attached }, undefined, true)
+    expect(recovered.transcriptReady(fixture.row)).toBe(false)
+    recovered.startRecovery()
+    await vi.waitFor(() => expect(recovered.reasons.some(Boolean)).toBe(true))
+    expect(recovered.transcriptReady(fixture.row)).toBe(false)
+    recovered.stopRecovery()
+    expect(attached).not.toHaveBeenCalled()
+    expect(recovered.registered).not.toHaveBeenCalled()
+    expect(recovered.recoveryReady(fixture.row)).toBe(false)
+  })
+
+it.each(['frontier', 'binding', 'native proof', 'quiescence', 'final binding'])(
+  'revokes an uncertain-prompt transcript grant after %s changes', async kind => {
+    const { readNativeHookOwner, row } = await interruptedPrompt()
+    let nativeAvailable = true, changeBinding = false
+    const recovered = await httpFixture(() => {
+      if (changeBinding) registry.byAgent(source)!.cwd = '/fixture/final-binding-change'
+      return false
+    }, undefined, { readNativeHookOwner: async (...args) => ({
+      ...await readNativeHookOwner(...args), verify: () => { if (!nativeAvailable) throw Error('fixture native proof expired') },
+    }) }, undefined, true)
+    recovered.startRecovery()
+    await vi.waitFor(() => expect(recovered.transcriptReady(row)).toBe(true))
+    if (kind === 'frontier') {
+      const { fixtureNativeHookAdmissionStorage } = await import('../testing/nativeHookAdmissionStorageFixture.js')
+      const other = await fixtureNativeHookAdmissionStorage(join(root, 'data', 'native-hook-deliveries'))
+      const native = await readNativeHookOwner(row)
+      try {
+        const writer = await other.effects(native.key)
+        await writer.retain({ id: 'fixture-cold-observation-other-event', fingerprint: 'b'.repeat(64),
+          agentId: row.agentId, conversationId: A, firedAt: Date.now() + 2, owner: { key: native.key, evidence: native.evidence },
+          payload: { engine: 'codex', sessionId: A, transcriptPath: transcript, hookEvent: 'SessionStart' },
+        })
+      } finally { await other.close() }
+    } else if (kind === 'binding') registry.byAgent(source)!.cwd = '/fixture/changed-binding'
+    else if (kind === 'native proof') nativeAvailable = false
+    else if (kind === 'final binding') changeBinding = true
+    else void recovered.drainAndStopRecovery()
+    expect(recovered.transcriptReady(row)).toBe(false)
+    expect(recovered.recoveryReady(row)).toBe(false)
+    expect(recovered.registered).not.toHaveBeenCalled()
+    expect(recovered.prompts).toEqual([])
+  })
+
+it('rejects transcript permission when full frontier verification exhausts the original native proof', async () => {
+  const fixture = await interruptedPrompt()
+  let advance = false
+  vi.doMock('../engines/kit/nativeHookJournal.js', async original => {
+    const actual = await original<typeof import('../engines/kit/nativeHookJournal.js')>()
+    return { ...actual, createNativeHookJournal: (options: Parameters<typeof actual.createNativeHookJournal>[0]) => {
+      const journal = actual.createNativeHookJournal(options)
+      return { ...journal, snapshot: async () => {
+        const snapshot = await journal.snapshot()
+        return { ...snapshot, verify: () => { snapshot.verify(); if (advance) clock.now += 1 } }
+      } }
+    } }
+  })
+  const recovered = await httpFixture(undefined, undefined, { readNativeHookOwner: async (...args) => {
+    const native = await fixture.readNativeHookOwner(...args), began = clock.now
+    return { ...native, verify: () => { if (clock.now !== began) throw Error('fixture native proof deadline') } }
+  } }, undefined, true)
+  recovered.startRecovery()
+  await vi.waitFor(() => expect(recovered.transcriptReady(fixture.row)).toBe(true))
+  advance = true
+  expect(recovered.transcriptReady(fixture.row)).toBe(false)
+  expect(recovered.recoveryReady(fixture.row)).toBe(false)
 })
 
 it('finishes only an already-dispatched terminal receipt during graceful shutdown and recovers without redispatch', async () => {
@@ -1564,6 +1789,29 @@ it('keeps the first legacy Stop capture when a native owner read is unavailable 
   await vi.waitFor(async () => expect((await f.post(body, delivery, 'turn-stop')).status).toBe(200), { timeout: 4_000 })
   expect(effect).toHaveBeenCalledOnce(); expect(capture).toHaveBeenCalledOnce()
   expect(read.mock.calls.length).toBeGreaterThan(2)
+})
+
+it('refreshes original admission after a retryable legacy Stop preflight hold', async () => {
+  const { body, delivery } = boundClaudeStop()
+  let reads = 0, retryable = true, firstProof = 0
+  const read = vi.fn(async () => {
+    const generation = ++reads
+    return { key: 'fixture-native-claude', evidence: 'fixture-claude-image', verify() {
+      if (generation <= firstProof) throw Error('fixture preflight proof expired')
+    } }
+  })
+  const effect = Object.assign(vi.fn(async (execution) => {
+    execution.verify()
+    if (!firstProof) { firstProof = reads; return 'held' as const }
+    retryable = false
+    return 'completed' as const
+  }), { retryable: () => retryable })
+  const f = await httpFixture(undefined, undefined, { captureTurnStop: () => effect, readNativeHookOwner: read }, undefined, true)
+  expect((await f.post(body, delivery, 'turn-stop')).status).toBe(202)
+  f.startRecovery()
+  await vi.waitFor(async () => expect((await f.post(body, delivery, 'turn-stop')).status).toBe(200), { timeout: 4_000 })
+  expect(effect).toHaveBeenCalledTimes(2)
+  expect(reads).toBeGreaterThan(firstProof)
 })
 
 it('never dispatches a retained legacy Stop after its server shuts down during ownership capture', async () => {

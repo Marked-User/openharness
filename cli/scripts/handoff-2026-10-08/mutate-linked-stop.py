@@ -19,9 +19,20 @@ http = 'src/lib/registry.admission.spec.ts'
 turn_spec = 'src/core/turns/turnHooks.spec.ts'
 tasks = 'src/core/engines/cursorTasks.spec.ts'
 mutations = [
+    ('retryable Stop preflight keeps expired admission', server,
+     'if (!started || effect.retryable?.()) {', 'if (!started) {', http, 'retryable legacy Stop preflight'),
+    ('settled preparation cannot retry', turn,
+     "const retryable = () => !attempt || attempt.settled && !attempt.dispatched && attempt.outcome === 'held'",
+     'const retryable = () => !attempt', turn_spec, 'settled confirmation failure'),
+    ('timed-out preparation abandons actual reader', turn,
+     'attempt.settled && !attempt.dispatched', '!attempt.dispatched', turn_spec, 'waits for actual preparation'),
+    ('revoked read resumes after a temporary hold', turn,
+     'work.revoked || !work.execution.current()', '!work.execution.current()', turn_spec, 'actual preparation after temporary hold'),
+    ('entered Stop effect can repeat', turn,
+     "!attempt.dispatched && attempt.outcome === 'held'", "attempt.outcome === 'held'", turn_spec, 'callback throws after entry'),
     ('recovery replaces the retained Claude parser', 'src/core/main.ts',
-     'onNativeRecoveryReady: entry => { void attachSession(entry).catch',
-     'onNativeRecoveryReady: entry => { void attachSession(entry, true).catch',
+     'onNativeTranscriptReady: entry => { void attachSession(entry).catch',
+     'onNativeTranscriptReady: entry => { void attachSession(entry, true).catch',
      'e2e/hookclient.e2e.ts', 'original Claude Stop'),
     ('legacy response ends caller before ancestry capture', server,
      '    await caller\n    const receipt = legacyStops.get(id)',

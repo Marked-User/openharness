@@ -16,7 +16,7 @@ branch through `f864d6e9e`. It is neither activated nor claimed complete here.
 
 - Retain immutable intake, exclusive effect claims, terminal receipts and
   conflicting delivery IDs across restart, with bounded storage and work.
-- Keep the existing installed client and hook configuration. A slow durability
+- Keep the installed hook protocol and configuration compatible. A slow durability
   boundary is pending work, not evidence that a Stop belongs to another turn.
 - Retain the original live turn boundary through registration, transcript/task
   drains, closure and cleanup. Cancel, a successor or reconstructed interpretation
@@ -391,3 +391,84 @@ precondition. Reading its journal is insufficient; no warm-up turn is sent.
 The cold-turn test still requires no orchestrator directory before filling the
 disk. Independent review approved this setup change conditionally on macOS
 acceptance. No release has been requested or performed.
+
+The exact-head Linux unit run [38515540213](https://github.com/autonomous-ai/openharness/actions/runs/38515540213)
+passes on `7d9ca51fd`, including `ci/required`. Bundled Darwin acceptance
+`20261014T051318.250520Z-22389` passes both paused clients, both awkward-folder
+restart cases and both tmux configuration cases; its retained Claude Stop fails.
+The macOS setup helper also looked in the data directory instead of its
+`native-hook-deliveries` child. Those failures are not passing aggregate evidence.
+
+A bounded private trace reproduces the Claude failure: its first post-drain
+confirmation rejects while another confirmation is active, before any Stop effect
+runs. The old completion memoized that transient preparation failure. Each
+preparation attempt now retains its own execution proof, deadline and revoked
+callbacks. Only an actually settled attempt that entered no mirror, close or
+emission may retry on the original captured turn. The server refreshes admission
+for that retry; after any effect entry, an uncertain result stays held. A second
+preflight confirmation is needed only after the configured asynchronous delay.
+Three regressions fail before correction. Types, all turn-hook tests and affected
+legacy HTTP cases pass in `20261014T053457.512951Z-97100` (6.9/0.9/8.9 seconds).
+Independent review approves this correction conditionally on the remaining gates.
+
+The shipped Claude Stop passes in `20261014T053547.431358Z-2280` (35.8 seconds),
+with the original 20-second acceptance deadline. Its macOS lane passes both disk
+cases and the first two update cases, but fails the last two update recoveries:
+Claude's conversation does not reattach after the full-disk restart, while Codex
+recovers. The setup now confirms the exact stored intake through the original
+body and origin header. The remaining recovery failure is blocking; no merge or
+release has occurred. Final coverage, causal mutations, runtime comparison and
+corrected full end-to-end acceptance remain required.
+
+
+### Cold restart: observing a bound transcript without replaying a hook
+
+The failing full-disk update reproduced an exclusive UserPromptSubmit claim with
+no result after the former core exited. Both copies preserved that uncertainty.
+Replaying the claim would be unsafe, but the strict recovery gate also prevented
+an already-bound conversation from attaching, so later native answers never
+reached the daemon. This is a session-control availability defect, not a reason
+to infer that the interrupted callback did or did not run.
+
+Attachment now has a separate permission. It requires a confirmed earlier
+accepted registration for the same agent and conversation in the same native
+process journal, a currently validated stored binding, fresh precise native
+process proof, and a complete confirmed frontier whose unresolved deliveries
+are same-conversation UserPromptSubmit registrations with no conflicting path.
+A first binding, Stop, other conversation/path, changed binding, unavailable
+proof, or unconfirmed incoming delivery cannot use it. The grant checks the full
+frontier and its original native deadline again before returning. It is revoked
+by shutdown, process/binding changes, or changed journal evidence. Ordinary
+transcript lifecycle, input and recap observation may proceed; no hook receipt,
+prompt credit, Stop capture or registration callback is manufactured.
+
+Automatic Close continues to use strict effect recovery readiness and the visible
+admission hold. The uncertain claim is neither completed nor replayed. This does
+not activate the separate generation/launch/outbox draft.
+
+A regression first failed against the strict attachment gate. Cold persisted
+registry and journal fixtures now prove observation, exact delivery retry without
+repeating callbacks, preservation of the original uncertain claim, and refusal
+for conflicting or unavailable authority. The real Watcher-to-ingest-to-Close
+composition observes a later native turn while automatic Close remains held.
+Independent review required final proof/binding rechecks and process-scoped local
+receipts; both corrections are implemented. Nine additional mutation cases target
+these permission boundaries and require actual assertion failures.
+
+Validation receipt `20261014T061214.446282Z-57047` records passing types
+(5.4 seconds), 479 passing affected cases and one failed newly written fixture
+(133.9 seconds), and all four formerly failing macOS full-disk update cases passing
+(144.5 seconds). The aggregate remains failed: the new external-frontier fixture
+mistakenly supplied the proof's function along with its serializable owner data.
+That fixture now passes only the owner key and evidence, with no runtime change.
+The positive observation test also has a larger outer test limit so the unchanged
+four-second assertion deadline remains the failure oracle for disconnected wiring.
+Final coverage, affected mutations and full end-to-end acceptance remain pending.
+
+Receipt `20261014T061751.701322Z-91582` passes types (6.3 seconds), all 17
+new cold-observation cases (15.1 seconds), and all 2,790 core tests in 185 files.
+The core gate nevertheless fails (172.8 seconds): statements and branches are
+99.99%, with one unexercised refusal in the new Claude Stop callback. A focused
+causal test now invokes a revoked preparation's late close callback while its
+retry owns the turn, and verifies that only the retry may close it. The full
+coverage gate will be rerun; the earlier near-complete gate is not called green.

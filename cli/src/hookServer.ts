@@ -107,6 +107,8 @@ export interface HookServerHandlers {
   onAdmissionHeld?: (agentId: string, reason: string | undefined) => void
   /** The process's confirmed hook frontier is restored; a held attach can resume. */
   onNativeRecoveryReady?: (entry: RegisteredSession) => void | Promise<void>
+  /** An independently bound transcript can be followed without recovering an uncertain hook effect. */
+  onNativeTranscriptReady?: (entry: RegisteredSession) => void | Promise<void>
   /** Production supplies precise kernel evidence; fixture-only servers inject their own process resolver. */
   readNativeHookOwner?: NativeHookOwnerReader
   captureNativeHookCaller?: NativeHookCallerReader
@@ -429,7 +431,8 @@ export function startHookServer(
   handlers: HookServerHandlers,
   options: HookServerOptions = {},
 ): Promise<{ server: http.Server; port: number; localSocket: LocalSocketServer | null; startRecovery(): void;
-  stopRecovery(): void; drainAndStopRecovery(): Promise<void>; recoveryReady(row: RegisteredSession): boolean }> {
+  stopRecovery(): void; drainAndStopRecovery(): Promise<void>; recoveryReady(row: RegisteredSession): boolean;
+  transcriptReady(row: RegisteredSession): boolean }> {
   const hookCredential = loadOrCreateHookCredential(env.ADAPTER_DATA_DIR)
   const admissions = createPendingAdmissions({ isProcessCurrent: (key, scope) => admissionProcessScope(registry.byAgent(key)) === scope })
   let admissionArrival = 0
@@ -487,11 +490,13 @@ export function startHookServer(
     await (opened ?? nativeStorage)?.close()
   })().catch(error => { closingStorage = undefined; throw error })
   type DurableProcess = { key: string; journal: Journal; restored: Set<string>; claims: Map<string, NativeHookClaim>;
-    ready: boolean; confirming: number; owner?: NativeHookOwner }
+    ready: boolean; confirming: number; owner?: NativeHookOwner;
+    transcript?: { identity: string; verify(): void } }
   const durableProcesses = new Map<string, DurableProcess>()
   const openingProcesses = new Map<string, Promise<DurableProcess>>()
   const nativeKeys = new Map<string, string>()
   const waitingAttaches = new Set<string>()
+  const waitingTranscripts = new Set<string>()
   const admissionHeld = (agentId: string, reason: string | undefined) => {
     try { handlers.onAdmissionHeld?.(agentId, reason) }
     catch (error) { console.warn('[hooks] admission status notification failed', error) }
@@ -573,6 +578,7 @@ export function startHookServer(
       try { void Promise.resolve(handlers.onNativeRecoveryReady?.(row)).catch(error => console.warn('[hooks] recovery notification failed', error)) }
       catch (error) { console.warn('[hooks] recovery notification failed', error) }
     }
+    notifyTranscripts(context)
   }
   const recoveryReady = (row: RegisteredSession): boolean => {
     if (row.engine === 'terminal') return true
@@ -582,6 +588,35 @@ export function startHookServer(
     }
     waitingAttaches.add(row.agentId)
     return false
+  }
+  const transcriptReady = (row: RegisteredSession): boolean => {
+    if (row.engine === 'terminal') return true
+    if (closed || quiescing) return false
+    if (recoveryStarted) {
+      try {
+        const context = durableProcesses.get(durableKey(row))
+        if (context?.ready) return true
+        if (context?.transcript && context.transcript.identity === paneReadIdentity(row)
+          && context.transcript.identity === paneReadIdentity(registry.byAgent(row.agentId))) {
+          const grant = context.transcript
+          grant.verify()
+          if (!closed && !quiescing && context.transcript === grant && grant.identity === paneReadIdentity(row)
+            && grant.identity === paneReadIdentity(registry.byAgent(row.agentId))) return true
+        }
+      } catch { /* A changed frontier or unavailable owner must be confirmed again. */ }
+    }
+    waitingTranscripts.add(row.agentId)
+    return false
+  }
+  const notifyTranscripts = (context: DurableProcess) => {
+    for (const agentId of waitingTranscripts) {
+      const row = registry.byAgent(agentId)
+      if (!row?.active || !row.processIdentity) { waitingTranscripts.delete(agentId); continue }
+      try { if (durableKey(row) !== context.key || !transcriptReady(row)) continue } catch { continue }
+      waitingTranscripts.delete(agentId)
+      try { void Promise.resolve(handlers.onNativeTranscriptReady?.(row)).catch(error => console.warn('[hooks] transcript notification failed', error)) }
+      catch (error) { console.warn('[hooks] transcript notification failed', error) }
+    }
   }
   const restoreDeliveryOrder = (context: DurableProcess, row: RegisteredSession, deliveries: ReadonlyMap<string, NativeHookDelivery>) => {
     for (const [id, delivery] of deliveries) {
@@ -599,6 +634,8 @@ export function startHookServer(
     }
   }
   const confirmedSnapshot = async (context: DurableProcess, row: RegisteredSession, ownerVerified?: (verify: () => void) => void) => {
+    const identity = paneReadIdentity(row)
+    let verifyOwner: (() => void) | undefined
     ready(context, false)
     context.confirming++
     try {
@@ -615,6 +652,7 @@ export function startHookServer(
       }
       const native = await handlers.readNativeHookOwner(row, context.owner)
       native.verify()
+      verifyOwner = native.verify
       ownerVerified?.(native.verify)
     }
     snapshot.verify()
@@ -624,8 +662,49 @@ export function startHookServer(
     }
     restoreDeliveryOrder(context, row, snapshot.deliveries)
     ready(context, !snapshot.active && [...snapshot.deliveries.values()].every(delivery => delivery.result))
+    context.transcript = undefined
+    if (snapshot.active && context.claims.get(snapshot.active.id)?.token !== snapshot.active.token
+      && context.journal.pendingClaim()?.token !== snapshot.active.token) {
+      recoveryHeld(row.agentId, 'Waiting for an authoritative outcome of a native hook interrupted by the previous core.')
+      // An update can interrupt a prompt registration after this conversation
+      // was already bound. The claim stays unknown; it must not prevent the
+      // same native process's transcript from advancing ordinary turn state.
+      // Require an earlier accepted registration, never client clock order.
+      const deliveries = [...snapshot.deliveries.values()]
+      const sameBinding = (delivery: NativeHookDelivery) => {
+        const body = delivery.intake.payload
+        return delivery.intake.agentId === row.agentId && delivery.intake.conversationId === row.sessionId
+          && validHookBody(body) && (body.engine ?? 'claude') === row.engine && body.sessionId === row.sessionId
+          && (!body.transcriptPath || body.transcriptPath === row.transcriptPath)
+          && (!delivery.intake.wire || delivery.intake.wire.path === '/api/hook/session-start')
+      }
+      const firstPending = deliveries.findIndex(delivery => !delivery.result)
+      if (verifyOwner && (row.engine === 'claude' || row.engine === 'codex') && row.sessionId && row.transcriptPath
+        && !row.identityHold && identity === paneReadIdentity(registry.byAgent(row.agentId))
+        && firstPending > 0 && deliveries.slice(0, firstPending).some(delivery => delivery.result?.accepted === true && sameBinding(delivery))
+        && deliveries.slice(firstPending).every(delivery => delivery.result
+          || sameBinding(delivery) && delivery.intake.payload.hookEvent === 'UserPromptSubmit')) {
+        const owner = verifyOwner
+        context.transcript = { identity, verify: () => {
+          owner(); snapshot.verify()
+          const history = admissionReceipts.get(row.agentId)
+          if (context.claims.size || context.journal.pendingClaim()
+            || [...intakeReservations].some(key => key.startsWith(`${context.key}\u0000`))
+            || history && history.scope === scopeOf(row) && [...history.records].some(([id, receipt]) => receipt.preparing?.intake
+              || receipt.pending && !snapshot.deliveries.has(id) || receipt.linkedStop)
+            || [...legacyStops.values()].some(receipt => receipt.legacyOwner?.agentId === row.agentId
+              && receipt.legacyOwner.scope === admissionProcessScope(row) && receipt.status !== 200)
+            || handlers.hookAdmissionBlocked?.(row.agentId)) {
+            throw new IdentityReadUnavailable('the transcript is waiting for current native hook intake')
+          }
+          owner()
+        } }
+        notifyTranscripts(context)
+      }
+    }
     return snapshot
-    } finally { context.confirming-- }
+    } catch (error) { context.transcript = undefined; throw error }
+    finally { context.confirming-- }
   }
   const scopeOf = (row: RegisteredSession | undefined) => row && JSON.stringify([
     row.agentId, row.engine, row.processIdentity ? processIdentityKey(row.engine, row.processIdentity) : null,
@@ -754,7 +833,7 @@ export function startHookServer(
       running = true; runningLegacyStops++
       void (async () => {
         try {
-          if (!started) {
+          if (!started || effect.retryable?.()) {
             await confirm()
             if (!reported) {
               reported = true
@@ -762,7 +841,7 @@ export function startHookServer(
               if (handlers.stopHookDelayMs) await new Promise(resolve => setTimeout(resolve, handlers.stopHookDelayMs))
             }
             if (!current() || !notCancelled()) { finish(); return }
-            await confirm()
+            if (handlers.stopHookDelayMs) await confirm()
             if (!notCancelled()) { finish(); return }
             started = true
           }
@@ -1333,6 +1412,7 @@ export function startHookServer(
         ...(pending.intake.wire ? { wire: pending.intake.wire } : {}),
         recovery: { agentId: pending.intake.agentId, key: context.key, owner: pending.intake.owner } }, () => {})
     } catch (error) {
+      context.transcript = undefined
       if (!closed) recoveryHeld(row.agentId,
         `Waiting for native hook recovery: ${error instanceof Error ? error.message : 'storage unavailable'}`.slice(0, 1024))
     } finally { recovering.delete(context.key) }
@@ -1363,6 +1443,7 @@ export function startHookServer(
             const context = await durableProcess(row, native)
             if (!closed && !quiescing && !recovering.has(context.key) && !recovered.has(context.key)) await recover(row, context)
           })().catch(error => {
+            if (context) context.transcript = undefined
             if (!closed) recoveryHeld(row.agentId, `Waiting for native hook recovery: ${error instanceof Error ? error.message : 'process unavailable'}`.slice(0, 1024))
           }).finally(() => { recovering.delete(scope) })
         } catch (error) {
@@ -1946,7 +2027,7 @@ export function startHookServer(
   }
   const server = http.createServer(handle)
   const quiesce = () => {
-    quiescing = true; clearTimeout(recoveryTimer); admissions.close(); waitingAttaches.clear()
+    quiescing = true; clearTimeout(recoveryTimer); admissions.close(); waitingAttaches.clear(); waitingTranscripts.clear()
     legacyStopRetries.clear()
     void clientReplay.close().catch(error => console.warn('[hooks] client replay cleanup remains held', error))
   }
@@ -2005,13 +2086,13 @@ export function startHookServer(
       console.log(`[hooks] listening on 127.0.0.1:${actual} (SessionStart/SessionEnd callbacks)`)
       if (!options.deferNativeRecovery) startRecovery()
       const socketPath = options.socketPath
-      if (!socketPath) { resolve({ server, port: actual, localSocket: null, startRecovery, stopRecovery, drainAndStopRecovery, recoveryReady }); return }
+      if (!socketPath) { resolve({ server, port: actual, localSocket: null, startRecovery, stopRecovery, drainAndStopRecovery, recoveryReady, transcriptReady }); return }
       // The private socket is mandatory when opting into multi-user startup. A duplicate daemon
       // must not survive on a random port while another one owns this user's socket.
       listenLocalSocket(handle, socketPath).then(
         (localSocket) => {
           console.log(`[hooks] listening on ${socketPath}`)
-          resolve({ server, port: actual, localSocket, startRecovery, stopRecovery, drainAndStopRecovery, recoveryReady })
+          resolve({ server, port: actual, localSocket, startRecovery, stopRecovery, drainAndStopRecovery, recoveryReady, transcriptReady })
         },
         (error: unknown) => {
           if (options.allowPortFallback) {
@@ -2021,7 +2102,7 @@ export function startHookServer(
             return
           }
           console.warn(`[hooks] local socket unavailable (${socketPath}): ${error instanceof Error ? error.message : error}`)
-          resolve({ server, port: actual, localSocket: null, startRecovery, stopRecovery, drainAndStopRecovery, recoveryReady })
+          resolve({ server, port: actual, localSocket: null, startRecovery, stopRecovery, drainAndStopRecovery, recoveryReady, transcriptReady })
         },
       )
     })
