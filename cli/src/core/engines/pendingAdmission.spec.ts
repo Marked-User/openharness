@@ -11,6 +11,35 @@ function request(overrides: Partial<PendingAdmission<string>> = {}): PendingAdmi
 const flush = async () => { await Promise.resolve(); await Promise.resolve() }
 
 describe('pending hook admission', () => {
+  it.each(['unchanged', 'new binding', 'rejected'] as const)('keeps an undelivered exclusive claim ahead of peers while admission is %s', async change => {
+    vi.useFakeTimers()
+    const queue = createPendingAdmissions({ retryMs: 20 })
+    let reserved = false, writable = false
+    const first = request({ order: { scope: 'process', firedAt: 10, arrival: 1 },
+      pendingClaim: () => reserved,
+      inspect: vi.fn(async (): Promise<AdmissionDecision<string>> => writable && change === 'rejected'
+        ? { kind: 'reject', reason: 'delegated' } : { kind: 'accept', value: 'first' }),
+      conclude: async decision => {
+        reserved = true
+        return writable ? decision : { kind: 'hold', reason: 'claim not yet confirmed' }
+      } })
+    const second = request({ order: { scope: 'process', firedAt: 20, arrival: 2 } })
+    queue.submit('agent', 'first', first); await flush(); await flush()
+    queue.submit('agent', 'second', second); await flush(); await flush()
+    await vi.advanceTimersByTimeAsync(20)
+    expect(second.inspect).not.toHaveBeenCalled()
+    if (change === 'new binding') queue.restore('agent', 'new-owner', { scope: 'process', firedAt: 30, arrival: 3 })
+    writable = true
+    await vi.advanceTimersByTimeAsync(20)
+    if (change === 'unchanged') expect(first.accept).toHaveBeenCalledExactlyOnceWith('first')
+    else {
+      expect(first.accept).not.toHaveBeenCalled()
+      expect(first.reject).toHaveBeenCalledExactlyOnceWith(change === 'rejected' ? 'delegated' : 'stale_hook')
+    }
+    expect(second.inspect).toHaveBeenCalledOnce()
+    queue.close()
+  })
+
   it('finishes an already-owned effect before inspecting a newer competing intent', async () => {
     vi.useFakeTimers()
     const queue = createPendingAdmissions({ retryMs: 20 })

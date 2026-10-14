@@ -7,7 +7,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, opendirSync, read
 import { dirname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { secureStateDirectory } from '../../lib/secureState.js'
-import { inspectHookFile, runHookPreparation } from './nativeHookFiles.js'
+import { inspectHookFile, runHookPreparation, type HookFilePublication } from './nativeHookFiles.js'
 import { NativeEvidenceBudget } from './nativeEvidence.js'
 import { NativePaths, verifyNativePathFacts } from './nativePaths.js'
 import type { NativeHookOwner } from './nativeHookOwner.js'
@@ -257,16 +257,18 @@ function createNativeHookLog({ directory, processKey, current = () => true,
   const operations = new AsyncLocalStorage<Operation>()
   const readFence = (read: () => void) => boundary
     ? boundary.read(read, operations.getStore()?.checkOwner ?? checkOwner) : read()
-  const operation = async <T>(purpose: OperationPurpose, work: () => Promise<T>, reuse = false): Promise<T> => {
+  const operation = async <T>(purpose: OperationPurpose, work: () => Promise<T>, reuse = false,
+    track?: (actual: Promise<unknown>, confirmDeadline: () => void) => void): Promise<T> => {
     const parent = operations.getStore()
     // Only a private confirmation nested in its caller shares a lease. Every
     // public retain has a separate normal scope, even inside a terminal caller.
     if (reuse && parent) { parent.check(); return work() }
-    if (!boundary) return work()
+    if (!boundary && !track) return work()
     check()
     if (activeOperations >= 16) held('actual journal operation slots are occupied')
     activeOperations++
     const deadline = performance.now() + 4500
+    const confirmDeadline = () => { checkOwner(); if (performance.now() >= deadline) held('the journal operation expired') }
     let expired = false, timer: ReturnType<typeof setTimeout> | undefined
     const state: Operation = { purpose, preparations: new Set(), yieldedAt: performance.now(), check: () => { check(); state.checkOwner() }, checkOwner: () => {
       checkOwner()
@@ -285,12 +287,15 @@ function createNativeHookLog({ directory, processKey, current = () => true,
         finally { activeOperations--; clearTimeout(timer) }
       }
     })
-    boundary.track(actual)
-    return Promise.race([actual, new Promise<never>((_, reject) => {
+    boundary?.track(actual); track?.(actual, confirmDeadline)
+    const result = await Promise.race([actual, new Promise<never>((_, reject) => {
       timer = setTimeout(() => { expired = true; reject(new NativeHookJournalHeld('journal disk confirmation exceeded its deadline')) }, 4500)
     })])
+    confirmDeadline()
+    return result
   }
-  const publish = async (file: string, text: string, verify: () => void, exclusive: boolean, normalOnly = false) => {
+  const publish = async (file: string, text: string, verify: () => void, exclusive: boolean, normalOnly = false,
+    publishedEarly?: (proof: HookFilePublication) => void) => {
     const owner = operations.getStore()
     const published = await runHookPreparation([file], async attempt => {
       verify(); check()
@@ -311,7 +316,7 @@ function createNativeHookLog({ directory, processKey, current = () => true,
         lease = await state.stage
         state.check(); lease.verify()
       }
-      return inspected.replace(text, attempt, exclusive, lease?.stage)
+      return inspected.replace(text, attempt, exclusive, lease?.stage, publishedEarly)
     }, {
       // Recovery and admission can confirm the same immutable bytes at once.
       // Share only that in-flight sync; each waiter still checks its own facts
@@ -529,24 +534,108 @@ function createNativeHookLog({ directory, processKey, current = () => true,
     return { deliveries, active, previous, lastResult, bytes, length: history.names.length, verify, verifyRecords, verifyAuthority,
       confirm: () => operation('terminal', () => confirm(tail, verify, verifyAuthority), true) }
   }
-  const append = async (before: Snapshot, event: Event) => {
+  const append = async (before: Snapshot, event: Event, publishedEarly?: (verify: () => void) => void) => {
     before.verify()
     if (before.length >= maxRecords) held('journal record capacity is exhausted')
     const text = JSON.stringify({ version: 1, ...log, processKey, index: before.length, previous: before.previous, event } satisfies RecordValue)
     if (Buffer.byteLength(text) * 2 + before.bytes > maxBytes) held('journal byte capacity is exhausted')
     const name = `${String(before.length).padStart(8, '0')}.json`
+    const proofs = [before.verifyRecords]
+    const verifyPublished = () => { for (const verify of proofs) verify() }
+    const remember = (proof: HookFilePublication) => { proofs.push(proof.verify); publishedEarly?.(verifyPublished) }
     // The outside publication exclusively selects this log position across cores.
-    // A failed sync never transfers that publisher's execution right to a retry.
-    await publish(join(witnesses, name), text, before.verifyAuthority, true)
+    // Only its live publisher can retain an undelivered claim through failed sync.
+    await publish(join(witnesses, name), text, before.verifyAuthority, true, false, remember)
     // A recovery reader may already have completed the mirror. Only the original
     // exclusive outside publisher can reach this return and own a new claim.
     const existing = read(join(directory, name))
     if (existing && existing.text !== text) held('journal publication changed')
-    await publish(join(directory, name), text, () => { before.verifyAuthority(); existing?.verify() }, !existing)
+    if (existing) proofs.push(existing.verify)
+    await publish(join(directory, name), text, () => { verifyPublished(); existing?.verify() }, !existing, false, remember)
     const record = read(join(directory, name)), witness = read(join(witnesses, name))
     if (!record || !witness || record.text !== text || witness.text !== text) held('journal publication changed')
-    before.verifyRecords()
-    return () => { before.verifyRecords(); record.verify(); witness.verify() }
+    verifyPublished()
+    return () => { verifyPublished(); record.verify(); witness.verify() }
+  }
+  type UndeliveredClaim = { id: string; agentId: string; token: string; verify?: () => void }
+  type ClaimAttempt = { actual?: Promise<unknown>; confirmDeadline?: () => void; settled: boolean; replied: boolean }
+  let undelivered: UndeliveredClaim | undefined
+  let claiming: ClaimAttempt | undefined
+  const claim = async (id: string, agentId: string, inspected?: { previous: string | null }): Promise<NativeHookClaim> => {
+    check()
+    if (claiming) held('the original claim confirmation is still settling')
+    const attempt: ClaimAttempt = claiming = { settled: false, replied: false }
+    const release = () => {
+      if (attempt.replied && (!attempt.actual || attempt.settled)) {
+        if (!undelivered?.verify) undelivered = undefined
+        if (claiming === attempt) claiming = undefined
+      }
+    }
+    try {
+      const result = await operation('terminal', async (): Promise<NativeHookClaim> => {
+        if (kind !== 'effects') held('a client outbox cannot claim effects')
+        if (undelivered) {
+          if (undelivered.id !== id || undelivered.agentId !== agentId) held('an earlier native hook effect is unconfirmed')
+          undelivered.verify!()
+        }
+        const before = await snapshot(), delivery = before.deliveries.get(id)
+        if (!delivery || delivery.result || delivery.intake.agentId !== agentId) held('this delivery cannot dispatch')
+        const pending = undelivered
+        if (before.active && (!pending || before.active.id !== id || before.active.token !== pending.token)) {
+          held('an earlier native hook effect is unconfirmed')
+        }
+        if (pending && !before.active) held('the original undelivered claim is missing')
+        if (inspected && inspected.previous !== before.previous) held('native hook order changed after inspection')
+        const waiting = [...before.deliveries.values()].filter(item => !item.result).length
+        if (!pending && (before.length + waiting * 2 > maxRecords || before.bytes + waiting * TERMINAL_BYTES > maxBytes)) {
+          held('journal capacity cannot retain terminal outcomes')
+        }
+        pending?.verify!()
+        await before.confirm()
+        delivery.verify(); pending?.verify!()
+        const retained = pending ?? (undelivered = { id, agentId, token: randomUUID() })
+        const token = retained.token
+        const verifyClaim = pending
+          ? () => { pending.verify!(); before.verifyRecords(); before.active!.verify() }
+          : await append(before, { kind: 'claim', id, agentId, token, predecessor: before.lastResult }, verify => { retained.verify = verify })
+        let finished = false, terminal: string | undefined
+        const verifyOwner = () => { check(); delivery.verify(); verifyClaim() }
+        const verify = () => {
+          verifyOwner()
+          if (finished) held('the hook effect already completed')
+          if (terminal !== undefined) held('the hook effect is completing')
+        }
+        return { id, token, verify, finish: value => operation('terminal', async () => {
+          const captured = structuredClone(value), proposed = JSON.stringify(captured)
+          if (!object(captured) || Buffer.byteLength(proposed) > MAX_RESULT_BYTES) held('hook result exceeds its byte limit')
+          verifyOwner()
+          if (terminal !== undefined && terminal !== proposed) held('the original hook result cannot change')
+          // Dispatch permission ends before any terminal publication or await. A
+          // retry retains only permission to confirm this exact original result.
+          terminal = proposed
+          if (finished) return
+          const latest = await snapshot()
+          const completed = latest.deliveries.get(id)
+          if (completed?.resultToken === token && JSON.stringify(completed.result) === proposed) {
+            await latest.confirm(); verifyOwner(); finished = true; return
+          }
+          if (latest.active?.id !== id || latest.active.token !== token) held('the hook effect claim changed')
+          verifyOwner()
+          await append(latest, { kind: 'result', id, token, value: captured })
+          finished = true
+        }) }
+      }, false, (actual, confirmDeadline) => {
+        attempt.actual = actual; attempt.confirmDeadline = confirmDeadline
+        const settled = () => { attempt.settled = true; release() }
+        void actual.then(settled, settled)
+      })
+      // operation can time out while its finally still owns file or stage
+      // cleanup. Only fulfillment here hands permission to an effect caller.
+      result.verify()
+      attempt.confirmDeadline!()
+      undelivered = undefined
+      return result
+    } finally { attempt.replied = true; release() }
   }
   return {
     snapshot: (repairAllowed = true) => operation('terminal', () => snapshot(repairAllowed)),
@@ -586,45 +675,10 @@ function createNativeHookLog({ directory, processKey, current = () => true,
       if (before.length + remaining > maxRecords || before.bytes + remaining * ackBytes > maxBytes) held('journal capacity cannot retain phase acknowledgements')
       await append(before, { kind: 'ack', id, phase })
     }),
-    claim: (id: string, agentId: string, inspected?: { previous: string | null }): Promise<NativeHookClaim> => operation('terminal', async () => {
-      if (kind !== 'effects') held('a client outbox cannot claim effects')
-      const before = await snapshot(), delivery = before.deliveries.get(id)
-      if (!delivery || delivery.result || delivery.intake.agentId !== agentId) held('this delivery cannot dispatch')
-      if (before.active) held('an earlier native hook effect is unconfirmed')
-      if (inspected && inspected.previous !== before.previous) held('native hook order changed after inspection')
-      const pending = [...before.deliveries.values()].filter(item => !item.result).length
-      if (before.length + pending * 2 > maxRecords || before.bytes + pending * TERMINAL_BYTES > maxBytes) held('journal capacity cannot retain terminal outcomes')
-      await before.confirm()
-      delivery.verify()
-      const token = randomUUID()
-      const verifyClaim = await append(before, { kind: 'claim', id, agentId, token, predecessor: before.lastResult })
-      let finished = false, terminal: string | undefined
-      const verifyOwner = () => { check(); delivery.verify(); verifyClaim() }
-      const verify = () => {
-        verifyOwner()
-        if (finished) held('the hook effect already completed')
-        if (terminal !== undefined) held('the hook effect is completing')
-      }
-      return { id, token, verify, finish: value => operation('terminal', async () => {
-        const captured = structuredClone(value), proposed = JSON.stringify(captured)
-        if (!object(captured) || Buffer.byteLength(proposed) > MAX_RESULT_BYTES) held('hook result exceeds its byte limit')
-        verifyOwner()
-        if (terminal !== undefined && terminal !== proposed) held('the original hook result cannot change')
-        // Dispatch permission ends before any terminal publication or await. A
-        // retry retains only permission to confirm this exact original result.
-        terminal = proposed
-        if (finished) return
-        const latest = await snapshot()
-        const completed = latest.deliveries.get(id)
-        if (completed?.resultToken === token && JSON.stringify(completed.result) === proposed) {
-          await latest.confirm(); verifyOwner(); finished = true; return
-        }
-        if (latest.active?.id !== id || latest.active.token !== token) held('the hook effect claim changed')
-        verifyOwner()
-        await append(latest, { kind: 'result', id, token, value: captured })
-        finished = true
-      }) }
-    }),
+    claim,
+    /** Queue priority only. This identity never grants permission to dispatch. */
+    pendingClaim: () => !closed && undelivered?.verify
+      ? { id: undelivered.id, agentId: undelivered.agentId, token: undelivered.token } : undefined,
     close(): void { closed = true },
   }
 }
@@ -634,8 +688,8 @@ function createNativeHookLog({ directory, processKey, current = () => true,
  * lost receipt or replaced directory holds instead of making an old ID new.
  */
 export function createNativeHookJournal(options: JournalOptions) {
-  const { snapshot, retain, claim, close } = createNativeHookLog(options, 'effects')
-  return { snapshot, retain, claim, close }
+  const { snapshot, retain, claim, pendingClaim, close } = createNativeHookLog(options, 'effects')
+  return { snapshot, retain, claim, pendingClaim, close }
 }
 
 /** Client receipts record responsibility, never permission to dispatch an effect. */

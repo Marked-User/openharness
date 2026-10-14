@@ -141,7 +141,8 @@ export function inspectHookFile(file: string, defaultMode = 0o666) {
     content, directory, stamp: before,
     verify, prepare,
     async replace(next: string, attempt: HookPreparationAttempt, exclusive = false,
-      staging?: (destination: string) => HookFileStage): Promise<HookFilePublication> {
+      staging?: (destination: string) => HookFileStage,
+      publishedEarly?: (proof: HookFilePublication) => void): Promise<HookFilePublication> {
       attempt.verify(); prepare(next)
       if (exclusive && content !== null) throw new HookPreparationHeld('another owner already published this claim')
       if (content === next) {
@@ -195,6 +196,10 @@ export function inspectHookFile(file: string, defaultMode = 0o666) {
           throw new HookPreparationHeld('the published settings changed before sync')
         }
         attempt.observe(file, committed.verify)
+        // An exclusive journal publisher may time out during the directory
+        // flush. Retain its exact inode before that wait, never by rereading
+        // equal bytes after the original publication has become uncertain.
+        publishedEarly?.({ verify: committed.verify })
         await syncDirectoryChain(parent, attempt)
         attempt.verify()
         verifyNativePathFacts(facts.filter(fact => fact.identity !== null && fact.path !== target))

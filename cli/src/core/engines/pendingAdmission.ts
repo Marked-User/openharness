@@ -14,6 +14,9 @@ export interface PendingAdmission<T> {
   current: () => boolean
   /** An exclusive durable effect already started; finish it before selecting a successor. */
   ownsEffect?: () => boolean
+  /** Exclusive publication has not handed out execution permission yet. Keep
+   * its queue position, while still allowing fresh admission to reject it. */
+  pendingClaim?: () => boolean
   inspect: () => Promise<AdmissionDecision<T>>
   /** Synchronous durable publication. Uncertainty retains this candidate and its place. */
   commit?: (value: T) => AdmissionDecision<T>
@@ -37,7 +40,7 @@ export function createPendingAdmissions({ retryMs = 1_000, capacity = 64, isProc
   const conversation = (job: Job) => job.request.conversationId ?? job.id
   const selected = (key: string) => {
     const queue = jobs.get(key)
-    const owned = queue?.find(job => job.request.ownsEffect?.())
+    const owned = queue?.find(job => job.request.ownsEffect?.() || job.request.pendingClaim?.())
     if (owned) return owned
     const newest = queue?.at(-1)
     // Distinct prompts for one conversation retain delivery order. A newer
@@ -71,7 +74,7 @@ export function createPendingAdmissions({ retryMs = 1_000, capacity = 64, isProc
       // One lookup owns the key. A group rotation or a new prompt may select an
       // already-held job; none of its old timers may start a concurrent lookup.
       for (const pending of jobs.get(key)!) clearTimer(pending)
-      if (retry && current(key, job) && !job.request.ownsEffect?.()) {
+      if (retry && current(key, job) && !job.request.ownsEffect?.() && !job.request.pendingClaim?.()) {
         const peer = leaders(key, job).find(other => conversation(other) !== conversation(job))
         if (peer) {
           const queue = jobs.get(key)!
@@ -108,7 +111,7 @@ export function createPendingAdmissions({ retryMs = 1_000, capacity = 64, isProc
     if (!owned && status === 'older') decision = { kind: 'reject', reason: 'stale_hook' }
     else if (!owned && decision.kind === 'accept') {
       const unresolved = leaders(key, job).some(other => other !== job && conversation(other) !== conversation(job))
-      if (status === 'ambiguous' || unresolved) decision = { kind: 'hold', reason:
+      if (status === 'ambiguous' || unresolved && !job.request.pendingClaim?.()) decision = { kind: 'hold', reason:
         'Waiting for unambiguous native hook order; keeping the current conversation.'
         + (job.request.order.firedAt === undefined ? ' This hook has no native timestamp; reload or restart the engine with updated hooks.' : '') }
     }

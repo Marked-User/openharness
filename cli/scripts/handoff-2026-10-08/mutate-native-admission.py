@@ -60,7 +60,7 @@ mutations = [
     ('matched process snapshot is still live', 'src/core/engines/hooks.ts',
      'const candidate = structuredClone(live)', 'const candidate = live', spec, 'resolver continuation'),
     ('inspection binding authority ignored', http,
-     'if (!current() || paneReadIdentity(live()) !== inspectionIdentity)', 'if (!current())', 'src/hookServer.hermes.spec.ts', 'known home changes during source inspection'),
+     'paneReadIdentity(live()) !== inspectionIdentity', 'false', 'src/hookServer.hermes.spec.ts', 'known home changes during source inspection'),
     ('Stop admission fence disconnected', http,
      'if (handlers.hookAdmissionBlocked?.(processAgent.agentId))', 'if (false)', spec, 'actual Stop job'),
     ('unmatched Stop claim forgotten', http,
@@ -126,7 +126,7 @@ failures = []
 for label, relative, before, after, target, pattern in mutations:
     path = cli / relative
     original = path.read_text()
-    expected = 2 if label in ['Stop admission fence disconnected', 'linked Stop invocation duplicated'] else 1
+    expected = 3 if label == 'inspection binding authority ignored' else 2 if label in ['Stop admission fence disconnected', 'linked Stop invocation duplicated'] else 1
     assert original.count(before) == expected, (label, original.count(before))
     try:
         path.write_text(original.replace(before, after))

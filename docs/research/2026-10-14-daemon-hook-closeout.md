@@ -357,3 +357,37 @@ It is not a passing aggregate: the Codex awkward-folder case hits a journal
 confirmation deadline before initial registration, then remains behind an
 unconfirmed claim. That recovery defect needs correction before another full
 acceptance run. Emitted-client Linux acceptance remains outstanding.
+
+The Codex folder failure published an exclusive claim, then missed disk
+confirmation before returning its execution capability. Its own live journal
+treated that never-returned claim as if another core had been interrupted.
+Two regression cases fail before correction. The journal now retains the
+exclusive publisher's exact original witness, observed mirror and namespace
+proof before fallible post-publication sync. Only that same live journal may
+confirm its never-delivered claim, after both actual cleanup and its original
+public reply settle. Returned capabilities, reconstructed journals, changed
+owners and equal-byte replacement records never inherit this permission.
+
+An undelivered claim keeps its queue position without overriding a later
+accepted binding or fresh rejection. Three queue regressions fail before the
+correction. Composed HTTP cases confirm original prompt then successor exactly
+once, and reject the old prompt if binding has independently advanced. No new
+request from the original producer is needed. Independent review approved this
+slice after adding absolute deadline checks after cleanup and final proof;
+tests cover a clock crossing before the timeout callback can run.
+
+Types and composed HTTP tests pass in `20261014T050855.689853Z-98801` (5.9 and
+3.8 seconds). Its combined journal, file, queue and architecture check is not a
+passing aggregate: 154 cases pass and one actual-process case exceeds its
+unchanged 4.5-second deadline while other files run. All 11 actual-process cases
+then pass alone in 20.6 seconds. Native process checks will continue serially;
+the deadline is unchanged. The new causal mutations and final broad gates remain
+pending, as do runtime measurements, acceptance, head CI and merge.
+
+The full-disk fixtures now confirm the exact initial SessionStart before filling
+their private volume: same delivery ID, firing time and original body, including
+its origin. Only an ordinary successful server acknowledgement establishes that
+precondition. Reading its journal is insufficient; no warm-up turn is sent.
+The cold-turn test still requires no orchestrator directory before filling the
+disk. Independent review approved this setup change conditionally on macOS
+acceptance. No release has been requested or performed.

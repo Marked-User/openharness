@@ -12,6 +12,7 @@ vi.mock('node:perf_hooks', async original => ({ ...await original<object>(), per
 
 const fault = vi.hoisted(() => ({ file: '', rename: false, directorySync: false, renamed: false, nativeSync: false,
   nativeWritten: new Map<number, string>(), beforeNativeSync: undefined as ((text?: string) => void) | undefined,
+  afterNativeLink: undefined as ((file: string) => void) | undefined,
   afterProof: undefined as (() => void) | undefined, beforeVerify: undefined as (() => void) | undefined }))
 vi.mock('fs', async original => {
   const actual = await original<typeof import('node:fs')>()
@@ -23,6 +24,9 @@ vi.mock('fs', async original => {
     if (typeof args[0] === 'number') fault.nativeWritten.set(args[0], String(args[1]))
     return result
   }, closeSync: (fd: number) => { fault.nativeWritten.delete(fd); return actual.closeSync(fd) },
+    linkSync: (...args: Parameters<typeof actual.linkSync>) => {
+      const result = actual.linkSync(...args); fault.afterNativeLink?.(String(args[1])); return result
+    },
     renameSync: (...args: Parameters<typeof actual.renameSync>) => {
     if (fault.rename && String(args[1]) === fault.file) throw new Error('fixture registry write failure')
     const result = actual.renameSync(...args)
@@ -68,6 +72,7 @@ beforeEach(async () => {
   clock.now = 0
   fault.nativeSync = false
   fault.beforeNativeSync = undefined
+  fault.afterNativeLink = undefined
   fault.nativeWritten.clear()
   fault.rename = false; fault.directorySync = false; fault.renamed = false; fault.afterProof = undefined; fault.beforeVerify = undefined
   root = realpathSync(mkdtempSync(join(tmpdir(), 'registry-admission-')))
@@ -90,6 +95,7 @@ afterEach(async () => {
   server = undefined
   fault.nativeSync = false
   fault.beforeNativeSync = undefined
+  fault.afterNativeLink = undefined
   fault.nativeWritten.clear()
   fault.rename = false; fault.directorySync = false; fault.renamed = false; fault.afterProof = undefined; fault.beforeVerify = undefined
   vi.restoreAllMocks(); vi.doUnmock('../engines/transcriptBindings.js'); vi.doUnmock('../engines/kit/nativeHookJournal.js')
@@ -499,6 +505,43 @@ async function httpFixture(blocked: (agentId: string) => boolean = () => false, 
   return { post, prompts, registered, reasons, startRecovery: started.startRecovery, stopRecovery: started.stopRecovery,
     drainAndStopRecovery: started.drainAndStopRecovery, recoveryReady: started.recoveryReady }
 }
+
+it.each(['queued successor', 'changed binding'])('recovers an undelivered claim with a %s without replay or stale rebinding', async change => {
+  const f = await httpFixture(undefined, undefined, {}, undefined, true)
+  let interrupted = false
+  fault.afterNativeLink = path => {
+    if (!interrupted && path.includes('.witnesses/') && JSON.parse(readFileSync(path, 'utf8')).event?.kind === 'claim') {
+      interrupted = true; fault.nativeSync = true
+    }
+  }
+  const firedAt = Date.now()
+  expect((await f.post({}, { id: 'fixture-undelivered-first', firedAt })).body).toEqual({ pending: true })
+  await vi.waitFor(() => expect(f.reasons.some(reason => reason?.includes('fixture native confirmation unavailable'))).toBe(true))
+  expect(interrupted).toBe(true)
+  expect(f.registered).not.toHaveBeenCalled()
+  expect(f.prompts).toEqual([])
+  const successor = join(home, 'sessions', `rollout-${B}.jsonl`)
+  writeFileSync(successor, header(B))
+  fault.nativeSync = false
+  if (change === 'changed binding') expect(registry.register(input(B, successor, '%2'))?.entry.sessionId).toBe(B)
+  else {
+    const next = await f.post({ sessionId: B, transcriptPath: successor, prompt: 'successor prompt' },
+      { id: 'fixture-undelivered-next', firedAt: firedAt + 1 })
+    expect(next.status).toBe(200)
+    expect([{ pending: true }, { ok: true }]).toContainEqual(next.body)
+  }
+  f.startRecovery()
+  if (change === 'queued successor') {
+    await vi.waitFor(() => expect(f.prompts).toEqual(['fixture prompt', 'successor prompt']), { timeout: 5000 })
+    expect(f.registered.mock.calls.map(([row]) => row.sessionId)).toEqual([A, B])
+  } else {
+    await vi.waitFor(async () => expect((await f.post({}, { id: 'fixture-undelivered-first', firedAt })).body)
+      .toEqual({ ignored: true, reason: 'stale_hook' }), { timeout: 5000 })
+    expect(f.registered).not.toHaveBeenCalled()
+    expect(f.prompts).toEqual([])
+  }
+  expect(registry.byAgent(source)?.sessionId).toBe(B)
+}, 10_000)
 
 it.each(['accepted', 'rejected'] as const)('does not publish a %s admission whose claim finishes after graceful shutdown starts', async decision => {
   let release!: () => void

@@ -8,7 +8,7 @@ cli = Path(sys.argv[1]).resolve()
 source = cli / 'src/engines/kit/nativeHookJournal.ts'
 mutations = [
     ('uncertain effect claim can be acquired again',
-     "if (before.active) held('an earlier native hook effect is unconfirmed')", '',
+     'if (before.active && (!pending || before.active.id !== id || before.active.token !== pending.token))', 'if (false)',
      'holds an unconfirmed claim'),
     ('cross-process intake frontier ignored',
      "if (inspected && inspected.previous !== before.previous) held('native hook order changed after inspection')", '',

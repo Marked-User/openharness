@@ -1,9 +1,10 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, fstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync, type opendirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { createNativeHookJournal, type NativeHookIntake } from './nativeHookJournal.js'
+import { createNativeHookJournal, type NativeHookIntake, type NativeHookJournalBoundary } from './nativeHookJournal.js'
 
 const fault = vi.hoisted(() => ({ fail: false, onSync: undefined as ((fd: number) => void) | undefined,
   beforeOpen: undefined as ((path: string) => void) | undefined,
@@ -238,6 +239,121 @@ it('allows only the exclusive effect publisher to dispatch under contention', as
   expect(owned).toHaveLength(1)
   expect(attempts.filter(attempt => attempt.status === 'rejected')).toHaveLength(1)
   expect((await journal().snapshot()).active?.token).toBe(owned[0]!.value.token)
+})
+
+async function interruptClaimConfirmation(original: ReturnType<typeof journal>, mirror = false) {
+  const body = intake()
+  await original.retain(body)
+  const published = join(mirror ? directory : `${directory}.witnesses`, '00000001.json')
+  fault.onSync = () => { if (existsSync(published)) fault.fail = true }
+  await expect(original.claim(body.id, body.agentId)).rejects.toThrow('fixture disk confirmation unavailable')
+  fault.fail = false; fault.onSync = undefined
+  return body
+}
+
+it.each([false, true])('retries only its own never-delivered claim after failed confirmation (mirror=%s)', async mirror => {
+  const original = journal(), body = await interruptClaimConfirmation(original, mirror)
+  const recovered = journal(), before = await recovered.snapshot()
+  expect(before.active?.id).toBe(body.id)
+  await expect(recovered.claim(body.id, body.agentId)).rejects.toThrow('earlier native hook effect')
+  const replies = await Promise.allSettled([original.claim(body.id, body.agentId), original.claim(body.id, body.agentId)])
+  const delivered = replies.filter(reply => reply.status === 'fulfilled')
+  expect(delivered).toHaveLength(1)
+  const claim = delivered[0]!.value
+  expect(claim.token).toBe(before.active?.token)
+  claim.verify()
+  // A returned capability is never granted a second time, even in its own core.
+  await expect(original.claim(body.id, body.agentId)).rejects.toThrow('earlier native hook effect')
+  await claim.finish({ accepted: true })
+  expect((await recovered.snapshot()).deliveries.get(body.id)?.result).toEqual({ accepted: true })
+})
+
+it.each(['witness', 'mirror', 'authority', 'owner', 'close'])('refuses an undelivered claim after its %s changes', async changed => {
+  let current = true
+  const original = journal({ current: () => current })
+  const body = await interruptClaimConfirmation(original, true)
+  if (changed === 'owner') current = false
+  else if (changed === 'close') original.close()
+  else {
+    const file = changed === 'authority' ? `${directory}.authority`
+      : join(changed === 'witness' ? `${directory}.witnesses` : directory, '00000001.json')
+    // Keep the first inode alive: this is an equal-byte replacement, never an
+    // incidental inode reuse from deleting the fixture.
+    const bytes = readFileSync(file)
+    renameSync(file, `${file}.preserved`)
+    writeFileSync(file, bytes, { mode: 0o600 })
+    // Move the preserved leaf out of the journal's recognized record set.
+    renameSync(`${file}.preserved`, join(root, 'original-record'))
+  }
+  await expect(original.claim(body.id, body.agentId)).rejects.toThrow()
+  expect((await journal().snapshot()).deliveries.get(body.id)?.result).toBeUndefined()
+})
+
+it.each(['flush', 'cleanup'])('hands out an undelivered claim once after its timed-out actual %s settles', async phase => {
+  let paused!: () => void, release!: () => void, blockCleanup = false
+  const pausing = new Promise<void>(done => { paused = done })
+  const gate = new Promise<void>(done => { release = done })
+  const actuals: Promise<unknown>[] = []
+  const boundary: NativeHookJournalBoundary = {
+    verify() {}, read(check, after) { check(); after() }, authorize: async () => {}, track(actual) { actuals.push(actual) },
+    acquireStage: async () => ({ verify() {},
+      stage: destination => ({ path: join(dirname(destination), `.harness-hook-${randomUUID()}.tmp`),
+        verify() {}, verifyCleanup() {}, finish: async () => {} }),
+      close: async () => { if (blockCleanup) { paused(); await gate } },
+    }),
+  }
+  const original = journal({ boundary }), body = intake()
+  await original.retain(body)
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  blockCleanup = phase === 'cleanup'
+  if (phase === 'flush') fault.deferSync = (_fd, done) => {
+    if (!existsSync(join(`${directory}.witnesses`, '00000001.json'))) return false
+    fault.deferSync = undefined
+    void gate.then(() => done(null)); paused(); return true
+  }
+  const first = original.claim(body.id, body.agentId).then(value => ({ value }), error => ({ error }))
+  try {
+    await pausing
+    await vi.advanceTimersByTimeAsync(4500)
+    expect(await first).toMatchObject({ error: expect.objectContaining({ message: expect.stringContaining('exceeded its deadline') }) })
+    expect(original.pendingClaim()?.id).toBe(body.id)
+    await expect(original.claim(body.id, body.agentId)).rejects.toThrow('still settling')
+    release(); blockCleanup = false
+    await Promise.allSettled(actuals)
+    const known = await journal().snapshot()
+    await expect(journal().claim(body.id, body.agentId)).rejects.toThrow('earlier native hook effect')
+    const replies = await Promise.allSettled([original.claim(body.id, body.agentId), original.claim(body.id, body.agentId)])
+    const granted = replies.filter(reply => reply.status === 'fulfilled')
+    expect(granted).toHaveLength(1)
+    expect(granted[0]!.value.token).toBe(known.active?.token)
+    expect(original.pendingClaim()).toBeUndefined()
+    await granted[0]!.value.finish({ accepted: true })
+  } finally { release(); blockCleanup = false; await Promise.allSettled(actuals); vi.useRealTimers() }
+})
+
+it.each(['cleanup', 'final proof'])('holds a claim when %s crosses the absolute deadline before the timer runs', async phase => {
+  let offset = 0, crossing = false, cleaned = false
+  const now = performance.now.bind(performance)
+  const clock = vi.spyOn(performance, 'now').mockImplementation(() => now() + offset)
+  const boundary: NativeHookJournalBoundary = {
+    verify() { if (crossing && cleaned && phase === 'final proof') offset = 10_000 },
+    read(check, after) { check(); after() }, authorize: async () => {}, track() {},
+    acquireStage: async () => ({ verify() {},
+      stage: destination => ({ path: join(dirname(destination), `.harness-hook-${randomUUID()}.tmp`),
+        verify() {}, verifyCleanup() {}, finish: async () => {} }),
+      close: async () => { if (crossing) { cleaned = true; if (phase === 'cleanup') offset = 10_000 } },
+    }),
+  }
+  const original = journal({ boundary }), body = intake()
+  try {
+    await original.retain(body)
+    crossing = true
+    await expect(original.claim(body.id, body.agentId)).rejects.toThrow('operation expired')
+    expect(cleaned).toBe(true)
+    expect(original.pendingClaim()?.id).toBe(body.id)
+    crossing = false; offset = 0
+    await (await original.claim(body.id, body.agentId)).finish({ accepted: true })
+  } finally { clock.mockRestore() }
 })
 
 it.each(['witness', 'authority', 'directory', 'bootstrap', 'seal'])('holds a missing %s without making completed delivery new', async lost => {

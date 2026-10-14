@@ -1181,6 +1181,7 @@ export function startHookServer(
         binding: () => { const row = live(); return row && { id: row.sessionId, at: row.boundAt } },
         current,
         ownsEffect: () => !!claim,
+        pendingClaim: () => context.journal.pendingClaim()?.id === deliveryId,
         inspect: async () => prepare() ?? (engine === 'hermes' && body.sessionId
           ? await inspectHermesKind(body.sessionId, live()?.hermesHome ?? undefined) : { kind: 'accept', value: undefined }),
         conclude: async decision => {
@@ -1200,7 +1201,7 @@ export function startHookServer(
               { ...admissionOrder, scope: admissionProcessScope(processAgent) ?? processAgent.agentId })
             if (order === 'older') decision = { kind: 'reject', reason: 'stale_hook' }
             if (order === 'ambiguous') return { kind: 'hold', reason: 'Waiting for unambiguous durable native hook order.' }
-            if (decision.kind === 'accept') {
+            if (decision.kind === 'accept' && context.journal.pendingClaim()?.id !== deliveryId) {
               let before = true
               for (const [id, delivery] of snapshot.deliveries) {
                 if (id === deliveryId) { before = false; continue }
@@ -1308,7 +1309,8 @@ export function startHookServer(
     recovering.add(context.key)
     try {
       const snapshot = await confirmedSnapshot(context, row)
-      if (snapshot.active && context.claims.get(snapshot.active.id)?.token !== snapshot.active.token) {
+      if (snapshot.active && context.claims.get(snapshot.active.id)?.token !== snapshot.active.token
+        && context.journal.pendingClaim()?.token !== snapshot.active.token) {
         recoveryHeld(row.agentId, 'Waiting for an authoritative outcome of a native hook interrupted by the previous core.')
         return
       }
