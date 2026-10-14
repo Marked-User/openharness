@@ -308,10 +308,17 @@ impl Pane {
     /// Start `spec`'s command in this pane once its child has exited (tmux `respawn-pane`): the
     /// new child draws into the same grid, continuing its sequence. `spec.cwd` defaults to the
     /// previous child's spawn directory; the size is the pane's.
+    ///
+    /// A child whose exit is already reported but not yet recorded (the reader queues the event
+    /// just before it records the exit) is given `EXIT_REPORT` to finish.
     pub fn respawn(&self, mut spec: PaneSpec) -> io::Result<()> {
-        let mut attachment = lock(&self.attachment);
-        if !attachment.life.has_exited() {
+        let life = lock(&self.attachment).life.clone();
+        if !life.wait(EXIT_REPORT) {
             return Err(io::Error::other("the pane's process is still running"));
+        }
+        let mut attachment = lock(&self.attachment);
+        if !Arc::ptr_eq(&attachment.life, &life) {
+            return Err(io::Error::other("the pane was respawned meanwhile"));
         }
         let (cols, rows) = {
             let screen = lock(&self.screen);
@@ -448,6 +455,12 @@ impl Pane {
         } else {
             attachment.pid
         }
+    }
+
+    /// The pid of the current child, or of the last one once it has exited: what tmux's
+    /// `#{pane_pid}` still says of a dead pane.
+    pub fn last_pid(&self) -> Option<u32> {
+        self.attachment().pid
     }
 
     pub fn title(&self) -> String {
@@ -786,8 +799,10 @@ impl Reader {
             #[cfg(windows)]
             End::Hangup => wait_process(&process),
         };
-        life.set(status);
+        // The event first: whoever sees `life` set (a respawn after its kill) knows the old
+        // child's exit is already queued, ahead of anything the next child reports.
         let _ = sink.send((id, PaneEvent::Exited { status }));
+        life.set(status);
     }
 
     fn event_loop(&mut self) -> End {
@@ -820,10 +835,11 @@ impl Reader {
                             // Drain what the child wrote before it exited.
                             self.read(&mut buf);
                             let status = status.and_then(exit_code);
-                            self.life.set(status);
+                            // Queued before `life` is set, as above.
                             let _ = self
                                 .sink
                                 .send((self.id.clone(), PaneEvent::Exited { status }));
+                            self.life.set(status);
                             return End::Exited;
                         }
                     }

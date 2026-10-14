@@ -116,7 +116,8 @@ export type HelloReply =
 
 export interface PaneInventoryRow {
   pane: string
-  /** null once the pane's process has exited (a held, dead pane). */
+  /** The current child's pid, or the last one's once it has exited (a held, dead pane), as tmux keeps a dead
+   *  pane's `#{pane_pid}`; null only where the host never learned one. */
   rootPid: number | null
   cwd: string
   title: string
@@ -130,7 +131,9 @@ export interface PaneStateInfo {
   exitStatus: number | null
   command: string[]
   engineExit: number | null
-  heldToken: string | null
+  /** `command` joined by single spaces: tmux's `#{pane_start_command}`, which a held shell is told by
+   *  (nativePaneHold.ts `heldPaneFormat`). */
+  startCommand: string
 }
 export interface PaneInfo {
   command: string
@@ -152,7 +155,7 @@ export type PtyOp =
   | { op: 'paste'; pane: string; text: string; bracketed: boolean }
   | { op: 'key'; pane: string; key: string }
   | { op: 'setTitle'; pane: string; title: string }
-  | { op: 'holdOpen'; pane: string; token?: string }
+  | { op: 'holdOpen'; pane: string }
   | { op: 'releaseHold'; pane: string }
   | { op: 'respawn'; pane: string; command: string[]; cwd?: string; env?: Record<string, string>; expectedHeldToken?: string }
   | { op: 'jobPids'; pane: string }

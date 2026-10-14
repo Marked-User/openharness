@@ -190,14 +190,17 @@ describe('PtyHostBackend inventory and titles', () => {
     expect(await backend.inventory()).toEqual({ state: 'unavailable', reason: 'timeout' })
   })
 
-  it('lists this daemon\'s live panes', async () => {
-    const row = (pane: string, owner: string, rootPid: number | null) => ({ pane, rootPid, cwd: `/w${pane}`, title: '', dead: rootPid === null, owner, label: null })
+  it('lists this daemon\'s panes, a dead held one with its last pid as tmux lists it', async () => {
+    const row = (pane: string, owner: string, rootPid: number | null, dead = false) => ({ pane, rootPid, cwd: `/w${pane}`, title: '', dead, owner, label: null })
     const { backend } = await ready({
-      inventory: { state: 'ok', value: { panes: [row('%1', 'me', 11), row('%2', 'other', 12), row('%3', 'me', null)] } },
+      inventory: { state: 'ok', value: { panes: [row('%1', 'me', 11), row('%2', 'other', 12), row('%3', 'me', 13, true), row('%4', 'me', null, true)] } },
     })
     expect(await backend.inventory()).toEqual({
       state: 'available',
-      roots: [{ runtime: { backend: 'ptyhost', instance: 'p1', paneId: '%1' }, rootPid: 11, cwd: '/w%1' }],
+      roots: [
+        { runtime: { backend: 'ptyhost', instance: 'p1', paneId: '%1' }, rootPid: 11, cwd: '/w%1' },
+        { runtime: { backend: 'ptyhost', instance: 'p1', paneId: '%3' }, rootPid: 13, cwd: '/w%3' },
+      ],
     })
   })
 
@@ -240,7 +243,7 @@ describe('PtyHostBackend reads', () => {
   it('paneState: gone, unknown, or the pane as tmux would describe it', async () => {
     expect(await (await ready({ paneState: { state: 'ok', value: { state: 'gone' } } })).backend.paneState(PANE)).toBe('gone')
     expect(await (await ready({ paneState: { state: 'unknown', dispatch: 'possibly_executed', reason: 't' } })).backend.paneState(PANE)).toBe('unknown')
-    const state = { dead: true, exitStatus: 3, command: ['/usr/local/bin/claude', '--x'], engineExit: 2, heldToken: null }
+    const state = { dead: true, exitStatus: 3, command: ['/usr/local/bin/claude', '--x'], engineExit: 2, startCommand: '/usr/local/bin/claude --x' }
     expect(await (await ready({ paneState: { state: 'ok', value: { state } } })).backend.paneState(PANE))
       .toEqual({ dead: true, exitStatus: 3, command: 'claude', engineExit: 2 })
   })
@@ -273,9 +276,13 @@ describe('PtyHostBackend capture', () => {
     expect(await captured()).toMatchObject({ historyLines: 100, visible: false, ansi: true })
   })
 
-  it('detection: 40 plain lines unless told otherwise', async () => {
-    expect(await captured({ mode: 'detection' })).toEqual({ op: 'capture', pane: '%1', visible: false, historyLines: 40, ansi: false })
-    expect(await captured({ mode: 'detection', historyLines: 80, ansi: true })).toMatchObject({ historyLines: 80, ansi: true })
+  it('detection: as TmuxBackend.capture, which gives only `visible` by mode', async () => {
+    const { tmuxCaptureArgs } = await import('./tmuxCapture.js')
+    // tmux: `capture-pane -p -e -J -t %1 -S -100`, and with the caller's lines and no colours `-p -J … -S -40`.
+    expect(tmuxCaptureArgs('%1', undefined, { visible: false, ansi: undefined })).toEqual(['capture-pane', '-p', '-e', '-J', '-t', '%1', '-S', '-100'])
+    expect(await captured({ mode: 'detection' })).toEqual({ op: 'capture', pane: '%1', visible: false, historyLines: 100, ansi: true })
+    expect(tmuxCaptureArgs('%1', 40, { visible: false, ansi: false })).toEqual(['capture-pane', '-p', '-J', '-t', '%1', '-S', '-40'])
+    expect(await captured({ mode: 'detection', historyLines: 40, ansi: false })).toEqual({ op: 'capture', pane: '%1', visible: false, historyLines: 40, ansi: false })
   })
 
   it('a failed capture says why', async () => {
@@ -354,59 +361,78 @@ describe('PtyHostBackend input', () => {
 })
 
 describe('PtyHostBackend hold and respawn', () => {
-  it('holdOpen holds the pane under a fresh token that respawn then expects', async () => {
+  const TOKEN = '0b5f9d38-3c1e-4c55-9f1a-1d2e3f4a5b6c'
+
+  it('holdOpen holds the pane, and needs no token', async () => {
     const { backend, calls } = await ready()
     expect(await backend.holdOpen(PANE)).toEqual({ state: 'succeeded', dispatch: 'executed' })
-    const hold = calls[0]
-    if (hold.op !== 'holdOpen') throw new Error('expected holdOpen')
-    expect(hold.token).toMatch(UUID)
+    expect(calls).toEqual([{ op: 'holdOpen', pane: '%1' }])
+    expect(backend.known(PANE)).toEqual({ hold: true })
+  })
+
+  it('respawn passes the request on, and the caller\'s held token', async () => {
+    const { backend, calls } = await ready()
     expect(await backend.respawn(PANE, { command: ['claude'], cwd: '/w', env: { K: 'v' } })).toEqual({ state: 'succeeded', dispatch: 'executed' })
-    expect(calls[1]).toEqual({ op: 'respawn', pane: '%1', command: ['claude'], cwd: '/w', env: { K: 'v' }, expectedHeldToken: hold.token })
+    expect(await backend.respawn(PANE, { command: ['sh'], expectedHeldToken: TOKEN })).toEqual({ state: 'succeeded', dispatch: 'executed' })
+    expect(calls).toEqual([
+      { op: 'respawn', pane: '%1', command: ['claude'], cwd: '/w', env: { K: 'v' } },
+      { op: 'respawn', pane: '%1', command: ['sh'], expectedHeldToken: TOKEN },
+    ])
   })
 
-  it('every holdOpen has a token of its own', async () => {
-    const { backend, calls } = await ready()
-    await backend.holdOpen(PANE)
-    await backend.holdOpen(PANE)
-    const tokens = calls.map((c) => c.op === 'holdOpen' ? c.token : undefined)
-    expect(tokens[0]).not.toBe(tokens[1])
-  })
-
-  it('a token the caller holds wins, and a pane held by another is not replaced', async () => {
-    const { backend, calls } = await ready({ respawn: { state: 'failed', dispatch: 'rejected', code: 'held_mismatch', reason: 'pane %1 is held by another token' } })
-    const token = '0b5f9d38-3c1e-4c55-9f1a-1d2e3f4a5b6c'
-    expect(await backend.respawn(PANE, { command: ['sh'], expectedHeldToken: token }))
-      .toEqual({ state: 'failed', dispatch: 'not_started', reason: 'The waiting pane changed' })
-    expect(calls[0]).toEqual({ op: 'respawn', pane: '%1', command: ['sh'], expectedHeldToken: token })
-  })
-
-  it('respawn without a hold sends no token, and nothing once the harness changed', async () => {
-    const { backend, calls } = await ready()
+  it('a respawn clears the exit its pane had', async () => {
+    const { backend, emit } = await ready({ create: { state: 'ok', value: { pane: '%1' } } })
+    await backend.create({ command: ['sh'] })
+    emit({ event: 'exit', pane: '%1', status: 1 })
+    expect(backend.known(PANE)).toEqual({ hold: true, exited: 1 })
     await backend.respawn(PANE, { command: ['sh'] })
-    expect(calls[0]).toEqual({ op: 'respawn', pane: '%1', command: ['sh'] })
+    expect(backend.known(PANE)).toEqual({ hold: true })
+  })
+
+  it('a pane that is not the held shell is not replaced', async () => {
+    const { backend } = await ready({ respawn: { state: 'failed', dispatch: 'rejected', code: 'held_mismatch', reason: 'pane %1 is not held under that token' } })
+    expect(await backend.respawn(PANE, { command: ['sh'], expectedHeldToken: TOKEN }))
+      .toEqual({ state: 'failed', dispatch: 'not_started', reason: 'The waiting pane changed' })
+  })
+
+  it('a token that is not one is refused before anything is sent', async () => {
+    const { backend, calls } = await ready()
+    expect(await backend.respawn(PANE, { command: ['sh'], expectedHeldToken: 'tok' }))
+      .toEqual({ state: 'failed', dispatch: 'not_started', reason: 'invalid waiting pane identity' })
+    expect(calls).toEqual([])
+  })
+
+  it('a respawn that failed after the host may have killed the old process may have happened', async () => {
+    const spawnFailed = await ready({ respawn: { state: 'failed', dispatch: 'rejected', code: 'spawn_failed', reason: 'No such file or directory' } })
+    expect(await spawnFailed.backend.respawn(PANE, { command: ['nope'] }))
+      .toEqual({ state: 'unknown', dispatch: 'possibly_executed', reason: 'pty host could not respawn the pane: No such file or directory' })
+    const timedOut = await ready({ respawn: { state: 'unknown', dispatch: 'possibly_executed', reason: 'timeout' } })
+    expect(await timedOut.backend.respawn(PANE, { command: ['sh'] })).toMatchObject({ state: 'unknown', dispatch: 'possibly_executed' })
+    const unsent = await ready({ respawn: { state: 'failed', dispatch: 'not_started', code: 'not_connected', reason: 'closed' } })
+    expect(await unsent.backend.respawn(PANE, { command: ['sh'] })).toEqual({ state: 'failed', dispatch: 'not_started', reason: 'closed' })
+  })
+
+  it('nothing is sent once the harness changed', async () => {
+    const { backend, calls } = await ready()
     const dispatched = vi.fn()
     expect(await backend.respawn(PANE, { command: ['sh'], current: () => false, onDispatch: dispatched })).toMatchObject({ dispatch: 'not_started' })
     expect(await backend.holdOpen(PANE, () => false)).toMatchObject({ dispatch: 'not_started' })
-    expect(calls).toHaveLength(1)
+    expect(calls).toEqual([])
     expect(dispatched).not.toHaveBeenCalled()
   })
 
-  it('releaseHold drops the token, so a later respawn expects none', async () => {
-    const { backend, calls } = await ready()
-    await backend.holdOpen(PANE)
-    await backend.releaseHold(PANE)
-    await backend.respawn(PANE, { command: ['sh'] })
-    expect(calls.at(-1)).toEqual({ op: 'respawn', pane: '%1', command: ['sh'] })
-  })
-
-  it('isHeld: a dead pane under this token', async () => {
-    const token = '0b5f9d38-3c1e-4c55-9f1a-1d2e3f4a5b6c'
-    const state = (dead: boolean, heldToken: string | null) => ({ state: 'ok', value: { state: { dead, exitStatus: 0, command: ['sh'], engineExit: null, heldToken } } })
-    expect(await (await ready({ paneState: state(true, token) })).backend.isHeld(PANE, token)).toBe(true)
-    expect(await (await ready({ paneState: state(false, token) })).backend.isHeld(PANE, token)).toBe(false)
-    expect(await (await ready({ paneState: state(true, 'other') })).backend.isHeld(PANE, token)).toBe(false)
-    expect(await (await ready({ paneState: { state: 'ok', value: { state: 'gone' } } })).backend.isHeld(PANE, token)).toBe(false)
-    expect(await (await ready({ paneState: { state: 'unknown', dispatch: 'possibly_executed', reason: 't' } })).backend.isHeld(PANE, token)).toBe('unknown')
+  it('isHeld: a running pane whose start command is the held shell under this token', async () => {
+    const state = (dead: boolean, startCommand: string) => ({ state: 'ok', value: { state: { dead, exitStatus: null, command: ['sh'], engineExit: null, startCommand } } })
+    const held = `/bin/sh -c harness-held ${TOKEN}`
+    const isHeld = async (reply: unknown, token = TOKEN) => (await ready({ paneState: reply })).backend.isHeld(PANE, token)
+    expect(await isHeld(state(false, held))).toBe(true)
+    expect(await isHeld(state(true, held))).toBe(false)
+    expect(await isHeld(state(false, `/bin/sh -c harness-held ${'1'.repeat(36)}`))).toBe(false)
+    expect(await isHeld(state(false, `/bin/sh -c ${TOKEN}`))).toBe(false)
+    expect(await isHeld(state(false, `HARNESS_NATIVE_LAUNCH_TOKEN=${TOKEN} ${held}`))).toBe(false)
+    expect(await isHeld({ state: 'ok', value: { state: 'gone' } })).toBe(false)
+    expect(await isHeld({ state: 'unknown', dispatch: 'possibly_executed', reason: 't' })).toBe('unknown')
+    expect(await isHeld(state(false, held), 'tok')).toBe('unknown')
   })
 })
 

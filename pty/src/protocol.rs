@@ -137,7 +137,7 @@ pub enum Op {
     Paste { pane: String, text: String, bracketed: bool },
     Key { pane: String, key: String },
     SetTitle { pane: String, title: String },
-    HoldOpen { pane: String, token: Option<String> },
+    HoldOpen { pane: String },
     ReleaseHold { pane: String },
     Respawn {
         pane: String,
@@ -223,13 +223,11 @@ mod tests {
         assert_eq!(h.hello.client_id, "c");
     }
     #[test]
-    fn kill_defaults_grace_and_hold_open_token_optional() {
+    fn kill_defaults_grace() {
         let r: Request = serde_json::from_str(r#"{"id":2,"op":"kill","pane":"%3"}"#).unwrap();
         assert!(matches!(r.op, Op::Kill { grace_ms: 2000, .. }));
-        let r: Request = serde_json::from_str(r#"{"id":3,"op":"holdOpen","pane":"%3","token":"u"}"#).unwrap();
-        assert!(matches!(r.op, Op::HoldOpen { token: Some(ref t), .. } if t == "u"));
         let r: Request = serde_json::from_str(r#"{"id":4,"op":"holdOpen","pane":"%3"}"#).unwrap();
-        assert!(matches!(r.op, Op::HoldOpen { token: None, .. }));
+        assert!(matches!(r.op, Op::HoldOpen { ref pane } if pane == "%3"));
     }
     #[test]
     fn parses_every_op() {

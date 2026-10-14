@@ -10,7 +10,7 @@
   {"id": 9, "op": "paste", "pane": "%1", "text": "hi", "bracketed": true},
   {"id": 10, "op": "key", "pane": "%1", "key": "Enter"},
   {"id": 11, "op": "setTitle", "pane": "%1", "title": "t"},
-  {"id": 12, "op": "holdOpen", "pane": "%1", "token": "u"},
+  {"id": 12, "op": "holdOpen", "pane": "%1"},
   {"id": 13, "op": "releaseHold", "pane": "%1"},
   {"id": 14, "op": "respawn", "pane": "%1", "command": ["sh"], "cwd": "/var", "env": {"B": "2"}, "expectedHeldToken": "u"},
   {"id": 15, "op": "jobPids", "pane": "%1"},

@@ -6,10 +6,10 @@
  * Streams (`openStream`) are not here yet: the coordinator treats a backend without them as one that
  * cannot stream until they are (Task 14).
  */
-import { randomUUID } from 'node:crypto'
 import { env } from '../config/env.js'
 import type { AgentEngine } from '../engines/types.js'
 import { harnessPaneOwner } from './harnessSessionLabel.js'
+import { isHeldStartCommand } from './nativePaneHold.js'
 import { lookupPaneEngineProcess } from './paneEngineProcess.js'
 import { LSTART_MARKER_RE } from './processTable.js'
 import type { PtyHostCallResult, PtyHostClient } from './ptyHost/client.js'
@@ -62,8 +62,6 @@ export interface PtyHostBackendOptions {
  */
 export interface PtyPaneRecord {
   hold: boolean
-  /** The token the last `holdOpen` gave the host, which a `respawn` then expects. */
-  heldToken?: string
   /** The exit the host reported for a held pane; absent while its process runs. */
   exited?: number | null
 }
@@ -200,8 +198,10 @@ export class PtyHostBackend implements TerminalBackend<PtyRuntimeRef> {
     const owner = this.owner()
     return {
       state: 'available',
-      // This daemon's panes alone, as tmux's listing (`ownedHere`). A held pane whose process ended has no
-      // root process to observe, and a tmux dead pane has none running either.
+      // This daemon's panes alone, as tmux's listing (`ownedHere`). A held pane whose process ended is
+      // listed with its last pid, as tmux lists a dead pane's: a placement missing from inventory is
+      // evicted after a few passes (terminalAgentReconciler.ts), and a failed create or restart must
+      // keep its tile and its error on screen.
       roots: result.value.panes
         .filter((pane) => pane.owner === owner && pane.rootPid !== null)
         .map((pane) => ({
@@ -241,23 +241,19 @@ export class PtyHostBackend implements TerminalBackend<PtyRuntimeRef> {
   }
 
   /**
-   * The modes as `TmuxBackend.capture` gives them to `tmuxCaptureArgs`: the screen alone, or history
-   * bounded to 20–300 lines (100 by default), with colours unless asked for none. Detection reads 40 plain
-   * lines unless told otherwise.
+   * Exactly as `TmuxBackend.capture` hands the options to `tmuxCaptureArgs`: `visible` is the screen alone,
+   * every other mode history bounded to 20–300 lines (100 by default), with colours unless asked for none.
    */
   async capture(runtime: PtyRuntimeRef, options: TerminalCaptureOptions = {}): Promise<TerminalReadResult<string>> {
     const client = this.clientFor(runtime)
     if (!client) return { state: 'failed', reason: UNAVAILABLE }
     const visible = options.mode === 'visible'
-    const detection = options.mode === 'detection'
-    const ansi = detection ? options.ansi === true : options.ansi !== false
-    const lines = options.historyLines ?? (detection ? 40 : 100)
     const result = await client.call({
       op: 'capture',
       pane: runtime.paneId,
       visible,
-      ...(visible ? {} : { historyLines: Math.max(20, Math.min(300, Math.floor(lines))) }),
-      ansi,
+      ...(visible ? {} : { historyLines: Math.max(20, Math.min(300, Math.floor(options.historyLines ?? 100))) }),
+      ansi: options.ansi !== false,
     })
     return result.state === 'ok' ? { state: 'succeeded', value: result.value.text } : { state: 'failed', reason: result.reason }
   }
@@ -307,53 +303,65 @@ export class PtyHostBackend implements TerminalBackend<PtyRuntimeRef> {
     return TERMINAL_ACTION_SUCCEEDED
   }
 
-  /**
-   * Hold the pane under a fresh token, ahead of killing its process for a restart. The token is kept, and
-   * a `respawn` given none expects it: the host then replaces only the pane this hold kept.
-   */
+  /** Keep the pane when its process ends, ahead of killing that process for a restart (tmux's remain-on-exit). */
   async holdOpen(runtime: PtyRuntimeRef, current?: () => boolean): Promise<TerminalActionResult> {
     const client = this.clientFor(runtime)
     if (!client) return terminalActionNotStarted(UNAVAILABLE)
     if (current?.() === false) return terminalActionNotStarted('The harness changed before retaining its pane')
-    const token = randomUUID()
-    const result = await client.call({ op: 'holdOpen', pane: runtime.paneId, token })
+    const result = await client.call({ op: 'holdOpen', pane: runtime.paneId })
     if (result.state === 'ok') {
       const record = this.panes.get(runtime.paneId)
-      if (record) Object.assign(record, { hold: true, heldToken: token })
-      else this.panes.set(runtime.paneId, { hold: true, heldToken: token })
+      if (record) record.hold = true
+      else this.panes.set(runtime.paneId, { hold: true })
     }
     return actionOf(result)
   }
 
+  /**
+   * tmux's `respawn-pane -k`: the host kills a process still running in the pane, then starts [request]'s in
+   * the same pane and grid. With `expectedHeldToken`, only over the held shell under that token, checked on
+   * the host in the same op (`heldPaneFormat`).
+   */
   async respawn(runtime: PtyRuntimeRef, request: TerminalRespawnRequest): Promise<TerminalActionResult> {
     const client = this.clientFor(runtime)
     if (!client) return terminalActionNotStarted(UNAVAILABLE)
+    if (request.expectedHeldToken && !/^[a-f0-9-]{36}$/.test(request.expectedHeldToken)) return terminalActionNotStarted('invalid waiting pane identity')
     if (request.current?.() === false) return terminalActionNotStarted('The harness changed before pane dispatch')
     request.onDispatch?.()
-    const record = this.panes.get(runtime.paneId)
-    const expectedHeldToken = request.expectedHeldToken ?? record?.heldToken
     const result = await client.call({
       op: 'respawn',
       pane: runtime.paneId,
       command: request.command,
       ...(request.cwd ? { cwd: request.cwd } : {}),
       ...(request.env && Object.keys(request.env).length ? { env: request.env } : {}),
-      ...(expectedHeldToken ? { expectedHeldToken } : {}),
+      ...(request.expectedHeldToken ? { expectedHeldToken: request.expectedHeldToken } : {}),
     })
+    if (result.state === 'ok') {
+      // The host absorbs the replaced process's exit; the pane runs again.
+      const record = this.panes.get(runtime.paneId)
+      if (record) delete record.exited
+      return TERMINAL_ACTION_SUCCEEDED
+    }
     // The host checked the token against the pane and replaced nothing, as tmux's `adoption-mismatch`.
     if (result.state === 'failed' && result.code === 'held_mismatch') return terminalActionNotStarted('The waiting pane changed')
-    if (result.state === 'ok' && record) delete record.exited
-    return actionOf(result)
+    // Never sent, or no such pane: nothing was killed.
+    if (result.state === 'failed' && result.dispatch === 'not_started') return terminalActionNotStarted(result.reason)
+    // The old process may be gone though the new one never started (`-k`, as `TmuxBackend.respawn` says).
+    return terminalActionPossiblyExecuted(`pty host could not respawn the pane: ${result.reason}`)
   }
 
-  /** Read only: the host's pane is dead and held under [token]. A failed read is `'unknown'`. */
+  /**
+   * Read only: the pane runs the held shell under [token], as tmux's `heldPaneFormat` reads the start
+   * command. The respawn repeats the check on the host; this read grants no later write.
+   */
   async isHeld(runtime: PtyRuntimeRef, token: string): Promise<boolean | 'unknown'> {
+    if (!/^%\d+$/.test(runtime.paneId) || !/^[a-f0-9-]{36}$/.test(token)) return 'unknown'
     const client = this.clientFor(runtime)
     if (!client) return 'unknown'
     const result = await client.call({ op: 'paneState', pane: runtime.paneId })
     if (result.state !== 'ok') return 'unknown'
     const state = result.value.state
-    return state !== 'gone' && state.dead && state.heldToken === token
+    return state !== 'gone' && !state.dead && isHeldStartCommand(state.startCommand, token)
   }
 
   async releaseHold(runtime: PtyRuntimeRef, current?: () => boolean): Promise<void> {

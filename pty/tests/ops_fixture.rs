@@ -33,7 +33,6 @@ fn assert_every_field_read(op: &Op, v: &Value) {
         Op::Capture { history_lines, .. } => {
             assert_eq!(history_lines.map(u64::from), v["historyLines"].as_u64())
         }
-        Op::HoldOpen { token, .. } => assert_eq!(token.clone(), str_of(&v["token"])),
         Op::Respawn { cwd, env: e, expected_held_token, .. } => {
             assert_eq!(cwd.clone(), str_of(&v["cwd"]));
             assert_eq!(*e, env(&v["env"]));

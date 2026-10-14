@@ -12,6 +12,10 @@
 //! `create` and `respawn` spawn under the table lock, so the new child's exit (handled under the
 //! same lock) always finds its entry.
 //!
+//! `respawn` is tmux's `respawn-pane -k`: a child still running is killed first (outside the
+//! lock, the entry marked `respawning` meanwhile), and its exit is absorbed rather than ending
+//! or marking dead the pane that is about to run the next child.
+//!
 //! Stream subscribers (`stream.rs`) live in `streams`, beside the table: the dispatcher queues
 //! each output there without taking the table lock. A pane that leaves the table closes its
 //! streams (`exited`, or `killed` at `kill`); no thread holds the table lock while it takes the
@@ -34,6 +38,23 @@ use crate::stream::{Registry, Subscriber};
 
 /// The longest grace a `kill` gives a child before it is killed outright.
 const MAX_GRACE: Duration = Duration::from_secs(60);
+
+/// How long `respawn` gives a running child after SIGHUP before it is killed outright: the
+/// daemon's own kill grace (ptyHostBackend.ts). tmux's `respawn-pane -k` gives none.
+const RESPAWN_GRACE: Duration = Duration::from_secs(2);
+
+/// What a native launch's start command carries (cli/src/lib/nativePaneHold.ts
+/// `NATIVE_LAUNCH_MARKER`): such a pane is not a held one.
+const NATIVE_LAUNCH_MARKER: &str = "HARNESS_NATIVE_LAUNCH_TOKEN=";
+
+/// Whether a pane started as `start_command` is held under `token`: tmux's `heldPaneFormat`
+/// (cli/src/lib/nativePaneHold.ts) over `#{pane_start_command}`, which is all a held shell is.
+fn held_by(start_command: &str, token: &str) -> bool {
+    !token.is_empty()
+        && !start_command.contains(NATIVE_LAUNCH_MARKER)
+        && start_command.contains("harness-held")
+        && start_command.contains(token)
+}
 
 /// A `kill`'s `graceMs`, held to `MAX_GRACE`.
 fn kill_grace(ms: u64) -> Duration {
@@ -90,8 +111,15 @@ struct PaneEntry {
     label: Option<String>,
     /// The argv of the current (or last) child.
     command: Vec<String>,
+    /// That argv joined by single spaces: tmux's `#{pane_start_command}`, which `respawn`'s
+    /// `expectedHeldToken` is checked against.
+    start_command: String,
     hold: bool,
-    held_token: Option<String>,
+    /// A `respawn` is killing the running child: its exit is kept in `pending_exit`, not applied.
+    respawning: bool,
+    pending_exit: Option<Option<i32>>,
+    /// Exits of children a `respawn` already replaced, still on their way: ignored.
+    stale_exits: u32,
     /// The process exited and the pane is held.
     dead: bool,
     exit_status: Option<i32>,
@@ -176,6 +204,15 @@ impl Panes {
                 let removed = {
                     let mut table = lock(&self.table);
                     match table.get_mut(id) {
+                        // The child a respawn is replacing: the pane lives on, nobody is told.
+                        Some(entry) if entry.respawning => {
+                            entry.pending_exit = Some(*status);
+                            return None;
+                        }
+                        Some(entry) if entry.stale_exits > 0 => {
+                            entry.stale_exits -= 1;
+                            return None;
+                        }
                         Some(entry) if entry.hold => {
                             entry.dead = true;
                             entry.exit_status = *status;
@@ -244,6 +281,79 @@ impl Panes {
         Ok(Reply::new())
     }
 
+    /// tmux's `respawn-pane -k`, guarded as `heldPaneFormat` guards it: the held check, the kill
+    /// of a running child (SIGHUP, the grace, SIGKILL, as `kill`), then the next child in the
+    /// same pane and grid. Replies once that child is spawned.
+    fn respawn(
+        &self,
+        pane: String,
+        command: Vec<String>,
+        cwd: Option<String>,
+        env: HashMap<String, String>,
+        expected_held_token: Option<String>,
+    ) -> Result<Reply, OpError> {
+        let (handle, running) = {
+            let mut table = lock(&self.table);
+            let entry = table
+                .get_mut(&pane)
+                .ok_or_else(|| OpError::no_pane(&pane))?;
+            if let Some(expected) = &expected_held_token
+                && !held_by(&entry.start_command, expected)
+            {
+                return Err(OpError::new(
+                    "held_mismatch",
+                    format!("pane {pane} is not held under that token"),
+                ));
+            }
+            if entry.respawning {
+                return Err(OpError::new(
+                    "bad_request",
+                    format!("pane {pane} is already being respawned"),
+                ));
+            }
+            // A pane not yet marked dead has an exit still to come, whether the child runs or
+            // its exit is queued: absorbed, from here.
+            let running = !entry.dead;
+            entry.respawning = running;
+            (entry.pane.clone(), running)
+        };
+        // Outside the lock: the grace must not stop every other op.
+        if running && let Some(killing) = handle.start_kill() {
+            killing.finish(RESPAWN_GRACE);
+        }
+        let env = self.child_env(&pane, env);
+        let mut table = lock(&self.table);
+        // Killed meanwhile: `kill` took the entry, and announced its exit.
+        let entry = table
+            .get_mut(&pane)
+            .filter(|e| Arc::ptr_eq(&e.pane, &handle))
+            .ok_or_else(|| OpError::no_pane(&pane))?;
+        entry.respawning = false;
+        let pending = entry.pending_exit.take();
+        match handle.respawn(spec(command.clone(), cwd, env, 0, 0)) {
+            Ok(()) => {
+                // The old child's exit is queued ahead of anything the new one reports (the
+                // reader queues it before recording it): the next exit is that one.
+                if running && pending.is_none() {
+                    entry.stale_exits += 1;
+                }
+                entry.start_command = command.join(" ");
+                entry.command = command;
+                entry.dead = false;
+                entry.exit_status = None;
+                entry.engine_exit = None;
+                Ok(Reply::new())
+            }
+            Err(e) => {
+                // The old child is gone and nothing replaced it: its exit applies after all.
+                if let Some(status) = pending {
+                    let _ = self.sink.send((pane, PaneEvent::Exited { status }));
+                }
+                Err(OpError::new("spawn_failed", e.to_string()))
+            }
+        }
+    }
+
     pub fn handle(&self, op: Op) -> Result<Reply, OpError> {
         match op {
             Op::Create {
@@ -277,9 +387,12 @@ impl Panes {
                         pane: Arc::new(pane),
                         owner,
                         label,
+                        start_command: command.join(" "),
                         command,
                         hold,
-                        held_token: None,
+                        respawning: false,
+                        pending_exit: None,
+                        stale_exits: 0,
                         dead: false,
                         exit_status: None,
                         engine_exit: None,
@@ -292,6 +405,10 @@ impl Panes {
                     .remove(&pane)
                     .ok_or_else(|| OpError::no_pane(&pane))?;
                 self.streams.close(&pane, "killed");
+                // An exit a respawn held back is still announced.
+                if let Some(status) = entry.pending_exit {
+                    let _ = self.sink.send((pane.clone(), PaneEvent::Exited { status }));
+                }
                 // The reply follows the first signal; the grace, the escalation and the drop
                 // happen off the connection. The pane is dropped (which ends its reader) only
                 // once its exit is reported, so the `exit` notice is never lost.
@@ -317,7 +434,9 @@ impl Panes {
                     .map(|(id, e)| {
                         json!({
                             "pane": id,
-                            "rootPid": e.pane.root_pid(),
+                            // The last child's pid once it has exited, as tmux keeps a dead
+                            // pane's `#{pane_pid}`: a held pane is still listed, not missing.
+                            "rootPid": e.pane.last_pid(),
                             "cwd": e.pane.cwd().unwrap_or_default(),
                             "title": e.pane.title(),
                             "dead": e.dead,
@@ -344,7 +463,7 @@ impl Panes {
                         "exitStatus": e.exit_status,
                         "command": e.command,
                         "engineExit": e.engine_exit,
-                        "heldToken": e.held_token,
+                        "startCommand": e.start_command,
                     }),
                 };
                 reply(json!({ "state": state }))
@@ -420,13 +539,12 @@ impl Panes {
                 self.pane(&pane)?.set_title(&title);
                 Ok(Reply::new())
             }
-            Op::HoldOpen { pane, token } => {
+            Op::HoldOpen { pane } => {
                 let mut table = lock(&self.table);
                 let entry = table
                     .get_mut(&pane)
                     .ok_or_else(|| OpError::no_pane(&pane))?;
                 entry.hold = true;
-                entry.held_token = token;
                 Ok(Reply::new())
             }
             Op::ReleaseHold { pane } => {
@@ -436,7 +554,6 @@ impl Panes {
                         .get_mut(&pane)
                         .ok_or_else(|| OpError::no_pane(&pane))?;
                     entry.hold = false;
-                    entry.held_token = None;
                     if entry.dead {
                         table.remove(&pane)
                     } else {
@@ -455,35 +572,7 @@ impl Panes {
                 cwd,
                 env,
                 expected_held_token,
-            } => {
-                let mut table = lock(&self.table);
-                let entry = table
-                    .get_mut(&pane)
-                    .ok_or_else(|| OpError::no_pane(&pane))?;
-                if !entry.dead {
-                    return Err(OpError::new(
-                        "bad_request",
-                        format!("pane {pane} is still running"),
-                    ));
-                }
-                if let Some(expected) = expected_held_token
-                    && entry.held_token.as_deref() != Some(expected.as_str())
-                {
-                    return Err(OpError::new(
-                        "held_mismatch",
-                        format!("pane {pane} is held by another token"),
-                    ));
-                }
-                entry
-                    .pane
-                    .respawn(spec(command.clone(), cwd, self.child_env(&pane, env), 0, 0))
-                    .map_err(|e| OpError::new("spawn_failed", e.to_string()))?;
-                entry.command = command;
-                entry.dead = false;
-                entry.exit_status = None;
-                entry.engine_exit = None;
-                Ok(Reply::new())
-            }
+            } => self.respawn(pane, command, cwd, env, expected_held_token),
             Op::SetEngineExit { pane, status } => {
                 let mut table = lock(&self.table);
                 let entry = table
@@ -626,11 +715,16 @@ mod tests {
             st["command"],
             json!(["/bin/sh", "-c", "echo last-words; exit 5"])
         );
-        assert_eq!(st["heldToken"], Value::Null);
+        assert_eq!(st["startCommand"], "/bin/sh -c echo last-words; exit 5");
         assert!(capture(&panes, &pane).unwrap().contains("last-words"));
+        // Still listed, with its last child's pid, as tmux lists a dead pane's `#{pane_pid}`.
         let inv = panes.handle(Op::Inventory).unwrap();
         assert_eq!(inv["panes"][0]["dead"], true);
-        assert_eq!(inv["panes"][0]["rootPid"], Value::Null);
+        assert!(inv["panes"][0]["rootPid"].as_u64().is_some());
+        let info = panes
+            .handle(op(json!({"op": "paneInfo", "pane": pane})))
+            .unwrap();
+        assert_eq!(info["info"]["pid"], Value::Null);
         // Input to a dead pane is refused.
         let err = panes
             .handle(op(json!({"op": "write", "pane": pane, "data": "eA=="})))
@@ -639,21 +733,17 @@ mod tests {
     }
 
     #[test]
-    fn hold_open_holds_a_running_pane_and_records_its_token() {
+    fn hold_open_holds_a_running_pane() {
         let (panes, notices) = table();
         let pane = create(&panes, "read x; exit 2", false);
         panes
-            .handle(op(json!({"op": "holdOpen", "pane": pane, "token": "tok"})))
+            .handle(op(json!({"op": "holdOpen", "pane": pane})))
             .unwrap();
         panes
             .handle(op(json!({"op": "write", "pane": pane, "data": "eAo="})))
             .unwrap();
         assert_eq!(exit_notice(&notices, &pane), Some(2));
-        let st = state(&panes, &pane);
-        assert_eq!(
-            (st["dead"].clone(), st["heldToken"].clone()),
-            (json!(true), json!("tok"))
-        );
+        assert_eq!(state(&panes, &pane)["dead"], true);
     }
 
     #[test]
@@ -708,48 +798,112 @@ mod tests {
     }
 
     #[test]
-    fn respawn_needs_a_dead_pane_and_the_held_token() {
+    fn respawn_replaces_a_dead_pane_in_its_grid() {
         let (panes, notices) = table();
-        let pane = create(&panes, "echo one; read x; exit 3", true);
-        let respawn = |token: Option<&str>| {
-            let mut v = json!({"op": "respawn", "pane": pane,
-                "command": ["/bin/sh", "-c", "echo two; sleep 30"]});
-            if let Some(t) = token {
-                v["expectedHeldToken"] = json!(t);
-            }
-            panes.handle(op(v))
-        };
-        assert_eq!(respawn(None).unwrap_err().code, "bad_request"); // still running
-        panes
-            .handle(op(json!({"op": "holdOpen", "pane": pane, "token": "tok"})))
-            .unwrap();
+        let pane = create(&panes, "echo one; exit 3", true);
+        exit_notice(&notices, &pane);
         panes
             .handle(op(
                 json!({"op": "setEngineExit", "pane": pane, "status": 9}),
             ))
             .unwrap();
-        until("one", || capture(&panes, &pane).unwrap().contains("one"));
-        panes
-            .handle(op(json!({"op": "write", "pane": pane, "data": "eAo="})))
-            .unwrap();
-        exit_notice(&notices, &pane);
         assert_eq!(state(&panes, &pane)["engineExit"], 9);
-        assert_eq!(respawn(Some("other")).unwrap_err().code, "held_mismatch");
-        respawn(Some("tok")).unwrap();
+        panes
+            .handle(op(json!({"op": "respawn", "pane": pane,
+                "command": ["/bin/sh", "-c", "echo two; sleep 30"]})))
+            .unwrap();
         let st = state(&panes, &pane);
         assert_eq!(st["dead"], false);
         assert_eq!(st["engineExit"], Value::Null);
         assert_eq!(st["exitStatus"], Value::Null);
-        assert_eq!(st["heldToken"], "tok");
         assert_eq!(
             st["command"],
             json!(["/bin/sh", "-c", "echo two; sleep 30"])
         );
+        assert_eq!(st["startCommand"], "/bin/sh -c echo two; sleep 30");
         until("two", || capture(&panes, &pane).unwrap().contains("two"));
         assert!(capture(&panes, &pane).unwrap().contains("one"));
         panes
             .handle(op(json!({"op": "kill", "pane": pane, "graceMs": 200})))
             .unwrap();
+    }
+
+    /// tmux's `respawn-pane -k`: the running child is killed, its exit is nobody's news, and the
+    /// next child draws below the old one's output in the same pane, held or not.
+    #[test]
+    fn respawn_kills_a_running_child_first() {
+        for hold in [true, false] {
+            let (panes, notices) = table();
+            let pane = create(&panes, "echo one; trap '' TERM; sleep 30", hold);
+            until("one", || capture(&panes, &pane).unwrap().contains("one"));
+            let old_pid = panes.handle(Op::Inventory).unwrap()["panes"][0]["rootPid"]
+                .as_u64()
+                .unwrap();
+            panes
+                .handle(op(json!({"op": "respawn", "pane": pane,
+                    "command": ["/bin/sh", "-c", "echo two; read x; exit 6"]})))
+                .unwrap();
+            let st = state(&panes, &pane);
+            assert_eq!(st["dead"], false, "hold {hold}");
+            let new_pid = panes.handle(Op::Inventory).unwrap()["panes"][0]["rootPid"]
+                .as_u64()
+                .unwrap();
+            assert_ne!(old_pid, new_pid);
+            until("two", || capture(&panes, &pane).unwrap().contains("two"));
+            assert!(capture(&panes, &pane).unwrap().contains("one"));
+            // The old child's exit was absorbed: the first exit announced is the new child's.
+            panes
+                .handle(op(json!({"op": "key", "pane": pane, "key": "Enter"})))
+                .unwrap();
+            assert_eq!(exit_notice(&notices, &pane), Some(6), "hold {hold}");
+            if hold {
+                assert_eq!(state(&panes, &pane)["exitStatus"], 6);
+            } else {
+                assert_eq!(state(&panes, &pane), json!("gone"));
+            }
+        }
+    }
+
+    /// `expectedHeldToken` is tmux's `heldPaneFormat` over the start command: `harness-held`
+    /// and the token in it, and no native launch marker.
+    #[test]
+    fn respawn_replaces_only_the_shell_held_under_the_token() {
+        let (panes, _notices) = table();
+        let respawn = |pane: &str, token: &str| {
+            panes.handle(op(json!({"op": "respawn", "pane": pane,
+                "command": ["/bin/sh", "-c", "echo replaced; sleep 30"],
+                "expectedHeldToken": token})))
+        };
+        let tok = "0b5f9d38-3c1e-4c55-9f1a-1d2e3f4a5b6c";
+        let held = create(&panes, &format!("echo harness-held {tok}; sleep 30"), true);
+        let native = create(
+            &panes,
+            &format!("HARNESS_NATIVE_LAUNCH_TOKEN={tok} harness-held; sleep 30"),
+            true,
+        );
+        let plain = create(&panes, &format!("echo {tok}; sleep 30"), true);
+        assert_eq!(
+            respawn(&held, "11111111-2222-3333-4444-555555555555")
+                .unwrap_err()
+                .code,
+            "held_mismatch"
+        );
+        assert_eq!(respawn(&held, "").unwrap_err().code, "held_mismatch");
+        assert_eq!(respawn(&native, tok).unwrap_err().code, "held_mismatch");
+        assert_eq!(respawn(&plain, tok).unwrap_err().code, "held_mismatch");
+        // A refused respawn touched nothing.
+        assert_eq!(state(&panes, &held)["dead"], false);
+        respawn(&held, tok).unwrap();
+        until("replaced", || {
+            capture(&panes, &held).unwrap().contains("replaced")
+        });
+        // The replacement is no longer the held shell.
+        assert_eq!(respawn(&held, tok).unwrap_err().code, "held_mismatch");
+        for pane in [held, native, plain] {
+            panes
+                .handle(op(json!({"op": "kill", "pane": pane, "graceMs": 200})))
+                .unwrap();
+        }
     }
 
     #[test]

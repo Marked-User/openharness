@@ -108,13 +108,13 @@ describe('ptyHost protocol messages', () => {
 
   it('serialises ops with wire (camelCase) field names', () => {
     const ops: PtyOp[] = [
-      { op: 'holdOpen', pane: '%1', token: 'u' },
+      { op: 'holdOpen', pane: '%1' },
       { op: 'respawn', pane: '%1', command: ['sh'], expectedHeldToken: 'u' },
       { op: 'kill', pane: '%1', graceMs: 10 },
       { op: 'capture', pane: '%1', historyLines: 3, ansi: true, visible: false },
     ]
     const wire = ops.map(o => JSON.parse(JSON.stringify({ id: 1, ...o })))
-    expect(wire[0]).toEqual({ id: 1, op: 'holdOpen', pane: '%1', token: 'u' })
+    expect(wire[0]).toEqual({ id: 1, op: 'holdOpen', pane: '%1' })
     expect(wire[1].expectedHeldToken).toBe('u')
     expect(wire[2].graceMs).toBe(10)
     expect(wire[3].historyLines).toBe(3)
@@ -139,7 +139,7 @@ const OP_FIELDS: OpFields = {
   paste: { pane: 'string', text: 'string', bracketed: 'boolean' },
   key: { pane: 'string', key: 'string' },
   setTitle: { pane: 'string', title: 'string' },
-  holdOpen: { pane: 'string', token: 'string' },
+  holdOpen: { pane: 'string' },
   releaseHold: { pane: 'string' },
   respawn: { pane: 'string', command: 'string[]', cwd: 'string', env: 'env', expectedHeldToken: 'string' },
   jobPids: { pane: 'string' },

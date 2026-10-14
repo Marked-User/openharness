@@ -190,19 +190,23 @@ fn exit_events_reach_every_control_connection() {
 
 #[test]
 fn held_pane_respawns_with_its_token() {
+    // A held shell, as tmux's `heldPaneFormat` knows one: `harness-held` and the token in its start command.
+    const TOK: &str = "0b5f9d38-3c1e-4c55-9f1a-1d2e3f4a5b6c";
     let (_h, disc) = start();
     let (mut w, mut r) = connect(&disc);
     let created = call(
         &mut w,
         &mut r,
-        r#"{"id":1,"op":"create","command":["/bin/sh","-c","echo first; exit 3"],"cols":80,"rows":24,"owner":"o","label":"l","hold":true}"#,
+        &format!(
+            r#"{{"id":1,"op":"create","command":["/bin/sh","-c","echo first; exit 3","harness-held","{TOK}"],"cols":80,"rows":24,"owner":"o","label":"l","hold":true}}"#
+        ),
     );
     let pane = created["pane"].as_str().unwrap().to_string();
-    // Created held: holdOpen records the token, dead or not.
+    // Created held; holdOpen holds it again, dead or not.
     let held = call(
         &mut w,
         &mut r,
-        &format!(r#"{{"id":2,"op":"holdOpen","pane":"{pane}","token":"tok"}}"#),
+        &format!(r#"{{"id":2,"op":"holdOpen","pane":"{pane}"}}"#),
     );
     if held["ok"] != true {
         panic!("holdOpen: {held}");
@@ -221,7 +225,10 @@ fn held_pane_respawns_with_its_token() {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert_eq!(state["state"]["exitStatus"], 3);
-    assert_eq!(state["state"]["heldToken"], "tok");
+    assert_eq!(
+        state["state"]["startCommand"],
+        format!("/bin/sh -c echo first; exit 3 harness-held {TOK}")
+    );
     let inv = call(&mut w, &mut r, r#"{"id":4,"op":"inventory"}"#);
     let row = inv["panes"]
         .as_array()
@@ -232,12 +239,13 @@ fn held_pane_respawns_with_its_token() {
         .clone();
     assert_eq!(row["dead"], true);
     assert_eq!(row["owner"], "o");
+    assert!(row["rootPid"].as_u64().is_some(), "{row}");
 
     let wrong = call(
         &mut w,
         &mut r,
         &format!(
-            r#"{{"id":5,"op":"respawn","pane":"{pane}","command":["/bin/sh","-c","echo second; sleep 30"],"expectedHeldToken":"other"}}"#
+            r#"{{"id":5,"op":"respawn","pane":"{pane}","command":["/bin/sh","-c","echo second; sleep 30"],"expectedHeldToken":"11111111-2222-3333-4444-555555555555"}}"#
         ),
     );
     assert_eq!(wrong["code"], "held_mismatch", "{wrong}");
@@ -245,7 +253,7 @@ fn held_pane_respawns_with_its_token() {
         &mut w,
         &mut r,
         &format!(
-            r#"{{"id":6,"op":"respawn","pane":"{pane}","command":["/bin/sh","-c","echo second; sleep 30"],"expectedHeldToken":"tok"}}"#
+            r#"{{"id":6,"op":"respawn","pane":"{pane}","command":["/bin/sh","-c","echo second; sleep 30"],"expectedHeldToken":"{TOK}"}}"#
         ),
     );
     assert_eq!(ok["ok"], true, "{ok}");
