@@ -100,7 +100,13 @@ mod tests {
         assert_eq!(first.endpoint(), path.to_string_lossy());
         assert!(matches!(bind(&path).unwrap(), Bound::Taken));
         drop(first);
-        // The file stays, nobody answers: replaced.
+        // The file stays, nobody answers: replaced. (A child another test forks just now holds
+        // the listener until it execs: wait for the refusal.)
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while UnixStream::connect(&path).is_ok() {
+            assert!(std::time::Instant::now() < end, "the listener stays open");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(path.exists());
         assert!(matches!(bind(&path).unwrap(), Bound::Listening(_)));
     }

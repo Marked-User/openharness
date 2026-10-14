@@ -37,6 +37,8 @@ const READ_PER_WAKEUP: usize = 1024 * 1024;
 /// How long a dropped pane's child gets after SIGHUP before SIGKILL.
 #[cfg(unix)]
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+/// How long a kill that escalated waits for the reader to report the exit.
+const EXIT_REPORT: Duration = Duration::from_secs(1);
 /// How often a kill looks whether the pane's process group is empty.
 #[cfg(unix)]
 const GROUP_POLL: Duration = Duration::from_millis(20);
@@ -368,60 +370,41 @@ impl Pane {
         reported.or_else(|| lock(&self.spawn_cwd).clone())
     }
 
-    /// Unix: SIGHUP to the child's process group (as closing a tmux pane's tty does); after
-    /// `grace`, SIGKILL to the group if anything in it still runs, so a descendant that ignores
-    /// SIGHUP does not outlive the pane. Returns once the child has exited and the group is
-    /// empty, at most after `grace`.
+    /// Send a kill's first signal; `Killing::finish` waits out the grace and escalates. `None`
+    /// when the child had already exited: it is left alone, as its pid (and so the group id) may
+    /// since belong to another process.
     ///
-    /// A child that had already exited is left alone: its pid, and so the group id, may since
-    /// belong to another process.
+    /// Unix: SIGHUP to the child's process group, as closing a tmux pane's tty does.
     #[cfg(unix)]
-    pub fn kill(&self, grace: Duration) {
+    pub fn start_kill(&self) -> Option<Killing> {
         let attachment = self.attachment();
-        let Some(pid) = attachment.pid else { return };
+        let pid = attachment.pid?;
         if attachment.life.has_exited() {
-            return;
+            return None;
         }
         // `tty::new` makes the child a session (and process group) leader: pgid == pid. Until
         // the child is reaped, and then while any process is in the group, the id is not reused.
         let group = pid as libc::pid_t;
         unsafe { libc::kill(-group, libc::SIGHUP) };
-        let deadline = std::time::Instant::now() + grace;
-        loop {
-            let exited = attachment.life.has_exited();
-            if exited && !group_alive(group) {
-                return;
-            }
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
-                unsafe { libc::kill(-group, libc::SIGKILL) };
-                return;
-            }
-            if exited {
-                std::thread::sleep(left.min(GROUP_POLL));
-            } else {
-                attachment.life.wait(left.min(GROUP_POLL));
-            }
-        }
+        Some(Killing { attachment, group })
     }
 
-    /// Windows: close the pseudo console (the console's processes get CTRL_CLOSE_EVENT); after
-    /// `grace`, terminate the child if it is still running. Task 16 replaces this with a Job.
+    /// Windows: close the pseudo console (the console's processes get CTRL_CLOSE_EVENT).
+    /// Task 16 replaces this with a Job.
     #[cfg(windows)]
-    pub fn kill(&self, grace: Duration) {
-        use std::os::windows::io::AsRawHandle;
+    pub fn start_kill(&self) -> Option<Killing> {
         let attachment = self.attachment();
         if attachment.life.has_exited() {
-            return;
+            return None;
         }
         let _ = attachment.send(Msg::Hangup);
-        if !attachment.life.wait(grace) {
-            unsafe {
-                windows_sys::Win32::System::Threading::TerminateProcess(
-                    attachment.process.as_raw_handle() as _,
-                    1,
-                )
-            };
+        Some(Killing { attachment })
+    }
+
+    /// `start_kill`, then `Killing::finish`.
+    pub fn kill(&self, grace: Duration) {
+        if let Some(killing) = self.start_kill() {
+            killing.finish(grace);
         }
     }
 
@@ -433,6 +416,59 @@ impl Pane {
 impl Drop for Pane {
     fn drop(&mut self) {
         let _ = self.attachment().send(Msg::Shutdown);
+    }
+}
+
+/// A kill whose first signal is sent. It holds the child's attachment, not the pane.
+pub struct Killing {
+    attachment: Attachment,
+    #[cfg(unix)]
+    group: libc::pid_t,
+}
+
+impl Killing {
+    /// Unix: after `grace`, SIGKILL the group if anything in it still runs, so a descendant
+    /// that ignores SIGHUP does not outlive the pane. Returns once the child has exited and the
+    /// group is empty, at most after `grace` (plus `EXIT_REPORT` after a SIGKILL).
+    #[cfg(unix)]
+    pub fn finish(self, grace: Duration) {
+        let Killing { attachment, group } = self;
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            let exited = attachment.life.has_exited();
+            if exited && !group_alive(group) {
+                return;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                unsafe { libc::kill(-group, libc::SIGKILL) };
+                // Until the reader has seen the exit: a pane dropped before that ends its
+                // reader without reporting one.
+                attachment.life.wait(EXIT_REPORT);
+                return;
+            }
+            if exited {
+                std::thread::sleep(left.min(GROUP_POLL));
+            } else {
+                attachment.life.wait(left.min(GROUP_POLL));
+            }
+        }
+    }
+
+    /// Windows: after `grace`, terminate the child if it is still running.
+    #[cfg(windows)]
+    pub fn finish(self, grace: Duration) {
+        use std::os::windows::io::AsRawHandle;
+        let attachment = self.attachment;
+        if !attachment.life.wait(grace) {
+            unsafe {
+                windows_sys::Win32::System::Threading::TerminateProcess(
+                    attachment.process.as_raw_handle() as _,
+                    1,
+                )
+            };
+            attachment.life.wait(EXIT_REPORT);
+        }
     }
 }
 

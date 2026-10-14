@@ -193,6 +193,12 @@ fn stale_socket_is_replaced() {
     // A socket file nobody listens on, as a crashed host leaves it.
     let path = run.join(format!("pty-host-{PROTOCOL}.sock"));
     drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+    // A child another test forks just now holds the listener until it execs: wait for refusal.
+    let end = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(&path).is_ok() {
+        assert!(Instant::now() < end, "the listener stays open");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(path.exists());
     let mut child = Command::new(env!("CARGO_BIN_EXE_harness-pty"))
         .args(["serve", "--home"])
@@ -339,6 +345,92 @@ fn held_pane_respawns_with_its_token() {
         &format!(r#"{{"id":10,"op":"paneState","pane":"{pane}"}}"#),
     );
     assert_eq!(st["state"], "gone");
+}
+
+#[test]
+fn children_see_harness_pane() {
+    let (_h, disc) = start();
+    let (mut w, mut r) = connect(&disc);
+    let created = call(
+        &mut w,
+        &mut r,
+        r#"{"id":1,"op":"create","command":["/bin/sh","-c","echo \"hp=$HARNESS_PANE.\"; sleep 5"],"cols":80,"rows":24,"owner":"t","hold":false}"#,
+    );
+    let pane = created["pane"].as_str().unwrap().to_string();
+    let want = format!("hp=p{PROTOCOL}:{pane}.");
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        let cap = call(
+            &mut w,
+            &mut r,
+            &format!(r#"{{"id":2,"op":"capture","pane":"{pane}","ansi":false,"visible":true}}"#),
+        );
+        if cap["text"].as_str().unwrap().contains(&want) {
+            break;
+        }
+        assert!(Instant::now() < end, "no {want:?}: {cap}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    call(
+        &mut w,
+        &mut r,
+        &format!(r#"{{"id":3,"op":"kill","pane":"{pane}","graceMs":200}}"#),
+    );
+}
+
+#[test]
+fn kill_does_not_hold_up_the_connection_and_the_exit_still_arrives() {
+    let (_h, disc) = start();
+    let (mut w, mut r) = connect(&disc);
+    let created = call(
+        &mut w,
+        &mut r,
+        r#"{"id":1,"op":"create","command":["/bin/sh","-c","trap '' HUP; echo ready; while :; do sleep 1; done"],"cols":80,"rows":24,"owner":"t","hold":false}"#,
+    );
+    let pane = created["pane"].as_str().unwrap().to_string();
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        let cap = call(
+            &mut w,
+            &mut r,
+            &format!(r#"{{"id":2,"op":"capture","pane":"{pane}","ansi":false,"visible":true}}"#),
+        );
+        if cap["text"].as_str().unwrap().contains("ready") {
+            break;
+        }
+        assert!(Instant::now() < end, "{cap}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let start = Instant::now();
+    let killed = call(
+        &mut w,
+        &mut r,
+        &format!(r#"{{"id":3,"op":"kill","pane":"{pane}","graceMs":2000}}"#),
+    );
+    assert_eq!(killed["ok"], true, "{killed}");
+    assert!(
+        start.elapsed() < Duration::from_millis(500),
+        "kill waited out the grace"
+    );
+    let st = call(
+        &mut w,
+        &mut r,
+        &format!(r#"{{"id":4,"op":"paneState","pane":"{pane}"}}"#),
+    );
+    assert_eq!(st["state"], "gone");
+    assert!(start.elapsed() < Duration::from_millis(500));
+    // The shell ignores SIGHUP: SIGKILL after the grace, and its exit is announced.
+    loop {
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if v["event"] == "exit" && v["pane"] == pane.as_str() {
+            assert_eq!(v["status"], 128 + 9);
+            break;
+        }
+    }
+    let waited = start.elapsed();
+    assert!(waited >= Duration::from_millis(2000), "{waited:?}");
 }
 
 #[test]

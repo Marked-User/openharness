@@ -319,7 +319,7 @@ mod tests {
     }
 
     fn ctx() -> Ctx {
-        let (panes, _events) = Panes::new(100);
+        let (panes, _events) = Panes::new(100, "p1");
         Ctx {
             panes: Arc::new(panes),
             info: HostInfo {

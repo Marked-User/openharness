@@ -132,7 +132,7 @@ pub fn serve(home: &Path, history_limit: usize) -> std::io::Result<()> {
             token: info.token.clone(),
         },
     )?;
-    let (panes, events) = crate::panes::Panes::new(history_limit);
+    let (panes, events) = crate::panes::Panes::new(history_limit, info.instance.clone());
     crate::server::run(listener, panes, events, info)
 }
 

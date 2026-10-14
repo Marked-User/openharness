@@ -89,6 +89,8 @@ pub struct Panes {
     next_id: AtomicU64,
     history_limit: usize,
     sink: Sender<(String, PaneEvent)>,
+    /// The host's instance, for each child's `HARNESS_PANE`.
+    instance: String,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -126,13 +128,17 @@ fn pane_number(id: &str) -> u64 {
 
 impl Panes {
     /// An empty table, and the receiving end of its panes' events (for the dispatcher).
-    pub fn new(history_limit: usize) -> (Panes, Receiver<(String, PaneEvent)>) {
+    pub fn new(
+        history_limit: usize,
+        instance: impl Into<String>,
+    ) -> (Panes, Receiver<(String, PaneEvent)>) {
         let (sink, events) = mpsc::channel();
         let panes = Panes {
             table: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             history_limit,
             sink,
+            instance: instance.into(),
         };
         (panes, events)
     }
@@ -166,6 +172,13 @@ impl Panes {
                 })
             }
         }
+    }
+
+    /// The child's environment: the caller's, and `HARNESS_PANE=<instance>:<pane>`, so hooks
+    /// name their pane as they read `TMUX_PANE` under tmux.
+    fn child_env(&self, id: &str, mut env: HashMap<String, String>) -> HashMap<String, String> {
+        env.insert("HARNESS_PANE".into(), format!("{}:{id}", self.instance));
+        env
     }
 
     fn pane(&self, id: &str) -> Result<Arc<Pane>, OpError> {
@@ -214,7 +227,7 @@ impl Panes {
                 let mut table = lock(&self.table);
                 let pane = Pane::spawn(
                     id.clone(),
-                    spec(command.clone(), cwd, env, cols, rows),
+                    spec(command.clone(), cwd, self.child_env(&id, env), cols, rows),
                     self.history_limit,
                     self.sink.clone(),
                 )
@@ -239,7 +252,20 @@ impl Panes {
                 let entry = lock(&self.table)
                     .remove(&pane)
                     .ok_or_else(|| OpError::no_pane(&pane))?;
-                entry.pane.kill(Duration::from_millis(grace_ms));
+                // The reply follows the first signal; the grace, the escalation and the drop
+                // happen off the connection. The pane is dropped (which ends its reader) only
+                // once its exit is reported, so the `exit` notice is never lost.
+                let killing = entry.pane.start_kill();
+                let grace = Duration::from_millis(grace_ms);
+                std::thread::Builder::new()
+                    .name(format!("pty-kill {pane}"))
+                    .spawn(move || {
+                        if let Some(killing) = killing {
+                            killing.finish(grace);
+                        }
+                        drop(entry);
+                    })
+                    .map_err(|e| OpError::new("internal", e.to_string()))?;
                 Ok(Reply::new())
             }
             Op::Inventory => {
@@ -407,7 +433,7 @@ impl Panes {
                 }
                 entry
                     .pane
-                    .respawn(spec(command.clone(), cwd, env, 0, 0))
+                    .respawn(spec(command.clone(), cwd, self.child_env(&pane, env), 0, 0))
                     .map_err(|e| OpError::new("spawn_failed", e.to_string()))?;
                 entry.command = command;
                 entry.dead = false;
@@ -439,7 +465,7 @@ mod tests {
 
     /// A table with its dispatcher running; the notices it raised.
     fn table() -> (Arc<Panes>, Receiver<Notice>) {
-        let (panes, events) = Panes::new(1000);
+        let (panes, events) = Panes::new(1000, "p9");
         let panes = Arc::new(panes);
         let (tx, notices) = mpsc::channel();
         let p = panes.clone();
@@ -736,6 +762,63 @@ mod tests {
                 .code,
             "no_pane"
         );
+    }
+
+    #[test]
+    fn children_name_their_pane_in_harness_pane() {
+        let (panes, notices) = table();
+        let r = panes
+            .handle(op(
+                json!({"op": "create", "command": ["/bin/sh", "-c", "echo \"hp=$HARNESS_PANE.\""],
+                "env": {"HARNESS_PANE": "caller", "OTHER": "kept"},
+                "cols": 40, "rows": 10, "owner": "o", "hold": true}),
+            ))
+            .unwrap();
+        let pane = r["pane"].as_str().unwrap().to_owned();
+        exit_notice(&notices, &pane);
+        assert!(
+            capture(&panes, &pane)
+                .unwrap()
+                .contains(&format!("hp=p9:{pane}."))
+        );
+        panes
+            .handle(op(json!({"op": "respawn", "pane": pane,
+                "command": ["/bin/sh", "-c", "echo \"again=$HARNESS_PANE $OTHER.\"; sleep 5"],
+                "env": {"OTHER": "o2"}})))
+            .unwrap();
+        until("again", || {
+            capture(&panes, &pane)
+                .unwrap()
+                .contains(&format!("again=p9:{pane} o2."))
+        });
+        panes
+            .handle(op(json!({"op": "kill", "pane": pane, "graceMs": 200})))
+            .unwrap();
+    }
+
+    #[test]
+    fn kill_answers_at_once_and_an_escalated_kill_still_reports_the_exit() {
+        let (panes, notices) = table();
+        let pane = create(
+            &panes,
+            "trap '' HUP; echo ready; while :; do sleep 1; done",
+            false,
+        );
+        until("ready", || {
+            capture(&panes, &pane).unwrap().contains("ready")
+        });
+        let start = Instant::now();
+        panes
+            .handle(op(json!({"op": "kill", "pane": pane, "graceMs": 500})))
+            .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "kill waited out the grace"
+        );
+        assert_eq!(state(&panes, &pane), json!("gone"));
+        // SIGKILL after the grace; the exit is still announced.
+        assert_eq!(exit_notice(&notices, &pane), Some(128 + libc::SIGKILL));
+        assert!(start.elapsed() >= Duration::from_millis(500));
     }
 
     #[test]
