@@ -94,15 +94,15 @@ class _PrivacyPageState extends State<PrivacyPage> {
             child: const Text('Reload'),
           ),
         ],
+        const SizedBox(height: 8),
         TextButton(
           onPressed: () => setState(() {
             _details = !_details;
           }),
           child: Text(_details ? 'Hide shared fields' : 'See what’s shared'),
         ),
-        if (_enabled == true && widget.feedback != null)
-          ProductFeedback(send: widget.feedback!),
-        if (_details)
+        if (_details) ...[
+          const SizedBox(height: 8),
           const Text(
             'Shared fields: UTC day, a random retry receipt, protocol and preference revisions; '
             'active/working computer counts, first/repeat work, desktop/terminal opens, '
@@ -122,6 +122,9 @@ class _PrivacyPageState extends State<PrivacyPage> {
             'Previously collected activity records expire after 35 days. '
             'A turn ending does not establish task success.',
           ),
+        ],
+        if (_enabled == true && widget.feedback != null)
+          ProductFeedback(send: widget.feedback!),
       ],
     ),
   );

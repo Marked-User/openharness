@@ -135,6 +135,7 @@ class _ProductUsagePreferenceState extends State<ProductUsagePreference> {
             ),
           ),
         ],
+        const SizedBox(height: 8),
         Align(
           alignment: Alignment.centerLeft,
           child: TextButton(
@@ -144,9 +145,8 @@ class _ProductUsagePreferenceState extends State<ProductUsagePreference> {
             child: Text(_details ? 'Hide shared fields' : 'See what’s shared'),
           ),
         ),
-        if (_enabled == true && widget.feedback != null)
-          ProductFeedback(send: widget.feedback!),
-        if (_details)
+        if (_details) ...[
+          const SizedBox(height: 8),
           const SelectableText(
             'Shared fields\n'
             '• UTC day and a random report receipt to prevent duplicate counts\n'
@@ -171,6 +171,9 @@ class _ProductUsagePreferenceState extends State<ProductUsagePreference> {
             'Optional task feedback sends only your selected outcome or reason. '
             'A turn ending does not tell us whether your task succeeded.',
           ),
+        ],
+        if (_enabled == true && widget.feedback != null)
+          ProductFeedback(send: widget.feedback!),
       ],
     ),
   );
