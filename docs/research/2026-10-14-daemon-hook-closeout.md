@@ -267,3 +267,25 @@ acceptance, final runtime measurements, integrated review and new head checks ar
 still pending. The earlier failed Linux and full end-to-end runs remain failures;
 this checkpoint is neither merge nor refactor completion. Publication remains
 unauthorized.
+
+The corrected core gate passes 2,780 tests with all four coverage measures at
+100% per file in `20261014T035440.798888Z-64237` (168.7 seconds). Full affected
+HTTP, storage, admission, architecture and unchanged goldens pass 268 cases in
+eight files in `20261014T035807.706676Z-80885` (types 4.7 seconds, tests 247.0).
+Independent review carries to combined head `64105ede1` against main `5519be61a`;
+that conflict-free integration changes only firmware, Desktop, website and docs,
+with identical CLI, Store and scripts trees.
+
+Linux [run 38508805283](https://github.com/autonomous-ai/openharness/actions/runs/38508805283)
+then exposed a fixture race: startup allocation could refuse a deliberately
+replaced process before the test reached its intended resolver-snapshot fence.
+The fixture now waits for the original journal's readiness before injecting that
+replacement. Its exact stale-hook, no-prompt, no-registration and unbound-row
+assertions remain, and pass in `20261014T040355.123441Z-9266` (1.8 seconds).
+Independent review approved the correction; its existing disconnected-snapshot
+mutation still must fail. No production code changed for this failure.
+
+Corrected full [end-to-end run 38509153975](https://github.com/autonomous-ai/openharness/actions/runs/38509153975)
+is running on `64105ede1`. Subsequent unit-fixture and documentation edits do not
+change that run's production, end-to-end harness, helper, workflow or dependencies.
+The final mutation, runtime and current-head CI gates remain outstanding.

@@ -1045,6 +1045,10 @@ it('refuses an HTTP hook whose matched process changed at the real core resolver
     return row
   } }, agentReconciler: { triggerHint: vi.fn(async () => true), trigger: vi.fn() } as never })
   const f = await httpFixture(() => false, 65_536, { resolveHookAgent: hooks.resolveHookAgent })
+  // Pin the original process's initialized journal. Otherwise its startup
+  // allocation can independently refuse the replacement before this fixture
+  // reaches the resolver-snapshot fence whose exact stale reply it asserts.
+  await vi.waitFor(() => expect(f.recoveryReady(row)).toBe(true), { timeout: 4_000 })
   expect((await f.post({ callerPid: 6102 })).body).toEqual({ ignored: true, reason: 'stale_hook' })
   expect(f.prompts).toEqual([])
   expect(f.registered).not.toHaveBeenCalled()
