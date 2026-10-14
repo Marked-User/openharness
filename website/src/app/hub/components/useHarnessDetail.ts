@@ -12,6 +12,8 @@ import { useRefreshOnReturn } from './useRefreshOnReturn';
 export function useHarnessDetail(id: string, initial: OpenHarness | null, onSignIn: () => void) {
   const [harness, setHarness] = useState(initial), [social, setSocial] = useState(emptySocial);
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [ready, setReady] = useState(false), [unavailable, setUnavailable] = useState(false);
+  // A failed read of a page already drawn: said aloud, since without it the author's Edit silently vanishes.
+  const [failed, setFailed] = useState(false);
   const revision = useRef(0), writing = useRef(false), loaded = useRef(!!initial);
 
   /**
@@ -35,12 +37,13 @@ export function useHarnessDetail(id: string, initial: OpenHarness | null, onSign
       const data = await read();
       if (current !== revision.current) return;
       if (data.harness) { loaded.current = true; setHarness(data.harness); }
-      setSocial(data.social); setReady(true); setError('');
+      setSocial(data.social); setReady(true); setError(''); setFailed(false);
     } catch (e) {
       if (current !== revision.current) return;
       setReady(false);
       if (e instanceof CommunityError && e.status === 404) setUnavailable(true);
       else if (!initial) setError('This harness could not be loaded. Please try again.');
+      else setFailed(true);
     }
   }, [read, initial]);
   useEffect(() => {
@@ -87,10 +90,5 @@ export function useHarnessDetail(id: string, initial: OpenHarness | null, onSign
       return { ...value, comments: [...value.comments.filter(item => item.id !== data.comment.id), data.comment], commentCount: commentTotal(value) + (known ? 0 : 1) };
     });
   });
-  const unpublish = () => mutate(async () => {
-    await communityRequest(`harnesses/${id}`, { method: 'DELETE' });
-    setUnavailable(true);
-  });
-
-  return { harness, social, ready, error, busy, unavailable, load, follow, like, removeComment, postComment, unpublish };
+  return { harness, social, ready, failed, error, busy, unavailable, load, follow, like, removeComment, postComment };
 }

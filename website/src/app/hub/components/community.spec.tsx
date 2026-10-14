@@ -108,17 +108,36 @@ describe('community navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Back to chat log' }));
     expect(screen.getByText('Make an orbit.')).toBeInTheDocument();
   });
-  it('offers its author Edit beside Unpublish, and a reader neither', async () => {
+  it('offers its author one Edit beside Fork, and a reader none', async () => {
     const id = '0f8fad5b-d9cb-469f-a165-70867728950e';
     request.mockResolvedValueOnce({ harness: { ...sample, id }, social: { ...emptySocial, signedIn: true, mine: true } });
     const { unmount } = render(<Detail id={id} initial={null} />);
-    expect(await screen.findByRole('link', { name: 'Edit this harness' })).toHaveAttribute('href', `/hub/publish?edit=${id}`);
-    expect(screen.getByRole('button', { name: 'Unpublish this harness' })).toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: 'Edit' })).toHaveAttribute('href', `/hub/publish?edit=${id}`);
+    // Unpublish lives in the edit, not beside the output.
+    expect(screen.queryByRole('button', { name: 'Unpublish this harness' })).not.toBeInTheDocument();
     unmount();
     request.mockResolvedValueOnce({ harness: { ...sample, id }, social: { ...emptySocial, signedIn: true } });
     render(<Detail id={id} initial={null} />);
     await screen.findByTitle('Orbit output');
-    expect(screen.queryByRole('link', { name: 'Edit this harness' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Edit' })).not.toBeInTheDocument();
+  });
+  it('says so when a drawn page cannot load its likes and actions, and retries', async () => {
+    const id = '0f8fad5b-d9cb-469f-a165-70867728950e';
+    request.mockRejectedValueOnce(new CommunityError('Service unavailable', 503));
+    render(<Detail id={id} initial={{ ...sample, id }} />);
+    expect(await screen.findByText(/could not be loaded/)).toBeInTheDocument();
+    request.mockResolvedValueOnce({ social: { ...emptySocial, signedIn: true, mine: true } });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByRole('link', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.queryByText(/could not be loaded/)).not.toBeInTheDocument();
+  });
+  it('tells a browser whose sign-in the Hub no longer accepts to sign in again', async () => {
+    localStorage.setItem('harness.web.v1.auth_access_token', 'expired-fixture');
+    request.mockResolvedValueOnce({ harness: { ...sample, id: sample.id }, social: { ...emptySocial, signedIn: false } });
+    render(<Detail id={sample.id} initial={null} />);
+    expect(await screen.findByText(/Your sign-in has expired/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Sign in again' })).toHaveAttribute('href', '/web');
+    localStorage.clear();
   });
   it('reads a publication once, then refreshes only its social state', async () => {
     const id = '0f8fad5b-d9cb-469f-a165-70867728950e';
