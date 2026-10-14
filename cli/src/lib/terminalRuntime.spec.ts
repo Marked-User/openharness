@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   mergeTerminalRuntimes,
+  ownedPanesOf,
   processIdentityKey,
   processIdentityOf,
   sameProcessIdentity,
@@ -11,6 +12,17 @@ import type { TmuxRuntimeRef } from './terminalTypes.js'
 
 const tmux: TmuxRuntimeRef = { backend: 'tmux', paneId: '%3' }
 describe('terminal runtime identity', () => {
+  it('hands a backend only the panes on it, each with its row\'s engine', () => {
+    // A ptyhost pane has a `%N` id too: handed to tmux, it could rename a legacy session that is not its.
+    const ptyhost = { backend: 'ptyhost', instance: 'p1', paneId: '%7' } as unknown as TmuxRuntimeRef
+    const sessions = [
+      { engine: 'claude' as const, runtimes: [tmux, ptyhost] },
+      { engine: 'codex' as const, runtimes: [{ backend: 'tmux' as const, paneId: '%8' }] },
+      { engine: 'opencode' as const, runtimes: [{ ...ptyhost, paneId: '%9' }] },
+    ]
+    expect([...ownedPanesOf(sessions, 'tmux')]).toEqual([['%3', 'claude'], ['%8', 'codex']])
+  })
+
   it('merges observed runtimes without duplicating a placement', () => {
     const other: TmuxRuntimeRef = { backend: 'tmux', paneId: '%4' }
     expect(terminalPlacementKey(tmux)).toBe(terminalRouteKey(tmux))

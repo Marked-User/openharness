@@ -100,7 +100,7 @@ import { TerminalBackendCoordinator } from '../lib/terminalBackendCoordinator.js
 import type { TerminalBackend } from '../lib/terminalBackend.js'
 import type { TerminalRuntimeRef } from '../lib/terminalTypes.js'
 import { TerminalStreamManager } from '../lib/terminalStreamManager.js'
-import { terminalRouteKey, terminalRuntimeLabel } from '../lib/terminalRuntime.js'
+import { ownedPanesOf, terminalRouteKey, terminalRuntimeLabel } from '../lib/terminalRuntime.js'
 import { probeTerminalAgents } from '../lib/terminalAgentDiscovery.js'
 import { RECONCILE_PASS_DEADLINE_MS, TerminalAgentReconciler } from '../lib/terminalAgentReconciler.js'
 import { Watcher } from '../watcher/watcher.js'
@@ -534,9 +534,11 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // local socket and the backend link, leaves for an update, and says what is missing.
   const candidates: TerminalBackend[] = []
   if (terminalConfig.backends.includes('tmux')) candidates.push(new TmuxBackend(() => hostTheme))
-  // The registry's panes, for a backend that adopts what an older build left (tmux's legacy session names).
-  const ownedPanes = new Map(registry.list().flatMap((s) => s.runtimes.map((r) => [r.paneId, s.engine] as const)))
-  const preparing = Promise.all(candidates.map(async (backend) => ({ backend, result: await backend.prepare({ ownedPanes }) })))
+  // Each is handed the registry's panes on it, and only those, for adopting what an older build left
+  // (tmux's legacy session names): pane ids are per backend.
+  const preparing = Promise.all(candidates.map(async (backend) => ({
+    backend, result: await backend.prepare({ ownedPanes: ownedPanesOf(registry.list(), backend.name) }),
+  })))
   // Started while the backends prepare, which ask a login shell too (tmux: where it is installed): two
   // independent login-shell spawns whose wall-clock cost overlaps instead of adding up.
   // `loginShellEnvPromise` is awaited later, near the existing `[env]` log line.

@@ -1,4 +1,5 @@
-import type { ProcessIdentity, TerminalRuntimeRef } from './terminalTypes.js'
+import type { AgentEngine } from '../engines/types.js'
+import type { ProcessIdentity, TerminalBackendName, TerminalRuntimeRef } from './terminalTypes.js'
 
 const SEP = '\u0000'
 
@@ -8,6 +9,22 @@ function assertKeyPart(value: string, field: string): string {
 }
 
 /** Stable route key. */
+/**
+ * The panes [sessions] hold on [backend] (pane id → the row's engine), for that backend's `prepare`. Only
+ * its own: pane ids are per backend (`%N` on tmux and on ptyhost alike), and tmux renames the legacy
+ * session of any pane it is handed.
+ */
+export function ownedPanesOf(
+  sessions: Iterable<{ engine: AgentEngine; runtimes: readonly TerminalRuntimeRef[] }>,
+  backend: TerminalBackendName,
+): Map<string, AgentEngine> {
+  const owned = new Map<string, AgentEngine>()
+  for (const session of sessions) {
+    for (const runtime of session.runtimes) if (runtime.backend === backend) owned.set(runtime.paneId, session.engine)
+  }
+  return owned
+}
+
 export function terminalRouteKey(runtime: TerminalRuntimeRef): string {
   return `tmux${SEP}${assertKeyPart(runtime.paneId, 'tmux pane id')}`
 }

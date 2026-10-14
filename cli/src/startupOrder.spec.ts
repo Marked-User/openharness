@@ -130,7 +130,8 @@ describe('the core\'s start-up order (core/main.ts)', () => {
     // which `TmuxBackend.prepare` prints once its first inventory lands (tmuxBackend.spec.ts): the list is
     // printed after every prepare is started and before any is awaited.
     const source = code(SOURCE)
-    const started = source.indexOf('backend.prepare({ ownedPanes })')
+    // Each backend is handed only its own panes (`ownedPanesOf`, terminalRuntime.spec.ts).
+    const started = source.indexOf('backend.prepare({ ownedPanes: ownedPanesOf(registry.list(), backend.name) })')
     const named = source.indexOf('console.log(`[terminal] enabled backends: ${terminalConfig.backends.join(\', \')}`)')
     const awaited = source.indexOf('await preparing')
     expect(started, 'core/main.ts still prepares each backend').toBeGreaterThan(-1)
