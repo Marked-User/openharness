@@ -4,8 +4,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { atomicJson, gridJson, PACKAGE, stateDir } from '../lib/fleet.mjs';
 import { assemble, createCollector } from '../lib/telemetry.mjs';
@@ -175,4 +176,25 @@ test('a fresh workspace probes with --no-wake and takes a sleeping own grid as a
   assert.equal(result.grid,'tuan-dev-991371e4');
   const probes=calls.filter(c=>c[1]==='engines');
   assert.ok(probes.length>0);for(const probe of probes)assert.ok(probe.includes('--no-wake'),probe.join(' '));
+});
+
+/** A package script run as the person's agent runs it, against one fake `grid`, and its exit status. */
+const script=(file,args,grid,dir)=>new Promise(done=>execFile(file,args,{cwd:PACKAGE,env:{...process.env,
+  PATH:`${dirname(process.execPath)}:${process.env.PATH}`,HARNESS_GRID_BIN:grid,ADAPTER_RUNTIME_DIR:join(dir,'runtime')}},
+  (error,stdout,stderr)=>done({code:error?error.code:0,out:`${stdout}${stderr}`})));
+
+test('setup and doctor take the first grid that knows --no-wake as the floor, and nothing older',async t=>{
+  const dir=await temporary(t),log=join(dir,'calls.json');
+  const old=await fakeGrid(dir,'grid-0.3.48',{verbs:{version:{stdout:'grid 0.3.48\n'}}},log);
+  const first=await fakeGrid(dir,'grid-0.3.49',{verbs:{version:{stdout:'grid 0.3.49\n'}}},log);
+  // Every automatic read of a remote grid carries NO_WAKE, so a grid that refuses it can never be read.
+  const refused=await script('bash',['toolchain/setup.sh'],old,dir);
+  assert.equal(refused.code,1,refused.out);assert.match(refused.out,/miss Grid >= 0\.3\.49\b/);
+  const doctored=await script(process.execPath,['toolchain/fleet.mjs','doctor'],old,dir);
+  assert.equal(doctored.code,1,doctored.out);assert.match(doctored.out,/Grid >= 0\.3\.49 is required/);
+  // The positive control: the same scripts, one release on, pass.
+  const ok=await script('bash',['toolchain/setup.sh'],first,dir);
+  assert.equal(ok.code,0,ok.out);assert.match(ok.out,/^ok {3}grid 0\.3\.49$/m);
+  const healthy=await script(process.execPath,['toolchain/fleet.mjs','doctor'],first,dir);
+  assert.equal(healthy.code,0,healthy.out);assert.match(healthy.out,/^ok {3}Grid 0\.3\.49$/m);
 });

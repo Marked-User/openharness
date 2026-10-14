@@ -34,6 +34,11 @@ export { GRID_BINARY, GRID_NO_UPDATE_CHECK_VAR, gridAvailable, gridBinaryPath, g
  * `3286163`, 2026-09-04). An older binary answers argparse's exit 2, which the hand-off already
  * reads as OUTDATED; this constant is what lets every OTHER call say so in one sentence instead of
  * each one rediscovering it.
+ *
+ * Two arguments are newer, deliberately without raising it: `mcp config --json` (0.3.42,
+ * `gridMcpUrl.ts`) and `--no-wake` (0.3.49, `gridReader.readViaCli`). Each is an extra that reads an
+ * older `grid`'s exit 2 as "no web tools" or "no read", and never retries without the flag; raising
+ * the floor would instead refuse the harness grid itself to a `grid` that can sign in and serve.
  */
 export const GRID_VERSION_FLOOR = '0.3.36'
 
