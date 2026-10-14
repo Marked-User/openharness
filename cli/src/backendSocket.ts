@@ -827,7 +827,8 @@ export class BackendSocket {
     const launchMeasured = productUsageLaunch(type, (frame.payload as { creationId?: unknown } | undefined)?.creationId,
       signal => this.toGateway('usage', gateway => gateway.usageLaunch?.(signal)))
     const usageSource = local && connId && this.toolClients.has(connId) ? 'tool' : local || role === 'web' ? 'app' : 'unknown'
-    const measured = productUsageRequest(type, (metric) => this.toGateway('usage', (gateway) => gateway.usageCounter?.(metric)), Date.now, usageSource)
+    const measured = productUsageRequest(type, (metric) => this.toGateway('usage', (gateway) => gateway.usageCounter?.(metric)), Date.now, usageSource,
+      (frame.payload as { userAction?: unknown } | undefined)?.userAction === true)
     productUsageIntent(type, (frame.payload as { usageIntent?: unknown } | undefined)?.usageIntent,
       (frame.payload as { agentId?: unknown } | undefined)?.agentId, usageSource,
       signal => this.toGateway('usage', gateway => gateway.usageLaunch?.(signal)))

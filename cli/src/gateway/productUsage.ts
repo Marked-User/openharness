@@ -6,6 +6,7 @@ import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ProductUsageLaunchSignal } from '../lib/productUsageSignals.js'
 import { PRODUCT_USAGE_ACTIONS, PRODUCT_USAGE_AUTOMATIC_ACTIONS, PRODUCT_USAGE_DAYS, PRODUCT_USAGE_MAX_COUNT, PRODUCT_USAGE_METRICS,
+  PRODUCT_USAGE_USER_OPENED_ACTIONS,
   type ProductUsageChoice, type ProductUsageMetric, type ProductUsageReport } from '../lib/productUsageContract.js'
 
 const DAY = 86_400_000
@@ -13,9 +14,14 @@ const MAX_QUEUE_BYTES = 256 * 1024
 // A report stays below the server's 8 KiB body bound even with the complete vocabulary.
 const MAX_REPORT_METRICS = 64
 const metricSet = new Set<string>(PRODUCT_USAGE_METRICS)
-// Feature reach is a person's use; the reads the apps make on their own count only their reliability.
-const requestActions = new Map(PRODUCT_USAGE_ACTIONS.filter(action => !PRODUCT_USAGE_AUTOMATIC_ACTIONS.includes(action))
-  .map(action => [`${action}_requests`, action]))
+// Feature reach is a person's use; the reads the apps make on their own count only their reliability,
+// unless the app says a person opened that list (`<action>_user_requests`, its own first/repeat).
+type Reach = typeof PRODUCT_USAGE_ACTIONS[number] | `${typeof PRODUCT_USAGE_USER_OPENED_ACTIONS[number]}_user`
+const REACHES: readonly Reach[] = [...PRODUCT_USAGE_ACTIONS, ...PRODUCT_USAGE_USER_OPENED_ACTIONS.map(action => `${action}_user` as const)]
+const requestActions = new Map<string, Reach>([
+  ...PRODUCT_USAGE_ACTIONS.filter(action => !PRODUCT_USAGE_AUTOMATIC_ACTIONS.includes(action)).map(action => [`${action}_requests`, action] as const),
+  ...PRODUCT_USAGE_USER_OPENED_ACTIONS.map(action => [`${action}_user_requests`, `${action}_user`] as const),
+])
 const key = (now: number) => new Date(now).toISOString().slice(0, 10)
 const week = (now: number) => { const d = new Date(now); return key(now - ((d.getUTCDay() + 6) % 7) * DAY) }
 type Counters = Partial<Record<ProductUsageMetric, number>>
@@ -29,8 +35,8 @@ interface State {
   workWeek: string | null
   workMonth: string | null
   measurementDay: string | null
-  featureDays: Partial<Record<typeof PRODUCT_USAGE_ACTIONS[number], string>>
-  featuresUsed: typeof PRODUCT_USAGE_ACTIONS[number][]
+  featureDays: Partial<Record<Reach, string>>
+  featuresUsed: Reach[]
   workedBefore: boolean
   respondedBefore: boolean
   launchedBefore: boolean
@@ -80,7 +86,7 @@ export function createProductUsage(deps: ProductUsageDeps) {
         if (typeof saved[field] === 'string' && validDay(saved[field]!)) state[field] = saved[field]
       }
       if (typeof saved.workMonth === 'string' && /^\d{4}-\d{2}$/.test(saved.workMonth)) state.workMonth = saved.workMonth
-      for (const action of PRODUCT_USAGE_ACTIONS) {
+      for (const action of REACHES) {
         if (validDay(saved.featureDays?.[action] ?? '')) state.featureDays[action] = saved.featureDays![action]
         if (saved.featuresUsed?.includes(action)) state.featuresUsed.push(action)
       }
@@ -128,7 +134,7 @@ export function createProductUsage(deps: ProductUsageDeps) {
     for (const field of ['activeDay', 'workDay', 'workWeek', 'measurementDay'] as const) if (state[field] && !validDay(state[field]!)) state[field] = null
     for (const day of Object.keys(state.days)) if (!validDay(day)) delete state.days[day]
     for (const day of Object.keys(state.dayContexts)) if (!state.days[day]) delete state.dayContexts[day]
-    for (const action of PRODUCT_USAGE_ACTIONS) if (!validDay(state.featureDays[action] ?? '')) delete state.featureDays[action]
+    for (const action of REACHES) if (!validDay(state.featureDays[action] ?? '')) delete state.featureDays[action]
     state.workDays = state.workDays.filter(validDay)
     if (state.firstLaunchAt !== null && !validDay(key(state.firstLaunchAt))) state.firstLaunchAt = null
     if (state.pending && !validDay(state.pending.day)) state.pending = null

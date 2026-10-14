@@ -65,3 +65,16 @@ it('observes Store, search and model operations without their arguments and reje
   productUsageRequest('terminal_input', emit, clock)
   expect(clock).not.toHaveBeenCalled()
 })
+
+it('marks a Store or model list a person opened, and only those', () => {
+  const emit = vi.fn()
+  productUsageRequest('dsh_list', emit, Date.now, 'app', true)(undefined, undefined, false)
+  productUsageRequest('grid_models_list', emit, Date.now, 'app', true)(undefined, undefined, false)
+  expect(emit.mock.calls.flat()).toEqual(expect.arrayContaining(['store_list_user_requests', 'model_list_user_requests']))
+  emit.mockClear()
+  // The Store's minute refresh, the pickers and the previews send no flag; history has no person behind it.
+  productUsageRequest('dsh_list', emit)(undefined, undefined, false)
+  productUsageRequest('agent_recent', emit, Date.now, 'app', true)(undefined, undefined, false)
+  productUsageRequest('session_tail', emit, Date.now, 'app', true)(undefined, undefined, false)
+  expect(emit.mock.calls.flat().filter(m => String(m).includes('_user_'))).toEqual([])
+})

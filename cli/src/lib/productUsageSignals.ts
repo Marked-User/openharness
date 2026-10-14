@@ -1,5 +1,5 @@
 import type { HealthSource } from './productHealthContract.js'
-import type { ProductUsageMetric } from './productUsageContract.js'
+import { PRODUCT_USAGE_USER_OPENED_ACTIONS, type ProductUsageMetric } from './productUsageContract.js'
 
 const actions = { agent_create: 'create', agent_resume: 'resume', agent_restart: 'restart',
   agent_retarget: 'model_change', agent_recent: 'history',
@@ -55,8 +55,10 @@ export function productUsageLaunch(type: string, id: unknown, emit: (signal: Pro
  * No request, reply, error message, path, agent name or identifier is handed to the collector.
  * A pending durable launch is an acknowledgement, never a successful launch. Status polling is
  * excluded: counting each poll as a launch would turn a slow install into hundreds of attempts.
+ * [userAction] is the app saying a person opened the list (the Store, a model list); the same request
+ * from a refresh, a probe or a picker carries none, and only the flagged one counts toward reach.
  */
-export function productUsageRequest(type: string, emit: (metric: ProductUsageMetric) => void, now = Date.now, source?: HealthSource) {
+export function productUsageRequest(type: string, emit: (metric: ProductUsageMetric) => void, now = Date.now, source?: HealthSource, userAction = false) {
   const action = type === 'message' ? 'message' : Object.hasOwn(actions, type) ? actions[type as keyof typeof actions] : null
   // In particular, streaming frames and polling do not allocate clocks or observers.
   if (!action) return unmeasured
@@ -66,6 +68,7 @@ export function productUsageRequest(type: string, emit: (metric: ProductUsageMet
   const count = (measure: string) => { if (action && action !== 'message') { try { emit(`${action}_${measure}` as ProductUsageMetric) } catch { /* Optional measurement. */ } } }
   const detail = (measure: string) => { if (!source) return; try { emit(`request_${origin}_${action}_${measure}` as ProductUsageMetric) } catch { /* Optional measurement. */ } }
   count('requests'); detail('started')
+  if (userAction && (PRODUCT_USAGE_USER_OPENED_ACTIONS as readonly string[]).includes(action)) count('user_requests')
   return (error: unknown, state: unknown, hasAgent: boolean, ok?: unknown) => {
     if (!action || answered) return
     answered = true

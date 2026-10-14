@@ -4920,10 +4920,19 @@ class AppNotifier extends ChangeNotifier {
   /// Never throws — a machine whose daemon is too old to know the RPC, one with
   /// no grid, and one that timed out are all "nothing to offer", which is what
   /// the sheet shows.
-  Future<GridModels> gridModels(String machineId) async {
+  ///
+  /// [userAction] marks the read as a person opening a model sheet: the only
+  /// read the model list's reach counts (`model_list_user_*`).
+  Future<GridModels> gridModels(
+    String machineId, {
+    bool userAction = false,
+  }) async {
     try {
-      final response = await _conn(machineId)
-          .request('grid_models_list', timeout: const Duration(seconds: 12));
+      final response = await _conn(machineId).request(
+        'grid_models_list',
+        payload: userAction ? const {'userAction': true} : const {},
+        timeout: const Duration(seconds: 12),
+      );
       List<GridModel> parseModels(Object? raw, {String? grid}) =>
           (raw as List<dynamic>? ?? [])
               .whereType<Map<String, dynamic>>()

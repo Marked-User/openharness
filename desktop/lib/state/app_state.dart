@@ -1723,6 +1723,7 @@ class AppNotifier extends ChangeNotifier {
       if (harness != null) notifyListeners();
       return;
     }
+    _storeOpenedByPerson = true;
     final existing = swarms.where((swarm) => swarm.isStore).firstOrNull;
     if (existing != null) {
       selectSwarm(existing.id);
@@ -1750,6 +1751,17 @@ class AppNotifier extends ChangeNotifier {
   }
 
   String? _pendingStoreHarness;
+
+  /// A person opened the Store ([openStore]), not a tab restored at launch: the Store tab's first ask
+  /// takes it ([takeStoreOpened]) and marks its `dsh_list` as theirs, all the Store's reach counts
+  /// (`store_list_user_*`). Its minute refresh and reconnect asks carry no mark.
+  bool _storeOpenedByPerson = false;
+
+  bool takeStoreOpened() {
+    final opened = _storeOpenedByPerson;
+    _storeOpenedByPerson = false;
+    return opened;
+  }
 
   /// Devices is a regular workspace on the desktop app. A browser or a viewer
   /// build has no device on its desk to manage.
@@ -9207,8 +9219,21 @@ class AppNotifier extends ChangeNotifier {
   ///
   /// Never throws — a machine whose daemon is too old to know the RPC, one with no grid, and one
   /// that timed out are all "nothing to offer", which is what the picker shows.
-  Future<GridModels> gridModels(String machineId) =>
-      _askGridModels(machineId, const {'rowState': true});
+  Future<GridModels> gridModels(
+    String machineId, {
+    bool userAction = false,
+  }) => _askGridModels(machineId, {
+        'rowState': true,
+        if (userAction) 'userAction': true,
+      });
+
+  /// A person opened the Models panel: read this computer's model list marked as theirs, all that
+  /// the list's reach (`model_list_user_*`) counts. The panel's own refresh joins it in flight.
+  void markModelsOpened() {
+    if (localMachineState case final local?) {
+      unawaited(refreshGridModels(local.machine.machineId, userAction: true));
+    }
+  }
 
   /// One `grid_models_list` ask with [payload].
   ///
@@ -9315,12 +9340,18 @@ class AppNotifier extends ChangeNotifier {
   /// when a `grid_models_changed` push landed is returned to its caller but not adopted: the push is
   /// newer. An answer that is not one — the machine could not be asked — is returned but not adopted
   /// either: one surface's timed-out read must not blank the list every other surface is showing.
-  Future<GridModels> refreshGridModels(String machineId) {
+  ///
+  /// [userAction] marks the read as a person opening a model list ([markModelsOpened]); joined with
+  /// a read in flight, the mark is lost.
+  Future<GridModels> refreshGridModels(
+    String machineId, {
+    bool userAction = false,
+  }) {
     final inFlight = _gridReads[machineId];
     if (inFlight != null) return inFlight;
     final epoch = gridPictures.epochOf(machineId);
     late final Future<GridModels> read;
-    read = gridModels(machineId)
+    read = gridModels(machineId, userAction: userAction)
         .then((answer) {
           if (!_disposed && answer.reachable) {
             gridPictures.adopt(machineId, answer, ifEpoch: epoch);
@@ -9907,22 +9938,35 @@ class AppNotifier extends ChangeNotifier {
   /// [MachineDsh.inFlight] exactly like [probeEngines]. The Create dialog asks
   /// with [force] on every open, since an install it started itself is what
   /// most often makes the stored answer stale.
-  Future<void> probeDsh(String machineId, {bool force = false}) {
+  ///
+  /// [userAction] marks the ask as a person opening the Store, for its reach. One that joins an ask
+  /// already in flight loses the mark: the count is a lower bound.
+  Future<void> probeDsh(
+    String machineId, {
+    bool force = false,
+    bool userAction = false,
+  }) {
     final machine = machineStates[machineId];
     if (machine == null) return Future.value();
     final existing = machine.dsh.inFlight;
     if (existing != null) return existing;
     if (machine.dsh.loaded && !force) return Future.value();
-    final work = _probeDsh(machine);
+    final work = _probeDsh(machine, userAction: userAction);
     machine.dsh.inFlight = work;
     notifyListeners();
     return work;
   }
 
-  Future<void> _probeDsh(MachineState machine) async {
+  Future<void> _probeDsh(
+    MachineState machine, {
+    bool userAction = false,
+  }) async {
     try {
-      final result = await _conn(machine.machine.machineId)
-          .request('dsh_list', timeout: const Duration(seconds: 30));
+      final result = await _conn(machine.machine.machineId).request(
+        'dsh_list',
+        payload: userAction ? const {'userAction': true} : const {},
+        timeout: const Duration(seconds: 30),
+      );
       final raw = result['dsh'];
       if (raw is! List) throw const FormatException('dsh_list: no list');
       machine.dsh.replace(raw.map(DshEntry.fromJson).whereType<DshEntry>());

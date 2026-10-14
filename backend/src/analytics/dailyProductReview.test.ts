@@ -82,3 +82,15 @@ it('reports a read the apps make on their own as reliability only, even from cli
     installationDays: null, firstMeasuredInstallations: null, repeatInstallationDays: null })
   expect(r.features.find(f => f.action === 'search')).toMatchObject({ automatic: false, installationDays: 19 })
 })
+
+it('reads Store and model-list reach only from the requests a person opened', () => {
+  const r = dailyProductReview([
+    row('2026-10-12', 'store_list_requests', 1965), row('2026-10-12', 'store_list_installation_days', 22),
+    row('2026-10-12', 'store_list_user_requests', 9), row('2026-10-12', 'store_list_user_installation_days', 4),
+    row('2026-10-12', 'store_list_user_first_installations', 3), row('2026-10-12', 'store_list_user_repeat_installation_days', 1),
+  ], new Date('2026-10-13'))
+  expect(r.features.find(f => f.action === 'store_list')).toMatchObject({ requests: 1965, automatic: true, userRequests: 9,
+    installationDays: 4, firstMeasuredInstallations: 3, repeatInstallationDays: 1 })
+  expect(r.features.find(f => f.action === 'model_list')).toMatchObject({ userRequests: 0, installationDays: null })
+  expect(r.features.find(f => f.action === 'history')).toMatchObject({ userRequests: null, installationDays: null })
+})

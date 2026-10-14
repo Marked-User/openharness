@@ -1,4 +1,4 @@
-import { PRODUCT_FEEDBACK, PRODUCT_FEEDBACK_REASONS, PRODUCT_FEEDBACK_OUTCOMES, PRODUCT_USAGE_ACTIONS, PRODUCT_USAGE_AUTOMATIC_ACTIONS, PRODUCT_USAGE_FLOWS, PRODUCT_USAGE_SURFACES } from '../types/productUsage.js'
+import { PRODUCT_FEEDBACK, PRODUCT_FEEDBACK_REASONS, PRODUCT_FEEDBACK_OUTCOMES, PRODUCT_USAGE_ACTIONS, PRODUCT_USAGE_AUTOMATIC_ACTIONS, PRODUCT_USAGE_FLOWS, PRODUCT_USAGE_SURFACES, PRODUCT_USAGE_USER_OPENED_ACTIONS } from '../types/productUsage.js'
 import { DAILY_PRODUCT_METRICS } from './dailyProductUsage.js'
 
 type Row = { dayUtc: Date; metric: string; value: number }
@@ -125,14 +125,20 @@ export function dailyProductReview(rows: Row[], now: Date) {
       interpretation: 'Post-sign-in first-use signals; these stage counts are not one signup cohort or a signup conversion rate. Already installed clients enter measurement when updated.' },
     feedback: Object.fromEntries(PRODUCT_FEEDBACK.map(answer => [answer, c[`feedback_${answer}`] ?? 0])),
     features: PRODUCT_USAGE_ACTIONS.map(action => {
-      // The apps make these reads on their own; clients before the split still send their reach.
+      // The apps make these reads on their own; clients before the split still send their reach. The
+      // Store and model lists are also opened by people, and only those requests carry reach (`_user_`).
       const automatic = PRODUCT_USAGE_AUTOMATIC_ACTIONS.includes(action)
-      const reach = (measure: string) => automatic ? null : c[`${action}_${measure}`] ?? null
+      const opened = (PRODUCT_USAGE_USER_OPENED_ACTIONS as readonly string[]).includes(action)
+      const reach = (measure: string) => opened ? c[`${action}_user_${measure}`] ?? null
+        : automatic ? null : c[`${action}_${measure}`] ?? null
       return { action, automatic, requests: c[`${action}_requests`] ?? 0,
+        userRequests: opened ? c[`${action}_user_requests`] ?? 0 : null,
         installationDays: reach('installation_days'),
         firstMeasuredInstallations: reach('first_installations'),
         repeatInstallationDays: reach('repeat_installation_days'),
-        interpretation: automatic
+        interpretation: opened
+          ? 'Also requested by the apps on their own: requests are reliability only. userRequests and reach count only a person opening the list (apps that mark it); reach is installation-days, a lower bound.'
+          : automatic
           ? 'Requested by the apps on their own (after updates, on connect, for previews): reliability and latency only, not feature use.'
           : 'An operation was requested, possibly automatically. Reach is installation-days, not unique people, UI clicks or successful feature use.',
       }

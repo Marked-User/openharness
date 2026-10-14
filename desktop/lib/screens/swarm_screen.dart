@@ -5418,6 +5418,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     _onboarding.acknowledge(OnboardingStep.models);
     app.modelManager.setPanelVisible(true);
     unawaited(app.modelManager.dismissIntroduction());
+    app.markModelsOpened();
     unawaited(app.modelManager.refresh());
     unawaited(_modelsMenu!.refresh());
     _modelsOverlay = OverlayEntry(

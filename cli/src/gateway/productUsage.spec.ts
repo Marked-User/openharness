@@ -229,6 +229,20 @@ it('counts a read the apps make on their own for reliability only, never as a fe
     search_requests: 1, search_installation_days: 1, search_first_installations: 1 })
 })
 
+it('counts the Store or a model list as used only when a person opened it, once a day', async () => {
+  await usage.sync()
+  usage.counter('store_list_requests'); usage.counter('store_list_user_requests'); usage.counter('store_list_user_requests')
+  await usage.sync()
+  expect(totals()).toEqual({ measurement_v2_installation_days: 1, store_list_requests: 1, store_list_user_requests: 2,
+    store_list_user_installation_days: 1, store_list_user_first_installations: 1 })
+  now += 86400000; await usage.stop(); usage = createProductUsage({ file, now: () => now, request }); await usage.sync()
+  usage.counter('store_list_user_requests'); usage.counter('model_list_user_requests')
+  await usage.sync()
+  expect(totals()).toMatchObject({ store_list_user_installation_days: 2, store_list_user_repeat_installation_days: 1,
+    store_list_user_first_installations: 1, model_list_user_first_installations: 1 })
+  expect(totals()).not.toHaveProperty('store_list_installation_days')
+})
+
 it('tracks a durable launch through polls without persisting its receipt or counting polls as attempts', async () => {
   await usage.sync()
   const id = 'PRIVATE_CREATION_CANARY'
