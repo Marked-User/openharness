@@ -7,11 +7,13 @@ it('counts only explicit interactive intent and never serializes its identifiers
   health.start('0.3.96')
   health.work('PRIVATE_RAW_TERMINAL')
   health.intent('PRIVATE_TOOL', 'tool'); health.work('PRIVATE_TOOL')
+  health.intent('PRIVATE_MIXED', 'interactive'); health.intent('PRIVATE_MIXED', 'tool'); health.work('PRIVATE_MIXED')
   health.intent('PRIVATE_USER', 'interactive'); health.work('PRIVATE_USER')
   health.intent('PRIVATE_USER', 'interactive'); health.work('PRIVATE_USER')
   expect(add.mock.calls.filter(([k]) => k === 'health_cli_interactive_work_days')).toHaveLength(1)
   expect(add).toHaveBeenCalledWith('health_cli_unclassified_turns_started', undefined)
   expect(add).toHaveBeenCalledWith('health_cli_tool_turns_started', undefined)
+  expect(add.mock.calls.filter(([k]) => k === 'health_cli_unclassified_turns_started')).toHaveLength(2)
   for (const lag of [1, 7, 28]) {
     now = Date.parse('2026-10-01T12:00:00Z') + lag * 86400000
     health.intent('PRIVATE_USER', 'interactive'); health.work('PRIVATE_USER')

@@ -86,6 +86,16 @@ it('collects nothing before it can check the preference, and respects off', asyn
   expect(sent).toEqual([])
 })
 
+it('discards a permanently invalid packet so later reports and loss counts can recover', async () => {
+  await usage.sync(); usage.counter('search_requests')
+  request.mockImplementationOnce(async () => ({ status: 200, body: { data: { enabled: true, revision: 0 } } }))
+    .mockImplementationOnce(async () => ({ status: 400, body: {} }))
+  await usage.sync()
+  expect(JSON.parse(readFileSync(file, 'utf8')).pending).toBeNull()
+  await usage.sync()
+  expect(totals().health_cli_report_rejected).toBe(1)
+})
+
 it('reduces turns locally, excludes replay, and never persists or uploads agent identity', async () => {
   await usage.sync()
   usage.opened('desktop')

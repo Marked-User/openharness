@@ -66,6 +66,7 @@ class ProductMeasurement extends ChangeNotifier {
   final _expires = <Object, DateTime>{};
   final _expire = <Object, void Function(ProductOutcome)>{};
   int get choiceRevision => _revision;
+  int get observationGeneration => _accountEpoch;
   final ProductReportRequest sendSetup;
   final bool automatic;
   final DateTime Function() _now;
@@ -299,8 +300,10 @@ class ProductMeasurement extends ChangeNotifier {
       );
     }
 
-    _expires[ticket] = started.add(const Duration(minutes: 15));
-    _expire[ticket] = finish;
+    if (healthEnabled) {
+      _expires[ticket] = started.add(const Duration(minutes: 15));
+      _expire[ticket] = finish;
+    }
     return finish;
   }
 

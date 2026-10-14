@@ -62,7 +62,7 @@ export function productUsageRequest(type: string, emit: (metric: ProductUsageMet
   if (!action) return unmeasured
   const started = now()
   let answered = false
-  const origin = ['history', 'history_page', 'store_list', 'model_list'].includes(action) ? 'automatic' : source
+  const origin = source === 'app' && ['history', 'history_page', 'store_list', 'model_list'].includes(action) ? 'automatic' : source
   const count = (measure: string) => { if (action && action !== 'message') { try { emit(`${action}_${measure}` as ProductUsageMetric) } catch { /* Optional measurement. */ } } }
   const detail = (measure: string) => { if (!source) return; try { emit(`request_${origin}_${action}_${measure}` as ProductUsageMetric) } catch { /* Optional measurement. */ } }
   count('requests'); detail('started')

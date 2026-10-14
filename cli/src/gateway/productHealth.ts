@@ -26,7 +26,7 @@ export function createProductHealth(add: (metric: ProductUsageMetric, day?: stri
   initial: HealthState) {
   let state = initial
   let started = false, sampledAt = 0
-  const intents = new Map<string, { at: number; origin: 'interactive' | 'tool' }>()
+  const intents = new Map<string, { at: number; origin: 'interactive' | 'tool' | 'unclassified' }>()
   const count = (m: string, day?: string) => add(`health_cli_${m}` as ProductUsageMetric, day)
   return {
     snapshot: () => state = cleanHealthState(state, now()),
@@ -43,7 +43,8 @@ export function createProductHealth(add: (metric: ProductUsageMetric, day?: stri
     intent(id: string, origin: 'interactive' | 'tool') {
       for (const [key, intent] of intents) if (now() - intent.at > 120000) intents.delete(key)
       if (intents.size >= 1000) { count('observation_overflow'); return }
-      intents.set(id, { at: now(), origin })
+      const previous = intents.get(id)
+      intents.set(id, { at: now(), origin: previous && previous.origin !== origin ? 'unclassified' : origin })
     },
     work(id: string) {
       const intent = intents.get(id); intents.delete(id)

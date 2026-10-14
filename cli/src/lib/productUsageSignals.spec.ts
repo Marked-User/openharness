@@ -4,12 +4,14 @@ import { productUsageIntent, productUsageLaunch, productUsageRequest } from './p
 it('separates automated polling, tool and app RPCs without inspecting error objects or content', () => {
   const emit = vi.fn()
   productUsageRequest('models_list', emit, Date.now, 'app')(undefined, undefined, false)
+  productUsageRequest('models_list', emit, Date.now, 'tool')(undefined, undefined, false)
   productUsageRequest('agent_resume', emit, Date.now, 'tool')('AGENT_NOT_FOUND', 'failed', false)
   productUsageRequest('agent_close', emit, Date.now, 'app')(undefined, 'cancelled', false)
   const secret = { toString() { throw Error('PRIVATE') } }
   expect(() => productUsageRequest('agent_restart', emit, Date.now, 'unknown')(secret, 'failed', false)).not.toThrow()
   expect(emit.mock.calls.flat()).toEqual(expect.arrayContaining(['request_automatic_model_list_ok', 'request_tool_resume_error_not_found', 'request_app_close_cancelled', 'request_unknown_restart_error_other']))
   expect(JSON.stringify(emit.mock.calls)).not.toContain('PRIVATE')
+  expect(emit.mock.calls.flat()).toContain('request_tool_model_list_ok')
 })
 it('requires an explicit composer marker for interactive work; raw terminal input is unclassified', () => {
   const emit = vi.fn()

@@ -10,9 +10,11 @@ void main() {
   late ProductMeasurement usage;
   late List<Map<String, dynamic>> reports, setup;
   late DateTime now;
+  late Map<String, dynamic> choice;
   setUp(() {
     now = DateTime.utc(2026, 10, 14, 12);
     reports = [];
+    choice = {'enabled': true, 'revision': 0};
     setup = [];
     usage = ProductMeasurement(
       surface: 'desktop',
@@ -30,7 +32,7 @@ void main() {
     );
     usage.account(
       'PRIVATE_ACCOUNT',
-      choice: () async => {'enabled': true, 'revision': 0},
+      choice: () async => choice,
       send: (report) async {
         reports.add(jsonDecode(jsonEncode(report)));
         return {'accepted': true};
@@ -40,7 +42,11 @@ void main() {
   tearDown(() => usage.dispose());
   test('development builds do not send anonymous setup counts', () async {
     usage.account(null);
-    usage.context = ProductUsageContext(release: 'unknown', platform: 'macos', production: false);
+    usage.context = ProductUsageContext(
+      release: 'unknown',
+      platform: 'macos',
+      production: false,
+    );
     await usage.setSignedOutSharing(true);
     usage.begin(ProductFlow.setup)(ProductOutcome.ok);
     usage.milestone(ProductHealthMeasure.funnelSetupSeen);
@@ -55,6 +61,21 @@ void main() {
     }
     return all;
   }
+
+  test('connection observations restart cleanly after off/on with the same machine', () async {
+    await usage.flush();
+    final connections = ProductConnections(usage);
+    connections.status('PRIVATE_MACHINE', connecting: true, connected: false);
+    usage.savedChoice({'enabled': false, 'revision': 1});
+    choice = {'enabled': true, 'revision': 2};
+    usage.savedChoice(choice);
+    connections.status('PRIVATE_MACHINE', connecting: true, connected: false);
+    connections.status('PRIVATE_MACHINE', connecting: false, connected: true);
+    await usage.flush();
+    expect(totals()['ui_desktop_connect_auto_started'], 1);
+    expect(totals()['ui_desktop_connect_auto_ok'], 1);
+    connections.dispose();
+  });
 
   test('consented funnel is once per local episode, with coarse waits and no identity', () async {
     usage.milestone(ProductHealthMeasure.funnelFirstWork);

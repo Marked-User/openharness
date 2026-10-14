@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 import '../../shared/widgets/section_scaffold.dart';
 import '../../shared/widgets/setting_row.dart';
@@ -185,7 +186,7 @@ class _ProductUsagePreferenceState extends State<ProductUsagePreference> {
           ),
         ],
         if (_enabled == true && widget.feedback != null) ...[
-          TextButton(
+          if (!kIsWeb) TextButton(
             onPressed: () => showTaskFeedback(
               context,
               choice: widget.request,

@@ -89,19 +89,20 @@ class ProductRuntimeHealth {
   Future<void> _start(int epoch) async {
     try {
       final previous = readState != null ? await readState!() : await _read();
-      final version = await (readVersion?.call() ?? runningAppVersion());
+      final rawVersion = await (readVersion?.call() ?? runningAppVersion());
       if (!_active || _disposed || epoch != _epoch) return;
       final oldContext = measurement.context!;
       measurement.context = ProductUsageContext(
-        release: version,
+        release: rawVersion,
         platform: oldContext.platform,
         production: oldContext.production,
       );
+      final version = measurement.context!.release;
       final same =
           previous['scope'] == _scope && previous['revision'] == _revision;
       if (same && previous['pendingUpdate'] is String) {
         measurement.begin(ProductFlow.updateRelaunch)(
-          previous['pendingUpdate'] == version
+          version != 'unknown' && previous['pendingUpdate'] == version
               ? ProductOutcome.ok
               : ProductOutcome.unknown,
         );
@@ -111,7 +112,11 @@ class ProductRuntimeHealth {
       measurement.health(
         newInstallation
             ? ProductHealthMeasure.installNew
-            : same && previous['release'] != version
+            : same &&
+                  version != 'unknown' &&
+                  previous['release'] != null &&
+                  previous['release'] != 'unknown' &&
+                  previous['release'] != version
             ? ProductHealthMeasure.installUpgrade
             : ProductHealthMeasure.installUnknown,
       );

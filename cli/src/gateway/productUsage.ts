@@ -246,7 +246,11 @@ export function createProductUsage(deps: ProductUsageDeps) {
       if (answer.status === 200 && result?.accepted === true) { state.pending = null; await persist() }
       else if (result?.reason === 'CHOICE_CHANGED') { enabled = false; state = fresh(-1); running.clear(); launches.clear(); health.reset(); await persist() }
       else if (result?.reason === 'EXPIRED') { state.pending = null; add('health_cli_report_expired'); await persist() }
-      else { add('health_cli_report_rejected') }
+      else {
+        add('health_cli_report_rejected')
+        // A permanently invalid packet must not block every future report behind it.
+        if (answer.status === 400 || answer.status === 413) { state.pending = null; await persist() }
+      }
     } catch {
       if (enabled) add('health_cli_report_failed')
       enabled = false; running.clear(); launches.clear(); health.clearObservations() /* No error text or request body in logs. */
@@ -272,7 +276,7 @@ export function createProductUsage(deps: ProductUsageDeps) {
     launch(signal: ProductUsageLaunchSignal): void {
       if (!enabled || stopped || !signal || typeof signal.id !== 'string') return
       if (signal.phase === 'work_requested') {
-        if (signal.id.length > 0 && signal.id.length <= 256 && (signal.origin === 'interactive' || signal.origin === 'tool')) health.intent(signal.id, signal.origin)
+        if (!running.has(signal.id) && signal.id.length > 0 && signal.id.length <= 256 && (signal.origin === 'interactive' || signal.origin === 'tool')) health.intent(signal.id, signal.origin)
         return
       }
       if (!/^[a-zA-Z0-9_-]{16,96}$/.test(signal.id)) return

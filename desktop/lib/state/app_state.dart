@@ -658,6 +658,7 @@ class AppNotifier extends ChangeNotifier {
   late final ProductConnections productConnections;
   final _measurementResumes = <String, void Function(ProductOutcome)>{};
   void Function(bool)? _measurementError;
+  int _measurementGeneration = -1;
   final _measurementConnections = <String, void Function(ProductOutcome)>{};
 
   /// Signs in, and says whether this computer is signed in: the harness CLI in a desktop build,
@@ -3283,6 +3284,7 @@ class AppNotifier extends ChangeNotifier {
               sendSetupMeasurement(this.config.apiBaseUrl, report),
         );
     productConnections = ProductConnections(this.productMeasurement);
+    this.productMeasurement.addListener(_measurementChoiceChanged);
     if (!kUnderTest && this.productMeasurement.healthEnabled) {
       productRuntimeHealth = ProductRuntimeHealth(this.productMeasurement);
       _measurementError = (framework) => this.productMeasurement.health(
@@ -3319,8 +3321,11 @@ class AppNotifier extends ChangeNotifier {
     final context = productMeasurement.context;
     final production = kReleaseMode && _autonomousEnv == 'prod';
     if (context != null && context.production != production) {
-      productMeasurement.context = ProductUsageContext(release: context.release,
-        platform: context.platform, production: production);
+      productMeasurement.context = ProductUsageContext(
+        release: context.release,
+        platform: context.platform,
+        production: production,
+      );
     }
     final scope =
         signedIn &&
@@ -3335,7 +3340,9 @@ class AppNotifier extends ChangeNotifier {
       choice: () => api.productUsageSettings(),
       send: api.productUsageReport,
     );
-    productRuntimeHealth?.account(scope == null ? null : currentUser!.id);
+    productRuntimeHealth?.account(
+      scope == null ? null : '$_autonomousEnv:${currentUser!.id}',
+    );
     if (scope == null) {
       _measurementConnections.clear();
       productConnections.clear();
@@ -3349,6 +3356,15 @@ class AppNotifier extends ChangeNotifier {
     if (status == AppStatus.unauthenticated) {
       productMeasurement.milestone(ProductHealthMeasure.funnelSignInSeen);
     }
+  }
+
+  void _measurementChoiceChanged() {
+    if (!productMeasurement.sharing ||
+        _measurementGeneration != productMeasurement.observationGeneration) {
+      _measurementConnections.clear();
+      _measurementResumes.clear();
+    }
+    _measurementGeneration = productMeasurement.observationGeneration;
   }
 
   // Connection keys already belong to the app. Only fixed outcomes reach measurement, never the key.
@@ -6591,8 +6607,14 @@ class AppNotifier extends ChangeNotifier {
   void _onLocalFailure(String machineId, int code, String reason) {
     final machine = machineStates[machineId];
     if (machine == null) return;
-    productConnections.refused(machineId, code == 4404 ? ProductHealthMeasure.connectErrorUnlinked
-      : code == 4401 || code == 4403 ? ProductHealthMeasure.connectErrorAuth : ProductHealthMeasure.connectErrorOther);
+    productConnections.refused(
+      machineId,
+      code == 4404
+          ? ProductHealthMeasure.connectErrorUnlinked
+          : code == 4401 || code == 4403
+          ? ProductHealthMeasure.connectErrorAuth
+          : ProductHealthMeasure.connectErrorOther,
+    );
     if (code == 4403) {
       if (machine.isLocalMachine) {
         unawaited(_onLocalMachineMismatch(machine, reason));
@@ -7580,7 +7602,8 @@ class AppNotifier extends ChangeNotifier {
       settle();
       final connected = await done.future;
       if (!connected) {
-        productConnections.refused(machineId,
+        productConnections.refused(
+          machineId,
           machineStates[machineId]?.needsLink == true
               ? ProductHealthMeasure.connectErrorUnlinked
               : ProductHealthMeasure.connectErrorTimeout,
@@ -13411,10 +13434,16 @@ class AppNotifier extends ChangeNotifier {
         productMeasurement.sharing) {
       if (_measurementResumes.length >= 64) {
         productMeasurement.health(ProductHealthMeasure.observationOverflow);
-        _measurementResumes.remove(_measurementResumes.keys.first)?.call(ProductOutcome.unknown);
+        _measurementResumes
+            .remove(_measurementResumes.keys.first)
+            ?.call(ProductOutcome.unknown);
       }
-      _measurementResumes.remove(measurementKey)?.call(ProductOutcome.cancelled);
-      _measurementResumes[measurementKey] = productMeasurement.begin(ProductFlow.resumeRecovery);
+      _measurementResumes
+          .remove(measurementKey)
+          ?.call(ProductOutcome.cancelled);
+      _measurementResumes[measurementKey] = productMeasurement.begin(
+        ProductFlow.resumeRecovery,
+      );
     }
     final unknown = RestartAgentResult(
       error: resuming
@@ -18210,8 +18239,9 @@ class AppNotifier extends ChangeNotifier {
       CrashLog.healthError = null;
     }
     productRuntimeHealth?.dispose();
-    productConnections.clear();
+    productConnections.dispose();
     _measurementResumes.clear();
+    productMeasurement.removeListener(_measurementChoiceChanged);
     productMeasurement.dispose();
     _measurementConnections.clear();
     if (cliLogin case final CliLogin cli) {
