@@ -1,5 +1,5 @@
-// Console Tab (pro-console-tab-cards.html, B): the selected tab's agents as cards, four a page (the Overview grid), in the window's
-// own pane order. Each card takes its agent's state: green while it works, amber when it asks, a red edge when it failed. Head line:
+// Console Tab and Recent (pro-console-tab-cards.html, B): the selected tab's agents as cards, four a page (the Overview grid), in
+// the window's own pane order; Recent's agents the same way, newest first. Each card takes its agent's state: green while it works, amber when it asks, a red edge when it failed. Head line:
 // the agent's name left, its time right ("ask" while it asks); then its pet, logo or ">_"; at the foot the state in a word (the
 // working bars before "Working"). Tap opens the agent. The TAB frame's scroll is the page; the glue pages on a vertical swipe and
 // steps tabs on a sideways one. More than one page: dots down the right edge.
@@ -65,17 +65,18 @@ void cs_view_tab(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, uint3
 {
     ht_scene_t *s = f->scene;
     const pod_frame_t *top = &nav->stack[nav->depth - 1];
-    const pod_tab_t *t = &m->tabs[top->tab];
+    const bool recent = top->tab == POD_TAB_RECENT;
+    if (!recent && (top->tab < 0 || top->tab >= m->tab_count)) return;
 
     int running, asking;
     cs_counts(m, &running, &asking);
-    const char *const crumbs[] = {"Overview", t->name};
+    const char *const crumbs[] = {"Overview", recent ? "Recent" : m->tabs[top->tab].name};
     cs_bar(f, crumbs, 2, running, asking, cs_unread(m), NULL, now_ms);
 
     const pod_agent_t *page[CS_PER_PAGE];
     int k = cs_tab_page(nav, m, page), pages = cs_tab_pages(nav, m);
     if (k <= 0) {
-        const char *msg = "No panes in this tab";
+        const char *msg = recent ? "No recent agents" : "No panes in this tab";
         int w = ht_pro_width(&cs_rg_24, msg);
         cs_text(s, (POD_W - w) / 2, POD_W / 2, w + 2, &cs_rg_24, CS_MUTED, msg);
         return;

@@ -989,8 +989,8 @@ static void wake_rates(void) {
         uint32_t n = wakes_in(2000, 10000, &mn);
         CHECK(n > 10 && n <= 10000 / 66 + 1 && mn >= 1);
     }
-    for (int k = 0; k < 4; k++) {   // nobody works or asks: Overview's and a Tab's cards still play their pets' rest scenes (never
-                                    // faster than 66 ms); Recent and the Inbox, with no pet, wake once a second
+    for (int k = 0; k < 4; k++) {   // nobody works or asks: the cards of Overview, a Tab and Recent still play their pets' rest
+                                    // scenes (never faster than 66 ms); the Inbox, with no pet, wakes once a second
         fresh(POD_SKIN_CONSOLE);
         calm();
         pod_model_question_close(&U.model, "a4");
@@ -1000,7 +1000,7 @@ static void wake_rates(void) {
         else if (k == 3) act(POD_A_INBOX, 0);
         render(1000);
         uint32_t n = wakes_in(2000, 10000, &mn);
-        if (k < 2) CHECK(pod_ui_pet_on_screen(&U) && n > 10 && n <= 10000 / 66 + 1);
+        if (k < 3) CHECK(pod_ui_pet_on_screen(&U) && n > 10 && n <= 10000 / 66 + 1);
         else CHECK(n == 10 && mn == 1000);
     }
     // an Overview with a Playing ribbon in Classic still polls at 300 ms; Console does not (its bar mark is the only motion)
@@ -1107,7 +1107,7 @@ static void tab_cards_page(void) {
     render(3600);
     swipe(360, 300, 360, 520, 3600);
     CHECK(top()->scroll == 0);
-    // Recent keeps its row scroll, and its sixth row (y 596..700) starts a scroll rather than going back
+    // Recent pages its cards like a tab: two pages of four for eight agents; a swipe up from the lower row (y 660) pages, not back
     fresh(POD_SKIN_CONSOLE);
     pod_model_agents_begin(&U.model);
     static const char *const r8[] = {"r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8"};
@@ -1116,10 +1116,15 @@ static void tab_cards_page(void) {
     for (int i = 0; i < 8; i++) pod_model_turn(&U.model, r8[i], "activity", "Editing", 10, 900u + (uint32_t)i);
     act(POD_A_OPEN_TAB, POD_TAB_RECENT);
     render(1000);
-    CHECK(top()->tab == POD_TAB_RECENT && top()->scroll == 0 && pod_scroll_max(&U.nav, &U.model) == 2);
+    CHECK(top()->tab == POD_TAB_RECENT && top()->scroll == 0 && pod_scroll_max(&U.nav, &U.model) == 1);
     depth = U.nav.depth;
-    t_(true, 360, 660, 1000); t_(true, 360, 560, 1050); t_(true, 360, 450, 1100); t_(false, 360, 450, 1150);
-    CHECK(U.nav.depth == depth && top()->scroll > 0);
+    swipe(360, 660, 360, 450, 1000);
+    CHECK(U.nav.depth == depth && top()->scroll == 1 && top()->tab == POD_TAB_RECENT);
+    swipe(360, 300, 360, 520, 1200);
+    CHECK(top()->scroll == 0);
+    render(1400);
+    const pod_hit_t *c0 = find(POD_A_OPEN_AGENT);   // a tap on a card opens its agent
+    CHECK(c0 && tap_(c0->x + c0->w / 2, c0->y + c0->h / 2, 1500).fx == POD_FX_AGENT_OPEN);
 }
 
 // ---- Classic index (Task 4) ----------------------------------------------------------------------------------

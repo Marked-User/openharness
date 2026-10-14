@@ -49,7 +49,6 @@ idf_component_register(
         "pod/console/cs_ota.c"
         "pod/console/cs_overview.c"
         "pod/console/cs_recap.c"
-        "pod/console/cs_recent.c"
         "pod/console/cs_tab.c"
         "pod/console/cs_talk.c"
         "pod/console/cs_toast.c"

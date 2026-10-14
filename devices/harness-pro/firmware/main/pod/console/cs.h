@@ -45,14 +45,8 @@ int cs_runs(const pod_out_frame_t *);
 // pct % of colour a over colour b, per channel (0xRRGGBB).
 unsigned cs_mix(unsigned a, unsigned b, unsigned pct);
 
-// ---- Overview and Recent (cs_overview.c, cs_recent.c) -------------------------------------------------------------
-// Recent's row list: up to CS_ROWS_MAX rows of CS_ROW_H px from `first`, right under the bar.
-// Each row: the 44 px logo, the working mark (WORKING) or a dot, the name, the tab's name when tab_col, the time (or "ask") right
-// aligned, and the agent's line. Its hit is POD_A_OPEN_AGENT with the agent's index in `list` and its id. Returns the rows drawn.
-enum { CS_ROW_H = 104, CS_ROWS_MAX = 6, CS_ROWS_TOP = CS_BAR_H + 4, CS_PER_PAGE = 4 };
-int cs_rows(pod_out_frame_t *, const pod_model_t *, const pod_agent_t *const list[], int n, int first, bool tab_col, uint32_t now_ms);
-// The scroll limit of a TAB frame: Recent's agents less the rows that show; a tab's last card page.
-int cs_rows_max(const pod_nav_t *, const pod_model_t *);
+// ---- Overview, Tab and Recent (cs_overview.c, cs_tab.c) -------------------------------------------------------------
+enum { CS_PER_PAGE = 4 };   // cards a page, on Overview and on a tab (Recent too)
 void cs_view_overview(pod_out_frame_t *, const pod_nav_t *, pod_model_t *, uint32_t now_ms);
 // Overview cards. cs_card_lead: the agent that speaks for cover c (0 = Recent, else tab c - 1), among its first CS_CARD_AGENTS:
 // the first working, else asking, failed, done, idle; NULL with none. cs_card_scene: the pet scene a card plays for it (WORK, ASK,
@@ -73,9 +67,9 @@ pod_scene_t cs_card_scene(const pod_model_t *, const pod_agent_t *);
 // to the next step of any of them (never sooner than POD_CS_ANIM_MS's beat). False / 1000 on other screens.
 bool cs_cards_move(const pod_nav_t *, const pod_model_t *);
 uint32_t cs_cards_next_ms(const pod_nav_t *, const pod_model_t *, uint32_t now_ms);
-void cs_view_recent(pod_out_frame_t *, const pod_nav_t *, pod_model_t *, uint32_t now_ms);
-// The selected tab: its agents as cards (pro-console-tab-cards.html, B), four a page in the window's own pane order, each tinted by
-// its agent's state. The TAB frame's scroll is the page; a vertical swipe pages (the glue), sideways steps tabs.
+// The selected tab, or Recent: its agents as cards (pro-console-tab-cards.html, B), four a page (a tab in the window's own pane
+// order, Recent newest first), each tinted by its agent's state. The TAB frame's scroll is the page; a vertical swipe pages (the
+// glue), sideways steps tabs.
 void cs_view_tab(pod_out_frame_t *, const pod_nav_t *, pod_model_t *, uint32_t now_ms);
 // The tab's agents on the page the TAB frame shows (at most CS_PER_PAGE), and the number of pages (at least 1).
 int cs_tab_page(const pod_nav_t *, const pod_model_t *, const pod_agent_t *out[CS_PER_PAGE]);

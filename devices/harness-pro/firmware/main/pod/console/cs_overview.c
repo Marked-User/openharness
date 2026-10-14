@@ -130,7 +130,7 @@ static int on_screen(const pod_nav_t *nav, const pod_model_t *m, const pod_agent
 {
     const pod_frame_t *f = nav->depth ? &nav->stack[nav->depth - 1] : NULL;
     if (!f || nav->skin != POD_SKIN_CONSOLE) return 0;
-    if (f->view == POD_V_TAB && f->tab != POD_TAB_RECENT) return cs_tab_page(nav, m, out);
+    if (f->view == POD_V_TAB) return cs_tab_page(nav, m, out);
     if (f->view != POD_V_TABS) return 0;
     int first, n = page_span(nav, m, &first), k = 0;
     for (int i = 0; i < n; i++) {
