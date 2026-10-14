@@ -108,8 +108,52 @@ export async function deleteLegacyProductUsage(userId: string): Promise<void> {
   ])
 }
 
-/** Run only in the singleton worker. Expiry is enforced by Mongo, including during application downtime. */
+async function ensureProductUsageTotalKey(): Promise<void> {
+  // The API can receive relay counts before the singleton's general schema push. That push may
+  // also decline unrelated changes. Install this correctness boundary explicitly; do not rely on it.
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      await prisma.$runCommandRaw({ createIndexes: 'product_usage_totals', indexes: [{
+        key: { dayUtc: 1, metric: 1 }, name: 'product_usage_totals_dayUtc_metric_key', unique: true,
+      }] })
+      return
+    } catch (error) {
+      const failure = error as { meta?: { code?: string | number; message?: string } }
+      if (String(failure.meta?.code) !== '11000' && !failure.meta?.message?.includes('E11000')) throw error
+    }
+    // Repair only duplicate aggregate keys, never account data. A transaction preserves increments
+    // from concurrent writers: a changed/deleted row conflicts and retries instead of losing counts.
+    // Bound each pass; a large backlog fails worker startup and resumes safely on its next start.
+    try {
+      await prisma.$transaction(async tx => {
+        const [group] = await tx.productUsageTotal.groupBy({
+          by: ['dayUtc', 'metric'], having: { id: { _count: { gt: 1 } } },
+          orderBy: [{ dayUtc: 'asc' }, { metric: 'asc' }], take: 1,
+        })
+        if (!group) return
+        const rows = await tx.productUsageTotal.findMany({
+          where: { dayUtc: group.dayUtc, metric: group.metric },
+          select: { id: true, value: true }, orderBy: { id: 'asc' }, take: 128,
+        })
+        if (rows.length < 2) return
+        const [keeper, ...duplicates] = rows
+        await tx.productUsageTotal.update({ where: { id: keeper.id },
+          data: { value: { increment: duplicates.reduce((sum, row) => sum + row.value, 0) } } })
+        await tx.productUsageTotal.deleteMany({ where: { id: { in: duplicates.map(row => row.id) } } })
+      })
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'P2034') throw error
+    }
+  }
+  throw new Error('Product usage aggregate key is not ready')
+}
+
+/** Run only in the singleton worker. Required keys and expiry must survive a declined schema push. */
 export async function ensureProductUsageExpiry(): Promise<void> {
+  await prisma.$runCommandRaw({ createIndexes: 'product_usage_preferences', indexes: [{
+    key: { userId: 1 }, name: 'product_usage_preferences_userId_key', unique: true,
+  }] })
+  await ensureProductUsageTotalKey()
   for (const [collection, field, seconds] of [
     ['product_usage_receipts', 'expiresAt', 0],
     ['product_usage_totals', 'dayUtc', 396 * DAY / 1000],
