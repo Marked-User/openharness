@@ -177,6 +177,26 @@ static void pod_model_test_no_agent_ids(void) {
     CHECK(!M.tabs[0].members_known && !M.tabs[1].members_known && M.selected == 1);
 }
 
+// A tab with only shells or viewers (agents 0) is left out of the list; the window's tab among them marks none current.
+static void pod_model_test_hides_agentless_tabs(void) {
+    fresh();
+    cable_swarm_t it[4] = {{"s1", "Shell", 0, 1}, {"s2", "Build", 2, 2}, {"s3", "Empty", 0, 0}, {"s4", "Solo", 1, 1}};
+    const char *const *ids[4] = {NULL, ids_a, NULL, ids_c};
+    uint8_t cnt[4] = {0, 2, 0, 1};
+    pod_model_swarms(&M, it, ids, cnt, 4, "s4", NULL, 0);
+    CHECK(M.tab_count == 2 && !strcmp(M.tabs[0].id, "s2") && !strcmp(M.tabs[1].id, "s4"));
+    CHECK(M.selected == 1 && M.tabs[0].agent[0] == 0);
+    pod_model_swarms(&M, it, ids, cnt, 4, "s1", NULL, 0);
+    CHECK(M.tab_count == 2 && M.selected == 2);
+    // the window's tab with an agent tile is kept even when the daemon's count says 0
+    cable_tile_t tiles[2] = {{0, 0, 500, 1000, ""}, {500, 0, 1000, 1000, "a2"}};
+    pod_model_swarms(&M, it, ids, cnt, 4, "s1", tiles, 2);
+    CHECK(M.tab_count == 3 && M.selected == 0 && !strcmp(M.tabs[0].id, "s1") && M.tabs[0].has_rects);
+    // no tab with an agent: an empty list
+    pod_model_swarms(&M, it, ids, cnt, 1, "s1", NULL, 0);
+    CHECK(M.tab_count == 0 && M.selected == 0);
+}
+
 static void pod_model_test_shared_agent(void) {
     fresh();
     cable_swarm_t it[2] = {{"s1", "One", 2, 2}, {"s2", "Two", 2, 2}};
@@ -1023,6 +1043,7 @@ int main(void) {
     pod_model_test_library_vs_turn_order();
     pod_model_test_tabs_with_ids();
     pod_model_test_no_agent_ids();
+    pod_model_test_hides_agentless_tabs();
     pod_model_test_shared_agent();
     pod_model_test_recap_lines();
     pod_model_test_recap_cut();

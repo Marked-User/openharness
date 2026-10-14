@@ -604,7 +604,7 @@ static void many_tabs(void) {
     setup();
     static cable_swarm_t sw[8];
     memset(sw, 0, sizeof sw);
-    for (int i = 0; i < 8; i++) { snprintf(sw[i].id, sizeof sw[i].id, "t%d", i); snprintf(sw[i].name, sizeof sw[i].name, "Tab %d", i); sw[i].panes = 1; }
+    for (int i = 0; i < 8; i++) { snprintf(sw[i].id, sizeof sw[i].id, "t%d", i); snprintf(sw[i].name, sizeof sw[i].name, "Tab %d", i); sw[i].panes = 1; sw[i].agents = 1; }
     pod_ui_swarms(&U, sw, 8, NULL, "t0", NULL, 0);
     render();
 }
@@ -867,8 +867,8 @@ static void tap_cover_opens_tab(void) {
     // A tab inserted before it, by the feed: the tap resolves its id, not the index drawn.
     static cable_swarm_t more[9];
     memset(more, 0, sizeof more);
-    snprintf(more[0].id, sizeof more[0].id, "new"); snprintf(more[0].name, sizeof more[0].name, "Newest"); more[0].panes = 1;
-    for (int i = 0; i < 8; i++) { snprintf(more[i + 1].id, sizeof more[i + 1].id, "t%d", i); snprintf(more[i + 1].name, sizeof more[i + 1].name, "Tab %d", i); more[i + 1].panes = 1; }
+    snprintf(more[0].id, sizeof more[0].id, "new"); snprintf(more[0].name, sizeof more[0].name, "Newest"); more[0].panes = 1; more[0].agents = 1;
+    for (int i = 0; i < 8; i++) { snprintf(more[i + 1].id, sizeof more[i + 1].id, "t%d", i); snprintf(more[i + 1].name, sizeof more[i + 1].name, "Tab %d", i); more[i + 1].panes = 1; more[i + 1].agents = 1; }
     h = hit(POD_A_OPEN_TAB, 6);
     int cx = h->x + h->w / 2, cy = h->y + h->h / 2;
     ucontact(true, cx, cy, &c);

@@ -361,7 +361,7 @@ static void nav_test_tab_identity(void) {
     static const char *x[] = {"a1", "a2", "a3"}, *y[] = {"a4"};
     const char *const *ids[3] = {NULL, x, y};
     uint8_t cnt[3] = {0, 3, 1};
-    cable_swarm_t it[3] = {{"s0", "Inbox", 0, 0}, {"s1", "Build", 3, 3}, {"s2", "Docs", 1, 1}};
+    cable_swarm_t it[3] = {{"s0", "Inbox", 1, 1}, {"s1", "Build", 3, 3}, {"s2", "Docs", 1, 1}};
     pod_model_swarms(&M, it, ids, cnt, 3, "s1", NULL, 0);
     CHECK(pod_nav_sync(&N, &M).fx == POD_FX_NONE);
     CHECK(N.depth == 3 && N.stack[1].tab == 2 && top()->tab == 2);

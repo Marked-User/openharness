@@ -204,23 +204,16 @@ static void card(pod_out_frame_t *f, const pod_model_t *m, int c, int x, int y, 
     unsigned fill = cs_mix(hue, CARD_BASE, 15), border = sel ? CS_FOCUS : asks ? CS_ASK : cs_mix(hue, CARD_BASE, 75);
     ht_pro_rect_aa_stroke(s, x, y, CARD_W, CARD_H, 18, C(border), C(fill));
 
-    // head line: the tab's name on the left; on the right the count chip (a 2 x 2 pane glyph and N, in the hue), or "empty"
+    // head line: the tab's name on the left; on the right the count chip (a 2 x 2 pane glyph and N, in the hue)
     const int left = x + PAD, right = x + CARD_W - PAD, hy = y + NAME_Y;
-    int cw;
-    if (c > 0 && pod_tab_panes(&m->tabs[c - 1]) == 0) {
-        cw = ht_pro_width(&cs_rg_22, "empty");
-        cs_text(s, right - cw, hy, cw + 2, &cs_rg_22, CS_MUTED, "empty");
-    } else {
-        char k[8];
-        snprintf(k, sizeof k, "%d", count);
-        int kw = ht_pro_width(&cs_mono_24, k), cx0;
-        cw = 10 + GLYPH + 8 + kw + 10;
-        cx0 = right - cw;
-        ht_pro_rect_aa(s, cx0, hy - 17, cw, 34, 10, C(cs_mix(hue, CARD_BASE, 50)));
-        for (int i = 0; i < 4; i++)   // the pane glyph: four 8 px squares, 4 px apart
-            ht_pro_rect(s, cx0 + 10 + (i % 2) * 12, hy - GLYPH / 2 + (i / 2) * 12, 8, 8, 2, C(hue));
-        cs_text(s, cx0 + 10 + GLYPH + 8, hy, kw + 2, &cs_mono_24, CS_INK, k);
-    }
+    char k[8];
+    snprintf(k, sizeof k, "%d", count);
+    int kw = ht_pro_width(&cs_mono_24, k);
+    const int cw = 10 + GLYPH + 8 + kw + 10, cx0 = right - cw;
+    ht_pro_rect_aa(s, cx0, hy - 17, cw, 34, 10, C(cs_mix(hue, CARD_BASE, 50)));
+    for (int i = 0; i < 4; i++)   // the pane glyph: four 8 px squares, 4 px apart
+        ht_pro_rect(s, cx0 + 10 + (i % 2) * 12, hy - GLYPH / 2 + (i / 2) * 12, 8, 8, 2, C(hue));
+    cs_text(s, cx0 + 10 + GLYPH + 8, hy, kw + 2, &cs_mono_24, CS_INK, k);
     cs_text(s, left, hy, right - cw - 12 - left, &cs_md_28, CS_INK, c == 0 ? "Recent" : m->tabs[c - 1].name);
     if (!lead) { pod_hit_add_id(f, x, y, CARD_W, CARD_H, POD_A_OPEN_TAB, c ? c - 1 : POD_TAB_RECENT, c ? m->tabs[c - 1].id : ""); return; }
 

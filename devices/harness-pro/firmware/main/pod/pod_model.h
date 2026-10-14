@@ -99,7 +99,7 @@ typedef struct {
     pod_agent_t agents[POD_AGENTS_MAX];
     uint8_t agent_count;
     pod_tab_t tabs[POD_TABS_MAX];
-    uint8_t tab_count, selected;
+    uint8_t tab_count, selected;         // tabs holding no agent are left out; selected == tab_count: the window's tab is one of those
     bool linked;
     uint32_t revision;                   // bumped by every feed that changes something
     uint32_t clock_ms;                   // the newest now_ms seen (pod_model_clock); the stale rule reads it

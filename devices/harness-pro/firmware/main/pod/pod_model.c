@@ -369,19 +369,26 @@ void pod_model_swarms_meta(pod_model_t *m, const cable_swarm_t *items, const cha
     if (tile_count < 0 || !tiles) tile_count = 0;
     if (tile_count > POD_PANES_MAX) tile_count = POD_PANES_MAX;
 
-    int sel = 0;
+    int sel = -1;
     for (int i = 0; i < n; i++)
         if (same(items[i].id, selected)) { sel = i; break; }
+    if (sel < 0) sel = 0;
 
+    // A tab with no agent (only shells or viewers, or nothing at all) is not shown: nothing on the Pod can drive it.
+    int out = 0, nsel_out = -1;
     for (int i = 0; i < n; i++) {
-        pod_tab_t *t = &nt[i];
+        int ids = (agent_ids && agent_id_counts && agent_ids[i]) ? agent_id_counts[i] : 0;
+        bool has_agent = items[i].agents > 0 || ids > 0;
+        if (i == sel) for (int k = 0; k < tile_count && !has_agent; k++) if (tiles[k].agent_id[0]) has_agent = true;
+        if (!has_agent) continue;
+        if (i == sel) nsel_out = out;
+        pod_tab_t *t = &nt[out++];
         copy_str(t->id, sizeof t->id, items[i].id);
         copy_str(t->name, sizeof t->name, items[i].name);
         int panes = items[i].panes < 0 ? 0 : items[i].panes > 255 ? 255 : items[i].panes;
         t->panes = (uint8_t)panes;
         for (int k = 0; k < POD_PANES_MAX; k++) t->agent[k] = -1;
 
-        int ids = (agent_ids && agent_id_counts && agent_ids[i]) ? agent_id_counts[i] : 0;
         if (ids > 0) {
             if (ids > POD_PANES_MAX) ids = POD_PANES_MAX;
             t->members_known = true;
@@ -418,10 +425,11 @@ void pod_model_swarms_meta(pod_model_t *m, const cable_swarm_t *items, const cha
         }
     }
 
-    uint8_t nsel = (uint8_t)sel;
-    if (n != m->tab_count || nsel != m->selected || memcmp(nt, m->tabs, sizeof nt)) {
+    // The window's tab hidden here: selected points past the list, so no tab is marked current.
+    uint8_t nsel = (uint8_t)(nsel_out >= 0 ? nsel_out : out);
+    if (out != m->tab_count || nsel != m->selected || memcmp(nt, m->tabs, sizeof nt)) {
         memcpy(m->tabs, nt, sizeof nt);
-        m->tab_count = (uint8_t)n;
+        m->tab_count = (uint8_t)out;
         m->selected = nsel;
         m->revision++;
     }

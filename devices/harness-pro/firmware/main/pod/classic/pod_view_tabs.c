@@ -1,8 +1,8 @@
 // The Tabs screen (Classic Index): a 3 x 2 grid of 164 px covers between the bar and the footer. Each cover wears its
 // tab's panes as pale minis (one pane fills it, two or more split into two columns, a mark in each, a dot on a working or
-// asking one); the first cover is Recent (up to 8 minis, 4 x 2); an empty tab is grey with a grid icon. A cover whose
+// asking one); the first cover is Recent (up to 8 minis, 4 x 2); a tab holding no agent has no cover. A cover whose
 // agents are working wears a ribbon at its foot (eq, "Working", the count). The window's selected tab is ringed in blue
-// with its name blue. Under each cover: the name, then "7 agents" / "2 panes" / "Empty".
+// with its name blue. Under each cover: the name, then "7 agents" / "2 panes".
 // Two rows of covers a page; more than six covers page (the frame's scroll is the first row of the page, so always even).
 // While the finger drags, or the page settles after the release, the glue gives the pixel offset (f->tabs_off) and the grid
 // is drawn where it is, the bar and the footer drawn last over whatever has scrolled under them.
@@ -62,7 +62,6 @@ static unsigned mix(unsigned a, unsigned b, int pct)   // a toward b, in percent
 static unsigned cover_top(int c) { return c > 0 ? palette[(c - 1) % PALETTE_N][0] : 0x5d8dda; }
 static unsigned cover_bottom(int c) { return c > 0 ? palette[(c - 1) % PALETTE_N][1] : 0x2859aa; }
 static unsigned cover_at(int c, int pct) { return mix(cover_top(c), cover_bottom(c), pct); }
-static bool cover_empty(const pod_model_t *m, int c) { return c > 0 && pod_tab_panes(&m->tabs[c - 1]) == 0; }
 static int chosen_cover(const pod_model_t *m)   // the window's selected tab, or -1
 {
     return m->tab_count && m->selected < m->tab_count ? m->selected + 1 : -1;
@@ -93,8 +92,7 @@ static void caption(const pod_model_t *m, int c, caption_t *cap)
         int n = pod_tab_panes(t);
         pod_tab_counts(m, t, &w, NULL);
         snprintf(cap->name, sizeof cap->name, "%s", t->name);
-        if (n == 0) snprintf(cap->count, sizeof cap->count, "Empty");
-        else snprintf(cap->count, sizeof cap->count, "%d pane%s", n, n == 1 ? "" : "s");
+        snprintf(cap->count, sizeof cap->count, "%d pane%s", n, n == 1 ? "" : "s");
     }
     cap->working = w;
 }
@@ -173,20 +171,6 @@ static void draw_mini(ht_scene_t *s, const pod_model_t *m, int c, int x, int y, 
     }
 }
 
-// The grid icon of an empty tab: four outlined squares, 72 px across.
-static void draw_grid_icon(ht_scene_t *s, int x, int y)
-{
-    const int box = 72, sq = 21, st = 3;
-    int ox = x + (COVER - box) / 2, oy = y + (COVER - box) / 2;
-    for (int i = 0; i < 4; i++) {
-        int sx = ox + (i % 2 ? 42 : 9), sy = oy + (i / 2 ? 42 : 9);
-        unsigned ground = mix(0xdce2d7, 0xbfcbbd, (sy + sq / 2 - y) * 100 / COVER);
-        unsigned line = mix(ground, 0xf8faf5, 85);
-        ht_pro_rect_aa(s, sx, sy, sq, sq, 3, C(line));
-        ht_pro_rect_aa(s, sx + st, sy + st, sq - 2 * st, sq - 2 * st, 1, C(ground));
-    }
-}
-
 // The working ribbon on the cover's foot: eq on the left, "Working" between, the count on the right.
 static void draw_ribbon(ht_scene_t *s, int c, int x, int y, int working, uint32_t now_ms)
 {
@@ -203,14 +187,9 @@ static void draw_ribbon(ht_scene_t *s, int c, int x, int y, int working, uint32_
     ht_pro_text(s, x + COVER - RIB_PAD - cw, mid - ci_rg_20.height / 2, cw, &ci_rg_20, C(0xffffff), n);
 }
 
-// The cover at (x, y): its gradient, its minis (or the grid icon), the ribbon.
+// The cover at (x, y): its gradient, its minis, the ribbon.
 static void draw_cover(ht_scene_t *s, const pod_model_t *m, int c, int x, int y, int working, int detail, uint32_t now_ms)
 {
-    if (cover_empty(m, c)) {
-        pod_grad_aa(s, x, y, COVER, COVER, COVER_R, C(0xdce2d7), C(0xbfcbbd));
-        draw_grid_icon(s, x, y);
-        return;
-    }
     pod_grad_aa(s, x, y, COVER, COVER, COVER_R, C(cover_top(c)), C(cover_bottom(c)));
     if (!(detail & D_BARE)) {
         box_t b[CELLS_MAX];

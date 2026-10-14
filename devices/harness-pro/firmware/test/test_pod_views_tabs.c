@@ -260,11 +260,14 @@ static void test_list_long_name_ellipsis(void) {
     CHECK(!strcmp(vi->text + strlen(vi->text) - 3, "\xe2\x80\xa6"));
 }
 
-// A tab with no panes: "No panes yet." and its line, no rows, "No panes" in the footer. An empty Recent says so too.
+// A tab with no rows to list: "No panes yet." and its line, no rows, "No panes" in the footer. An empty Recent says so too.
 static void test_list_empty_tab(void) {
     build(0, 0, true);
     pod_model_swarms(&M, sw, NULL, NULL, 0, "", NULL, 0);
-    cable_swarm_t one = {"e", "Empty", 0, 0};
+    cable_swarm_t none = {"z", "Shells", 0, 2};   // no agent: not listed
+    pod_model_swarms(&M, &none, NULL, NULL, 1, "z", NULL, 0);
+    CHECK(M.tab_count == 0);
+    cable_swarm_t one = {"e", "Empty", 1, 1};   // members unknown (older daemon): no rows to list
     pod_model_swarms(&M, &one, NULL, NULL, 1, "e", NULL, 0);
     pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
     render(0);
@@ -431,33 +434,16 @@ static void test_tabs_footer_pages(void) {
     CHECK(find_text("1 TAB \xc2\xb7 1 AGENT") != NULL);
 }
 
-// A tab with no panes: a grey cover with a grid icon (four outlined squares), captioned Empty, no ribbon and no mark.
-static void test_tabs_empty_cover_grid_icon(void) {
+// Tabs holding no agent get no cover: only Recent is drawn, and the bar counts the tabs that are shown.
+static void test_tabs_hide_agentless(void) {
     pod_model_reset(&M);
-    cable_swarm_t two[2] = {{"a", "Alpha", 0, 0}, {"b", "Beta", 0, 0}};
+    cable_swarm_t two[2] = {{"a", "Alpha", 0, 0}, {"b", "Beta", 0, 1}};
     pod_model_swarms(&M, two, NULL, NULL, 2, "a", NULL, 0);
     pod_model_link(&M, true);
     pod_nav_init(&N);
     render(0);
-    CHECK(find_text("Empty") != NULL && find_text("Empty")->pro_font == &ci_rg_23 && find_text("0 panes") == NULL);
-    int x, y;
-    cover_xy(1, &x, &y);
-    int squares = 0, arcs = 0;
-    for (int i = 0; i < S.count; i++) {
-        ht_rect_t b = ht_run_bounds(&S.runs[i]);
-        if (b.x < x || b.y < y || b.x + b.w > x + COVER || b.y + b.h > y + COVER) continue;
-        if (S.runs[i].pro_kind == K_RECT_AA && b.w == 21 && b.h == 21) squares++;
-        if (S.runs[i].pro_kind == POD_ARC) arcs++;
-    }
-    CHECK(squares == 4 && arcs == 0);   // the icon, no "+" ring
-    int cx = x + COVER / 2, cy = y + COVER / 2;   // centred in its 72 px box
-    int lo = 9999, hi = 0;
-    for (int i = 0; i < S.count; i++) {
-        ht_rect_t b = ht_run_bounds(&S.runs[i]);
-        if (S.runs[i].pro_kind == K_RECT_AA && b.w == 21 && b.x >= x && b.x < x + COVER && b.y >= y && b.y < y + COVER) { if (b.x < lo) lo = b.x; if (b.x + b.w > hi) hi = b.x + b.w; }
-    }
-    CHECK(hi - lo == 54 && lo + 27 == cx && cy > y);   // 54 px of squares in the 72 px box
-    CHECK(count_in(K_IMAGE, x, y, COVER) == 0 && foot_eq_bars(1) == 0 && find_hit(POD_A_OPEN_TAB, 0) != NULL);
+    CHECK(M.tab_count == 0 && find_text("Alpha") == NULL && find_text("Beta") == NULL && find_text("Empty") == NULL);
+    CHECK(find_text("Recent") != NULL && find_hit(POD_A_OPEN_TAB, 0) == NULL);
 }
 
 // The worst frame: six covers of 2 to 9 panes, every agent working, a light mark in every third pane, a bell and a banner.
@@ -563,12 +549,8 @@ static void tabs_test_default_mark(void) {
     }
     CHECK(in_tab == 2 && find_text(">_") != NULL);
     pod_model_reset(&M);
-    cable_swarm_t none = {"e", "Empty", 0, 0};
-    pod_model_swarms(&M, &none, NULL, NULL, 1, "e", NULL, 0);
     pod_model_link(&M, true);
     pod_nav_init(&N);
-    render(0);
-    CHECK(count_rect(ht_rgb(0x9aa09a)) == 0 && find_text(">_") == NULL && find_text("Empty") != NULL);
     cable_swarm_t two = {"e", "Two", 2, 2};   // members unknown (older daemon) with 2 panes: two default marks
     pod_model_swarms(&M, &two, NULL, NULL, 1, "e", NULL, 0);
     render(0);
@@ -702,7 +684,7 @@ static void grid_test_motion(void) {
 
 // Run budget in motion: 24 tabs, nine marked panes a cover, the worst two partial pages, every offset.
 static void grid_test_motion_budget(void) {
-    for (int per = 0; per <= 9; per += (per < 6 ? 2 : 1)) {
+    for (int per = 1; per <= 9; per += (per < 6 ? 2 : 1)) {
         build_shared(24, per);
         for (int k = 0; k < per; k++) { pod_model_agent(&M, ids[0][k], "x", k % 2 ? "cursor" : "claude", "mac"); pod_model_turn(&M, ids[0][k], "started", NULL, 0, 5 + (uint32_t)k); }
         if (per > 1) pod_model_question(&M, "m1", "ok?");
@@ -808,7 +790,7 @@ int main(void) {
     test_tabs_selected_ring();
     test_tabs_ribbon_only_when_working();
     test_tabs_footer_pages();
-    test_tabs_empty_cover_grid_icon();
+    test_tabs_hide_agentless();
     test_tabs_budget();
     tabs_test_minis();
     grid_test_six_covers();

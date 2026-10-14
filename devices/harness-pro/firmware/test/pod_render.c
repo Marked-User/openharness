@@ -155,7 +155,7 @@ static void classic_fixture(const char *screen)
     }
 }
 
-// The mockup's Option B: Recent, then five tabs with the second selected, the last one empty.
+// The mockup's Option B: Recent, then five tabs with the second selected (the mockup's last, empty one is not shown).
 static void mock_tabs(void)
 {
     static const char *const names[] = {"Harness repo", "Doi song", "Thoi trang", "Harness Store", "New Swarm"};
@@ -329,7 +329,7 @@ int main(int argc, char **argv)
         }
         const char *at = strchr(screen, '@');   // tabs:<rows>@<px>: mid-drag, the grid at this offset from the top of page 0
         if (at) { F.tabs_moving = true; F.tabs_off = atoi(at + 1); }
-    } else if (!strncmp(screen, "default", 7) && !inbox) {   // default marks: a tab with no panes, one of unknown agents, one with a stranger
+    } else if (!strncmp(screen, "default", 7) && !inbox) {   // default marks: a tab with no panes (not shown), one of unknown agents, one with a stranger
         pod_model_agents_begin(&M);
         pod_model_agent(&M, "zz", "stranger", "zzz", "MacBook Pro");
         pod_model_agent(&M, "fw", "firmware-pro", "claude", "MacBook Pro");
@@ -343,8 +343,8 @@ int main(int argc, char **argv)
         snprintf(sw[1].id, SWARM_ID_MAX, "e1"); snprintf(sw[1].name, CABLE_NAME_MAX, "Strangers"); sw[1].panes = sw[1].agents = 2;
         snprintf(sw[2].id, SWARM_ID_MAX, "e2"); snprintf(sw[2].name, CABLE_NAME_MAX, "Mixed"); sw[2].panes = sw[2].agents = 3;
         pod_model_swarms(&M, sw, L, NN, 3, "e0", NULL, 0);
-        if (strstr(screen, "tab")) pod_nav_act(&N, &M, POD_A_OPEN_TAB, 2, T0);
-        if (strstr(screen, "talk")) { pod_nav_act(&N, &M, POD_A_OPEN_TAB, 1, T0); pod_nav_act(&N, &M, POD_A_OPEN_AGENT, 0, T0); }
+        if (strstr(screen, "tab")) pod_nav_act(&N, &M, POD_A_OPEN_TAB, 1, T0);   // Mixed (Empty is not listed)
+        if (strstr(screen, "talk")) { pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, T0); pod_nav_act(&N, &M, POD_A_OPEN_AGENT, 0, T0); }
     } else if (!strcmp(screen, "recent")) {
         pod_nav_act(&N, &M, POD_A_OPEN_TAB, POD_TAB_RECENT, T0);
     } else if (!strncmp(screen, "tabp:", 5)) {   // tabp:<n>: one tab of n panes with its real rects (Console Tab): 3 = the mockup's, 1 = full, 8 = a 3 x 3 grid with two spare
@@ -368,12 +368,13 @@ int main(int argc, char **argv)
         uint8_t cnt[1] = {(uint8_t)n};
         pod_model_swarms(&M, sw, &ids, cnt, 1, "p", tl, n);
         pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, T0);
-    } else if (!strcmp(screen, "tab:empty")) {   // a tab with no panes
+    } else if (!strcmp(screen, "tab:empty")) {   // a tab with no rows to list: an older daemon's, members unknown
         static const uint8_t none[1] = {0};
         cable_swarm_t sw[1];
         memset(sw, 0, sizeof sw);
         snprintf(sw[0].id, SWARM_ID_MAX, "n0");
         snprintf(sw[0].name, CABLE_NAME_MAX, "New Swarm");
+        sw[0].agents = 1;
         pod_model_swarms(&M, sw, NULL, none, 1, "n0", NULL, 0);
         pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, T0);
     } else if (!strncmp(screen, "tab:", 4)) {
