@@ -4,7 +4,8 @@
 //! them, carried from line to line), and those escapes and backslashes escaped (-C).
 //!
 //! alacritty keeps no count of the cells a line has had written (tmux's cellused), so a line ends
-//! at its last cell that is not a default blank.
+//! at its last cell that is not a default blank — unless it wrapped, when every cell was written
+//! and it runs to the pane's width (a space in its last column is kept).
 
 use alacritty_terminal::grid::{Dimensions, Grid};
 use alacritty_terminal::index::{Column, Line};
@@ -151,7 +152,11 @@ pub fn history(grid: &Grid<Cell>, top: i32, bottom: i32, f: Flags2) -> String {
     let mut last = Look::default();
     for line in top..=bottom {
         let row = &grid[Line(line)];
-        let used = (0..cols).rposition(|c| !blank(&row[Column(c)])).map(|c| c + 1).unwrap_or(0);
+        let wrapped = cols > 0 && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+        // tmux's cellused: every cell of a row that wrapped was written, blank or not.
+        let used = if wrapped { cols } else {
+            (0..cols).rposition(|c| !blank(&row[Column(c)])).map(|c| c + 1).unwrap_or(0)
+        };
         let end = if f.empty_cells { cols } else { used };
         let mut s = String::new();
         for c in 0..end {
@@ -168,7 +173,6 @@ pub fn history(grid: &Grid<Cell>, top: i32, bottom: i32, f: Flags2) -> String {
         }
         if f.trim { while s.ends_with(' ') { s.pop(); } }
         out.push_str(&s);
-        let wrapped = cols > 0 && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
         if !f.join || !wrapped { out.push('\n') }
     }
     out
@@ -247,5 +251,24 @@ mod tests {
         // No history at all must not index above the grid.
         let fresh = Term::new(Config::default(), &TermSize::new(10, 3), alacritty_terminal::event::VoidListener);
         assert_eq!(capture_pane(fresh.grid(), Some(20), false), "\n\n\n");
+    }
+
+    /// tmux 3.8 on a 10×6 pane, for `abcdefghi world\r\n\e[31mredredred\e[0m next\r\nend`: a
+    /// row that wrapped keeps the space in its last column (`capture-pane -p -J`, `-p -e -J`,
+    /// `-p -e -N -T`).
+    #[test]
+    fn a_wrapped_row_runs_to_the_width() {
+        use alacritty_terminal::term::{Config, Term, test::TermSize};
+        use alacritty_terminal::vte::ansi::Processor;
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 6), alacritty_terminal::event::VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"abcdefghi world\r\n\x1b[31mredredred\x1b[0m next\r\nend");
+        let flags = |join, sequences| Flags2 { join, sequences, ..Flags2::default() };
+        assert_eq!(history(term.grid(), 0, 5, flags(true, false)), "abcdefghi world\nredredred next\nend\n\n");
+        assert_eq!(history(term.grid(), 0, 5, flags(true, true)), "abcdefghi world\n\x1b[31mredredred\x1b[39m next\nend\n\n");
+        assert_eq!(
+            history(term.grid(), 0, 5, flags(false, true)),
+            "abcdefghi \nworld\n\x1b[31mredredred\x1b[39m \nnext\nend\n\n"
+        );
     }
 }
