@@ -409,6 +409,8 @@ export interface HookServerOptions {
   admissionBytesCapacity?: number
   /** Production starts recovery only after the core readiness announcement. */
   deferNativeRecovery?: boolean
+  /** The installed client has no outbox. Enable replay only with durable client activation. */
+  nativeClientReplay?: boolean
 }
 
 export function startHookServer(
@@ -1204,7 +1206,7 @@ export function startHookServer(
     if (closed || recoveryStarted) return
     recoveryStarted = true
     recoveryTimer = setTimeout(recoveryPass, 0); recoveryTimer.unref()
-    clientReplay.start()
+    if (options.nativeClientReplay) clientReplay.start()
   }
   const handle: http.RequestListener = (req, res) => {
     void (async () => {

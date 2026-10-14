@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { nativeHookAcknowledgement } from './engines/kit/nativeHookClientProtocol.js'
 import { nativeHookOutboxShard } from './engines/kit/nativeHookOutbox.js'
-import type { HookServerHandlers } from './hookServer.js'
+import type { HookServerHandlers, HookServerOptions } from './hookServer.js'
 
 const fault = vi.hoisted(() => ({ unavailable: false, afterRetain: undefined as (() => void) | undefined,
   afterFinish: undefined as (() => void) | undefined, beforeSnapshot: undefined as (() => void) | undefined }))
@@ -82,7 +82,8 @@ afterEach(async () => {
   vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.doUnmock('./engines/kit/nativeHookStorage.js'); vi.resetModules()
   rmSync(root, { recursive: true, force: true })
 })
-async function fixture(overrides: Partial<HookServerHandlers> = {}, capacity = 65_536, requestedPort = 0) {
+async function fixture(overrides: Partial<HookServerHandlers> = {}, capacity = 65_536, requestedPort = 0,
+  options: Pick<HookServerOptions, 'nativeClientReplay'> = {}) {
   const { startHookServer } = await import('./hookServer.js'), { readHookCredential } = await import('./lib/hookAuth.js')
   const registered = vi.fn(), stopped = vi.fn(), capture = vi.fn(async () => { throw Error('live ancestry cannot replace original origin') })
   const resolved = vi.fn(async () => live ? registry.byAgent(agentId) ?? null : null)
@@ -92,7 +93,7 @@ async function fixture(overrides: Partial<HookServerHandlers> = {}, capacity = 6
       if (!live || expected && expected.key !== key) throw Error('fixture original engine unavailable')
       return { key, evidence: 'fixture-precise-native-process', verify() { if (!live) throw Error('fixture process exited') } }
     }, ...overrides,
-  }, { deferNativeRecovery: true, admissionReceiptCapacity: capacity })
+  }, { deferNativeRecovery: true, admissionReceiptCapacity: capacity, ...options })
   server = started.server
   const post = async (raw: string = JSON.stringify(body()), headers: Record<string, string | null> = {}, path = '/api/native-hook/v1/session-start') => {
     const sent: Record<string, string | null> = { 'content-type': 'application/json', 'x-harness-hook-token': readHookCredential(join(root, 'data'))!,
@@ -179,7 +180,7 @@ it('starts retained client replay only after readiness and recovers a held regis
     deps.onHeld(...args)
     if (args[0] === shard && args[1] === delivery.id && args[2] === undefined) completed = true
   } }))
-  const restarted = await fixture({}, 65_536, port), observer = await openNativeHookStorage(directory(), helpers)
+  const restarted = await fixture({}, 65_536, port, { nativeClientReplay: true }), observer = await openNativeHookStorage(directory(), helpers)
   const responses: unknown[] = []
   restarted.started.server.on('request', (request, response) => {
     const began = performance.now()
@@ -211,6 +212,24 @@ it('starts retained client replay only after readiness and recovers a held regis
     expect(restarted.capture).not.toHaveBeenCalled()
   } finally { await observer.close() }
 }, 25_000)
+
+it('recovers server intake while unavailable client outboxes remain inactive by default', async () => {
+  const storage = await import('./engines/kit/nativeHookStorage.js'), open = storage.openNativeHookStorage
+  const readOutbox = vi.fn(async () => { throw Error('fixture client outboxes unavailable') })
+  vi.spyOn(storage, 'openNativeHookStorage').mockImplementation(async (...args) => ({ ...await open(...args), readOutbox }))
+  const first = await fixture({ hookAdmissionBlocked: () => true }), raw = JSON.stringify(body())
+  expect(await first.post(raw)).toEqual({ status: 200, body: receipt(raw, 'owned') })
+  await close()
+  const restarted = await fixture()
+  restarted.started.startRecovery()
+  await restarted.settle(raw)
+  expect(restarted.registered).toHaveBeenCalledOnce()
+  expect(restarted.started.recoveryReady(registry.byAgent(agentId)!)).toBe(true)
+  // Cover more than two replay polling intervals: server recovery must not
+  // start recurring scans for the durable client that has not been activated.
+  await new Promise<void>(done => setTimeout(done, 1_100))
+  expect(readOutbox).not.toHaveBeenCalled()
+}, 20_000)
 
 it('completes four productive replay shards under the original bounded attempt deadlines', async () => {
   const first = await fixture({ hookAdmissionBlocked: () => true }), raw = JSON.stringify(body())
@@ -256,7 +275,7 @@ it('completes four productive replay shards under the original bounded attempt d
       finally { stages.push({ shard, step: 'acknowledge', elapsedMs: Math.round(performance.now() - began) }) }
     } }
   } }))
-  const restarted = await fixture({}, 65_536, port)
+  const restarted = await fixture({}, 65_536, port, { nativeClientReplay: true })
   const began = performance.now(), cpu = process.cpuUsage(), rss = process.memoryUsage().rss
   let last = began, maxLoopDelayMs = 0
   const monitor = setInterval(() => { const now = performance.now(); maxLoopDelayMs = Math.max(maxLoopDelayMs, now - last - 50); last = now }, 50)

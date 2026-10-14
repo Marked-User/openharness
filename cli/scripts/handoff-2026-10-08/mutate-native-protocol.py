@@ -11,6 +11,9 @@ catalog = 'src/engines/kit/nativeHookCatalog.ts'
 http = 'src/hookServer.nativeProtocol.spec.ts'
 storage = 'src/engines/kit/nativeHookCatalog.spec.ts'
 mutations = [
+    ('deferred client replay started by readiness', server,
+     'if (options.nativeClientReplay) clientReplay.start()', 'clientReplay.start()',
+     http, 'client outboxes remain inactive'),
     ('wire identity normalizes distinct raw bytes', protocol,
      'bodySha256: hash(body) }', 'bodySha256: hash(JSON.stringify(JSON.parse(body))) }', http, 'lost completed reply'),
     ('remembered ownership bypasses final evidence', server,
