@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import PublishPage from './page';
 import { readDraft } from '@/lib/community/drafts';
@@ -113,6 +113,25 @@ describe('explicit publication', () => {
     expect(saved(tankId)![1].body).not.toHaveProperty('cover');
     expect(published()).toHaveLength(0);
     expect(translations()).toHaveLength(0);
+    window.history.replaceState(null, '', '/');
+  });
+  it('unpublishes from the edit, after asking, and only there', async () => {
+    render(<PublishPage />); await act(async () => {});
+    expect(screen.queryByRole('button', { name: 'Unpublish this harness' })).not.toBeInTheDocument();
+    cleanup();
+    window.history.replaceState(null, '', `/hub/publish?edit=${tankId}`);
+    const answer = hub(undefined, [{ id: tankId, title: tank.title }]);
+    mocks.request.mockImplementation(async (path: string, options?: { method?: string; body?: unknown }) =>
+      path === `harnesses/${tankId}` && !options ? { harness: tank, social: {} } : path === `harnesses/${tankId}` && options?.method === 'DELETE' ? { removed: true } : answer(path, options));
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
+    render(<PublishPage />);
+    await screen.findByDisplayValue('TANK 1987');
+    fireEvent.click(screen.getByRole('button', { name: 'Unpublish this harness' }));
+    expect(mocks.request.mock.calls.some(([, options]) => options?.method === 'DELETE')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Unpublish this harness' }));
+    await waitFor(() => expect(mocks.push).toHaveBeenCalledWith('/hub/yours'));
+    expect(mocks.request).toHaveBeenCalledWith(`harnesses/${tankId}`, { method: 'DELETE' });
+    confirm.mockRestore();
     window.history.replaceState(null, '', '/');
   });
   it('saves an arriving draft over one of your publications when you choose it', async () => {

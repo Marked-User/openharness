@@ -137,9 +137,11 @@ the proxy forwards those bytes unchanged, and the backend unpacks them (bounded)
 (`backend/src/lib/gzipJson.ts`). Plain JSON bodies and an older Desktop's text field still work.
 
 Backend reads are public; likes, comments, following, publication, editing, and unpublication require SSO.
-An author edits a publication in place (`PUT /api/community/harnesses/:id`): **Edit this harness** on
-its page opens `/hub/publish?edit=<id>`, and a draft arriving from Desktop can choose **Publish as →
-Update "…"**. The address, likes, comments and forks stay; forks keep the version they copied; where it
+An author edits a publication in place (`PUT /api/community/harnesses/:id`): **Edit**, beside Fork on
+its page and shown only to its author, opens `/hub/publish?edit=<id>`, where **Unpublish this harness**
+also lives; a draft arriving from Desktop can choose **Publish as → Update "…"**. A harness page whose
+likes and actions fail to load says so with Retry, and one read anonymously because the browser's sign-in
+expired asks to sign in again, instead of silently hiding Edit. The address, likes, comments and forks stay; forks keep the version they copied; where it
 came from (`forkedFrom`, credits) and its cover (unless a new one is chosen) stay as published.
 Counts are persisted, like/follow writes are idempotent, comment retries have per-user request IDs,
 replies retain their parent and display a Creator badge,

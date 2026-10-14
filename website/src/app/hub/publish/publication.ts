@@ -31,6 +31,11 @@ export async function submitPublication(draft: PublishDraft, clientId: string | 
   return draft.updateId;
 }
 
+/** Takes your publication off the Hub. Forks people already made keep their copy. */
+export async function unpublishPublication(id: string): Promise<void> {
+  await communityRequest(`harnesses/${id}`, { method: 'DELETE' });
+}
+
 /** Your own publications, to choose one a draft updates. */
 export async function myPublications(): Promise<{ id: string; title: string }[]> {
   const { harnesses } = await communityRequest<{ harnesses: { id: string; title: string }[] }>('harnesses?mine=true');
