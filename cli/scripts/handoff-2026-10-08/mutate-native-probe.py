@@ -6,17 +6,18 @@ import sys
 
 cli = Path(sys.argv[1]).resolve()
 golden = 'src/lib/nativeProcessControl.golden.spec.ts'
+control = 'src/lib/nativeProcessControl.spec.ts'
 injected = 'src/lib/nativeProcessControlProbe.spec.ts'
 owner = 'src/engines/kit/nativeHookOwner.golden.spec.ts'
 mutations = [
     ('identity-only caller reads descriptors', 'src/lib/nativeProcessControl.ts',
-     'probeNativeProcessControl(pids, parent, budget, descriptors,', 'probeNativeProcessControl(pids, parent, budget, true,', golden),
+     'probeNativeProcessControl(pids, parent, budget, descriptors,', 'probeNativeProcessControl(pids, parent, budget, true,', control),
     ('daemon helper disconnected', 'src/lib/nativeProcessControl.ts',
      'prepare: () => bundledProcessImageHelper({ retryUnavailable: true })', 'prepare: async () => null', golden),
     ('precise native birth rounded', 'src/lib/nativeProcessControlProbe.ts',
      'birth: `${row.startSeconds}:${row.startMicros}`', 'birth: `${row.startSeconds}:0`', golden),
     ('native identity mode disconnected', 'src/lib/nativeProcessControlProbe.ts',
-     "descriptors ? '--control' : '--identity'", "'--control'", golden),
+     "descriptors ? '--control' : '--identity'", "'--control'", control),
     ('existing corrupt helper accepted', 'src/lib/nativeProcessImageArtifact.ts',
      'try { await lstat(target); return null }', 'try { await lstat(target); return target }', golden),
     ('wrong helper invalidated', 'src/lib/nativeProcessControlProbe.ts',
@@ -38,7 +39,7 @@ def run(targets):
                           cwd=cli, env=environment, text=True, capture_output=True, timeout=60)
 
 
-baseline = run([golden, injected, owner])
+baseline = run([golden, control, injected, owner])
 if baseline.returncode:
     raise SystemExit('Baseline failed; no mutants ran.\n' + baseline.stdout + baseline.stderr)
 print('Unchanged golden and pure dependency baselines passed', flush=True)

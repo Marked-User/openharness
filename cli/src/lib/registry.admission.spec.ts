@@ -1401,7 +1401,7 @@ it('completes the original legacy Stop after real deferred attach and registrati
     expect(original.snapshot().turnOpen).toBe(false)
     expect(stopped).toHaveBeenCalledOnce()
   } finally { f?.stopRecovery(); attach.forget(A); await watcher.stop() }
-})
+}, 10_000)
 
 it('keeps the first legacy Stop capture when a native owner read is unavailable and refreshes before dispatch', async () => {
   const { body, delivery } = boundClaudeStop()

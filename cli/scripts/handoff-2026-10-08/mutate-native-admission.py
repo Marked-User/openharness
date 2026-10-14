@@ -1,6 +1,7 @@
 """Owned disposable worktree only. A passing baseline and assertion failure are mandatory."""
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -113,12 +114,13 @@ def run(targets, pattern=''):
                           cwd=cli, env=environment, text=True, capture_output=True, timeout=180)
 
 
-for native in [False, True]:
-    targets = sorted({entry[4] for entry in mutations if entry[4].startswith('e2e/') == native})
-    if targets:
-        baseline = run(targets, 'real native prompt visibly held|later Cursor turn open' if native else '')
-        if baseline.returncode:
-            raise SystemExit('Baseline failed; no mutants ran.\n' + baseline.stdout + baseline.stderr)
+# Check every selected mutant's exact positive oracle. Unrelated full HTTP
+# suites can exceed a single mutation's deadline and add no mutation evidence.
+for target, pattern in sorted({(entry[4], entry[5]) for entry in mutations}):
+    baseline = run([target], pattern)
+    output = re.sub(r'\x1b\[[0-9;]*m', '', baseline.stdout + baseline.stderr)
+    if baseline.returncode or not re.search(r'\bTests\s+[1-9]\d* passed\b', output):
+        raise SystemExit('Baseline failed; no mutants ran.\n' + baseline.stdout + baseline.stderr)
 print('Unchanged baselines passed', flush=True)
 failures = []
 for label, relative, before, after, target, pattern in mutations:

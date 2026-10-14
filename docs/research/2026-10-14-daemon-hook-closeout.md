@@ -289,3 +289,25 @@ Corrected full [end-to-end run 38509153975](https://github.com/autonomous-ai/ope
 is running on `64105ede1`. Subsequent unit-fixture and documentation edits do not
 change that run's production, end-to-end harness, helper, workflow or dependencies.
 The final mutation, runtime and current-head CI gates remain outstanding.
+
+The final mutation aggregate `20261014T040515.982940Z-15735` is not a passing
+receipt: ten groups prove 145 deliberate wiring faults, but linked Stop has two
+framework timeouts among its 17 cases, native admission exceeds its 180-second
+full-baseline deadline, and two identity-mode faults target a control-only golden.
+The correction retains every golden and production byte: give the composed Stop
+its existing six-second assertion window inside a ten-second test limit, advance
+the existing fake grace clock before the parser-isolation assertion, and target
+the existing identity-only unit oracle. Each selected admission mutation now runs
+its exact positive file/pattern first and requires at least one passing test.
+Independent review approved these test/script corrections; only the three affected
+mutation groups need to run again.
+
+Current-head Linux CI for `251d9e0d0` is fully green, including `ci/required` in
+run `38509558339`. Manual e2e run `38509153975` has failures in restored-session
+interpretation, paused-core prompt hooks and the macOS disk/update lane. It is not
+passing evidence. Diagnostics show engines answering after normal restart while
+some transcript readers stay unattached. Shutdown currently revokes journals
+before all dispatched receipt writes finish; that explanation needs a regression
+and a bounded correction. Full-disk setup also fills storage after discovery
+binding but before initial hook admission; review requires a confirmed setup
+precondition while retaining recovery assertions. No merge or release occurred.

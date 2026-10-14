@@ -144,7 +144,9 @@ describe('turn hooks', () => {
         if (changed === 'revision') session.evidenceRevision!++
         if (changed === 'identity') session.identityHold = 'unavailable'
         if (changed === 'interpretation') session.interpretationHold = 'unavailable'
-        expect(await run.stop(run.execution)).toBe(['parser', 'path', 'revision', 'identity', 'interpretation'].includes(changed) ? 'held' : 'superseded')
+        const result = run.stop(run.execution)
+        await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+        expect(await result).toBe(['parser', 'path', 'revision', 'identity', 'interpretation'].includes(changed) ? 'held' : 'superseded')
         expect(run.state.turnOpen).toBe(true)
         expect(run.deps.drain).not.toHaveBeenCalled()
         expect(run.deps.mirror.noteEngineStopped).not.toHaveBeenCalled()

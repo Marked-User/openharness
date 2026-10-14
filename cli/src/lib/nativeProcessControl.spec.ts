@@ -53,7 +53,7 @@ describe('strict Darwin control protocol', () => {
   it('separates identity-only evidence from descriptor authority in both request and reply', async () => {
     host.exec.mockImplementationOnce((_path, _args, _options, callback) => callback(null,
       Buffer.from(output({ ...record(), fds: [] }, { schema: 2, mode: 'identity', parent: 0, children: [] })), Buffer.alloc(0)))
-    expect((await nativeProcessControl([42], 0, budget(), false)).rows.get(42)?.fds).toEqual([])
+    await expect(nativeProcessControl([42], 0, budget(), false).then(snapshot => snapshot.rows.get(42)?.fds)).resolves.toEqual([])
     expect(host.exec.mock.calls[0][1]).toEqual(['--identity', expect.any(String), '0', '42'])
     expect(() => parse(output({ ...record(), fds: [] }, { schema: 2, mode: 'identity', parent: 0, children: [] }))).toThrow('ambiguous child pool')
     expect(() => parseNativeProcessControl(output(record(), { schema: 2, mode: 'identity', parent: 0, children: [] }), [42], 0, budget(), false)).toThrow('invalid process record')
