@@ -11,6 +11,14 @@ catalog = 'src/engines/kit/nativeHookCatalog.ts'
 http = 'src/hookServer.nativeProtocol.spec.ts'
 storage = 'src/engines/kit/nativeHookCatalog.spec.ts'
 mutations = [
+    ('legacy mutation competes with an unfinished admission', server,
+     'if (context.confirming || context.claims.size\n'
+     '        || history && history.scope === scopeOf(owner) && [...history.records.values()].some(receipt => receipt.pending || receipt.preparing)\n'
+     '        || [...intakeReservations].some(key => key.startsWith(`${context.key}\\u0000`))) {',
+     'if (false) {', http, 'without competing confirmation'),
+    ('old process pending receipt blocks its replacement', server,
+     'history && history.scope === scopeOf(owner) && [...history.records.values()]',
+     'history && [...history.records.values()]', http, 'old process pending receipt'),
     ('deferred client replay started by readiness', server,
      'if (options.nativeClientReplay) clientReplay.start()', 'clientReplay.start()',
      http, 'client outboxes remain inactive'),

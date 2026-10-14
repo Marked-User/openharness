@@ -11,7 +11,8 @@ import { nativeHookOutboxShard } from './engines/kit/nativeHookOutbox.js'
 import type { HookServerHandlers, HookServerOptions } from './hookServer.js'
 
 const fault = vi.hoisted(() => ({ unavailable: false, afterRetain: undefined as (() => void) | undefined,
-  afterFinish: undefined as (() => void) | undefined, beforeSnapshot: undefined as (() => void) | undefined }))
+  afterFinish: undefined as (() => void) | undefined, beforeFinish: undefined as (() => Promise<void>) | undefined,
+  beforeSnapshot: undefined as (() => void) | undefined }))
 vi.mock('node:fs', async original => ({ ...await original<object>(),
   fsync: (_fd: number, done: (error: Error | null) => void) => queueMicrotask(() => done(fault.unavailable ? Error('fixture confirmation unavailable') : null)),
 }))
@@ -30,7 +31,9 @@ vi.mock('./engines/kit/nativeHookJournal.js', async original => {
       const delivery = await journal.retain(...input); fault.afterRetain?.(); return delivery
     }, claim: async (...input: Parameters<typeof journal.claim>) => {
       const claim = await journal.claim(...input)
-      return { ...claim, finish: async (...result: Parameters<typeof claim.finish>) => { await claim.finish(...result); fault.afterFinish?.() } }
+      return { ...claim, finish: async (...result: Parameters<typeof claim.finish>) => {
+        await fault.beforeFinish?.(); await claim.finish(...result); fault.afterFinish?.()
+      } }
     } }
   } }
 })
@@ -61,7 +64,8 @@ async function close() {
   server = undefined
 }
 beforeEach(async () => {
-  live = true; fault.unavailable = false; fault.afterRetain = undefined; fault.afterFinish = undefined; fault.beforeSnapshot = undefined
+  live = true; fault.unavailable = false; fault.afterRetain = undefined; fault.afterFinish = undefined
+  fault.beforeFinish = undefined; fault.beforeSnapshot = undefined
   root = realpathSync(mkdtempSync(join(tmpdir(), 'native-protocol-http-')))
   for (const [name, value] of Object.entries({ HOME: join(root, 'home'), ADAPTER_DATA_DIR: join(root, 'data'),
     ADAPTER_RUNTIME_DIR: join(root, 'runtime'), CODEX_HOME: join(root, 'codex'), CLAUDE_CONFIG_DIR: join(root, 'claude') })) {
@@ -229,6 +233,59 @@ it('recovers server intake while unavailable client outboxes remain inactive by 
   // start recurring scans for the durable client that has not been activated.
   await new Promise<void>(done => setTimeout(done, 1_100))
   expect(readOutbox).not.toHaveBeenCalled()
+}, 20_000)
+
+it('holds legacy mutations without competing confirmation while a local admission is unfinished', async () => {
+  const f = await fixture(), raw = JSON.stringify(body()), snapshots = vi.fn()
+  let release!: () => void, finishing = false
+  const blocked = new Promise<void>(done => { release = done })
+  fault.beforeFinish = async () => { finishing = true; await blocked }
+  try {
+    expect(await f.post(raw)).toEqual({ status: 200, body: receipt(raw, 'owned') })
+    await vi.waitFor(() => expect(finishing).toBe(true))
+    fault.beforeSnapshot = snapshots
+    expect(await f.post(raw, {}, '/api/hook/turn-stop')).toMatchObject({ status: 202, body: { retry: true,
+      detail: expect.stringContaining('an earlier native hook has no confirmed outcome') } })
+    expect(snapshots).not.toHaveBeenCalled()
+    expect(f.stopped).not.toHaveBeenCalled()
+  } finally { fault.beforeFinish = undefined; release() }
+  await f.settle(raw)
+  f.started.startRecovery()
+  await vi.waitFor(() => expect(f.started.recoveryReady(registry.byAgent(agentId)!)).toBe(true))
+  snapshots.mockClear()
+  expect(await f.post(raw, {}, '/api/hook/turn-stop')).toEqual({ status: 200, body: { ok: true } })
+  expect(snapshots).toHaveBeenCalledOnce()
+  expect(f.stopped).toHaveBeenCalledOnce()
+}, 20_000)
+
+it('does not let an old process pending receipt hold a freshly proved replacement mutation', async () => {
+  let currentKey = key, release!: () => void, finishing = false
+  const blocked = new Promise<void>(done => { release = done })
+  const f = await fixture({
+    readNativeHookOwner: async (_row, expected) => {
+      if (expected && expected.key !== currentKey) throw Error('fixture original process changed')
+      return { key: currentKey, evidence: 'fixture-precise-native-process', verify() {} }
+    },
+  }), raw = JSON.stringify(body())
+  // Keep the old receipt pending through replacement allocation. A timer-driven
+  // stale-job rejection must not remove the condition this assertion exercises.
+  fault.beforeFinish = async () => { finishing = true; await blocked }
+  try {
+    expect(await f.post(raw)).toEqual({ status: 200, body: receipt(raw, 'owned') })
+    await vi.waitFor(() => expect(finishing).toBe(true))
+    currentKey = `${boot}\u0000codex\u00005100\u000067890`
+    expect(registry.updateProcessIdentity(agentId, { pid: 5100, startMarker: 'fixture-replacement', executable: '<codex>' })).toBe(true)
+    const replacement = structuredClone(origin)
+    replacement.ancestry[1].birth = '67890'
+    const snapshots = vi.fn(); fault.beforeSnapshot = snapshots
+    expect(await f.post(JSON.stringify(body({ nativeOrigin: replacement })), {}, '/api/hook/turn-stop'))
+      .toEqual({ status: 200, body: { ok: true } })
+    expect(snapshots).toHaveBeenCalledOnce()
+    expect(f.stopped).toHaveBeenCalledOnce()
+  } finally {
+    fault.beforeFinish = undefined; release()
+    await new Promise<void>(done => setImmediate(done))
+  }
 }, 20_000)
 
 it('completes four productive replay shards under the original bounded attempt deadlines', async () => {

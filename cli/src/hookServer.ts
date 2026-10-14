@@ -595,6 +595,10 @@ export function startHookServer(
     return snapshot
     } finally { context.confirming-- }
   }
+  const scopeOf = (row: RegisteredSession | undefined) => row && JSON.stringify([
+    row.agentId, row.engine, row.processIdentity ? processIdentityKey(row.engine, row.processIdentity) : null,
+    handlers.readNativeHookOwner && row.processIdentity ? nativeKeys.get(processIdentityKey(row.engine, row.processIdentity)) : null,
+  ])
   const verifiedMutation = async (body: BoundHookBody): Promise<RegisteredSession | null> => {
     if (closed) return null
     const caller = await captureCaller(body)
@@ -603,7 +607,16 @@ export function startHookServer(
     const identity = paneReadIdentity(owner)
     try {
       const native = await handlers.readNativeHookOwner?.(owner, caller?.owner(owner))
-      const snapshot = await confirmedSnapshot(await durableProcess(owner, native), owner)
+      const context = await durableProcess(owner, native), history = admissionReceipts.get(owner.agentId)
+      // A local unfinished admission already denies this mutation. Confirming
+      // its journal again competes with the writer and prolongs its hold. This
+      // shortcut only refuses; every possible acceptance still needs fresh proof.
+      if (context.confirming || context.claims.size
+        || history && history.scope === scopeOf(owner) && [...history.records.values()].some(receipt => receipt.pending || receipt.preparing)
+        || [...intakeReservations].some(key => key.startsWith(`${context.key}\u0000`))) {
+        throw new IdentityReadUnavailable('an earlier native hook has no confirmed outcome')
+      }
+      const snapshot = await confirmedSnapshot(context, owner)
       if (snapshot.active || [...snapshot.deliveries.values()].some(delivery => !delivery.result)) {
         throw new IdentityReadUnavailable('an earlier native hook has no confirmed outcome')
       }
@@ -736,10 +749,6 @@ export function startHookServer(
     ])
     const originalStop = stopProvenance(body, admissionOrder.firedAt)
     const conflict = { status: 409, reply: { pending: false, error: 'HOOK_DELIVERY_CONFLICT' } }
-    const scopeOf = (row: RegisteredSession | undefined) => row && JSON.stringify([
-      row.agentId, row.engine, row.processIdentity ? processIdentityKey(row.engine, row.processIdentity) : null,
-      handlers.readNativeHookOwner && row.processIdentity ? nativeKeys.get(processIdentityKey(row.engine, row.processIdentity)) : null,
-    ])
     const resolving = resolvingStops.get(deliveryId)
     if (resolving) {
       const reply = resolving.fingerprint === fingerprint ? await resolving.stop(body, admissionOrder.firedAt) : conflict
