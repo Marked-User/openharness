@@ -16,7 +16,7 @@ const { PtyHostBackend } = await import('./ptyHostBackend.js')
 type Reply = unknown | ((op: PtyOp) => unknown)
 
 /** A backend over a stub client: [replies] by op name, an `ok {}` for the rest. */
-function backendWith(replies: Record<string, Reply>, options: { owner?: string } = {}) {
+function backendWith(replies: Record<string, Reply>, options: { owner?: string; stream?: () => Promise<unknown> } = {}) {
   const calls: PtyOp[] = []
   const listeners = new Set<(event: PtyEvent) => void>()
   const client = {
@@ -29,6 +29,7 @@ function backendWith(replies: Record<string, Reply>, options: { owner?: string }
     onEvent: (listener: (event: PtyEvent) => void) => { listeners.add(listener); return () => listeners.delete(listener) },
     onClose: () => () => {},
     close() {},
+    openStream: options.stream ?? (async () => null),
   }
   const backend = new PtyHostBackend({
     home: '/tmp/h',
@@ -39,7 +40,7 @@ function backendWith(replies: Record<string, Reply>, options: { owner?: string }
   return { backend, calls, emit }
 }
 
-async function ready(replies: Record<string, Reply> = {}, options: { owner?: string } = {}) {
+async function ready(replies: Record<string, Reply> = {}, options: { owner?: string; stream?: () => Promise<unknown> } = {}) {
   const made = backendWith(replies, options)
   expect(await made.backend.prepare({ ownedPanes: new Map() })).toEqual({ state: 'ready' })
   return made
@@ -470,5 +471,42 @@ describe('PtyHostBackend validate', () => {
     expect(await backend.validate(PANE, { engine: 'claude' })).toEqual({ state: 'unknown', reason: 'ptyhost:p1:%1 could not be resolved' })
     lookupPaneEngineProcess.mockRejectedValueOnce(new Error('boom'))
     expect(await backend.validate(PANE, { engine: 'claude' })).toEqual({ state: 'unknown', reason: 'pty host runtime probe failed' })
+  })
+})
+
+describe('PtyHostBackend openStream', () => {
+  const sink = { onData: () => {}, onClose: () => {} }
+
+  it('fails without a connection to the host, or with none for the stream', async () => {
+    const unprepared = new PtyHostBackend({ home: '/tmp/h', launch: async () => ({ unavailable: 'no', code: 'PTY_HOST_UNAVAILABLE' }) })
+    expect(await unprepared.openStream(PANE, { engine: 'terminal' }, { cols: 80, rows: 24 }, sink))
+      .toEqual({ state: 'failed', reason: 'pty host is unavailable' })
+    const { backend } = await ready()
+    expect(await backend.openStream({ ...PANE, instance: 'p0' }, { engine: 'terminal' }, { cols: 80, rows: 24 }, sink))
+      .toEqual({ state: 'failed', reason: 'pty host is unavailable' })
+    expect(await backend.openStream(PANE, { engine: 'terminal' }, { cols: 80, rows: 24 }, sink))
+      .toEqual({ state: 'failed', reason: 'pty host stream connection is unavailable' })
+  })
+
+  it('subscribes a stream connection to the pane', async () => {
+    const { Duplex, PassThrough } = await import('node:stream')
+    const { encodeFrame, FrameKind, FrameReader } = await import('./ptyHost/protocol.js')
+    const toStream = new PassThrough()
+    const fromStream = new PassThrough()
+    const reader = new FrameReader()
+    fromStream.on('data', (chunk: Buffer) => {
+      for (const frame of reader.push(chunk)) {
+        expect(frame.kind).toBe(FrameKind.Subscribe)
+        expect(JSON.parse(frame.payload.toString())).toEqual({ pane: '%1', cols: 80, rows: 24, readOnly: true })
+        toStream.write(encodeFrame(FrameKind.Ack, Buffer.from(JSON.stringify({ for: FrameKind.Subscribe, ok: true }))))
+      }
+    })
+    const { backend } = await ready({}, { stream: async () => Duplex.from({ readable: toStream, writable: fromStream }) })
+    const opened = await backend.openStream(PANE, { engine: 'terminal' }, { cols: 80, rows: 24 }, sink, true)
+    expect(opened.state).toBe('succeeded')
+    if (opened.state === 'succeeded') {
+      expect(opened.value.runtime).toEqual(PANE)
+      await opened.value.close()
+    }
   })
 })

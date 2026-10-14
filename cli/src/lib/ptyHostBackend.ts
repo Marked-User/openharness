@@ -3,8 +3,8 @@
  * over its control connection (ptyHost/client.ts). It mirrors `TmuxBackend` op for op, so an agent on
  * either backend is created, read, typed into, held and restarted the same way.
  *
- * Streams (`openStream`) are not here yet: the coordinator treats a backend without them as one that
- * cannot stream until they are (Task 14).
+ * Its streams (`openStream`) are `PtyHostStream`s (ptyHost/stream.ts), one stream connection each, whose keyframes
+ * are tmux's.
  */
 import { env } from '../config/env.js'
 import type { AgentEngine } from '../engines/types.js'
@@ -15,6 +15,7 @@ import { LSTART_MARKER_RE } from './processTable.js'
 import type { PtyHostCallResult, PtyHostClient } from './ptyHost/client.js'
 import { ensurePtyHost, type EnsurePtyHostResult } from './ptyHost/launch.js'
 import type { PtyEvent } from './ptyHost/protocol.js'
+import { PtyHostStream } from './ptyHost/stream.js'
 import { submitContent, submitSettleMs } from './submitTiming.js'
 import type { TerminalBackend, TerminalBackendPrepared } from './terminalBackend.js'
 import { TMUX_KEYS } from './terminalKeys.js'
@@ -39,6 +40,9 @@ import {
   type TerminalProcessExpectation,
   type TerminalReadResult,
   type TerminalRespawnRequest,
+  type TerminalStreamHandle,
+  type TerminalStreamSink,
+  type TerminalStreamSize,
 } from './terminalTypes.js'
 
 /** A new pane's size until a viewer resizes it to itself: a wide screen, so an engine's first frame wraps little. */
@@ -403,5 +407,24 @@ export class PtyHostBackend implements TerminalBackend<PtyRuntimeRef> {
     if (result.state === 'failed' && result.code === 'no_pane') return 'missing'
     if (result.state !== 'ok') return null
     return result.value.info.pid ?? 'missing'
+  }
+
+  /**
+   * A stream on the pane, over a stream connection of its own. As `TmuxBackend.openStream`, `expected` is not
+   * checked: a pane whose engine has gone still shows why.
+   */
+  async openStream(
+    runtime: PtyRuntimeRef,
+    expected: TerminalProcessExpectation,
+    size: TerminalStreamSize,
+    sink: TerminalStreamSink,
+    readOnly?: boolean,
+  ): Promise<TerminalReadResult<TerminalStreamHandle<PtyRuntimeRef>>> {
+    void expected
+    const client = this.clientFor(runtime)
+    if (!client) return { state: 'failed', reason: UNAVAILABLE }
+    const connection = await client.openStream()
+    if (!connection) return { state: 'failed', reason: 'pty host stream connection is unavailable' }
+    return PtyHostStream.open(connection, runtime, size, sink, readOnly === true)
   }
 }
