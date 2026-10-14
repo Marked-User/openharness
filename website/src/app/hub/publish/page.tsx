@@ -15,8 +15,9 @@ import { FilesReview } from './components/FilesReview';
 import { OutputInputs, SourceInputs } from './components/ProjectInputs';
 import { PublishChecks } from './components/PublishChecks';
 import { PublishTarget } from './components/PublishTarget';
+import { UnpublishAction } from './components/UnpublishAction';
 import { originalOutput, readCover, readProjectFolder } from './projectFiles';
-import { submitPublication } from './publication';
+import { submitPublication, unpublishPublication } from './publication';
 import { usePublishDraft, type PublishDraft } from './usePublishDraft';
 import { useEnglishDraft } from './useEnglishDraft';
 import styles from '../community.module.css';
@@ -66,6 +67,13 @@ export default function PublishPage() {
     void publishOnce(async clientId => { router.push(`/hub/${await submitPublication(draft, clientId)}`); })
       .catch(e => setError(e instanceof Error ? e.message : 'Publication failed. Your draft is still here.')).finally(() => setBusy(false));
   }
+  function unpublish() {
+    if (!draft.updateId || busy) return;
+    const id = draft.updateId;
+    setBusy(true); setError('');
+    void publishOnce(async () => { await unpublishPublication(id); router.push('/hub/yours'); })
+      .catch(e => setError(e instanceof Error ? e.message : 'The harness could not be unpublished. Try again.')).finally(() => setBusy(false));
+  }
   const updating = !!draft.updateId;
 
   return <><Header /><main className={`${styles.wrap} ${styles.publish}`}>
@@ -92,5 +100,6 @@ export default function PublishPage() {
       {(error || loadError || saveError) && <p className={styles.error} role="alert">{error || loadError || saveError}</p>}
       <button className={styles.primary} disabled={busy || !ready}>{updating ? (busy ? 'Saving…' : 'Save changes') : (busy ? 'Publishing…' : 'Publish harness')}</button>
     </form>
+    {updating && <UnpublishAction busy={busy} onUnpublish={unpublish} />}
   </main></>;
 }

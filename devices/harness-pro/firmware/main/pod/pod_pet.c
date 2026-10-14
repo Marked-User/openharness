@@ -262,20 +262,6 @@ uint32_t pod_pet_next_step_ms(const char *engine, pod_scene_t scene, uint32_t cl
     return n * step_ms;   // every step draws the same
 }
 
-// The plain loop's next change (pod_pet_draw_loop): the first step after clock_ms that draws a different frame or offset.
-uint32_t pod_pet_loop_next_ms(const char *engine, ht_pet_state_t state, uint32_t clock_ms)
-{
-    const ht_pet_t *pet = pod_pet_for(engine);
-    if (!pet || state >= HT_PET_STATES) return 1000;
-    unsigned n = ht_pet_steps(pet), step_ms = pet->step_ms[state], from = (clock_ms / step_ms) % n;
-    for (unsigned k = 1; k <= n; k++) {
-        unsigned to = (from + k) % n;
-        if (pet->loops[state][from].frame != pet->loops[state][to].frame || pet->loops[state][from].dy != pet->loops[state][to].dy)
-            return k * step_ms - clock_ms % step_ms;
-    }
-    return 1000;   // a still loop
-}
-
 // ---- the player -----------------------------------------------------------------------------------------
 
 // Logos are pre-rendered in native order at the exact sizes Pod draws (scripts/pod_gen_logos.py): a lookup and a blit.
@@ -317,15 +303,6 @@ void pod_mark_default_big(ht_scene_t *s, int x, int y, int size, uint16_t ground
         if (ht_pro_width(fonts[i], ">_") <= size * 62 / 100 && fonts[i]->height <= size * 70 / 100) { f = fonts[i]; break; }
     int w = ht_pro_width(f, ">_");
     ht_pro_text(s, x + (size - w) / 2, y + (size - f->height) / 2 - size / 16, w, f, ht_rgb(0x6f746f), ">_");
-}
-
-bool pod_pet_draw_loop(ht_scene_t *s, int x, int y, int side, const char *engine, ht_pet_state_t state, uint32_t clock_ms)
-{
-    const ht_pet_t *pet = pod_pet_for(engine);
-    if (!pet || state >= HT_PET_STATES) return false;
-    ctx_t c = {s, x, y, side, x, y, 8, 0xffffff};
-    play_rest(&c, pet, state, clock_ms);
-    return true;
 }
 
 void pod_pet_draw(ht_scene_t *s, int x, int y, int side, const char *engine, pod_scene_t scene,

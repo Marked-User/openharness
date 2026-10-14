@@ -12,10 +12,9 @@
 #define C(rgb) ht_rgb(rgb)
 enum {
     COLS = 2, CARD_W = CS_CARD_W, CARD_H = CS_CARD_H, GAP = CS_CARD_GAP, MARGIN = CS_CARD_MARGIN, TOP = CS_CARD_TOP, PAD = 19,
-    // the head line's middle (name and count), the art's box, the lead's name. The pet's square is 168 so every pet's
-    // small loop draws at its stored size (zoom 8, the rasteriser's fast path; Claude's frames are 145 wide); its ink fits ART_H
+    // the head line's middle (name and count), the art's box, the lead's name
     NAME_Y = 40, ART_Y = CS_CARD_ART_Y, ART_H = CS_CARD_ART_H, FOOT_Y = CARD_H - 30,
-    PET_SIDE = 168, LOGO = 72, MARK = 72, MARK_W = 26, GLYPH = 20,
+    LOGO = 72, MARK = 72, MARK_W = 26, GLYPH = 20,
     DOT = 8, DOT_PITCH = 16, DOT_Y = 700, DOTS_MAX = 8
 };
 
@@ -110,10 +109,10 @@ const pod_agent_t *cs_card_lead(const pod_model_t *m, int c)
     return best;
 }
 
-ht_pet_state_t cs_card_loop(const pod_model_t *m, const pod_agent_t *a)
+pod_scene_t cs_card_scene(const pod_model_t *m, const pod_agent_t *a)
 {
     pod_state_t st = pod_model_eff(m, a);
-    return st == POD_WORKING ? HT_PET_WORKING : st == POD_ASKING ? HT_PET_ASKING : HT_PET_IDLE;
+    return st == POD_WORKING ? POD_SCENE_WORK : st == POD_ASKING ? POD_SCENE_ASK : POD_SCENE_REST;
 }
 
 // The first cover on the page Overview shows and how many (the TABS frame's scroll is the page's first row, two rows a page).
@@ -131,7 +130,7 @@ static int on_screen(const pod_nav_t *nav, const pod_model_t *m, const pod_agent
 {
     const pod_frame_t *f = nav->depth ? &nav->stack[nav->depth - 1] : NULL;
     if (!f || nav->skin != POD_SKIN_CONSOLE) return 0;
-    if (f->view == POD_V_TAB && f->tab != POD_TAB_RECENT) return cs_tab_page(nav, m, out);
+    if (f->view == POD_V_TAB) return cs_tab_page(nav, m, out);
     if (f->view != POD_V_TABS) return 0;
     int first, n = page_span(nav, m, &first), k = 0;
     for (int i = 0; i < n; i++) {
@@ -147,8 +146,8 @@ uint32_t cs_cards_next_ms(const pod_nav_t *nav, const pod_model_t *m, uint32_t n
     int n = on_screen(nav, m, l);
     uint32_t best = 1000;
     for (int i = 0; i < n; i++) {
-        if (cs_card_loop(m, l[i]) == HT_PET_IDLE) continue;   // a resting pet is drawn still
-        uint32_t ms = pod_pet_loop_next_ms(l[i]->engine, cs_card_loop(m, l[i]), now_ms);
+        if (!pod_pet_for(l[i]->engine)) continue;   // a logo is still
+        uint32_t ms = pod_pet_next_step_ms(l[i]->engine, cs_card_scene(m, l[i]), now_ms, 0);
         if (ms < best) best = ms;
     }
     // four pets redraw the whole page: no faster than the Console's animation beat
@@ -161,7 +160,7 @@ bool cs_cards_move(const pod_nav_t *nav, const pod_model_t *m)
     const pod_agent_t *l[CS_PER_PAGE];
     int n = on_screen(nav, m, l);
     for (int i = 0; i < n; i++)
-        if (cs_card_loop(m, l[i]) != HT_PET_IDLE && pod_pet_for(l[i]->engine)) return true;
+        if (pod_pet_for(l[i]->engine)) return true;
     return false;
 }
 
@@ -169,12 +168,13 @@ bool cs_cards_move(const pod_nav_t *nav, const pod_model_t *m)
 static const unsigned HUES[] = {0x8B7CFF, 0x38BDF8, 0xF472B6, 0xFF8A65, 0x2DD4BF, 0xA3A8FF};
 enum { CARD_BASE = CS_GROUND };
 
-void cs_card_art(ht_scene_t *s, int cx, int cy, const pod_model_t *m, const pod_agent_t *a, unsigned fill, uint32_t now_ms)
+void cs_card_art(ht_scene_t *s, int cx, int cy, int side, const pod_model_t *m, const pod_agent_t *a, unsigned fill, uint32_t now_ms)
 {
-    ht_pet_state_t loop = cs_card_loop(m, a);   // a resting pet holds its first step: a quiet screen wakes once a second
-    if (pod_pet_draw_loop(s, cx - PET_SIDE / 2, cy - PET_SIDE / 2, PET_SIDE, a->engine, loop, loop == HT_PET_IDLE ? 0 : now_ms) ||
-        pod_logo_draw(s, cx - LOGO / 2, cy - LOGO / 2, LOGO, a->engine))
+    if (pod_pet_for(a->engine)) {   // the scene of its state (work, ask, rest), as the agent screen plays it
+        pod_pet_draw(s, cx - side / 2, cy - side / 2, side, a->engine, cs_card_scene(m, a), now_ms, 0);
         return;
+    }
+    if (pod_logo_draw(s, cx - LOGO / 2, cy - LOGO / 2, LOGO, a->engine)) return;
     ht_pro_rect_aa_stroke(s, cx - MARK / 2, cy - MARK / 2, MARK, MARK, 16, C(0x8A909A), C(fill));
     int w = ht_pro_width(&cs_mono_26, ">_");
     cs_text(s, cx - w / 2, cy, w + 2, &cs_mono_26, CS_INK2, ">_");
@@ -218,7 +218,7 @@ static void card(pod_out_frame_t *f, const pod_model_t *m, int c, int x, int y, 
     if (!lead) { pod_hit_add_id(f, x, y, CARD_W, CARD_H, POD_A_OPEN_TAB, c ? c - 1 : POD_TAB_RECENT, c ? m->tabs[c - 1].id : ""); return; }
 
     // the lead (working first): its pet, else its logo straight on the card, else a thin ">_" outline
-    cs_card_art(s, x + CARD_W / 2, y + ART_Y + ART_H / 2, m, lead, fill, now_ms);
+    cs_card_art(s, x + CARD_W / 2, y + ART_Y + ART_H / 2, CS_CARD_PET, m, lead, fill, now_ms);
 
     // its name at the foot, centred, after the working mark while it works
     char nm[sizeof lead->name];

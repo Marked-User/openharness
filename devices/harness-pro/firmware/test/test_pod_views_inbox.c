@@ -121,9 +121,9 @@ static void test_bell(void) {
     snprintf(M.tabs[0].name, sizeof M.tabs[0].name, "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
     render(1000);
     h = find_hit(POD_A_BACK);
-    CHECK(h && h->w == CI_BACK_W && h->x + h->w <= F.bell_x);
+    CHECK(h && h->w >= CI_BACK_W && h->x + h->w <= 632 && h->x + h->w <= F.bell_x);   // no title: the label runs to the bell
     for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].y < CI_BAR_H && S.runs[i].x < 173 && S.runs[i].x > 40) CHECK(S.runs[i].x + S.runs[i].w <= 62 + 115 + 2);
+        if (S.runs[i].pro_kind == K_TEXT && S.runs[i].y < CI_BAR_H && S.runs[i].x < 173 && S.runs[i].x > 40) CHECK(S.runs[i].x + S.runs[i].w <= F.bell_x - 16 + 1);
     // Not over a recording.
     pod_nav_act(&N, &M, POD_A_TALK, 0, 1000);
     CHECK(N.stack[N.depth - 1].view == POD_V_TALK);
