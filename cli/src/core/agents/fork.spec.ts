@@ -52,7 +52,7 @@ const pending = { agentId: 'f1', sessionId: '', engine: 'claude' } as Registered
 
 function setup(row: RegisteredSession | null = source(), over: Partial<ForkAgentDeps> = {}) {
   const deps: ForkAgentDeps = {
-    tmuxBackend: {} as ForkAgentDeps['tmuxBackend'],
+    createBackend: {} as ForkAgentDeps['createBackend'],
     registry: { byAgent: vi.fn(() => row ?? undefined) } as unknown as ForkAgentDeps['registry'],
     mirror: {
       isBusy: vi.fn(() => false),
@@ -191,7 +191,7 @@ describe('forking an agent', () => {
   })
 
   it('refuses without tmux, an agent, a folder, or with a grid or a turn in progress', async () => {
-    expect(await setup(source(), { tmuxBackend: null }).fork({ agentId: 'a1', name: null, prompt: null })).toEqual({ ok: false, error: 'TMUX_UNAVAILABLE' })
+    expect(await setup(source(), { createBackend: null }).fork({ agentId: 'a1', name: null, prompt: null })).toEqual({ ok: false, error: 'TMUX_UNAVAILABLE' })
     expect(await setup(null).fork({ agentId: 'a1', name: null, prompt: null })).toEqual({ ok: false, error: 'AGENT_NOT_FOUND' })
     expect(await setup(source({ cwd: undefined })).fork({ agentId: 'a1', name: null, prompt: null })).toMatchObject({ error: 'CWD_NOT_FOUND', detail: expect.stringContaining('no working folder') })
     expect(await setup(source({ cwd: join(root, 'file') })).fork({ agentId: 'a1', name: null, prompt: null })).toEqual({ ok: false, error: 'CWD_NOT_FOUND' })

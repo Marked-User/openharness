@@ -72,7 +72,8 @@ import { createHandoffDependencies } from './handoffDependencies.js'
 import { TmuxBackend } from '../lib/tmuxBackend.js'
 import { PtyHostBackend } from '../lib/ptyHostBackend.js'
 import { DEFAULT_HOST_THEME, loadHostTheme, saveHostTheme, type HostTheme } from '../lib/hostTheme.js'
-import { restoreAgents, tmuxSurvey, type RestoreAgentsDeps, type RestoreSummary } from '../lib/restoreAgents.js'
+import { restoreAgents, type RestoreAgentsDeps, type RestoreSummary } from '../lib/restoreAgents.js'
+import { restoreTerminals } from '../lib/restoreTerminals.js'
 import { createRetainExitedSession } from '../lib/retainExitedSession.js'
 import { createKeepAbandonedConversation } from '../lib/keepAbandonedConversation.js'
 import { RESUME_READINESS_BUDGET_MS } from '../lib/resumeStoppedAgent.js'
@@ -94,14 +95,13 @@ import type { AgentDshContext } from '../lib/agentFrame.js'
 import type { AgentGridTarget, GridAnnotation } from '../lib/gridAnnotation.js'
 import { confirmHomes, sessionCodexHome } from '../lib/engineHomes.js'
 import { sessionStoreContracts } from '../engines/sessionStoreContracts.js'
-import { lookupPaneEngineProcess, resolvePaneEngineProcess } from '../lib/paneEngineProcess.js'
 import { argvTokens, processRows } from '../lib/processTable.js'
 import { defaultTerminalBackends } from '../config/terminalConfig.js'
 import { prepareTerminalBackends, TerminalBackendCoordinator } from '../lib/terminalBackendCoordinator.js'
-import type { TerminalBackend } from '../lib/terminalBackend.js'
-import type { TerminalRuntimeRef } from '../lib/terminalTypes.js'
+import { canRestart, heldIn, type TerminalBackend } from '../lib/terminalBackend.js'
+import { handoffAgentId } from '../lib/terminalHandoff.js'
 import { TerminalStreamManager } from '../lib/terminalStreamManager.js'
-import { ownedPanesOf, terminalRouteKey, terminalRuntimeLabel, tmuxRuntimeOf } from '../lib/terminalRuntime.js'
+import { ownedPanesOf, terminalRouteKey, terminalRuntimeLabel } from '../lib/terminalRuntime.js'
 import { probeTerminalAgents } from '../lib/terminalAgentDiscovery.js'
 import { RECONCILE_PASS_DEADLINE_MS, TerminalAgentReconciler } from '../lib/terminalAgentReconciler.js'
 import { Watcher } from '../watcher/watcher.js'
@@ -554,17 +554,14 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // The backend new panes are made on. Every other pane operation reaches the pane's own backend
   // through the coordinator (`terminals.backendFor`).
   const createBackend: TerminalBackend | null = terminalBackends[0] ?? null
-  // What only tmux does so far — a held pane's token (`isHeld`/`killHeld`), clearing a pane's
-  // session environment, a respawn in place — reaches the services that need it on the tmux backend
-  // itself, and only when it is the one new panes are made on.
+  // A hook's tmux runtime hint is taken only while tmux is the backend new panes are made on
+  // (core/engines/hooks.ts). Restart, retarget, restore and adoption reach each pane's own backend
+  // through the coordinator, gated on what it can do (`canRestart`, `isHeld`, `killHeld`).
   const tmuxBackend = createBackend instanceof TmuxBackend ? createBackend : null
   const terminals = new TerminalBackendCoordinator(
     terminalBackends,
     terminalConfig.backends,
   )
-  // A row's pane (`tmuxPane`, its primary runtime's id) as the runtime the coordinator finds its backend
-  // by: tmux's, until rows carry another backend.
-  const paneRuntime = (paneId: string): TerminalRuntimeRef => ({ backend: 'tmux', paneId })
   const sqliteWarning = sqlitePreflightMessage()
   if (sqliteWarning) console.warn(sqliteWarning)
   // The user's shell environment is captured at startup, not on the first recap — a slow profile
@@ -940,7 +937,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // client's frames go through, held at the same gate. In its own process by default (core/gatewayLink.ts),
   // or here (gateway/start.ts); the socket hears it through `fromGateway` and speaks to it in the clear.
   Object.assign(coreApi.terminals, createTerminalSessions({ agents: coreApi.agents,
-    paneState: (pane) => { const runtime = paneRuntime(pane); return terminals.backendFor(runtime)?.paneState(runtime) ?? Promise.resolve('unknown') },
+    paneState: (runtime) => terminals.backendFor(runtime)?.paneState(runtime) ?? Promise.resolve('unknown'),
     processState: checkPidRuntime }))
   const account = (s = readAuthSession()): GatewayAccount => ({ machineId: s?.machineId ?? null, signIn: signInOf(s?.signInEpoch, s?.signInAcct), autonomousEnv: s?.autonomousEnv ?? env.AUTONOMOUS_ENV })
   const engineReaders = createEngineReaders({ isolated: outOfProcess, inline: inline?.engineTranscriptFor,
@@ -1049,7 +1046,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // theme is applied only for a frame, well after `agentReconciler` below exists (connect() comes last).
   const terminalRequests = createTerminalRequests({
     resolve: (id) => registry.resolve(id),
-    paneInfo: (pane) => { const runtime = paneRuntime(pane); return terminals.backendFor(runtime)?.paneInfo(runtime) ?? Promise.resolve(null) },
+    paneInfo: (runtime) => terminals.backendFor(runtime)?.paneInfo(runtime) ?? Promise.resolve(null),
     applyTheme: (theme) => {
       if (theme.background === hostTheme.background && theme.foreground === hostTheme.foreground) return
       hostTheme = theme
@@ -1529,10 +1526,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
 
   backend.runtimeProfileProvider = (session) => runtimeProfiles.selectedModel(session)
   backend.dshFrameProvider = (s) => ports.viewers?.frameContext(s) ?? null
-  // `harness remote` names the tile it was typed in by its tmux pane; the registry knows whose it is.
-  backend.onTerminalHandoff = (tmuxPane) => registry.advertised()
-    .find((session) => session.tmuxPane === tmuxPane
-      || session.runtimes.some((runtime) => runtime.backend === 'tmux' && runtime.paneId === tmuxPane))?.agentId ?? null
+  // `harness remote` names the tile it was typed in by its pane; the registry knows whose it is (lib/terminalHandoff.ts).
+  backend.onTerminalHandoff = (pane) => handoffAgentId(registry.advertised(), pane)
   // A rename, a model and effort, or an app opening an agent (core/agents/update.ts).
   const agentUpdate = createAgentUpdate({
     registry, clients: backend, toProject: (s) => backend.toProject(s), closeAgentService: () => backend.closeAgentService,
@@ -2175,17 +2170,20 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   }
   // Later passes over held agents (core/agents/heldLaunches.ts) wait for this one.
   await heldLaunches.boot(async (current) => {
-  if (tmuxBackend) {
+  // Restore runs where a backend can rebuild and relaunch a pane in place (tmux, the pty host): each row on the
+  // backend its pane is on (lib/restoreTerminals.ts).
+  if (terminalBackends.some(canRestart)) {
    // Best effort, like the cwd repair above it: panes that cannot be rebuilt cost this boot its
    // tiles, not the daemon. `restoreDegraded` then stops discovery retiring the rows whose panes
    // restore never got to, so the next daemon can put them back.
    try {
-    const backend = tmuxBackend
-    // Asked of the pane's own backend, as every other pane read is; restore runs only with tmux there.
-    const lookupPane = (pane: string, engine: AgentEngine) => {
-      const runtime = paneRuntime(pane)
-      return lookupPaneEngineProcess(terminals.backendFor(runtime) ?? backend, runtime, engine)
-    }
+    // Every pane question asked of the pane's own backend, as every other pane read is.
+    const restoreOn = restoreTerminals({
+      backendFor: (runtime) => terminals.backendFor(runtime),
+      listTmuxPanes: () => listTmuxPanes(),
+      cwd: homedir(),
+      label: (engine) => buildHarnessSessionLabel(engine),
+    })
     const restoreDeps: RestoreAgentsDeps = {
       cancelled: (agentId) => !current() || restoreCancelled(agentId),
       revision: (agentId) => restoreRevision(agentId),
@@ -2200,9 +2198,10 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       // A new tmux server hands out `%N` from zero again, so a stale id can name someone's shell;
       // and a pane that outlived the daemon in a session discovery no longer lists still has its
       // engine, which a second pane resuming the same session would collide with.
-      survey: () => tmuxSurvey(() => listTmuxPanes(), lookupPane),
-      waitingPane: (runtime, token) => backend.isHeld(runtime, token),
-      liveProcess: (entry, runtime) => tmuxSurvey(() => listTmuxPanes(), lookupPane).liveProcess(entry, runtime),
+      survey: restoreOn.survey,
+      restorable: restoreOn.restorable,
+      waitingPane: restoreOn.waitingPane,
+      liveProcess: restoreOn.liveProcess,
       buildLaunch: createRestoreLaunch({
         workspaceMissing, relaunchOverrides, prepareSessionResume, refreshGridWebSearch,
         downgradedPermission: (entry, native) => downgradedPermission(entry, entry.bypassPermission === true, 'restore', native),
@@ -2223,30 +2222,11 @@ async function runForeground(session: AuthSession | null): Promise<void> {
           return { argv, ...(overrides.native ? { nativeToken: overrides.native.token, current: overrides.native.current } : {}), ...(Object.keys(launchEnv).length ? { env: launchEnv } : {}) }
         },
       }),
-      createPane: async (entry, launch, control) => {
-        const created = await backend.create({
-          cwd: homedir(),
-          label: buildHarnessSessionLabel(entry.engine),
-          command: launch.argv,
-          ...control,
-          ...(launch.env ? { env: launch.env } : {}),
-        })
-        return created.state === 'succeeded'
-          ? { ok: true, runtime: created.runtime }
-          : { ok: false, reason: created.reason }
-      },
-      respawn: async (runtime, launch, control) => {
-        const result = await backend.respawn(runtime, {
-          command: launch.argv,
-          ...control,
-          cwd: homedir(),
-          ...(launch.env ? { env: launch.env } : {}),
-        })
-        return result.state === 'succeeded' ? { ok: true } : { ok: false, reason: result.reason }
-      },
-      probeProcess: (runtime, engine) => resolvePaneEngineProcess(backend, runtime, engine),
-      paneState: (runtime) => backend.paneState(runtime),
-      clearRemainOnExit: (runtime) => backend.releaseHold(runtime),
+      createPane: restoreOn.createPane,
+      respawn: restoreOn.respawn,
+      probeProcess: restoreOn.probeProcess,
+      paneState: restoreOn.paneState,
+      clearRemainOnExit: restoreOn.clearRemainOnExit,
       holdRoute: (key, ms) => agentReconciler.holdRoute(key, ms),
       releaseRoute: (key) => agentReconciler.releaseRoute(key),
       triggerHint: async (runtime, engine) => { await agentReconciler.triggerHint(runtime, engine) },
@@ -2254,7 +2234,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       // A grid's or a saved API's launch asks models: not before the core is ready (core/agents/heldLaunches.ts).
       needs: (entry) => [...(externalResumePending(entry.externalResume) ? ['search'] : []), ...(entry.gridLaunch ? ['models'] : []), ...(entry.dsh ? ['store'] : []), ...(!isTerminalEngine(entry.engine) ? ['native'] : [])],
       waitingLaunch: (entry, held) => ({ argv: heldPaneArgv(held.detail, entry.externalResume?.token ?? held.nativeToken) }),
-      killPane: async (runtime) => { await backend.kill(runtime) },
+      killPane: restoreOn.killPane,
     }
     // Later passes launch the held agents, into the panes they wait in, outside this pass's transaction.
     restoreOnly = (only, current) => restoreAgents({ ...restoreDeps, only, cancelled: id => !current() || restoreCancelled(id) })
@@ -2399,7 +2379,6 @@ async function runForeground(session: AuthSession | null): Promise<void> {
 
   // Watching a pane create or fork just opened until its engine is up, or why not (core/agents/newPane.ts).
   const watchNewPane = createPaneWatcher({
-    waitingPane: (runtime, token) => tmuxBackend?.isHeld(runtime, token) ?? Promise.resolve('unknown'),
     registry,
     announceSession,
     triggerHint: async (runtime, engine) => { await agentReconciler.triggerHint(runtime, engine) },
@@ -2410,13 +2389,11 @@ async function runForeground(session: AuthSession | null): Promise<void> {
 
   // Opening a conversation Harness did not start, and taking it over from a terminal (core/agents/adopt.ts).
   externalResumes = createExternalResumes({
-    registry, tmux: tmuxBackend, stopped: () => stoppedAgents.list(), cancelled: id => restoreCancelled(id),
+    // Its waiting pane opens where new panes are made, and is asked about and closed by the backend it is on.
+    registry, backend: createBackend, backendFor: (runtime) => terminals.backendFor(runtime),
+    stopped: () => stoppedAgents.list(), cancelled: id => restoreCancelled(id),
     generation: () => searchGeneration,
-    waiting: row => {
-      const runtime = tmuxRuntimeOf(row)
-      if (!runtime || !tmuxBackend) return Promise.resolve(false)
-      return tmuxBackend.isHeld(runtime, row.externalResume!.token).then(value => value === true)
-    },
+    waiting: row => heldIn(row, row.externalResume!.token, (runtime) => terminals.backendFor(runtime)).then(value => value === true),
     inspect: request => ports.search?.inspect(request) ?? Promise.resolve(externalUnavailable()),
     preflight: createExternalPreflight({ blocksFolder: cwd => backend.purgeAgentService?.blocksFolder(cwd),
       native: prepareNativeLaunch, hookPort, hooksDisabled: env.DISABLE_HOOK_INSTALL, installOpencodePlugin: installOpencodePluginBeforeSpawn }),
@@ -2458,7 +2435,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     prepareNative: launchOverridesDeps.prepareNative,
     authority: launchAuthority,
     dshLaunch,
-    tmuxBackend,
+    createBackend,
     registry,
     mirror,
     pendingForkInherit,
@@ -2474,7 +2451,6 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   const paneSwap = createPaneSwap({
     restartJobs,
     byAgent: (agentId) => registry.byAgent(agentId),
-    tmuxBackend,
     prepareSessionResume,
     keepAbandonedConversation,
   })
@@ -2488,7 +2464,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   backend.onRetargetAgent = createAgentRetargeter({
     sessionTurnOpen,
     purgeBusy: (agentId) => restorePanes.busy(agentId) || backend.purgeAgentService?.busy(agentId),
-    tmuxBackend,
+    terminals,
     registry,
     runtimeProfiles,
     launchOverridesDeps,
@@ -2572,7 +2548,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     purgeBusy: (agentId) => restorePanes.busy(agentId) || backend.purgeAgentService?.busy(agentId),
     stopJobs,
     pinnedControls,
-    tmuxBackend,
+    terminals,
     sameRestartTarget,
     agentReconciler,
     terminalHintMachineName,

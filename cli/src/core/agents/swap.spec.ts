@@ -27,15 +27,19 @@ const runtime = { backend: 'tmux', paneId: '%4' } as never
 const session = (over: Partial<RegisteredSession> = {}): RegisteredSession =>
   ({ agentId: 'a1', sessionId: 's1', engine: 'claude', registeredAt: 100, tmuxPane: '%4', cwd: '/work', ...over }) as RegisteredSession
 
+/** The pane the last `setup` swaps in, on its fake tmux backend (`restartTargetOf`'s answer). */
+let latest: { backend: never; runtime: never }
+const place = () => latest
+
 function setup(row: RegisteredSession | null = session()) {
   const tmuxBackend = {
     holdOpen: vi.fn(async () => ({ state: 'succeeded' })),
     respawn: vi.fn(async () => ({ state: 'succeeded' })),
     respawnRefusal: vi.fn(async (request: { env?: Record<string, string> }) => request.env ? 'too old' : null),
   }
+  latest = { backend: tmuxBackend as never, runtime }
   const deps: PaneSwapDeps = {
     byAgent: vi.fn(() => row ?? undefined),
-    tmuxBackend: tmuxBackend as unknown as PaneSwapDeps['tmuxBackend'],
     prepareSessionResume: vi.fn(),
     keepAbandonedConversation: vi.fn(),
   }
@@ -45,7 +49,7 @@ function setup(row: RegisteredSession | null = session()) {
 describe('the pane-process swap', () => {
   it('passes the prepared native snapshot into the final argv builder', () => {
     const native = { token: 'prepared-native' } as NativeLaunch
-    const prepared = setup().swap.paneSwapDeps(session(), runtime, { native })
+    const prepared = setup().swap.paneSwapDeps(session(), place(), { native })
     prepared.buildArgv({ resumeSessionId: 's1', bypassPermission: false })
     expect(buildEngineLaunchArgv).toHaveBeenCalledWith('claude', expect.objectContaining({ native, resumeSessionId: 's1' }))
   })
@@ -67,7 +71,7 @@ describe('the pane-process swap', () => {
   it('passes revocable ownership into the final signal and tmux dispatch boundaries', async () => {
     const { swap, tmuxBackend } = setup()
     const current = () => false
-    const prepared = swap.paneSwapDeps(session(), runtime, {}, null, current)
+    const prepared = swap.paneSwapDeps(session(), place(), {}, null, current)
     expect(prepared.isCurrent?.()).toBe(false)
     await prepared.holdOpen()
     expect(tmuxBackend.holdOpen).toHaveBeenCalledWith(runtime, current)
@@ -88,14 +92,14 @@ describe('the pane-process swap', () => {
 
   it('prepares the resume, holds the pane open and respawns it in the home folder, saying why when tmux will not', async () => {
     const { deps, tmuxBackend, swap } = setup()
-    const swapDeps = swap.paneSwapDeps(session(), runtime, { env: { GRID_KEY: 'k' } })
+    const swapDeps = swap.paneSwapDeps(session(), place(), { env: { GRID_KEY: 'k' } })
     swapDeps.prepareResume?.()
     expect(deps.prepareSessionResume).toHaveBeenCalledWith(session())
     swapDeps.keepAbandoned?.()
     expect(deps.keepAbandonedConversation).toHaveBeenCalledWith(session())
     // Asked of tmux with the relaunch's own environment, before anything is stopped.
     expect(await swapDeps.respawnRefusal?.()).toBe('too old')
-    expect(await swap.paneSwapDeps(session(), runtime).respawnRefusal?.()).toBeNull()
+    expect(await swap.paneSwapDeps(session(), place()).respawnRefusal?.()).toBeNull()
     expect(await swapDeps.holdOpen()).toEqual({ ok: true })
     tmuxBackend.holdOpen.mockResolvedValueOnce({ state: 'failed', reason: 'pane gone' } as never).mockResolvedValueOnce({ state: 'unknown' } as never)
     expect(await swapDeps.holdOpen()).toEqual({ ok: false, reason: 'pane gone' })
@@ -105,15 +109,37 @@ describe('the pane-process swap', () => {
     tmuxBackend.respawn.mockResolvedValueOnce({ state: 'failed', reason: 'busy' } as never).mockResolvedValueOnce({ state: 'unknown' } as never)
     expect(await swapDeps.respawn(['claude'])).toEqual({ ok: false, reason: 'busy' })
     expect(await swapDeps.respawn(['claude'])).toEqual({ ok: false, reason: 'tmux respawn-pane did not complete' })
-    await swap.paneSwapDeps(session(), runtime).respawn(['claude'])
+    await swap.paneSwapDeps(session(), place()).respawn(['claude'])
     expect(tmuxBackend.respawn).toHaveBeenLastCalledWith(runtime, { command: ['claude'], cwd: homedir() })
+  })
+
+  it('swaps a ptyhost pane through its own backend, which refuses no environment', async () => {
+    const { swap, tmuxBackend } = setup()
+    const pty = { backend: 'ptyhost' as const, instance: 'p1', paneId: '%3' }
+    const ptyBackend = { holdOpen: vi.fn(async () => ({ state: 'succeeded' })), respawn: vi.fn(async () => ({ state: 'succeeded' })) }
+    const current = () => true
+    const swapDeps = swap.paneSwapDeps(session(), { backend: ptyBackend as never, runtime: pty }, { env: { GRID_KEY: 'k' } }, null, current)
+    expect(swapDeps.respawnRefusal).toBeUndefined()
+    expect(await swapDeps.holdOpen()).toEqual({ ok: true })
+    expect(ptyBackend.holdOpen).toHaveBeenCalledWith(pty, current)
+    expect(await swapDeps.respawn(['claude'])).toEqual({ ok: true })
+    expect(ptyBackend.respawn).toHaveBeenCalledWith(pty, { command: ['claude'], current, cwd: homedir(), env: { GRID_KEY: 'k' } })
+    vi.useFakeTimers()
+    vi.mocked(resolvePaneEngineProcess).mockResolvedValue({ pid: 9, startMarker: 'm' } as never)
+    const waiting = swapDeps.waitForProcess()
+    await vi.advanceTimersByTimeAsync(150 + SWAP_SETTLE_MS)
+    expect(await waiting).toEqual({ pid: 9, startMarker: 'm' })
+    expect(resolvePaneEngineProcess).toHaveBeenCalledWith(ptyBackend, pty, 'claude')
+    expect(tmuxBackend.holdOpen).not.toHaveBeenCalled()
+    expect(tmuxBackend.respawn).not.toHaveBeenCalled()
+    expect(tmuxBackend.respawnRefusal).not.toHaveBeenCalled()
   })
 
   it('terminates the engine through the deleted-agent fallback, with real signals and sleeps', async () => {
     const { swap } = setup()
     const kill = vi.spyOn(process, 'kill').mockImplementation(() => true)
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
-    await swap.paneSwapDeps(session(), runtime).terminate(250)
+    await swap.paneSwapDeps(session(), place()).terminate(250)
     const [target, used, after] = vi.mocked(terminateDeletedAgent).mock.calls[0]
     expect(target).toEqual(session())
     expect(after).toBe(250)
@@ -134,12 +160,12 @@ describe('the pane-process swap', () => {
     const { swap, tmuxBackend } = setup()
     const found = { pid: 99, startMarker: 'now' }
     vi.mocked(resolvePaneEngineProcess).mockResolvedValueOnce(null).mockResolvedValueOnce(found as never).mockResolvedValueOnce({ ...found } as never)
-    const waiting = swap.paneSwapDeps(session(), runtime).waitForProcess()
+    const waiting = swap.paneSwapDeps(session(), place()).waitForProcess()
     await vi.advanceTimersByTimeAsync(150 + 300 + SWAP_SETTLE_MS)
     expect(await waiting).toEqual(found)
     // Asked of the pane's own backend, about the pane being swapped.
     expect(resolvePaneEngineProcess).toHaveBeenCalledWith(tmuxBackend, runtime, 'claude')
-    const never = swap.paneSwapDeps(session(), runtime).waitForProcess()
+    const never = swap.paneSwapDeps(session(), place()).waitForProcess()
     // 150, 300, 600, then 750 ms at a time: the budget is spent on the look that crosses 8 s.
     await vi.advanceTimersByTimeAsync(9_000)
     expect(await never).toBeNull()
@@ -157,7 +183,7 @@ describe('the pane-process swap', () => {
       // Another process in its place by the second look is not the one seen: it is looked at afresh.
       .mockResolvedValueOnce(lasting as never).mockResolvedValueOnce({ pid: 99, startMarker: 'later' } as never)
       .mockResolvedValueOnce(lasting as never).mockResolvedValueOnce({ ...lasting } as never)
-    const waiting = swap.paneSwapDeps(session(), runtime).waitForProcess()
+    const waiting = swap.paneSwapDeps(session(), place()).waitForProcess()
     await vi.advanceTimersByTimeAsync(150 + SWAP_SETTLE_MS + 300 + SWAP_SETTLE_MS + 600 + SWAP_SETTLE_MS)
     expect(await waiting).toEqual(lasting)
     expect(resolvePaneEngineProcess).toHaveBeenCalledTimes(6)
@@ -166,7 +192,7 @@ describe('the pane-process swap', () => {
       refused.pid++
       return { ...refused } as never
     })
-    const never = swap.paneSwapDeps(session(), runtime).waitForProcess()
+    const never = swap.paneSwapDeps(session(), place()).waitForProcess()
     await vi.advanceTimersByTimeAsync(12_000)
     expect(await never).toBeNull()
   })
@@ -174,13 +200,13 @@ describe('the pane-process swap', () => {
   it('builds the relaunch argv with the row\'s mode, folder, the caller\'s argv and the keys a grid must clear', () => {
     const { swap } = setup()
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
-    const plain = swap.paneSwapDeps(session({ permissionMode: 'plan' } as Partial<RegisteredSession>), runtime)
+    const plain = swap.paneSwapDeps(session({ permissionMode: 'plan' } as Partial<RegisteredSession>), place())
     plain.buildArgv({ resumeSessionId: 's1' } as never)
     expect(buildEngineLaunchArgv).toHaveBeenLastCalledWith('claude', { resumeSessionId: 's1', permissionMode: 'plan', cwd: '/work' })
-    const grid = swap.paneSwapDeps(session({ cwd: undefined }), runtime, { env: { HARNESS_DSH: 'blender' }, extraArgs: ['--grid'], clearEnv: ['ANTHROPIC_API_KEY'] }, null)
+    const grid = swap.paneSwapDeps(session({ cwd: undefined }), place(), { env: { HARNESS_DSH: 'blender' }, extraArgs: ['--grid'], clearEnv: ['ANTHROPIC_API_KEY'] }, null)
     grid.buildArgv({} as never)
     expect(buildEngineLaunchArgv).toHaveBeenLastCalledWith('claude', { extraArgs: ['--grid'], clearEnv: ['ANTHROPIC_API_KEY'], harnessNode: true })
-    swap.paneSwapDeps(session(), runtime, { extraArgs: [], clearEnv: [] }).buildArgv({} as never)
+    swap.paneSwapDeps(session(), place(), { extraArgs: [], clearEnv: [] }).buildArgv({} as never)
     expect(buildEngineLaunchArgv).toHaveBeenLastCalledWith('claude', { cwd: '/work' })
     grid.log('swapped')
     expect(log).toHaveBeenCalledWith('swapped')

@@ -437,6 +437,46 @@ describe('PtyHostBackend hold and respawn', () => {
   })
 })
 
+describe('PtyHostBackend killHeld', () => {
+  const TOKEN = '0b5f9d38-3c1e-4c55-9f1a-1d2e3f4a5b6c'
+  const held = `/bin/sh -c harness-held ${TOKEN}`
+  const state = (dead: boolean, startCommand: string) => ({ state: 'ok', value: { state: { dead, exitStatus: null, command: ['sh'], engineExit: null, startCommand } } })
+
+  it('closes the pane while it is the held shell under this token, dead or alive, as tmux\'s format reads it', async () => {
+    for (const dead of [false, true]) {
+      const { backend, calls } = await ready({ paneState: state(dead, held) })
+      expect(await backend.killHeld(PANE, TOKEN, () => true)).toEqual({ state: 'succeeded', dispatch: 'executed' })
+      expect(calls).toEqual([{ op: 'paneState', pane: '%1' }, { op: 'kill', pane: '%1', graceMs: 2000 }])
+    }
+  })
+
+  it('leaves a pane that runs anything else, and calls a pane already gone closed', async () => {
+    const other = await ready({ paneState: state(false, '/usr/local/bin/claude --resume x') })
+    expect(await other.backend.killHeld(PANE, TOKEN, () => true))
+      .toEqual({ state: 'failed', dispatch: 'not_started', reason: 'The waiting pane no longer has this adoption identity' })
+    expect(other.calls.map((call) => call.op)).toEqual(['paneState'])
+    const gone = await ready({ paneState: { state: 'ok', value: { state: 'gone' } } })
+    expect(await gone.backend.killHeld(PANE, TOKEN, () => true)).toEqual({ state: 'succeeded', dispatch: 'executed' })
+    expect(gone.calls.map((call) => call.op)).toEqual(['paneState'])
+  })
+
+  it('closes nothing it could not read, nor once the adoption changed, nor for an identity that is not one', async () => {
+    const unread = await ready({ paneState: { state: 'unknown', dispatch: 'possibly_executed', reason: 'timeout' } })
+    expect(await unread.backend.killHeld(PANE, TOKEN, () => true)).toEqual({ state: 'failed', dispatch: 'not_started', reason: 'timeout' })
+    let current = true
+    const changed = await ready({ paneState: () => { current = false; return state(false, held) } })
+    expect(await changed.backend.killHeld(PANE, TOKEN, () => current))
+      .toEqual({ state: 'failed', dispatch: 'not_started', reason: 'Adoption changed before pane close' })
+    expect(changed.calls.map((call) => call.op)).toEqual(['paneState'])
+    const invalid = await ready()
+    expect(await invalid.backend.killHeld(PANE, 'tok', () => true)).toEqual({ state: 'failed', dispatch: 'not_started', reason: 'invalid waiting pane identity' })
+    expect(await invalid.backend.killHeld({ ...PANE, paneId: '1' }, TOKEN, () => true)).toMatchObject({ dispatch: 'not_started' })
+    expect(invalid.calls).toEqual([])
+    const detached = backendWith({})
+    expect(await detached.backend.killHeld(PANE, TOKEN, () => true)).toEqual({ state: 'failed', dispatch: 'not_started', reason: 'pty host is unavailable' })
+  })
+})
+
 describe('PtyHostBackend validate', () => {
   const LIVE = { pid: 15160, executable: '/usr/local/bin/claude', startMarker: 'Tue Sep 15 23:10:38 2026' }
 

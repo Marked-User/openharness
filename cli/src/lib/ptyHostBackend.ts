@@ -475,6 +475,27 @@ export class PtyHostBackend implements TerminalBackend<PtyRuntimeRef> {
     return state !== 'gone' && !state.dead && isHeldStartCommand(state.startCommand, token)
   }
 
+  /**
+   * Close the pane only while it is the held shell under [token], dead or alive, as tmux's `heldPaneFormat` reads a
+   * remain-on-exit pane: an adoption cancelled, or rolled back. Read, then closed, where tmux does both in one
+   * `if-shell`. The gap cannot name another pane: a host never gives a pane id out twice for its home
+   * (pty/src/pane_ids.rs). And nothing replaces a held shell here but the daemon's own respawn (the shell has no
+   * tmux to replace itself with), which [current] fences.
+   */
+  async killHeld(runtime: PtyRuntimeRef, token: string, current: () => boolean): Promise<TerminalActionResult> {
+    if (!/^%\d+$/.test(runtime.paneId) || !/^[a-f0-9-]{36}$/.test(token)) return terminalActionNotStarted('invalid waiting pane identity')
+    const client = this.clientFor(runtime)
+    if (!client) return terminalActionNotStarted(UNAVAILABLE)
+    const result = await client.call({ op: 'paneState', pane: runtime.paneId })
+    if (result.state !== 'ok') return terminalActionNotStarted(result.reason)
+    const state = result.value.state
+    // Gone already: closed, as tmux reads an authoritative absence.
+    if (state === 'gone') return TERMINAL_ACTION_SUCCEEDED
+    if (!isHeldStartCommand(state.startCommand, token)) return terminalActionNotStarted('The waiting pane no longer has this adoption identity')
+    if (!current()) return terminalActionNotStarted('Adoption changed before pane close')
+    return this.kill(runtime, current)
+  }
+
   async releaseHold(runtime: PtyRuntimeRef, current?: () => boolean): Promise<void> {
     const client = this.clientFor(runtime)
     if (!client || current?.() === false) return

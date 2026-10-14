@@ -27,7 +27,10 @@ afterEach(() => { vi.useRealTimers(); rmSync(root, { recursive: true, force: tru
 const OWNER_LOCAL = { local: true, owner: true }
 const OWNER_REMOTE = { local: false, owner: true }
 const session = (agentId: string, pane: string, engine = 'claude', cwd = `/work/${agentId}`) =>
-  ({ agentId, sessionId: `s-${agentId}`, engine, cwd, tmuxPane: pane, active: true, title: agentId }) as unknown as RegisteredSession
+  ({ agentId, sessionId: `s-${agentId}`, engine, cwd, tmuxPane: pane, runtimes: [{ backend: 'tmux', paneId: pane }], active: true, title: agentId }) as unknown as RegisteredSession
+/** A harness in a pty host pane: its `tmuxPane` is that pane's id, which a tmux pane may also have. */
+const ptySession = (agentId: string, pane: string, engine = 'claude') =>
+  ({ ...session(agentId, pane, engine), runtimes: [{ backend: 'ptyhost', instance: 'p1', paneId: pane }] }) as unknown as RegisteredSession
 
 interface Setup {
   tabs?: Array<{ id: string; name: string; panes: Array<{ machineId: string; agentId: string }> }>
@@ -651,6 +654,37 @@ describe('the roster note and the directory', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(reads()).toBe(first + 2)
     t.service.stop()
+  })
+
+  it('keys each harness\'s inbox by its backend: `%3` on tmux and `%3` on a pty host are two inboxes', async () => {
+    vi.useFakeTimers()
+    const tabs = [{ id: 'app', name: 'app', panes: [{ machineId: 'm1', agentId: 'lead' }, { machineId: 'm1', agentId: 'api' }, { machineId: 'm1', agentId: 'web' }] }]
+    const t = setup({ tabs, agents: [session('lead', '%3', 'codex'), ptySession('api', '%3'), session('web', '%4')] })
+    t.service.start()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(TICK_MS)
+    const fs = require('node:fs') as typeof import('node:fs')
+    const state = JSON.parse(fs.readFileSync(join(root, 'state', 'state.json'), 'utf8'))
+    expect(state.notes.lead.pane).toBe('tmux\u0000%3')
+    expect(state.notes.api.pane).toBe('ptyhost\u0000p1\u0000%3')
+    const notes = (pane: string) => (fs.readdirSync(t.inbox.paneDir(pane)!) as string[]).filter((n) => n.startsWith('0note-'))
+    expect(notes('tmux\u0000%3')).toHaveLength(1)
+    expect(notes('ptyhost\u0000p1\u0000%3')).toHaveLength(1)
+    // `harness send` from tmux's `%3` is lead's, never the pty host pane's of the same id.
+    const sent = await t.ask({ action: 'send', pane: '%3', to: 'api', text: 'over to you' })
+    expect(sent.recipients).toEqual([{ name: 'api', state: 'queued' }])
+    await vi.advanceTimersByTimeAsync(TICK_MS)
+    const delivery = (JSON.parse(fs.readFileSync(join(root, 'state', 'state.json'), 'utf8')).local as Array<{ agentId: string; pane: string }>).find((d) => d.agentId === 'api')!
+    expect(delivery.pane).toBe('ptyhost\u0000p1\u0000%3')
+    t.service.stop()
+  })
+
+  it('a pty host pane id names its harness only when no tmux pane has it and exactly one row does', async () => {
+    const tabs = [{ id: 'app', name: 'app', panes: [{ machineId: 'm1', agentId: 'a' }, { machineId: 'm1', agentId: 'b' }] }]
+    const one = setup({ tabs, agents: [ptySession('a', '%5'), session('b', '%6')] })
+    expect((await one.ask({ action: 'send', pane: '%5', to: 'b', text: 'hi' })).recipients).toEqual([{ name: 'b', state: 'queued' }])
+    const two = setup({ tabs, agents: [ptySession('a', '%5'), { ...ptySession('b', '%5'), runtimes: [{ backend: 'ptyhost', instance: 'p2', paneId: '%5' }] } as unknown as RegisteredSession] })
+    expect((await two.ask({ action: 'send', pane: '%5', to: 'b', text: 'hi' })).error).toBe('NOT_A_HARNESS')
   })
 
   it('keeps the notes it put in the store, withdraws a gone harness\'s, and sweeps old files nothing waits on', async () => {

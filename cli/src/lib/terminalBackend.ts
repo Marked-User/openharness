@@ -68,10 +68,72 @@ export interface TerminalBackend<Ref extends TerminalRuntimeRef = TerminalRuntim
     readOnly?: boolean,
   ): Promise<TerminalReadResult<TerminalStreamHandle<Ref>>>
 
-  /** Restart's two primitives. Optional per backend — only tmux (a real multiplexer pane) supports an
-   *  in-place process swap; a backend without them makes restart report RESTART_UNSUPPORTED_BACKEND. */
+  /** Restart's two primitives, optional per backend: tmux and the pty host swap a pane's process in place. A
+   *  backend without them makes restart, retarget and restore report RESTART_UNSUPPORTED_BACKEND (`canRestart`). */
   /** Re-arm a pane's "keep it when the process dies" behavior ahead of killing that process. */
-  holdOpen?(runtime: Ref): Promise<TerminalActionResult>
+  holdOpen?(runtime: Ref, current?: () => boolean): Promise<TerminalActionResult>
   /** Replace the process occupying an existing pane/session in place, preserving its identity. */
   respawn?(runtime: Ref, request: TerminalRespawnRequest): Promise<TerminalActionResult>
+  /** Whether the pane runs the inert held shell under [token] (`nativePaneHold.heldPaneFormat`). Read only: a
+   *  respawn with `expectedHeldToken` checks it again where it replaces. 'unknown' when it could not be asked. */
+  isHeld?(runtime: Ref, token: string): Promise<boolean | 'unknown'>
+  /** Close the pane only while it still runs the held shell under [token]: an adoption cancelled, or rolled back. */
+  killHeld?(runtime: Ref, token: string, current: () => boolean): Promise<TerminalActionResult>
+  /** Why [respawn] would refuse [request] here (a tmux too old for `-e`), asked before a restart stops anything;
+   *  null when it would try. Left out: never refused. */
+  respawnRefusal?(request: Pick<TerminalRespawnRequest, 'env'>): Promise<string | null>
+  /** Remove [names] from what a respawn in the pane inherits (tmux's session environment). Left out: a respawn
+   *  inherits nothing it is not given (the pty host), so there is nothing to clear. */
+  clearEnv?(runtime: Ref, names: readonly string[], current?: () => boolean): Promise<TerminalActionResult>
+}
+
+/** A backend that swaps a pane's process in place: restart, retarget and restore run on it. */
+export type RestartableBackend = TerminalBackend & Required<Pick<TerminalBackend, 'holdOpen' | 'respawn'>>
+
+/** The gate for every restart-shaped path: the two primitives, never the backend's name. */
+export function canRestart(backend: TerminalBackend | null | undefined): backend is RestartableBackend {
+  return !!backend?.holdOpen && !!backend.respawn
+}
+
+/** Where a row restarts: one of its own runtimes, on a backend that can. */
+export interface RestartTarget {
+  backend: RestartableBackend
+  runtime: TerminalRuntimeRef
+}
+
+/**
+ * The runtime [session] restarts in place, and its backend: its tmux runtime first, as before any other backend
+ * could restart, then the rest in row order. Never the bare `tmuxPane`, which is the primary runtime's pane on
+ * whatever backend. Undefined when none of its runtimes is on a backend that can restart.
+ */
+export function restartTargetOf(
+  session: { readonly runtimes: readonly TerminalRuntimeRef[] },
+  backendFor: (runtime: TerminalRuntimeRef) => TerminalBackend | undefined,
+): RestartTarget | undefined {
+  for (const runtime of tmuxFirst(session.runtimes)) {
+    const backend = backendFor(runtime)
+    if (canRestart(backend)) return { backend, runtime }
+  }
+  return undefined
+}
+
+/**
+ * Whether [session]'s pane runs the held shell under [token], asked of the backend it is on (`isHeld`): its tmux
+ * runtime first, as before, then the rest in row order. False when none is on a backend that can say.
+ */
+export function heldIn(
+  session: { readonly runtimes: readonly TerminalRuntimeRef[] },
+  token: string,
+  backendFor: (runtime: TerminalRuntimeRef) => TerminalBackend | undefined,
+): Promise<boolean | 'unknown'> {
+  for (const runtime of tmuxFirst(session.runtimes)) {
+    const backend = backendFor(runtime)
+    if (backend?.isHeld) return backend.isHeld(runtime, token)
+  }
+  return Promise.resolve(false)
+}
+
+/** [runtimes] with their tmux ones first, the rest in row order. */
+function tmuxFirst(runtimes: readonly TerminalRuntimeRef[]): TerminalRuntimeRef[] {
+  return [...runtimes].sort((a, b) => Number(b.backend === 'tmux') - Number(a.backend === 'tmux'))
 }

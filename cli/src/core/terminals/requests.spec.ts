@@ -6,8 +6,9 @@ import { createTerminalRequests, type TerminalRequestDeps } from './requests.js'
 /** `terminal_info` and `theme_set`, answered by the core: tmux's word on an agent's pane, read outside
  *  the line, and the desktop's colours, applied whole or not at all. */
 const agents = new Map([
-  ['a1', { agentId: 'a1', sessionId: 's1', tmuxPane: '%7' }],
-  ['bare', { agentId: 'bare', sessionId: 's2', tmuxPane: null }],
+  ['a1', { agentId: 'a1', sessionId: 's1', tmuxPane: '%7', runtimes: [{ backend: 'tmux', paneId: '%7' }] }],
+  ['pty', { agentId: 'pty', sessionId: 's3', tmuxPane: '%7', runtimes: [{ backend: 'ptyhost', instance: 'p1', paneId: '%7' }] }],
+  ['bare', { agentId: 'bare', sessionId: 's2', tmuxPane: '', runtimes: [] }],
 ]) as unknown as Map<string, RegisteredSession>
 
 function setup(over: Partial<TerminalRequestDeps> = {}) {
@@ -28,12 +29,19 @@ describe('terminal_info', () => {
     let answer!: (info: TerminalPaneInfo | null) => void
     const { deps, replies, ask } = setup({ paneInfo: vi.fn(() => new Promise<TerminalPaneInfo | null>((resolve) => { answer = resolve })) })
     ask({ agentId: 'a1' })
-    expect(deps.paneInfo).toHaveBeenCalledWith('%7')
+    expect(deps.paneInfo).toHaveBeenCalledWith({ backend: 'tmux', paneId: '%7' })
     expect(replies).toEqual([])
     answer({ command: 'node', path: '/work/app', pid: 4242, tty: '/dev/ttys004' })
     await vi.waitFor(() => expect(replies).toHaveLength(1))
     expect(replies[0]).toStrictEqual({ command: 'node', path: '/work/app', pid: 4242, tty: '/dev/ttys004' })
     expect(Object.keys(replies[0])).toEqual(['command', 'path', 'pid', 'tty'])
+  })
+
+  it('asks a ptyhost row\'s own pane, never a tmux pane of the same id', async () => {
+    const { deps, replies, ask } = setup()
+    ask({ agentId: 'pty' })
+    expect(deps.paneInfo).toHaveBeenCalledExactlyOnceWith({ backend: 'ptyhost', instance: 'p1', paneId: '%7' })
+    await vi.waitFor(() => expect(replies).toHaveLength(1))
   })
 
   it('an agent it does not know, or one with no pane, is not found; a pane tmux cannot read is said so', async () => {

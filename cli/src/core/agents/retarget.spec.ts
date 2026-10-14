@@ -9,6 +9,7 @@ import { probeGatewayRuntime } from '../../lib/gatewayRuntime.js'
 import { parseRuntimeProfile } from '../../lib/runtimeProfileWire.js'
 import { workspaceMissing } from '../../lib/workspaceCheck.js'
 import { TerminalAgentReconciler } from '../../lib/terminalAgentReconciler.js'
+import type { TerminalBackend } from '../../lib/terminalBackend.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
 import { createAgentRetargeter, type RetargetDeps } from './retarget.js'
 import type { NativeLaunch } from '../../engines/nativeLaunch.js'
@@ -49,10 +50,13 @@ const agent = (over: Partial<RegisteredSession> = {}): RegisteredSession => ({
 
 function setup(row: RegisteredSession | null = agent(), over: Partial<RetargetDeps> = {}) {
   const release = vi.fn(), releaseRoute = vi.fn()
+  const tmux = { name: 'tmux', holdOpen: vi.fn(), respawn: vi.fn(),
+    clearEnv: vi.fn<NonNullable<TerminalBackend['clearEnv']>>(async () => ({ state: 'succeeded', dispatch: 'executed' })),
+    releaseHold: vi.fn<TerminalBackend['releaseHold']>(async () => {}) }
   const deps: RetargetDeps = {
     sessionTurnOpen: vi.fn(() => false),
     purgeBusy: vi.fn(() => false),
-    tmuxBackend: { clearEnv: vi.fn(async () => ({ state: 'succeeded' })), releaseHold: vi.fn(async () => {}) } as unknown as RetargetDeps['tmuxBackend'],
+    terminals: { backendFor: vi.fn((runtime: { backend: string }) => runtime.backend === 'tmux' ? tmux : undefined), instances: () => [tmux] } as unknown as RetargetDeps['terminals'],
     registry: {
       resolve: vi.fn(() => row ?? undefined),
       byAgent: vi.fn(() => row ?? undefined),
@@ -75,7 +79,7 @@ function setup(row: RegisteredSession | null = agent(), over: Partial<RetargetDe
     opencodeDb: '/db/opencode.db',
     ...over,
   }
-  return { deps, release, releaseRoute, retarget: createAgentRetargeter(deps) }
+  return { deps, tmux, release, releaseRoute, retarget: createAgentRetargeter(deps) }
 }
 
 describe('retargeting an agent', () => {
@@ -141,7 +145,7 @@ describe('retargeting an agent', () => {
       paneSwapDeps: () => ({ holdOpen: async () => { valid = false; return { ok: true } }, terminate, respawn,
         waitForProcess: async () => null, buildArgv: () => ['fixture-engine'], log: () => {} }),
     })
-    if (phase === 'clearing') vi.mocked(run.deps.tmuxBackend!.clearEnv).mockImplementationOnce(async (_pane, _vars, current) => {
+    if (phase === 'clearing') vi.mocked(run.tmux.clearEnv).mockImplementationOnce(async (_pane, _vars, current) => {
       valid = false
       expect(current?.()).toBe(false)
       return { state: 'succeeded', dispatch: 'executed' }
@@ -194,12 +198,12 @@ describe('retargeting an agent', () => {
           case 'version': vi.mocked(opencodeMajorVersion).mockImplementationOnce(async () => { replace(); return 2 }); break
           case 'preparation': vi.mocked(run.deps.relaunchOverrides).mockImplementationOnce(async () => { replace(); return { ok: true, overrides: { env: {}, extraArgs: [], clearEnv: [] } } }); break
           case 'native-write': vi.mocked(applyOpencodeSessionModel).mockImplementationOnce(async () => { replace(); return { ok: true } }); break
-          case 'environment': vi.mocked(run.deps.tmuxBackend!.clearEnv).mockImplementationOnce(async () => { replace(); return { state: 'succeeded', dispatch: 'executed' } }); break
+          case 'environment': vi.mocked(run.tmux.clearEnv).mockImplementationOnce(async () => { replace(); return { state: 'succeeded', dispatch: 'executed' } }); break
           case 'bypass': vi.mocked(bypassPermissionFor).mockImplementationOnce(async () => { replace(); return true }); break
           case 'permission': vi.mocked(run.deps.downgradedPermission).mockImplementationOnce(async () => { replace(); return {} }); break
           case 'replacement': vi.mocked(restartAgent).mockImplementationOnce(async () => { replace(); return { ok: true, resumed: true, processIdentity: { pid: 2, executable: 'opencode', startMarker: 'new' } } }); break
           case 'gateway': vi.mocked(probeGatewayRuntime).mockImplementationOnce(async () => { replace(); return { kind: 'none' } as never }); break
-          case 'pane-option': vi.mocked(run.deps.tmuxBackend!.releaseHold).mockImplementationOnce(async () => { replace() }); break
+          case 'pane-option': vi.mocked(run.tmux.releaseHold).mockImplementationOnce(async () => { replace() }); break
         }
         const result = await createAgentRetargeter(run.deps)({ agentId: 'a1', grid: phase === 'environment' ? null : grid })
         expect(result).toMatchObject({ ok: false, error: 'AGENT_CHANGED' })
@@ -242,7 +246,9 @@ describe('retargeting an agent', () => {
     })
     it('for an agent being purged, no tmux, no agent, no tmux pane or no process to validate', async () => {
       expect(await setup(agent(), { purgeBusy: () => true }).retarget({ agentId: 'a1', grid })).toEqual({ ok: false, error: 'AGENT_BUSY' })
-      expect(await setup(agent(), { tmuxBackend: null }).retarget({ agentId: 'a1', grid })).toEqual({ ok: false, error: 'TMUX_UNAVAILABLE' })
+      expect(await setup(agent(), { terminals: { backendFor: () => undefined, instances: () => [] } }).retarget({ agentId: 'a1', grid })).toEqual({ ok: false, error: 'TMUX_UNAVAILABLE' })
+      // A backend with no restart primitives is none to retarget on, whatever its name.
+      expect(await setup(agent(), { terminals: { backendFor: () => undefined, instances: () => [{ name: 'tmux' } as never] } }).retarget({ agentId: 'a1', grid })).toEqual({ ok: false, error: 'TMUX_UNAVAILABLE' })
       expect(await setup(null).retarget({ agentId: 'a1', grid })).toEqual({ ok: false, error: 'AGENT_NOT_FOUND' })
       expect(await setup(agent({ runtimes: [] } as Partial<RegisteredSession>)).retarget({ agentId: 'a1', grid })).toMatchObject({ error: 'RETARGET_UNSUPPORTED_BACKEND' })
       expect(await setup(agent({ processIdentity: undefined } as Partial<RegisteredSession>)).retarget({ agentId: 'a1', grid })).toEqual({ ok: false, error: 'NO_ACTIVE_PROCESS' })
@@ -380,7 +386,7 @@ describe('retargeting an agent', () => {
       const row = agent({ engine: 'opencode', subscriptionModel: 'fixture/model' })
       const run = setup(row, { relaunchOverrides: vi.fn(async () => ({ ok: true as const,
         overrides: { env: {}, extraArgs: [], clearEnv: [], sessionModel: 'fixture/model' } })) })
-      if (phase === 'environment') vi.mocked(run.deps.tmuxBackend!.clearEnv).mockResolvedValueOnce({ state: 'failed', dispatch: 'rejected', reason: 'fixture failure' })
+      if (phase === 'environment') vi.mocked(run.tmux.clearEnv).mockResolvedValueOnce({ state: 'failed', dispatch: 'rejected', reason: 'fixture failure' })
       if (phase === 'permission') vi.mocked(run.deps.downgradedPermission).mockRejectedValueOnce(Error('fixture failure'))
       if (phase === 'cancelled') vi.mocked(applyOpencodeSessionModel).mockImplementationOnce(async () => {
         row.sessionId = 'replacement'
@@ -432,7 +438,7 @@ describe('retargeting an agent', () => {
       expect(run.deps.registry.setSubscriptionModel).toHaveBeenCalledWith('a1', 'opus')
       expect(run.deps.registry.setActive).toHaveBeenCalledWith('a1', true)
       expect(run.deps.refreshGridAssignment).toHaveBeenCalledWith(agent())
-      expect(run.deps.tmuxBackend!.releaseHold).toHaveBeenCalledWith(pane, expect.any(Function))
+      expect(run.tmux.releaseHold).toHaveBeenCalledWith(pane, expect.any(Function))
       expect(run.deps.announceSession).toHaveBeenCalled()
       expect(run.release).toHaveBeenCalled()
       expect(run.releaseRoute).toHaveBeenCalled()
@@ -465,7 +471,7 @@ describe('retargeting an agent', () => {
       vi.mocked(restartAgent).mockResolvedValueOnce({ ok: true, resumed: false, processIdentity: { pid: 2, startMarker: 'n' } } as never)
       expect(await run.retarget({ agentId: 'a1', grid: null })).toEqual({ ok: true })
       expect(vi.mocked(validateLaunchOverrides).mock.lastCall?.[2]).toEqual({ gridLaunch: null, codexHome: undefined, subscriptionModel: 'opus' })
-      expect(run.deps.tmuxBackend!.clearEnv).toHaveBeenCalledWith(pane, ['ANTHROPIC_BASE_URL'], expect.any(Function))
+      expect(run.tmux.clearEnv).toHaveBeenCalledWith(pane, ['ANTHROPIC_BASE_URL'], expect.any(Function))
       expect(run.deps.registry.setGridLaunch).toHaveBeenCalledWith('a1', null)
       expect(run.deps.registry.setSubscriptionModel).not.toHaveBeenCalled()
       expect(log.mock.calls.map(([line]) => String(line))).toContain('claude on its own login · retargeted a1 · fresh session')
@@ -474,10 +480,27 @@ describe('retargeting an agent', () => {
       expect(vi.mocked(validateLaunchOverrides).mock.lastCall?.[2]).toMatchObject({ subscriptionModel: null })
     })
 
+    it('on a ptyhost pane: swapped through that pane\'s own backend, with nothing to clear on the way home', async () => {
+      const pty = { backend: 'ptyhost' as const, instance: 'p1', paneId: '%3' }
+      const ptyBackend = { name: 'ptyhost', holdOpen: vi.fn(), respawn: vi.fn(), releaseHold: vi.fn(async () => {}) }
+      const row = agent({ runtimes: [pty], grid: { baseUrl: 'x' }, subscriptionModel: 'opus' } as Partial<RegisteredSession>)
+      const run = setup(row, {
+        terminals: { backendFor: vi.fn(() => ptyBackend as never), instances: () => [ptyBackend as never] },
+        relaunchOverrides: vi.fn(async () => ({ ok: true, overrides: {} })) as never,
+      })
+      expect(await run.retarget({ agentId: 'a1', grid: null })).toEqual({ ok: true })
+      expect(run.deps.terminals.backendFor).toHaveBeenCalledWith(pty)
+      expect(run.deps.paneSwapDeps).toHaveBeenCalledWith(row, { backend: ptyBackend, runtime: pty }, {}, null, expect.any(Function))
+      expect(run.deps.agentReconciler.holdRoute).toHaveBeenCalledWith(terminalRouteKey(pty), null)
+      expect(ptyBackend.releaseHold).toHaveBeenCalledWith(pty, expect.any(Function))
+      expect(run.tmux.clearEnv).not.toHaveBeenCalled()
+      expect(run.tmux.releaseHold).not.toHaveBeenCalled()
+    })
+
     it('fails cleanly when the pane will not be cleared, or the respawn does not come up', async () => {
       const home = { relaunchOverrides: vi.fn(async () => ({ ok: true, overrides: {} })) as never }
       const run = setup(agent(), home)
-      vi.mocked(run.deps.tmuxBackend!.clearEnv).mockResolvedValueOnce({ state: 'failed', reason: 'no session' } as never).mockResolvedValueOnce({ state: 'unknown' } as never)
+      vi.mocked(run.tmux.clearEnv).mockResolvedValueOnce({ state: 'failed', reason: 'no session' } as never).mockResolvedValueOnce({ state: 'unknown' } as never)
       expect(await run.retarget({ agentId: 'a1', grid: null })).toEqual({ ok: false, error: 'GRID_CLEAR_FAILED', detail: 'no session' })
       expect(await run.retarget({ agentId: 'a1', grid: null })).toEqual({ ok: false, error: 'GRID_CLEAR_FAILED', detail: 'tmux would not clear the pane environment' })
       vi.mocked(restartAgent).mockResolvedValueOnce({ ok: false, detail: 'no process' } as never)

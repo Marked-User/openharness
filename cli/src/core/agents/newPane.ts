@@ -13,7 +13,7 @@ import { commandAvailableInInteractiveShell } from '../../lib/engineLaunch.js'
 import { sid } from '../../lib/log.js'
 import type { registry, RegisteredSession } from '../../lib/registry.js'
 import type { TerminalBackendCoordinator } from '../../lib/terminalBackendCoordinator.js'
-import type { TerminalRuntimeRef, TmuxRuntimeRef } from '../../lib/terminalTypes.js'
+import type { TerminalRuntimeRef } from '../../lib/terminalTypes.js'
 import { resolvePaneEngineProcess } from '../../lib/paneEngineProcess.js'
 import { terminalRuntimeLabel } from '../../lib/terminalRuntime.js'
 import { createLaunchAuthority } from './launchAuthority.js'
@@ -24,9 +24,8 @@ export interface PaneWatcherDeps {
   /** Ask the reconciler to bind what now runs in a pane (TerminalAgentReconciler.triggerHint). */
   triggerHint: (runtime: TerminalRuntimeRef, engine: AgentEngine) => Promise<void>
   captureTerminal: (target: string, historyLines?: number) => Promise<string | null>
-  waitingPane?: (runtime: TmuxRuntimeRef, token: string) => Promise<boolean | 'unknown'>
   retainExitedSession: (session: RegisteredSession, announce: boolean) => void
-  /** The backend that holds a new pane: its process, state and hold are asked of it. */
+  /** The backend that holds a new pane: its process, state and hold (`isHeld`) are asked of it. */
   terminals: Pick<TerminalBackendCoordinator, 'backendFor'>
 }
 
@@ -35,7 +34,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => {
   timer.unref?.()
 })
 
-export function createPaneWatcher({ registry, announceSession, triggerHint, captureTerminal, retainExitedSession, waitingPane, terminals }: PaneWatcherDeps) {
+export function createPaneWatcher({ registry, announceSession, triggerHint, captureTerminal, retainExitedSession, terminals }: PaneWatcherDeps) {
   /**
    * Watch a pane this daemon just opened until its engine process shows up (ready), dies (failed), or
    * ten minutes pass. Shared by create and fork: the two open panes the same way and wait the same way.
@@ -81,8 +80,10 @@ export function createPaneWatcher({ registry, announceSession, triggerHint, capt
           delayMs = Math.min(delayMs * 2, 750)
           continue
         }
-        // Only a tmux pane holds a launch by token (`TmuxBackend.isHeld`).
-        const waiting = nativeToken && spawned.runtime.backend === 'tmux' && await waitingPane?.(spawned.runtime, nativeToken)
+        // A pane holds a launch by token on a backend that can say so (`TerminalBackend.isHeld`): tmux and the
+        // pty host. On the pty host the held shell has no tmux to respawn itself with; it stays inert there, and a
+        // restore replaces it through `respawn` with the token.
+        const waiting = nativeToken && await backend.isHeld?.(spawned.runtime, nativeToken)
         if (!current()) return
         if (waiting === true) {
           const held = registry.setLaunch(pending.agentId, { state: 'held', service: 'native', nativeToken,

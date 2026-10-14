@@ -22,7 +22,7 @@ import { buildEngineCommandArgv, buildEngineLaunchArgv, namedAgentArgs, refusePe
 import { forkName, planFork } from '../../lib/forkAgent.js'
 import { buildHarnessSessionLabel } from '../../lib/harnessSessionLabel.js'
 import { projectDisplayName, type registry, type RegisteredSession } from '../../lib/registry.js'
-import type { TmuxBackend } from '../../lib/tmuxBackend.js'
+import type { TerminalBackend } from '../../lib/terminalBackend.js'
 import { prepareInstructionWrites, scmLaunchEnv } from '../../scm/scmProjects.js'
 import type { createLaunchHelpers } from './launch.js'
 import { mergedLaunchEnv } from './launchEnv.js'
@@ -39,7 +39,8 @@ export interface ForkAgentDeps {
   native?: (engine: AgentEngine, source: NativeLaunchSource, authority: LaunchAuthority) => Promise<NativeLaunchResult>
   prepareNative?: LaunchOverridesDeps['prepareNative']
   authority?: (agentId: string) => () => boolean
-  tmuxBackend: TmuxBackend | null
+  /** The backend new panes are made on, tmux or the pty host; null when none could be readied. */
+  createBackend: TerminalBackend | null
   registry: typeof registry
   mirror: Pick<TurnRecaps, 'isBusy' | 'recentAsks' | 'recent' | 'lastFullText'>
   /** Forks whose session has not reported in yet, to the source session whose recap they inherit (bind.ts). */
@@ -57,14 +58,14 @@ export interface ForkAgentDeps {
 
 export function createAgentForker({
   native: inspectNative, prepareNative, authority: captureAuthority,
-  tmuxBackend, registry, mirror, pendingForkInherit, watchNewPane, announceSession, attachDsh, prepareApiTools, relaunchOverrides, gridName, dshLaunch,
+  createBackend, registry, mirror, pendingForkInherit, watchNewPane, announceSession, attachDsh, prepareApiTools, relaunchOverrides, gridName, dshLaunch,
 }: ForkAgentDeps) {
   const prepare = async ({ agentId, name, prompt }: Parameters<ForkAgent>[0], authority: LaunchAuthority): Promise<LaunchPreparation<Awaited<ReturnType<ForkAgent>>>> => {
     const ownsSource = captureAuthority?.(agentId) ?? (() => true)
     const owner = () => authority.current() && ownsSource()
     const changed = { ok: false, error: 'AGENT_CHANGED', detail: 'The original fork source changed or stopped during preparation.' } as const
     if (!owner()) return changed
-    if (!tmuxBackend) return { ok: false, error: 'TMUX_UNAVAILABLE' }
+    if (!createBackend) return { ok: false, error: 'TMUX_UNAVAILABLE' }
     const observed = registry.byAgent(agentId)
     if (!observed) return { ok: false, error: 'AGENT_NOT_FOUND' }
     const source = structuredClone(observed)
@@ -166,7 +167,7 @@ export function createAgentForker({
     if (!dispatchCurrent()) return changed
     const result = await createAndRegisterPane({
       current: dispatchCurrent, ...(built.overrides.native ? { nativeToken: built.overrides.native.token } : {}),
-      tmuxBackend,
+      tmuxBackend: createBackend,
       registry,
       engine,
       cwd: source.cwd,

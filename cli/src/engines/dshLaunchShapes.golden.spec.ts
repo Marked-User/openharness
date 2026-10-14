@@ -324,7 +324,7 @@ async function relaunchCases(): Promise<Record<string, unknown>> {
 
 const mirror = { isBusy: () => false, recentAsks: () => [], recent: () => [], lastFullText: () => undefined }
 const forkRest = (source: RegisteredSession) => ({
-  tmuxBackend: {} as never, registry: { byAgent: (id: string) => (id === source.agentId ? source : undefined) } as never, mirror: mirror as never,
+  createBackend: {} as never, registry: { byAgent: (id: string) => (id === source.agentId ? source : undefined) } as never, mirror: mirror as never,
   pendingForkInherit: new Map<string, string>(), watchNewPane: (async () => {}) as never, announceSession: () => {}, attachDsh: () => {},
 })
 

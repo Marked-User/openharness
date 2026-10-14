@@ -20,6 +20,9 @@ const paneState = vi.fn<TerminalBackend['paneState']>(async () => ({ dead: false
 const releaseHold = vi.fn<TerminalBackend['releaseHold']>(async () => {})
 const backend = { paneState, releaseHold } as unknown as TerminalBackend
 
+/** The pane's own backend, answering whether it holds the launch's inert shell (`TerminalBackend.isHeld`). */
+const holding = (isHeld: TerminalBackend['isHeld']): Partial<PaneWatcherDeps> => ({ terminals: { backendFor: vi.fn(() => ({ ...backend, isHeld }) as TerminalBackend) } })
+
 function setup(over: Partial<PaneWatcherDeps> = {}) {
   const rows = new Map<string, RegisteredSession>([['a1', pending]])
   const deps: PaneWatcherDeps = {
@@ -44,7 +47,7 @@ describe('watching a new pane', () => {
   it.each(['held', 'row removed', 'not held', 'unknown', 'no probe'] as const)('retains a post-rc native guard hold without failing or archiving: %s', async result => {
     const entry = { ...pending, launch: { state: 'starting', nativeToken: 'fixture-native' } } as RegisteredSession
     const waitingPane = vi.fn(async () => result === 'unknown' ? 'unknown' as const : result === 'held' || result === 'row removed')
-    const { deps, rows, watch } = setup(result === 'no probe' ? {} : { waitingPane })
+    const { deps, rows, watch } = setup(result === 'no probe' ? {} : holding(waitingPane))
     rows.set('a1', entry)
     if (result === 'row removed') vi.mocked(deps.registry.setLaunch).mockReturnValue(null)
     const watching = watch('claude', entry, spawned, ['claude'], undefined, 1)
@@ -69,11 +72,25 @@ describe('watching a new pane', () => {
   })
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
 
+  it('asks a ptyhost pane\'s own backend whether it holds the launch, never tmux', async () => {
+    const pty = { backend: 'ptyhost' as const, instance: 'p1', paneId: '%7' }
+    const entry = { ...pending, runtimes: [pty], launch: { state: 'starting', nativeToken: 'fixture-native' } } as RegisteredSession
+    const isHeld = vi.fn(async () => true as const)
+    const ptyBackend = { ...backend, isHeld } as TerminalBackend
+    const backendFor = vi.fn(() => ptyBackend)
+    const { deps, rows, watch } = setup({ terminals: { backendFor } })
+    rows.set('a1', entry)
+    await watch('claude', entry, { runtime: pty }, ['claude'], undefined, 1)
+    expect(backendFor).toHaveBeenCalledWith(pty)
+    expect(isHeld).toHaveBeenCalledExactlyOnceWith(pty, 'fixture-native')
+    expect(deps.registry.setLaunch).toHaveBeenCalledWith('a1', expect.objectContaining({ state: 'held', service: 'native', nativeToken: 'fixture-native' }))
+  })
+
   it.each(['token', 'route', 'binding', 'removed', 'stopped', 'ready'] as const)('discards a delayed native hold after its %s changes', async change => {
     const entry = { ...pending, launch: { state: 'starting', nativeToken: 'original' } } as RegisteredSession
     let finish!: (waiting: true) => void
     const waitingPane = vi.fn(() => new Promise<true>(done => { finish = done }))
-    const { deps, rows, watch } = setup({ waitingPane })
+    const { deps, rows, watch } = setup(holding(waitingPane))
     rows.set('a1', entry)
     const watching = watch('claude', entry, spawned, ['claude'], undefined)
     await vi.advanceTimersByTimeAsync(0)

@@ -58,6 +58,19 @@ export function tmuxRuntimeOf(session: { readonly runtimes: readonly TerminalRun
   return session.runtimes.find((runtime): runtime is TmuxRuntimeRef => runtime.backend === 'tmux')
 }
 
+/**
+ * The row a shell's own word about its pane names: `%N` from `$TMUX_PANE` (`harness remote`, `harness send`), so a
+ * tmux pane first. Only when no tmux runtime has that id is it read as a pty host pane id, and then only when
+ * exactly one row has it: pane ids are per backend, and two hosts' `%N` are two panes. Never the bare `tmuxPane`,
+ * which is a ptyhost pane's id on a ptyhost row.
+ */
+export function sessionForPaneId<S extends { readonly runtimes: readonly TerminalRuntimeRef[] }>(sessions: readonly S[], pane: string): S | undefined {
+  const tmux = sessions.find((session) => session.runtimes.some((runtime) => runtime.backend === 'tmux' && runtime.paneId === pane))
+  if (tmux) return tmux
+  const pty = sessions.filter((session) => session.runtimes.some((runtime) => runtime.backend === 'ptyhost' && runtime.paneId === pane))
+  return pty.length === 1 ? pty[0] : undefined
+}
+
 /** Stable placement key. For tmux the pane id is both the route and the placement identity. */
 export function terminalPlacementKey(runtime: TerminalRuntimeRef): string {
   return terminalRouteKey(runtime)

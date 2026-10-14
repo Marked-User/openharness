@@ -43,7 +43,7 @@ const terminal = (over: Partial<RegisteredSession> = {}) => agent({ engine: 'ter
  *  (null: the row vanished mid-restart). `live` goes false to make the operation stale. */
 function setup(row: RegisteredSession | null = agent(), over: Partial<RestartDeps> = {}, refreshed: RegisteredSession | null = row) {
   const state = { live: true }
-  const tmuxBackend = { respawn: vi.fn(async () => ({ state: 'succeeded' })), releaseHold }
+  const tmuxBackend = { name: 'tmux', holdOpen: vi.fn(), respawn: vi.fn(async () => ({ state: 'succeeded' })), releaseHold }
   const deps: RestartDeps = {
     restartJobs: { run: vi.fn((_id: string, job: (current: () => boolean) => unknown) => job(() => state.live)) } as never,
     registry: {
@@ -55,7 +55,7 @@ function setup(row: RegisteredSession | null = agent(), over: Partial<RestartDep
     purgeBusy: vi.fn(() => false),
     stopJobs: new Map(),
     pinnedControls: new Set(),
-    tmuxBackend: tmuxBackend as unknown as RestartDeps['tmuxBackend'],
+    terminals: { backendFor: vi.fn((runtime: { backend: string }) => runtime.backend === 'tmux' ? tmuxBackend : undefined) } as unknown as RestartDeps['terminals'],
     sameRestartTarget: vi.fn(() => true),
     agentReconciler: { holdRoute: vi.fn(), releaseRoute: vi.fn() },
     terminalHintMachineName: () => 'studio',
@@ -157,12 +157,21 @@ describe('restarting an agent', () => {
 
     it('for an agent with no tmux pane, or no tmux at all', async () => {
       expect(await setup(agent({ tmuxPane: undefined, runtimes: [] })).restart('a1')).toEqual({ ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' })
-      expect(await setup(agent(), { tmuxBackend: null }).restart('a1')).toEqual({ ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' })
+      expect(await setup(agent(), { terminals: { backendFor: () => undefined } }).restart('a1')).toEqual({ ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' })
     })
 
-    it('for an agent on a ptyhost pane only, though its `tmuxPane` names that pane\'s id', async () => {
+    it('for an agent on a ptyhost pane only, though its `tmuxPane` names that pane\'s id, with no ptyhost backend', async () => {
       const run = setup(agent({ runtimes: [{ backend: 'ptyhost', instance: 'p1', paneId: '%4' }] }))
       expect(await run.restart('a1')).toEqual({ ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' })
+      expect(run.tmuxBackend.respawn).not.toHaveBeenCalled()
+    })
+
+    it('for an agent whose backend has no restart primitives, whatever its name', async () => {
+      const pty = { backend: 'ptyhost' as const, instance: 'p1', paneId: '%3' }
+      const bare = { name: 'ptyhost', respawn: vi.fn(), releaseHold: vi.fn() }
+      const run = setup(agent({ runtimes: [pty] }), { terminals: { backendFor: () => bare as never } })
+      expect(await run.restart('a1')).toEqual({ ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' })
+      expect(bare.respawn).not.toHaveBeenCalled()
       expect(run.tmuxBackend.respawn).not.toHaveBeenCalled()
     })
 
@@ -251,6 +260,34 @@ describe('restarting an agent', () => {
     })
   })
 
+  describe('on a ptyhost pane', () => {
+    const pty = { backend: 'ptyhost' as const, instance: 'p1', paneId: '%3' }
+    const ptyBackend = () => ({ name: 'ptyhost', holdOpen: vi.fn(), respawn: vi.fn(async () => ({ state: 'succeeded' })), releaseHold: vi.fn(async () => {}) })
+
+    it('restarts a terminal through that pane\'s own backend; tmux is never asked', async () => {
+      const backend = ptyBackend()
+      const run = setup(terminal({ runtimes: [pty] }), { terminals: { backendFor: vi.fn(() => backend as never) } })
+      expect(await run.restart('a1')).toMatchObject({ ok: true, resumed: false })
+      expect(run.deps.terminals.backendFor).toHaveBeenCalledWith(pty)
+      expect(backend.respawn).toHaveBeenCalledExactlyOnceWith(pty, { command: ['zsh', '-l'], cwd: homedir() })
+      expect(backend.releaseHold).toHaveBeenCalledWith(pty)
+      expect(run.tmuxBackend.respawn).not.toHaveBeenCalled()
+      expect(releaseHold).not.toHaveBeenCalled()
+      expect(run.deps.agentReconciler.holdRoute).toHaveBeenCalledWith(terminalRouteKey(pty))
+    })
+
+    it('swaps an engine in that pane and hands it back to that backend', async () => {
+      const backend = ptyBackend()
+      const row = agent({ runtimes: [pty] })
+      const run = setup(row, { terminals: { backendFor: () => backend as never } })
+      expect(await run.restart('a1')).toMatchObject({ ok: true, resumed: true })
+      expect(run.deps.paneSwapDeps).toHaveBeenCalledWith(row, { backend, runtime: pty }, { env: { GRID_KEY: 'k' } }, 'auto', expect.any(Function))
+      expect(backend.releaseHold).toHaveBeenCalledWith(pty)
+      expect(releaseHold).not.toHaveBeenCalled()
+      expect(run.deps.agentReconciler.releaseRoute).toHaveBeenCalledWith(terminalRouteKey(pty))
+    })
+  })
+
   describe('a terminal', () => {
     it('restarts in its tmux pane, not the pane `tmuxPane` projects from a ptyhost runtime sorted first', async () => {
       const tmux5 = { backend: 'tmux' as const, paneId: '%5' }
@@ -314,7 +351,7 @@ describe('restarting an agent', () => {
       expect(bypassPermissionFor).toHaveBeenCalledWith(agent(), expect.any(Function))
       expect(run.deps.liveBypassPermission).toHaveBeenCalledWith(agent())
       expect(run.deps.downgradedPermission).toHaveBeenCalledWith(agent(), true, 'restart', undefined)
-      expect(run.deps.paneSwapDeps).toHaveBeenCalledWith(agent(), runtime, { env: { GRID_KEY: 'k' } }, 'auto', expect.any(Function))
+      expect(run.deps.paneSwapDeps).toHaveBeenCalledWith(agent(), { backend: run.tmuxBackend, runtime }, { env: { GRID_KEY: 'k' } }, 'auto', expect.any(Function))
       const [target, bypass, swapDeps] = vi.mocked(restartAgent).mock.calls[0]
       expect(target).toEqual({ engine: 'claude', sessionId: 's1' })
       expect(bypass).toBe(true)
@@ -338,7 +375,7 @@ describe('restarting an agent', () => {
       const run = setup(grid, { downgradedPermission: vi.fn(async () => ({ bypassPermission: false })) as never })
       vi.mocked(restartAgent).mockResolvedValueOnce({ ok: true, resumed: false, processIdentity: newProcess } as never)
       expect(await run.restart('a1')).toEqual({ ok: true, session: grid, resumed: false })
-      expect(run.deps.paneSwapDeps).toHaveBeenCalledWith(grid, runtime, { env: { GRID_KEY: 'k' } }, null, expect.any(Function))
+      expect(run.deps.paneSwapDeps).toHaveBeenCalledWith(grid, { backend: run.tmuxBackend, runtime }, { env: { GRID_KEY: 'k' } }, null, expect.any(Function))
       expect(vi.mocked(restartAgent).mock.calls[0][1]).toBe(false)
       expect(console.log).toHaveBeenCalledWith('[restart] a1 claude · fresh session · grid Home')
     })

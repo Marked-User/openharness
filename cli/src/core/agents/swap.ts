@@ -11,18 +11,15 @@ import { buildEngineLaunchArgv } from '../../lib/engineLaunch.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { AgentRestartCoordinator, type RestartAgentDeps } from '../../lib/restartAgent.js'
 import { processRows } from '../../lib/terminalAgentDiscovery.js'
-import type { TmuxRuntimeRef } from '../../lib/terminalTypes.js'
+import type { RestartTarget } from '../../lib/terminalBackend.js'
 import { resolvePaneEngineProcess } from '../../lib/paneEngineProcess.js'
 import { bypassPermissionActive } from '../../lib/processTable.js'
 import { sameProcessIdentity } from '../../lib/terminalRuntime.js'
 import { signalAgentProcess } from '../../lib/processSignals.js'
-import type { TmuxBackend } from '../../lib/tmuxBackend.js'
 
 export interface PaneSwapDeps {
   restartJobs?: AgentRestartCoordinator
   byAgent: (agentId: string) => RegisteredSession | undefined
-  /** The tmux backend; a swap only ever runs where there is one. */
-  tmuxBackend: TmuxBackend | null
   prepareSessionResume: (session: RegisteredSession) => void
   /** Keeps a conversation a swap had to leave for a new one as a stopped harness (lib/keepAbandonedConversation.ts). */
   keepAbandonedConversation: (left: RegisteredSession) => void
@@ -31,7 +28,7 @@ export interface PaneSwapDeps {
 /** How long a relaunched engine must stay running before a restart counts it as come up (`waitForProcess`). */
 export const SWAP_SETTLE_MS = 500
 
-export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, keepAbandonedConversation, restartJobs = new AgentRestartCoordinator() }: PaneSwapDeps) {
+export function createPaneSwap({ byAgent, prepareSessionResume, keepAbandonedConversation, restartJobs = new AgentRestartCoordinator() }: PaneSwapDeps) {
   /**
    * The dependencies a pane-process swap needs, for both callers that do one.
    *
@@ -49,7 +46,8 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
 
   const paneSwapDeps = (
     session: RegisteredSession,
-    runtime: TmuxRuntimeRef,
+    /** The row's own pane and the backend it is on (`restartTargetOf`): a swap runs where the row is. */
+    { backend, runtime }: RestartTarget,
     launch: { native?: import('../../engines/nativeLaunch.js').NativeLaunch; env?: Record<string, string>; extraArgs?: readonly string[]; clearEnv?: readonly string[] } = {},
     /** The mode this swap may actually ask for — the row's own, unless the engine on disk has since
      *  stopped taking its flag and the caller dropped it (`dropPermissionFlagIfUnsupported`). */
@@ -60,9 +58,10 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
     prepareResume: () => prepareSessionResume(session),
     // The row as the swap found it: the conversation a fallback to a fresh start leaves behind.
     keepAbandoned: () => keepAbandonedConversation(session),
-    respawnRefusal: () => tmuxBackend!.respawnRefusal(launch.env ? { env: launch.env } : {}),
+    // Only a backend that can refuse is asked (tmux, too old for `-e`); the pty host takes any environment.
+    ...(backend.respawnRefusal ? { respawnRefusal: () => backend.respawnRefusal!(launch.env ? { env: launch.env } : {}) } : {}),
     holdOpen: async () => {
-      const result = await tmuxBackend!.holdOpen(runtime, current)
+      const result = await backend.holdOpen(runtime, current)
       return result.state === 'succeeded'
         ? { ok: true }
         : { ok: false, reason: 'reason' in result ? result.reason : 'could not re-arm remain-on-exit' }
@@ -75,7 +74,7 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
       ...(current ? { current } : {}),
     }, checkAfterMs),
     respawn: async (argv) => {
-      const result = await tmuxBackend!.respawn(runtime, {
+      const result = await backend.respawn(runtime, {
         command: argv,
         ...(current ? { current } : {}),
         cwd: homedir(),
@@ -94,14 +93,14 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
       while (waited < SWAP_DISCOVERY_BUDGET_MS) {
         await new Promise((resolve) => setTimeout(resolve, delayMs))
         waited += delayMs
-        const found = await resolvePaneEngineProcess(tmuxBackend!, runtime, session.engine)
+        const found = await resolvePaneEngineProcess(backend, runtime, session.engine)
         if (found) {
           // Up means still up a moment later: a launch the engine refuses (`codex resume` after an update
           // dropped it) runs for an instant, and seen then, the restart said "resumed" and never fell back
           // to a fresh start (e2e/updates.e2e.ts on Linux, whose faster start put it in the first look).
           await new Promise((resolve) => setTimeout(resolve, SWAP_SETTLE_MS))
           waited += SWAP_SETTLE_MS
-          const still = await resolvePaneEngineProcess(tmuxBackend!, runtime, session.engine)
+          const still = await resolvePaneEngineProcess(backend, runtime, session.engine)
           if (sameProcessIdentity(still, found)) return found
         }
         delayMs = Math.min(delayMs * 2, 750)

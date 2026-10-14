@@ -117,7 +117,7 @@ it('records create, fork, relaunch and actual retarget dispatch before the extra
 
       const source = row('opencode', named)
       resetCase()
-      const fork = await shapes.fork({ tmuxBackend: {}, registry: { byAgent: () => source },
+      const fork = await shapes.fork({ createBackend: {}, registry: { byAgent: () => source },
         mirror: { isBusy: () => false, recentAsks: () => ['fixture ask'], recent: () => [], lastFullText: () => 'fixture answer' },
         pendingForkInherit: new Map(), watchNewPane: async () => {}, announceSession: () => {}, attachDsh: () => {},
       } as never)({ agentId: source.agentId, name: null, prompt: 'try another approach' })
@@ -131,7 +131,13 @@ it('records create, fork, relaunch and actual retarget dispatch before the extra
     const source = row('opencode', true), events: unknown[] = []
     const event = (entry: unknown[]) => { events.push(entry); appendFileSync(calls, JSON.stringify({ control: entry }) + '\n') }
     const retarget = createAgentRetargeter({
-      purgeBusy: () => false, tmuxBackend: { clearEnv: async (_pane: unknown, names: string[]) => { event(['clearEnv', names]); return { state: 'succeeded' } }, releaseHold: async () => {} },
+      purgeBusy: () => false,
+      // The pane's own backend, tmux here: the retarget clears its session environment and hands the pane back.
+      terminals: (() => {
+        const tmux = { name: 'tmux', holdOpen: async () => ({ state: 'succeeded' }), respawn: async () => ({ state: 'succeeded' }),
+          clearEnv: async (_pane: unknown, names: string[]) => { event(['clearEnv', names]); return { state: 'succeeded' } }, releaseHold: async () => {} }
+        return { backendFor: () => tmux, instances: () => [tmux] }
+      })(),
       registry: { resolve: () => source, byAgent: () => source, updateProcessIdentity: (...args: unknown[]) => event(['process', ...args]),
         setGridLaunch: (...args: unknown[]) => event(['grid', ...args]), setSubscriptionModel: (...args: unknown[]) => event(['subscription', ...args]),
         setActive: (...args: unknown[]) => event(['active', ...args]) },

@@ -8,8 +8,12 @@
  * terminal streams' and never reach the RPC switch.)
  */
 
+import { sessionForPaneId } from './terminalRuntime.js'
+import type { TerminalRuntimeRef } from './terminalTypes.js'
+
 export interface TerminalHandoffRequest {
-  /** The pane `harness remote` was typed in: tmux's `%N`. */
+  /** The pane `harness remote` was typed in: tmux's `%N`. The daemon reads it as a tmux pane first, and as a pty
+   *  host pane only when no tmux pane has that id and exactly one row does (`handoffAgentId`). */
   tmuxPane: string
   /** The machine the new terminal is on, and the agent it is there. */
   machineId: string
@@ -26,4 +30,15 @@ export function terminalHandoffRequest(payload: Record<string, unknown>): Termin
   if (typeof machineId !== 'string' || !ID_RE.test(machineId)) return null
   if (typeof agentId !== 'string' || !ID_RE.test(agentId)) return null
   return { tmuxPane, machineId, agentId }
+}
+
+/**
+ * The agent whose tile `harness remote` was typed in, by the pane the shell named (`sessionForPaneId`): a tmux
+ * pane first, a pty host pane only when exactly one row has that id.
+ */
+export function handoffAgentId(
+  sessions: readonly { agentId: string; runtimes: readonly TerminalRuntimeRef[] }[],
+  pane: string,
+): string | null {
+  return sessionForPaneId(sessions, pane)?.agentId ?? null
 }

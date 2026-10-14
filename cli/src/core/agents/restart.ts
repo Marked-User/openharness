@@ -13,8 +13,9 @@ import { sid } from '../../lib/log.js'
 import type { registry, RegisteredSession } from '../../lib/registry.js'
 import { bypassPermissionFor, restartAgent } from '../../lib/restartAgent.js'
 import type { TerminalAgentReconciler } from '../../lib/terminalAgentReconciler.js'
-import { terminalRouteKey, tmuxRuntimeOf } from '../../lib/terminalRuntime.js'
-import type { TmuxBackend } from '../../lib/tmuxBackend.js'
+import { restartTargetOf } from '../../lib/terminalBackend.js'
+import type { TerminalBackendCoordinator } from '../../lib/terminalBackendCoordinator.js'
+import { terminalRouteKey } from '../../lib/terminalRuntime.js'
 import type { HeldRestart } from './heldLaunches.js'
 import { workspaceMissing } from '../../lib/workspaceCheck.js'
 import type { createLaunchHelpers } from './launch.js'
@@ -54,7 +55,8 @@ export interface RestartDeps {
   stopJobs: Map<string, Promise<void>>
   /** Panes held for a multi-step answer (terminal control). */
   pinnedControls: Set<string>
-  tmuxBackend: TmuxBackend | null
+  /** Each runtime's own backend: a row restarts on the one its pane is in (`restartTargetOf`). */
+  terminals: Pick<TerminalBackendCoordinator, 'backendFor'>
   sameRestartTarget: PaneSwap['sameRestartTarget']
   agentReconciler: Pick<TerminalAgentReconciler, 'holdRoute' | 'releaseRoute'>
   terminalHintMachineName: () => string
@@ -72,18 +74,18 @@ export interface RestartDeps {
 
 export function createAgentRestarter({
   native: inspectNative,
-  restartJobs, registry, purgeBusy, stopJobs, pinnedControls, tmuxBackend, sameRestartTarget, agentReconciler,
+  restartJobs, registry, purgeBusy, stopJobs, pinnedControls, terminals, sameRestartTarget, agentReconciler,
   terminalHintMachineName, announceSession, refreshGridAssignment, relaunchOverrides, downgradedPermission, refreshGridWebSearch,
   liveBypassPermission, paneSwapDeps, restartHeld,
 }: RestartDeps) {
   /**
    * Web or device restarted an agent (`agent_restart`): exit the live engine process and relaunch it in
-   * the SAME tmux pane, keeping the SAME agentId/session — restart must never look like delete+create to
+   * the SAME pane, keeping the SAME agentId/session — restart must never look like delete+create to
    * the registry or the UI. Two things guard that identity:
    *
    *  - `remain-on-exit` is re-armed on the pane before the old process is killed (mirrors what
    *    `create()` does at spawn time), or tmux would tear the pane — and with it the whole one-pane
-   *    session — down the instant that process exits.
+   *    session — down the instant that process exits. The pty host's `holdOpen` is the same keep.
    *  - the periodic reconciler is told to ignore this pane's ROUTE for the duration of the swap
    *    (`agentReconciler.holdRoute`/`releaseRoute`), or it would either flicker the agent dormant
    *    mid-kill, or — worse — mint a brand-new agent for the relaunched process the instant it appears,
@@ -104,9 +106,11 @@ export function createAgentRestarter({
     }
     const held = restartHeld(session.agentId)
     if (held) return held
-    // Restart respawns in place, which only tmux does: a row with no tmux pane cannot be restarted here.
-    const runtime = tmuxRuntimeOf(session)
-    if (!runtime || !tmuxBackend) return { ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' }
+    // Restart respawns in place: a row with no runtime on a backend that can (holdOpen and respawn) cannot be
+    // restarted here. Its tmux runtime first, never the bare `tmuxPane` (a ptyhost pane's id, on a ptyhost row).
+    const place = restartTargetOf(session, (candidate) => terminals.backendFor(candidate))
+    if (!place) return { ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' }
+    const { backend, runtime } = place
     const target = { ...session }
     const current = () => operationCurrent() && sameRestartTarget(target)
     const changed = { ok: false, error: 'AGENT_CHANGED', detail: 'The harness changed or stopped during restart.' } as const
@@ -126,7 +130,7 @@ export function createAgentRestarter({
       try {
         // The same opening a fresh terminal tile prints (`onCreateAgent`'s `terminalHint`): a
         // restarted tile is a fresh shell too, and should look like one.
-        const respawned = await tmuxBackend.respawn(runtime, {
+        const respawned = await backend.respawn(runtime, {
           command: buildEngineLaunchArgv(engine, {
             ...(session.cwd ? { cwd: session.cwd } : {}),
             terminalHint: { machineName: terminalHintMachineName() },
@@ -135,7 +139,7 @@ export function createAgentRestarter({
         })
         if (!current()) return changed
         if (respawned.state !== 'succeeded') return { ok: false, error: 'RESTART_FAILED', detail: respawned.reason }
-        await tmuxBackend.releaseHold(runtime)
+        await backend.releaseHold(runtime)
         if (!current()) return changed
         registry.setActive(session.agentId, true)
         const refreshed = registry.byAgent(session.agentId)
@@ -182,7 +186,7 @@ export function createAgentRestarter({
       const outcome = await restartAgent(
         { engine, sessionId: session.sessionId, ...(session.resumeOnly ? { resumeOnly: true as const } : {}) },
         restartPermission.bypassPermission === true,
-        { ...paneSwapDeps(session, runtime, built.overrides, restartPermission.permissionMode ?? null, dispatchCurrent), isCurrent: dispatchCurrent },
+        { ...paneSwapDeps(session, place, built.overrides, restartPermission.permissionMode ?? null, dispatchCurrent), isCurrent: dispatchCurrent },
       )
 
       if (!current()) return changed
@@ -197,7 +201,7 @@ export function createAgentRestarter({
       if (!current()) return changed
       registry.updateProcessIdentity(session.agentId, outcome.processIdentity, gateway.kind)
       registry.setActive(session.agentId, true)
-      await tmuxBackend.releaseHold(runtime)
+      await backend.releaseHold(runtime)
       if (!current()) return changed
       const refreshed = registry.byAgent(session.agentId)
       if (!refreshed) return { ok: false, error: 'RESTART_FAILED', detail: 'agent vanished from the registry mid-restart' }
