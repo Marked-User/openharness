@@ -115,6 +115,10 @@ Exhaustion drops measurement rather than affecting sign-in. Public counts remain
 fabrication; they are directional diagnostics, not trusted account acquisition metrics.
 
 Both ingestion paths atomically add only UTC-day/metric totals plus an unlinked random retry receipt.
+Fast database write conflicts retry that complete transaction up to three times with short jitter,
+rechecking the sharing choice each time. No retry starts after the first second; existing transaction
+deadlines still apply to each attempt. Slow or exhausted conflicts return to the client's normal
+immutable-report retry. Receipts prevent both immediate and later retries from counting twice.
 Receipts expire within 36 days and totals within 396 days through the existing Mongo TTL indexes.
 No account deduplication markers or stable hashes enter these totals. People-based daily counts and
 D1/D2/D3/D7 returns come from one mark per sharing person per day under an HMAC pseudonym (no time,

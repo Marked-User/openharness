@@ -1,6 +1,7 @@
 import { healthBreakdowns } from '../analytics/productHealth.js'
 import type { ProductUsageContext } from '../types/productHealthContract.js'
 import { createHmac } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 import type { Prisma } from '@prisma/client'
 import { env } from '../config/env.js'
 import { prisma } from './prisma.js'
@@ -51,38 +52,49 @@ export async function ingestSetupUsage(report: SetupUsageReport, now = new Date(
 
 async function ingestCounters(report: SetupUsageReport & { revision?: number; context?: ProductUsageContext }, userId?: string, now = new Date()) {
   if (report.context?.channel === 'development') return { accepted: true, reason: 'DEVELOPMENT' }
-  try {
-    return await prisma.$transaction(async tx => {
-      if (userId) {
-        const choice = await productUsageChoice(userId, tx)
-        if (!choice.enabled || choice.revision !== report.revision) return { accepted: false, reason: 'CHOICE_CHANGED', ...choice }
-      }
-      // Receipt and increments commit together; a lost HTTP response can be retried with the same id.
-      await tx.productUsageReceipt.create({ data: {
-        id: report.id, expiresAt: new Date(Date.parse(report.day) + (PRODUCT_USAGE_DAYS + 1) * DAY),
-      } })
-      for (const [metric, value] of Object.entries(report.counters)) {
-        if (!value) continue
-        for (const name of [metric, ...healthBreakdowns(report.context, metric)]) {
-          await tx.productUsageTotal.upsert({
-            where: { dayUtc_metric: { dayUtc: new Date(report.day), metric: name } },
-            create: { dayUtc: new Date(report.day), metric: name, value }, update: { value: { increment: value } },
-          })
+  // October's delivery audit found aggregate write conflicts. Retry the entire transaction,
+  // including permission, without extending a slow request or waiting a full client interval.
+  // At most four attempts; only fast conflicts may start another within the first second.
+  const started = performance.now()
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await prisma.$transaction(async tx => {
+        if (userId) {
+          const choice = await productUsageChoice(userId, tx)
+          if (!choice.enabled || choice.revision !== report.revision) return { accepted: false, reason: 'CHOICE_CHANGED', ...choice }
         }
-      }
-      if (report.context && report.day < now.toISOString().slice(0, 10)) {
-        const dayUtc = new Date(Math.floor(now.getTime() / DAY) * DAY)
-        const metric = `health_${report.context.surface}_report_late`
-        await tx.productUsageTotal.upsert({ where: { dayUtc_metric: { dayUtc, metric } },
-          create: { dayUtc, metric, value: 1 }, update: { value: { increment: 1 } } })
-      }
-      return { accepted: true }
-    })
-  } catch (error) {
-    // A competing first writer of a daily total is NOT a duplicate report: let the client retry it.
-    if ((error as { code?: string }).code === 'P2002'
-        && await prisma.productUsageReceipt.findUnique({ where: { id: report.id }, select: { id: true } })) return { accepted: true }
-    throw error
+        // Receipt and increments commit together; a lost HTTP response can be retried with the same id.
+        await tx.productUsageReceipt.create({ data: {
+          id: report.id, expiresAt: new Date(Date.parse(report.day) + (PRODUCT_USAGE_DAYS + 1) * DAY),
+        } })
+        for (const [metric, value] of Object.entries(report.counters)) {
+          if (!value) continue
+          for (const name of [metric, ...healthBreakdowns(report.context, metric)]) {
+            await tx.productUsageTotal.upsert({
+              where: { dayUtc_metric: { dayUtc: new Date(report.day), metric: name } },
+              create: { dayUtc: new Date(report.day), metric: name, value }, update: { value: { increment: value } },
+            })
+          }
+        }
+        if (report.context && report.day < now.toISOString().slice(0, 10)) {
+          const dayUtc = new Date(Math.floor(now.getTime() / DAY) * DAY)
+          const metric = `health_${report.context.surface}_report_late`
+          await tx.productUsageTotal.upsert({ where: { dayUtc_metric: { dayUtc, metric } },
+            create: { dayUtc, metric, value: 1 }, update: { value: { increment: 1 } } })
+        }
+        return { accepted: true }
+      })
+    } catch (error) {
+      // A competing first writer of a daily total is not a duplicate unless its receipt committed.
+      const code = (error as { code?: string } | null)?.code
+      if (code === 'P2002'
+          && await prisma.productUsageReceipt.findUnique({ where: { id: report.id }, select: { id: true } })) return { accepted: true }
+      const pause = 25 * 2 ** attempt + Math.floor(Math.random() * 50)
+      if ((code !== 'P2034' && code !== 'P2002') || attempt >= 3
+          || performance.now() - started + pause >= 1000) throw error
+      await delay(pause)
+      if (performance.now() - started >= 1000) throw error
+    }
   }
 }
 

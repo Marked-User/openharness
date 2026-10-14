@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { setTimeout as delay } from 'node:timers/promises'
+
+vi.mock('node:timers/promises', () => ({ setTimeout: vi.fn(async () => {}) }))
 
 const db = vi.hoisted(() => ({
   productUsagePreference: { findUnique: vi.fn(), upsert: vi.fn() },
@@ -99,6 +102,51 @@ describe('aggregate ingestion', () => {
     db.productUsageTotal.upsert.mockRejectedValue({ code: 'P2002' })
     db.productUsageReceipt.findUnique.mockResolvedValue(null)
     await expect(ingestProductUsage('a', report, now)).rejects.toMatchObject({ code: 'P2002' })
+    expect(db.$transaction).toHaveBeenCalledTimes(4)
+    expect(delay).toHaveBeenCalledTimes(3)
+  })
+  it.each(['P2034', 'P2002'])('retries a fast %s conflict with the same receipt and a fresh permission check', async code => {
+    db.productUsageTotal.upsert.mockRejectedValueOnce({ code })
+    expect(await ingestProductUsage('private-account', report, now)).toEqual({ accepted: true })
+    expect(db.$transaction).toHaveBeenCalledTimes(2)
+    expect(db.productUsagePreference.findUnique).toHaveBeenCalledTimes(2)
+    expect(db.productUsageReceipt.create.mock.calls[0]).toEqual(db.productUsageReceipt.create.mock.calls[1])
+    expect(delay).toHaveBeenCalledExactlyOnceWith(expect.any(Number))
+    expect(vi.mocked(delay).mock.calls[0][0]).toBeGreaterThanOrEqual(25)
+    expect(vi.mocked(delay).mock.calls[0][0]).toBeLessThan(75)
+  })
+  it('rechecks a sharing-off choice before retrying the transaction', async () => {
+    db.productUsageTotal.upsert.mockRejectedValueOnce({ code: 'P2034' })
+    db.productUsagePreference.findUnique.mockResolvedValueOnce({ enabled: true, revision: 0 })
+      .mockResolvedValueOnce({ enabled: false, revision: 1 })
+    expect(await ingestProductUsage('a', report, now)).toMatchObject({ accepted: false, reason: 'CHOICE_CHANGED' })
+    expect(db.$transaction).toHaveBeenCalledTimes(2)
+    expect(db.productUsageReceipt.create).toHaveBeenCalledOnce()
+  })
+  it('bounds persistent conflicts and does not retry unrelated storage errors', async () => {
+    db.$transaction.mockRejectedValue({ code: 'P2034' })
+    await expect(ingestProductUsage('a', report, now)).rejects.toMatchObject({ code: 'P2034' })
+    expect(db.$transaction).toHaveBeenCalledTimes(4)
+    expect(delay).toHaveBeenCalledTimes(3)
+    vi.mocked(delay).mockClear(); db.$transaction.mockClear().mockRejectedValue({ code: 'P2028' })
+    await expect(ingestProductUsage('a', report, now)).rejects.toMatchObject({ code: 'P2028' })
+    expect(db.$transaction).toHaveBeenCalledOnce(); expect(delay).not.toHaveBeenCalled()
+  })
+  it('does not extend an already slow conflict with another transaction', async () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValue(1000)
+    try {
+      db.$transaction.mockRejectedValue({ code: 'P2034' })
+      await expect(ingestProductUsage('a', report, now)).rejects.toMatchObject({ code: 'P2034' })
+      expect(db.$transaction).toHaveBeenCalledOnce(); expect(delay).not.toHaveBeenCalled()
+    } finally { clock.mockRestore() }
+  })
+  it('checks the retry window again after a delayed timer wakes', async () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(1000)
+    try {
+      db.$transaction.mockRejectedValue({ code: 'P2034' })
+      await expect(ingestProductUsage('a', report, now)).rejects.toMatchObject({ code: 'P2034' })
+      expect(db.$transaction).toHaveBeenCalledOnce(); expect(delay).toHaveBeenCalledOnce()
+    } finally { clock.mockRestore() }
   })
   it('fails closed when the preference cannot be checked', async () => {
     db.productUsagePreference.findUnique.mockRejectedValue(new Error('unavailable'))
