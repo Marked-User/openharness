@@ -371,6 +371,13 @@ final harnessCommands = <HarnessCommand>[
     ],
   ),
   const HarnessCommand('agent.stop', 'Stop Harness', ShortcutGroup.actions),
+  // Stop keeps the conversation to reopen; Delete removes it for good.
+  const HarnessCommand(
+    'agent.delete',
+    'Delete Harness',
+    ShortcutGroup.actions,
+    keywords: ['remove', 'purge', 'forget', 'conversation'],
+  ),
   const HarnessCommand('app.product_feedback', 'Rate task outcome', ShortcutGroup.actions,
     keywords: ['feedback', 'completed', 'useful', 'problem']),
   const HarnessCommand('agent.fork', 'Fork Harness', ShortcutGroup.actions),
@@ -776,6 +783,15 @@ final harnessCommands = <HarnessCommand>[
     'Open the full New Harness form',
     ShortcutGroup.navigate,
     extraKeys: ['cmd+period'],
+    context: KeymapContext.picker,
+  ),
+  // Open Harness: the selected harness, running or stopped, deleted for good.
+  // ⌘⌫ is the search field's own delete-to-start, so not that.
+  const HarnessCommand(
+    'picker.delete',
+    'Delete the selected harness',
+    ShortcutGroup.actions,
+    extraKeys: ['cmd+shift+backspace'],
     context: KeymapContext.picker,
   ),
   // Launch and Project use arrows/Enter. Keep stable command identities for

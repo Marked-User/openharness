@@ -617,13 +617,18 @@ export class BackendSocket {
   /** Attach one authenticated loopback desktop client to the same RPC and event plane as cloud web. */
   registerLocalClient(connId: string, sink: LocalClientSink, opts: { tool?: boolean; surface?: WindowSurface } = {}): boolean {
     if (!isLocalClientId(connId) || this.localClients.has(connId)) return false
+    const surface = opts.surface ?? 'desktop'
+    // The app holds a connection per machine and dials again on every reconnect and link retry:
+    // an open is its surface going from no window to one, not each connection (5,675 "desktop opens"
+    // across 68 active installations on the first measured day).
+    const firstOfSurface = !opts.tool && this.localWindows()[surface] === 0
     this.localClients.set(connId, sink)
     if (opts.tool) this.toolClients.add(connId)
     else if (opts.surface === 'tui') this.tuiClients.add(connId)
     this.gatewayPort?.localClients(this.localWindows())
     if (opts.tool) return true
     // The window is the person's session: the backend counts it, now or when the link next comes up.
-    this.gatewayPort?.windowOpened(opts.surface ?? 'desktop')
+    if (firstOfSurface) this.gatewayPort?.windowOpened(surface)
     this.onLocalClient?.(connId, true)
     return true
   }

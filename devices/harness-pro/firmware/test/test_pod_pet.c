@@ -44,6 +44,17 @@ static void pet_test_frames_advance(void)
     pod_pet_draw(&h, 0, 0, 270, "claude", POD_SCENE_WORK, p->working_scene->step_ms, 0);
     CHECK(memcmp(&a.runs[0], &h.runs[0], sizeof a.runs[0]) != 0 || frame_of(&a) == frame_of(&h));
 }
+// Fo (the round's fifth pet, imported 2026-10-14) plays its own scenes on the Pro: work, listen and send, not the pet-less cover.
+static void pet_test_fo(void)
+{
+    const ht_pet_t *p = pod_pet_for("fo");
+    CHECK(p && p->working_scene && p->listening_scene && p->sending_scene);
+    CHECK(pod_pet_has("fo", POD_SCENE_WORK) && pod_pet_has("fo", POD_SCENE_REST) && pod_pet_has("fo", POD_SCENE_LISTEN));
+    ht_scene_t s;
+    ht_scene_clear(&s, 0);
+    pod_pet_draw(&s, 0, 0, 206, "fo", POD_SCENE_WORK, 0, 0);
+    CHECK(s.count >= 1 && frame_of(&s));   // a cell frame, not the pale cover box of a pet-less engine
+}
 static void pet_test_send_once(void)
 {
     const ht_pet_t *p = pod_pet_for("claude");
@@ -296,6 +307,7 @@ int main(void)
     pet_test_runs_constant();
     pet_test_frames_advance();
     pet_test_send_once();
+    pet_test_fo();
     pet_test_next_step();
     pet_test_no_pet();
     pet_test_light_mark_on_dark();

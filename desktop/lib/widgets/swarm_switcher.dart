@@ -171,6 +171,7 @@ class SwarmSearchKeys extends StatelessWidget {
     this.onNewAgent,
     this.onCommands,
     this.onRefocus,
+    this.onDelete,
     this.previewControls,
     this.desktop = false,
     required this.child,
@@ -186,6 +187,9 @@ class SwarmSearchKeys extends StatelessWidget {
   final VoidCallback? onNewAgent;
   final VoidCallback? onCommands;
   final VoidCallback? onRefocus;
+
+  /// Delete Harness for the selected row (`picker.delete`), when it is one.
+  final ValueChanged<SwarmDestination>? onDelete;
   final SearchPreviewControls? previewControls;
   final bool desktop;
   final Widget child;
@@ -277,6 +281,13 @@ class SwarmSearchKeys extends StatelessWidget {
               'picker.preview_down': () => run(() => search.scrollPreview(1)),
               'picker.preview_page_up': () => run(() => search.page(-1)),
               'picker.preview_page_down': () => run(() => search.page(1)),
+              if (onDelete != null)
+                'picker.delete': () => run(() {
+                  if (search.selected case final row?
+                      when row.agentId != null && row.machineId != null) {
+                    onDelete!(row);
+                  }
+                }),
             },
             'picker.cancel': dismiss,
             'picker.complete': () => complete(true),

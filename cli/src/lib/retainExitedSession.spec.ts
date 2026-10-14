@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createRetainExitedSession, EARLY_EXIT_MS, type RetainExitedSessionDeps } from './retainExitedSession.js'
+import { createRetainExitedSession, type RetainExitedSessionDeps } from './retainExitedSession.js'
 import type { RegisteredSession } from './registry.js'
 
 const row = (over: Partial<RegisteredSession> = {}): RegisteredSession => ({
@@ -40,12 +40,12 @@ function harness(over: Partial<RetainExitedSessionDeps> = {}) {
 }
 
 describe('retainExitedSession', () => {
-  it('ends the identity that was running the engine so its views close, and keeps the surviving shell', () => {
+  it('ends the identity that was running the engine so its views move to the surviving shell', () => {
     const h = harness()
     const entry = row()
     h.retain(entry, true)
 
-    expect(h.frames).toEqual([{ type: 'agent_deleted', payload: { agentId: 'agent-a', retained: true } }])
+    expect(h.frames).toEqual([{ type: 'agent_deleted', payload: { agentId: 'agent-a', retained: true, successor: 'agent-shell' } }])
     expect(h.calls.indexOf('release:agent-a:true')).toBeLessThan(h.calls.indexOf('send:agent_deleted'))
     // The archive exists BEFORE the client is told to go looking for it, and the ending reaches the
     // client before the frame that is behind an await.
@@ -57,31 +57,17 @@ describe('retainExitedSession', () => {
     expect(h.calls).toContain('announce:agent-shell')
   })
 
-  // Only a failed start hands its tiles to the shell: there the engine's last screen is the only
-  // place that says why it stopped. A later exit keeps closing its views (#262).
-  it('an engine that exits soon after it appeared names the shell that keeps its pane', () => {
-    const quickExit = harness({ now: () => 1_000 + 30_000, hadConversation: () => true })
-    quickExit.retain(row({ registeredAt: 1_000 }), true)
-    expect(quickExit.frames, 'a quick /exit after real work closes as before').toEqual([{ type: 'agent_deleted', payload: { agentId: 'agent-a', retained: true } }])
-    const h = harness({ now: () => 1_000 + 30_000, hadConversation: () => false })
-    h.retain(row({ registeredAt: 1_000 }), true)
-    expect(h.frames).toEqual([{ type: 'agent_deleted', payload: { agentId: 'agent-a', retained: true, successor: 'agent-shell' } }])
-    const late = harness({ now: () => 1_000 + EARLY_EXIT_MS, hadConversation: () => false })
-    late.retain(row({ registeredAt: 1_000 }), true)
-    expect(late.frames).toEqual([{ type: 'agent_deleted', payload: { agentId: 'agent-a', retained: true } }])
-    const noTranscript = harness({ now: () => 1_000 + 30_000 })
-    noTranscript.retain(row({ registeredAt: 1_000, engine: 'opencode', transcriptPath: null }), true)
-    expect(noTranscript.frames, 'an engine that keeps no transcript: an ending').toEqual([{ type: 'agent_deleted', payload: { agentId: 'agent-a', retained: true } }])
-    for (const engine of ['claude', 'codex'] as const) {
-      const neverWrote = harness({ now: () => 1_000 + 30_000 })
-      neverWrote.retain(row({ registeredAt: 1_000, engine, transcriptPath: null }), true)
-      expect(neverWrote.frames[0]!.payload.successor, `${engine} that failed before writing a transcript`).toBe('agent-shell')
+  // Every exit that leaves its pane a shell hands its tiles to that shell, a failed start or one after
+  // work: the pane says it is a shell now, and Ctrl-C to stop Codex must not take it away (#600).
+  it('an engine whose pane outlived it names the shell that keeps the pane', () => {
+    for (const exited of [row(), row({ transcriptPath: null }), row({ engine: 'opencode', transcriptPath: null }),
+      row({ registeredAt: 1_000, touchedAt: 1_000 + 24 * 3_600_000 })]) {
+      const h = harness()
+      h.retain(exited, true)
+      expect(h.frames, exited.engine).toEqual([{ type: 'agent_deleted', payload: { agentId: 'agent-a', retained: true, successor: 'agent-shell' } }])
     }
-    const unwritten = harness({ now: () => 1_000 + 30_000 })
-    unwritten.retain(row({ registeredAt: 1_000, transcriptPath: '/nonexistent/never-written.jsonl' }), true)
-    expect(unwritten.frames[0]!.payload.successor).toBe('agent-shell')
-    const dead = harness({ now: () => 1_000, hadConversation: () => false })
-    dead.retain(row({ registeredAt: 1_000 }), false)
+    const dead = harness()
+    dead.retain(row(), false)
     expect(dead.frames).toEqual([{ type: 'agent_deleted', payload: { agentId: 'agent-a', retained: true } }])
   })
 
