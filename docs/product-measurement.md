@@ -128,7 +128,7 @@ image build can be distinguished from the version actually serving requests.
 Resume diagnostics add fixed conditions by request source: runtime unavailable, saved state missing,
 project missing, harness missing, credentials missing, busy, changed, unconfirmed, preparation failed,
 launch failed, invalid and other. These come only from known error codes, never error text or paths.
-From CLI 0.4.2, an unconfirmed runtime counts as unknown and a concurrently changed harness as
+From CLI 0.4.3, an unconfirmed runtime counts as unknown and a concurrently changed harness as
 cancelled (legacy aggregate: unknown), rather than failed. Compare releases separately across this
 definition change; a lower failure rate alone is not proof the product improved.
 Receipts expire within 36 days and totals within 396 days through the existing Mongo TTL indexes.
