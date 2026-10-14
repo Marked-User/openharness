@@ -148,6 +148,31 @@ void main() {
     expect((await build())['viewerPath'], 'notes.html');
   });
   test(
+    'a one-file page that imports a module from a CDN is never assumed',
+    () async {
+      await file(
+        'twisted-ribbon-lamp.html',
+        '<canvas></canvas><script type="module">import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";</script>',
+      );
+      await expectLater(
+        buildPublicationDraft(
+          folder: root.path,
+          title: 'Lamp',
+          engine: 'codex',
+        ),
+        throwsA(
+          isA<NeedsOutput>().having(
+            (e) => e.message,
+            'message',
+            contains(
+              'twisted-ribbon-lamp.html loads https://cdn.jsdelivr.net/',
+            ),
+          ),
+        ),
+      );
+    },
+  );
+  test(
     'a folder\'s index.html that needs other files is never assumed',
     () async {
       await file('app/index.html', '<script src="main.js"></script>');
@@ -399,10 +424,7 @@ void main() {
     // The draft goes as a gzipped file, never as text the edge could read.
     expect(html, contains('<input type="file" name="draft" hidden>'));
     final packed = RegExp(r'atob\("([A-Za-z0-9+/=]+)"\)').firstMatch(html)![1]!;
-    expect(
-      jsonDecode(utf8.decode(gzip.decode(base64Decode(packed)))),
-      draft,
-    );
+    expect(jsonDecode(utf8.decode(gzip.decode(base64Decode(packed)))), draft);
     await handoff.close();
   });
   test('login return accepts only local Hub pages', () {
