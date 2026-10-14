@@ -127,6 +127,72 @@ queue refusal and eventual completion. Remaining gates are full affected
 end-to-end lanes, causal mutations, runtime cost, final independent head/base
 review and ready-state CI.
 
+Runtime investigation found unnecessary client-outbox scanning even though the
+installed client has no durable outbox. Internal client replay is now opt-in;
+server recovery still starts after readiness. A default-off regression confirms
+recovered server intake completes without a client-outbox read. Full related
+HTTP/admission, storage, golden and architecture checks pass: 252 cases in eight
+files, plus types, in `20261014T020558.563256Z-73387` (193.8/6.1 seconds).
+
+A local unfinished admission also already denies a legacy mutation. The server
+now avoids a redundant journal confirmation in that case. This only refuses;
+every possible acceptance still requires fresh native and journal proof. The
+denial checks the exact process scope, so an old process's pending receipt cannot
+hold its replacement. Both deterministic regressions and types pass in
+`20261014T022256.326783Z-72642` (5.7/5.4 seconds). All 16 protocol mutations,
+including removal of either guard and the default-off replay check, fail by
+assertion in `20261014T022453.904061Z-81024` (105.6 seconds). The owned mutation
+worktree is restored clean. No covered core/master production file changed after
+their passing combined-main gates; the affected HTTP and end-to-end gates are
+being completed on the final source.
+
+Main advanced to `3b3c552d2`; the merge at `c4682a167` changes only the backend's
+measurement storage and documentation. Independent review approved that exact
+head/base, conditional on the remaining acceptance gates. The measured CLI
+baseline and existing CLI evidence retain identical relevant inputs.
+
+### Runtime cost
+
+The matched comparison uses Node 22.23.2, tmux 3.5a and Darwin 25.6.0 on the same
+16-logical-CPU machine. Both frozen release bundles use their matching verified
+native helper. There are four fake engines, two active agents, two windows, four
+terminal streams, no added history, the benchmark's standard 20-second warmup,
+and three 10-second measurement windows. Samples alternate baseline/candidate
+twice. The baseline is `17ee12593`; the candidate is `c4682a167`. The benchmark
+runner is the same for both. Sanitized raw measurements are preserved in
+[the runtime report](2026-10-14-daemon-hook-runtime.json).
+
+| Core measurement | Baseline, two samples | Candidate, two samples |
+| --- | --- | --- |
+| Empty CPU, percent of one logical CPU | 0.63 / 0.68 | 0.64 / 0.69 |
+| Populated idle CPU | 2.34 / 2.17 | 3.03 / 3.13 |
+| Active CPU | 7.33 / 7.03 | 38.94 / 29.65 |
+| Populated idle mean RSS, MiB | 104.4 / 105.3 | 117.0 / 112.8 |
+| Active mean RSS, MiB | 107.6 / 107.9 | 121.3 / 118.8 |
+| Active turn latency p95, ms | 6253 / 6379 | 6559 / 6522 |
+| Active event-loop delay p99, ms | 12.84 / 12.87 | 35.29 / 33.47 |
+| Active event-loop maximum delay, ms | 228 / 222 | 155 / 327 |
+
+All four workloads pass their ownership, session, stream and no-core-restart
+assertions; each active window completes two turns. Receipt
+`20261014T023107.238918Z-8881` records the build (15.7 seconds) and samples
+(92.0/100.5/91.9/101.6 seconds). This is a short fake-engine measurement, not a
+long-term stability or real-model benchmark. Two turn observations per sample
+also do not establish a latency distribution.
+
+Active CPU cost is materially higher. Durability adds repeated journal, route
+and ownership observations plus synchronization; the diagnostic CPU profile
+shows this work in native read fences, metadata and admission completion. Earlier
+two-second-warmup measurements included unfinished admission work in the idle
+window. Their receipts and reports remain retained, including
+`20261014T015947.942574Z-22932`, `20261014T020945.663454Z-88645` and diagnostic
+profile `20261014T021234.467234Z-16044`. Changing warmup and the denial guard
+together does not isolate either one's performance benefit. The final matched
+comparison above is the evidence for the resulting behavior. No numerical limit
+is invented, and no durability check is relaxed to lower this cost. Independent
+review found no concrete control or safety blocker in the first pair; final
+acceptance still requires the private control/deadline lanes and CI.
+
 The working target given to the owner is one to two focused days including
 validation and review, not a guaranteed completion date. The earlier two-to-three
 day estimate was wrong. Scope is frozen; additional blockers need a concrete

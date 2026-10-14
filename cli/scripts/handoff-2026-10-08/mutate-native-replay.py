@@ -16,8 +16,8 @@ files = 'src/engines/kit/nativeHookFiles.ts'
 files_unit = 'src/engines/kit/nativeHookFiles.spec.ts'
 journal_unit = 'src/engines/kit/nativeHookJournal.spec.ts'
 mutations = [
-    ('core readiness never starts client replay', 'src/hookServer.ts',
-     '    clientReplay.start()', '    void clientReplay.start', http, 'starts retained client replay'),
+    ('opted-in core readiness never starts client replay', 'src/hookServer.ts',
+     'if (options.nativeClientReplay) clientReplay.start()', 'if (options.nativeClientReplay) void clientReplay.start', http, 'starts retained client replay'),
     ('core drops the remaining transport budget', 'src/hookServer.ts',
      'sendNativeHookRequest(request, hookCredential, () => !closed && current(), remainingMs)', 'sendNativeHookRequest(request, hookCredential, () => !closed && current())', http, 'starts retained client replay'),
     ('legacy success borrows ownership', replay,

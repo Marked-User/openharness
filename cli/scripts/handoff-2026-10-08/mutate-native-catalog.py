@@ -26,7 +26,7 @@ mutations = [
     ('initial journal emptiness forgotten', catalog, 'proof.verify(); verifyEmpty() }, baseVerify)',
      'proof.verify() }, baseVerify)', 'retains the empty journal frontier', 1),
     ('fixed-name ancestor fences removed', catalog, 'metadata.routeStamps(canonical)',
-     '(() => {})', 'discards an ancestor redirection', 4),
+     '(() => {})', 'discards an ancestor redirection', 5),
     ('existing key beyond a hole ignored', catalog,
      'before.allocations.find(item => item.kind === kind && item.key === hashed)',
      'before.allocations.find(() => false)', 'finds an existing key beyond', 1),
