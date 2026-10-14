@@ -4394,9 +4394,12 @@ void ui_service_model_picker(void)
 }
 void ui_swarms_replace(const cable_swarm_t *rows, int count, const char *selected)
 {
+    // A tab with no agent (only shells or viewers, or nothing) is not listed: nothing on the dial can drive it.
+    static cable_swarm_t shown[SWARMS_MAX];   // static: too large for the reader task's stack; single writer
+    int total=!rows || count<0 ? 0 : count>SWARMS_MAX ? SWARMS_MAX : count, bounded=0;
+    for (int i=0;i<total;i++) if (rows[i].agents>0) shown[bounded++]=rows[i];
+    rows=shown;
     display_lock();
-    int bounded=count<0 ? 0 : count>SWARMS_MAX ? SWARMS_MAX : count;
-    if (!rows) bounded=0;
     char focused[ID_MAX] = "";
     int focused_index = ht_tab_carousel_index(&tab_carousel);
     if (s.view == TABS && focused_index >= 0 && focused_index < s.tab_count) COPY(focused, s.tabs[focused_index].id);

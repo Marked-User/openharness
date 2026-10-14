@@ -1,76 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+const record = vi.hoisted(() => vi.fn())
+vi.mock('./productUsage.js', () => ({ recordRelayUsage: record }))
+import { CLIENT_SURFACES, TUI_SURFACES, presenceTracker, presenceWriteDue, recordRemoteUsage, recordTurnStarted, touchClientOnlineDay, touchDeviceOnlineDay, touchMachineOnlineDay, touchUserOnlineDay } from './dailyTracking.js'
 
-const db = vi.hoisted(() => ({
-  userPresenceUpsert: vi.fn(),
-  machinePresenceUpsert: vi.fn(),
-  agentPresenceUpsert: vi.fn(),
-  devicePresenceUpsert: vi.fn(),
-  clientPresenceUpsert: vi.fn(),
-}))
-
-vi.mock('./prisma.js', () => ({
-  prisma: {
-    userDailyPresence: { upsert: db.userPresenceUpsert },
-    machineDailyPresence: { upsert: db.machinePresenceUpsert },
-    agentDailyPresence: { upsert: db.agentPresenceUpsert },
-    userDailyDevicePresence: { upsert: db.devicePresenceUpsert },
-    userDailyClientPresence: { upsert: db.clientPresenceUpsert },
-  },
-}))
-
-import { presenceTracker, presenceWriteDue, recordTurnStarted, touchClientOnlineDay, touchDeviceOnlineDay, touchMachineOnlineDay, touchUserOnlineDay } from './dailyTracking.js'
-import { utcDayStart } from '../types/analytics.js'
-
-describe('touchUserOnlineDay', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    db.userPresenceUpsert.mockResolvedValue({})
-  })
-
-  it('an app `open` upserts the (user, machine, UTC day) row and bumps connections', async () => {
-    const now = new Date('2026-09-16T10:15:30.000Z')
-    await touchUserOnlineDay('user-1', 'machine-a', now, { isNewConnection: true })
-
-    expect(db.userPresenceUpsert).toHaveBeenCalledTimes(1)
-    const call = db.userPresenceUpsert.mock.calls[0][0]
-    expect(call.where).toEqual({
-      userId_machineId_dayUtc: { userId: 'user-1', machineId: 'machine-a', dayUtc: utcDayStart(now) },
-    })
-    expect(call.create).toEqual({
-      userId: 'user-1', machineId: 'machine-a', dayUtc: utcDayStart(now),
-      connections: 1, firstSeenAt: now, lastSeenAt: now,
-    })
-    expect(call.update).toEqual({ lastSeenAt: now, connections: { increment: 1 } })
-  })
-
-  it('an app `ping` only touches lastSeenAt — a session spanning midnight opens no connection that day', async () => {
-    const now = new Date('2026-09-16T00:00:20.000Z')
-    await touchUserOnlineDay('user-1', 'machine-a', now, { isNewConnection: false })
-
-    const call = db.userPresenceUpsert.mock.calls[0][0]
-    expect(call.update).toEqual({ lastSeenAt: now })
-    expect(call.create.connections).toBe(0)
-  })
+beforeEach(() => { record.mockReset(); record.mockResolvedValue(undefined) })
+it('forwards only the choice identity and a fixed metric, never device, agent or location', async () => {
+  const now = new Date('2026-10-13T12:00:00Z')
+  await touchUserOnlineDay('account', 'PRIVATE_MACHINE', now, { isNewConnection: true })
+  await touchClientOnlineDay('account', 'mobile', now, { isNewConnection: true })
+  await touchDeviceOnlineDay('account', 'PRIVATE_DEVICE', now, { isNewConnection: true, countryCode: 'VN' })
+  await touchMachineOnlineDay('account', 'PRIVATE_MACHINE', now, { isNewConnection: true, countryCode: 'VN' })
+  await recordRemoteUsage('account', 'PRIVATE_MACHINE', now)
+  await recordTurnStarted('account', 'PRIVATE_MACHINE', 'PRIVATE_AGENT', now)
+  expect(record.mock.calls.map(c => c[2])).toEqual(['relay_desktop_opens', 'relay_mobile_opens', 'relay_device_connections', 'relay_machine_connections', 'relay_remote_sessions', 'relay_turns_started'])
+  expect(JSON.stringify(record.mock.calls)).not.toContain('PRIVATE_')
+  expect(JSON.stringify(record.mock.calls)).not.toContain('VN')
 })
-
-describe('touchClientOnlineDay', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    db.clientPresenceUpsert.mockResolvedValue({})
-  })
-
-  it('upserts the (user, surface, UTC day) row — no machine — and only an open counts a connection', async () => {
-    const now = new Date('2026-10-07T08:00:00.000Z')
-    await touchClientOnlineDay('user-1', 'mobile', now, { isNewConnection: true })
-    await touchClientOnlineDay('user-1', 'mobile', now, { isNewConnection: false })
-
-    const [open, ping] = db.clientPresenceUpsert.mock.calls.map((c) => c[0])
-    expect(open.where).toEqual({ userId_surface_dayUtc: { userId: 'user-1', surface: 'mobile', dayUtc: utcDayStart(now) } })
-    expect(open.create).toEqual({ userId: 'user-1', surface: 'mobile', dayUtc: utcDayStart(now), connections: 1, firstSeenAt: now, lastSeenAt: now })
-    expect(open.update).toEqual({ lastSeenAt: now, connections: { increment: 1 } })
-    expect(ping.update).toEqual({ lastSeenAt: now })
-    expect(ping.create.connections).toBe(0)
-  })
+it('idle heartbeats add no analytics records', async () => {
+  const now = new Date()
+  await touchUserOnlineDay('a', 'm', now, { isNewConnection: false })
+  await touchClientOnlineDay('a', 'tui', now, { isNewConnection: false })
+  await touchDeviceOnlineDay('a', 'd', now, { isNewConnection: false })
+  await touchMachineOnlineDay('a', 'm', now, { isNewConnection: false })
+  expect(record).not.toHaveBeenCalled()
 })
 
 describe('presenceTracker', () => {
@@ -119,140 +71,6 @@ describe('presenceTracker', () => {
   })
 })
 
-describe('touchDeviceOnlineDay', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    db.devicePresenceUpsert.mockResolvedValue({})
-  })
-
-  it('a connect upserts the (user, device, UTC day) row, bumps connections and stamps the country', async () => {
-    const now = new Date('2026-09-23T10:15:30.000Z')
-    await touchDeviceOnlineDay('user-1', 'device-a', now, { isNewConnection: true, countryCode: 'VN' })
-
-    const call = db.devicePresenceUpsert.mock.calls[0][0]
-    expect(call.where).toEqual({
-      userId_deviceId_dayUtc: { userId: 'user-1', deviceId: 'device-a', dayUtc: utcDayStart(now) },
-    })
-    expect(call.create).toEqual({
-      userId: 'user-1', deviceId: 'device-a', dayUtc: utcDayStart(now),
-      connections: 1, firstSeenAt: now, lastSeenAt: now, countryCode: 'VN',
-    })
-    expect(call.update).toEqual({ lastSeenAt: now, connections: { increment: 1 }, countryCode: 'VN' })
-  })
-
-  it('a refresh on an open socket only moves lastSeenAt — and a row it creates after midnight counts no connection', async () => {
-    const now = new Date('2026-09-23T00:05:00.000Z')
-    await touchDeviceOnlineDay('user-1', 'device-a', now, { isNewConnection: false })
-
-    const call = db.devicePresenceUpsert.mock.calls[0][0]
-    expect(call.update).toEqual({ lastSeenAt: now })
-    expect(call.create.connections).toBe(0)
-    expect(call.create.countryCode).toBeUndefined()
-  })
-})
-
-describe('touchMachineOnlineDay', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    db.machinePresenceUpsert.mockResolvedValue({})
-  })
-
-  it('upserts the (machine, UTC day) row and bumps connections on a new connection', async () => {
-    const now = new Date('2026-09-16T10:15:30.000Z')
-    await touchMachineOnlineDay('user-1', 'machine-a', now, { isNewConnection: true })
-
-    expect(db.machinePresenceUpsert).toHaveBeenCalledTimes(1)
-    const call = db.machinePresenceUpsert.mock.calls[0][0]
-    expect(call.where).toEqual({ machineId_dayUtc: { machineId: 'machine-a', dayUtc: utcDayStart(now) } })
-    expect(call.create).toEqual({
-      machineId: 'machine-a', userId: 'user-1', dayUtc: utcDayStart(now),
-      connections: 1, firstSeenAt: now, lastSeenAt: now,
-    })
-    expect(call.update).toEqual({ lastSeenAt: now, connections: { increment: 1 } })
-  })
-
-  it('only touches lastSeenAt on a heartbeat/close (no connections increment)', async () => {
-    const now = new Date('2026-09-16T23:59:59.000Z')
-    await touchMachineOnlineDay('user-1', 'machine-a', now, { isNewConnection: false })
-
-    const call = db.machinePresenceUpsert.mock.calls[0][0]
-    expect(call.update).toEqual({ lastSeenAt: now })
-    // First write of a new UTC day from a session that spans midnight: the row exists, but no
-    // connection was opened on that day.
-    expect(call.create.connections).toBe(0)
-  })
-
-  it('carries the Cloudflare country into both create and update (last write of the day wins)', async () => {
-    const now = new Date('2026-09-16T10:15:30.000Z')
-    await touchMachineOnlineDay('user-1', 'machine-a', now, { isNewConnection: false, countryCode: 'VN' })
-
-    const call = db.machinePresenceUpsert.mock.calls[0][0]
-    expect(call.create.countryCode).toBe('VN')
-    expect(call.update).toEqual({ lastSeenAt: now, countryCode: 'VN' })
-  })
-
-  it('never clears a country: a touch without one leaves the column out of the write', async () => {
-    const now = new Date('2026-09-16T10:15:30.000Z')
-    await touchMachineOnlineDay('user-1', 'machine-a', now, { isNewConnection: true })
-
-    const call = db.machinePresenceUpsert.mock.calls[0][0]
-    expect(call.create).not.toHaveProperty('countryCode')
-    expect(call.update).not.toHaveProperty('countryCode')
-  })
-
-  it('propagates a DB failure so the caller can log it and keep its guard unchanged', async () => {
-    db.machinePresenceUpsert.mockRejectedValueOnce(new Error('mongo down'))
-    await expect(
-      touchMachineOnlineDay('user-1', 'machine-a', new Date(), { isNewConnection: true }),
-    ).rejects.toThrow('mongo down')
-  })
-})
-
-describe('recordTurnStarted', () => {
-  const now = new Date('2026-09-16T10:15:30.000Z')
-
-  beforeEach(() => {
-    vi.clearAllMocks()
-    db.machinePresenceUpsert.mockResolvedValue({})
-    db.agentPresenceUpsert.mockResolvedValue({})
-  })
-
-  it('bumps turnsStarted on the machine row without counting a connection', async () => {
-    await recordTurnStarted('user-1', 'machine-a', 'agent-x', now)
-
-    expect(db.machinePresenceUpsert).toHaveBeenCalledTimes(1)
-    const call = db.machinePresenceUpsert.mock.calls[0][0]
-    expect(call.where).toEqual({ machineId_dayUtc: { machineId: 'machine-a', dayUtc: utcDayStart(now) } })
-    expect(call.create).toEqual({
-      machineId: 'machine-a', userId: 'user-1', dayUtc: utcDayStart(now),
-      connections: 0, turnsStarted: 1, firstSeenAt: now, lastSeenAt: now,
-    })
-    expect(call.update).toEqual({ lastSeenAt: now, turnsStarted: { increment: 1 } })
-  })
-
-  it('bumps the (machine, agent, day) row', async () => {
-    await recordTurnStarted('user-1', 'machine-a', 'agent-x', now)
-
-    expect(db.agentPresenceUpsert).toHaveBeenCalledTimes(1)
-    const call = db.agentPresenceUpsert.mock.calls[0][0]
-    expect(call.where).toEqual({
-      machineId_agentId_dayUtc: { machineId: 'machine-a', agentId: 'agent-x', dayUtc: utcDayStart(now) },
-    })
-    expect(call.create).toEqual({
-      machineId: 'machine-a', agentId: 'agent-x', userId: 'user-1', dayUtc: utcDayStart(now),
-      turnsStarted: 1, firstSeenAt: now, lastSeenAt: now,
-    })
-    expect(call.update).toEqual({ lastSeenAt: now, turnsStarted: { increment: 1 } })
-  })
-
-  it('propagates a failure from either upsert', async () => {
-    db.agentPresenceUpsert.mockRejectedValueOnce(new Error('agent row failed'))
-    await expect(recordTurnStarted('user-1', 'machine-a', 'agent-x', now)).rejects.toThrow('agent row failed')
-    // The machine write was still attempted — the two are independent.
-    expect(db.machinePresenceUpsert).toHaveBeenCalledTimes(1)
-  })
-})
-
 describe('presenceWriteDue', () => {
   const FIVE_MIN = 5 * 60_000
   const t0 = new Date('2026-09-16T10:00:00.000Z')
@@ -277,4 +95,16 @@ describe('presenceWriteDue', () => {
     const last = { dayKey: '2026-09-16', wroteAt: lateNight.getTime() }
     expect(presenceWriteDue(last, new Date('2026-09-17T00:00:05.000Z'), FIVE_MIN)).toBe(true)
   })
+})
+
+it('keeps Harness OS and Orange Pi connections separate without storing identity', async () => {
+  expect([...TUI_SURFACES]).toEqual(['tui', 'harness-os', 'harness-os-pi'])
+  for (const surface of TUI_SURFACES) expect(CLIENT_SURFACES.has(surface)).toBe(true)
+  for (const other of ['desktop', 'mobile', 'web', 'orangepi', '']) expect(TUI_SURFACES.has(other)).toBe(false)
+  const now = new Date('2026-10-13T08:00:00.000Z')
+  await touchClientOnlineDay('account', 'harness-os', now, { isNewConnection: true })
+  await touchClientOnlineDay('account', 'harness-os-pi', now, { isNewConnection: true })
+  expect(record.mock.calls).toEqual([
+    ['account', now, 'relay_harness-os_opens'], ['account', now, 'relay_harness-os-pi_opens'],
+  ])
 })

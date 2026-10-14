@@ -55,6 +55,11 @@ pub struct State {
 
 pub fn entry_required(app: &App) -> bool { app.account.entry_required && !app.headless }
 
+/// Required sign-in with no attempt under way: what may be covered without losing a sign-in.
+pub fn entry_idle(app: &App) -> bool {
+    entry_required(app) && matches!(app.account.phase, Phase::Ready | Phase::Failed(_))
+}
+
 /// Every interactive workspace needs an account, including the OS's bundled TUI.
 /// Detached servers keep their sessions running.
 pub fn begin_entry(app: &mut App) {

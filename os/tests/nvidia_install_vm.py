@@ -80,6 +80,8 @@ def main():
         vm.stop()
         vm.start(live=False)
         vm.login_installed(config)
+        # The workspace opens only once signed in (#1276); networking is up in this VM.
+        vm.sign_in('nvidia-installed')
         receipt['keyboard'] = check_graphical_keyboard(vm, 'nvidia-installed')
         vm.command('printf %s ' + shlex.quote(config['password'] + '\n') + ' | sudo -S true')
         vm.command('test ! -e /usr/share/harness-os/hardware/nvidia && test ! -e /etc/harness-live')

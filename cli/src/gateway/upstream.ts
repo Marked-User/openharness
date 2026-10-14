@@ -18,7 +18,7 @@
 import { WebSocket } from 'ws'
 import { hostname } from 'os'
 import { env } from '../config/env.js'
-import { WINDOW_SURFACES, type LocalWindows, type WindowSurface } from '../lib/windowSurfaces.js'
+import { tuiPresence, WINDOW_SURFACES, type LocalWindows, type WindowSurface } from '../lib/windowSurfaces.js'
 import { AuthSessionError, AuthSessionManager } from '../lib/authSession.js'
 import { BACKEND_IDLE_DEADLINE_MS, watchSocketLiveness, type LivenessWatch } from '../lib/wsLiveness.js'
 import { decodeTerminalHop, TerminalHopDirection } from '../lib/terminalBinary.js'
@@ -104,6 +104,8 @@ export class UpstreamLink {
   private heartbeat: LivenessWatch | null = null
   private appPing: NodeJS.Timeout | null = null
   private lastAppPresenceUpAt: Record<WindowSurface, number> = { desktop: 0, tui: 0 }
+  /** What a TUI window is counted as here: read once, it does not change while the daemon runs. */
+  private readonly tuiPresence = tuiPresence()
   // A window attached while there was no link to tell (cold start: the app dials this daemon before
   // the daemon has dialed the backend; or a daemon restart under an open window). The session is
   // real and must be counted once, so it is owed to the next link — not turned into a `ping`.
@@ -302,7 +304,9 @@ export class UpstreamLink {
       t: 'up',
       webEligible: false,
       commanderEligible: false,
-      frame: { type: 'app_presence', payload: surface === 'desktop' ? { kind } : { kind, surface } },
+      // A TUI on Harness OS says so, and on which board. A backend from before these names counted any
+      // name but `tui` as the desktop app: it is deployed first (adapterWs.ts TUI_SURFACES).
+      frame: { type: 'app_presence', payload: surface === 'desktop' ? { kind } : { kind, surface: this.tuiPresence } },
     })
     if (sent) this.lastAppPresenceUpAt[surface] = now
     if (kind === 'open') this.appOpenOwed[surface] = !sent

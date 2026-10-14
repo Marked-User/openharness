@@ -1,27 +1,31 @@
-// Task 7: the Tabs and Tab screens (and the "Connecting..." state of pod_render).
+// The Classic Tabs grid and the Recent / Tab lists (and the Connection lost state of pod_render).
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "pod/classic/ci.h"
 #include "pod/pod_view.h"
 #include "pro_canvas.h"
 
 static int checks;
 #define CHECK(c) do { assert(c); checks++; } while (0)
 
-enum { K_TEXT = 1, K_RECT = 2, K_IMAGE = 3 };   // pro_canvas.c's run kinds
+enum { K_TEXT = 1, K_RECT = 2, K_IMAGE = 3, K_RECT_AA = 4 };   // pro_canvas.c's run kinds
 
 static pod_model_t M;
 static pod_nav_t N;
 static pod_out_frame_t F;
 static ht_scene_t S;
 
+static bool banner;   // the glue's banner is up: the views leave its runs spare
 static void render(uint32_t now) {
     memset(&F, 0, sizeof F);
     ht_scene_clear(&S, ht_rgb(0xffffff));
     F.scene = &S;
+    F.banner = banner;
     pod_render(&F, &N, &M, now);
 }
+static int budget(void) { return POD_CLASSIC_RUNS - pod_spare_runs(&F) - 4; }   // the 4: the notice pill
 static int count_kind(int kind) {
     int n = 0;
     for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == kind) n++;
@@ -35,6 +39,11 @@ static int count_rect(uint16_t ink) {
 static const ht_run_t *find_text(const char *prefix) {
     for (int i = 0; i < S.count; i++)
         if (S.runs[i].pro_kind == K_TEXT && !strncmp(S.runs[i].text, prefix, strlen(prefix))) return &S.runs[i];
+    return NULL;
+}
+static const ht_run_t *find_exact(const char *text) {
+    for (int i = 0; i < S.count; i++)
+        if (S.runs[i].pro_kind == K_TEXT && !strcmp(S.runs[i].text, text)) return &S.runs[i];
     return NULL;
 }
 static const pod_hit_t *find_hit(pod_action_t a, int arg) {
@@ -71,145 +80,30 @@ static void build(int tabs, int per, bool with_ids) {
     pod_nav_init(&N);
 }
 
+
 static int count_in(int kind, int x, int y, int side);
-static int default_marks_in(int x, int y, int side) {   // the default mark's outline rects inside a square
+static void build_shared(int tabs, int per);
+
+// ---- geometry helpers ---------------------------------------------------------------------------------------
+
+enum { COVER = 164, ROW_Y0 = 113, ROW_PITCH = 255, ROW_H = 112, LIST_Y0 = 88, FOOT_Y = 628 };
+static const int COL_X[3] = {52, 278, 505};   // the art's left edges
+#define CI_BLUE_RGB ht_rgb(0x155ccc)
+#define CI_GROUND_RGB CI_GROUND
+#define CI_INK_RGB ht_rgb(0x20292c)
+#define CI_MUTED_RGB ht_rgb(0x657175)
+
+static void cover_xy(int i, int *x, int *y) { *x = COL_X[i % 3]; *y = ROW_Y0 + i / 3 * ROW_PITCH; }
+static int tab_hits(void) {
     int n = 0;
-    for (int i = 0; i < S.count; i++) {
-        ht_rect_t b = ht_run_bounds(&S.runs[i]);
-        if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x9aa09a) && b.x >= x && b.y >= y && b.x + b.w <= x + side && b.y + b.h <= y + side) n++;
-    }
+    for (int i = 0; i < F.hit_count; i++) if (F.hits[i].action == POD_A_OPEN_TAB) n++;
     return n;
 }
-static void build_shared(int tabs, int per);
-static void tab_test_rows(void) {
-    build(1, 3, true);
-    pod_model_turn(&M, "t0k0", "started", NULL, 0, 10);
-    (pod_model_turn(&M, "t0k2", "started", NULL, 0, 0), pod_model_turn(&M, "t0k2", "done", NULL, 0, 20));
-    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
-    render(5000);
-    const ht_run_t *a = find_text("agent00"), *b = find_text("agent01"), *c = find_text("agent02");
-    CHECK(a && b && c && a->y < b->y && b->y < c->y);
-    CHECK(find_text("1") == NULL);             // the working row shows the equaliser, not its number
-    CHECK(find_text("2") != NULL && find_text("3") != NULL);
-    CHECK(find_text("Idle") == NULL);          // agent01 is idle: its row says nothing on the right
-    CHECK(find_text("Tab0") != NULL && find_text("Tab0")->y < 54 && find_text("3 panes") == NULL && find_text("TAB") == NULL);   // no head: the status bar names the tab
-    CHECK(find_hit(POD_A_BACK, 0) != NULL);
-    CHECK(a->y < 54 + 84);               // the first row starts right under the status bar
-    for (int k = 0; k < 3; k++) CHECK(find_hit(POD_A_OPEN_AGENT, k) != NULL);
-    // The working row's name is blue.
-    CHECK(a->fg == ht_rgb(0x1f63d1) && b->fg == ht_rgb(0x111111));
-    // Three equaliser bars in blue sit left of the first row's name.
-    int bars = 0;
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x1f63d1) && S.runs[i].w < 10 && S.runs[i].y > 54) bars++;
-    CHECK(bars == 3);
-    // The Recent list prefixes the tab name and heads itself RECENT / Recent / N agents.
-    pod_nav_init(&N);
-    pod_nav_act(&N, &M, POD_A_OPEN_TAB, POD_TAB_RECENT, 0);
-    render(5000);
-    CHECK(find_text("Tab0 ") != NULL && find_text("RECENT") == NULL && find_text("EVERY TAB") == NULL);
-    CHECK(find_text("Recent") != NULL && find_text("Recent")->y < 54 && find_text("3 agents") == NULL);   // only the status bar title; the head is gone
-    CHECK(count_kind(K_IMAGE) >= 2);   // t0k0 and t0k2 had tasks; t0k1 did not
-    // With a recap, Recent's second line is the last turn's recap, its sentences on one line, cut with "..."; the
-    // tab's own list keeps engine and machine.
-    pod_model_recap(&M, "t0k2", "Fixed the cable resync. Tests pass on the host and the device, and the frame time is back under forty five milliseconds.", false);
-    render(5000);
-    const ht_run_t *rc = find_text("Fixed the cable resync. Tests");
-    CHECK(rc && rc->pro_font == &ht_pro_24 && strstr(rc->text, "...") && !strstr(rc->text, "Claude"));
-    CHECK(find_text("Tab0 ") != NULL);   // t0k0 has no recap yet: tab, engine and machine
-    pod_nav_init(&N);
-    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
-    render(5000);
-    CHECK(!find_text("Fixed the cable resync. Tests"));
-}
-
-// With the head gone a tab lists up to seven rows, the first right under the status bar, and scrolls past them.
-static void tab_test_many_rows(void) {
-    build_shared(1, 9);
-    for (int k = 0; k < 9; k++) pod_model_turn(&M, ids[0][k], "started", NULL, 0, 5);
-    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
-    render(100);
-    int rows = 0;
-    for (int k = 0; k < 9; k++) if (find_hit(POD_A_OPEN_AGENT, k)) rows++;
-    CHECK(rows == 7 && S.count <= HT_RUNS && find_hit(POD_A_OPEN_AGENT, 0)->y == 54);
-    CHECK(find_hit(POD_A_OPEN_AGENT, 6)->y + 84 <= 720);
-    CHECK(pod_tab_max_row(&N, &M) == 2);
-    pod_nav_act(&N, &M, POD_A_SCROLL, 9, 0);
-    render(100);
-    CHECK(find_hit(POD_A_OPEN_AGENT, 8) != NULL && find_hit(POD_A_OPEN_AGENT, 1) == NULL && S.count <= HT_RUNS);
-}
-
-static void tab_test_empty(void) {
-    build(0, 0, true);
-    pod_model_swarms(&M, sw, NULL, NULL, 0, "", NULL, 0);
-    cable_swarm_t one = {"e", "Empty", 0, 0};
-    pod_model_swarms(&M, &one, NULL, NULL, 1, "e", NULL, 0);
-    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
-    render(0);
-    CHECK(find_text("No panes in this tab") != NULL);
-    pod_nav_init(&N);
-    pod_nav_act(&N, &M, POD_A_OPEN_TAB, POD_TAB_RECENT, 0);
-    render(0);
-    CHECK(find_text("No recent agents") != NULL);   // an empty Recent list says so
-    CHECK(find_text("No panes in this tab") == NULL);
-    CHECK(find_text("No recent agents")->y > 54 + 200 && find_text("No recent agents")->y < 720 - 200);   // centred under the status bar
-    pod_nav_init(&N);
-    render(0);   // the Tabs grid: Recent reads "0 agents" and stays tappable
-    CHECK(find_text("Recent") != NULL && find_text("0 agents") != NULL);
-    CHECK(find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT) != NULL);
-}
-
-static void tabs_test_no_ids(void) {
-    build(2, 3, false);          // an older daemon: counts only
-    render(0);
-    CHECK(count_in(K_IMAGE, 262, 86, 196) == 0 && count_in(K_IMAGE, 490, 86, 196) == 0);   // the tabs' panes are blank, Recent's agents have marks
-    CHECK(find_text("3 panes") != NULL);
-    CHECK(count_rect(ht_rgb(0x9aa09a)) == 6);   // both tabs' three blank panes, each with the default mark's outline
-    CHECK(find_hit(POD_A_OPEN_TAB, 0) != NULL && find_hit(POD_A_OPEN_TAB, 1) != NULL);
-}
-
-// A pane whose agent or engine has no mark, and a tab with no panes, show the default mark, never an empty pane.
-static void tabs_test_default_mark(void) {
-    // Members listed but the roster does not know them (a tab of another window), and an agent with no engine.
-    build(1, 2, true);
-    pod_model_agent(&M, ids[0][1], "blank", "", "mac");
-    pod_model_agent(&M, ids[0][0], "odd", "zzz-unknown", "mac");
-    for (int k = 0; k < 2; k++) (pod_model_turn(&M, ids[0][k], "started", NULL, 0, 0), pod_model_turn(&M, ids[0][k], "done", NULL, 0, 1 + (uint32_t)k));   // tasks: Recent lists them
-    render(0);
-    CHECK(default_marks_in(262, 86, 196) == 2 && count_rect(ht_rgb(0x9aa09a)) == 4);   // the tab's two panes; Recent holds the same two agents
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x9aa09a)) CHECK(S.runs[i].w == POD_DEFAULT_MARK_SIDE && S.runs[i].pro_height == POD_DEFAULT_MARK_SIDE);
-    CHECK(find_text(">_") != NULL && find_text(">_")->fg == ht_rgb(0x6f746f) && find_text(">_")->pro_font == &ht_pro_24);
-    // A tab with zero panes is an Empty cover (no pane, no mark).
-    pod_model_reset(&M);
-    cable_swarm_t none = {"e", "Empty", 0, 0};
-    pod_model_swarms(&M, &none, NULL, NULL, 1, "e", NULL, 0);
-    pod_model_link(&M, true);
-    pod_nav_init(&N);
-    render(0);
-    CHECK(count_rect(ht_rgb(0x9aa09a)) == 0 && find_text(">_") == NULL && find_text("Empty") != NULL);   // a "+" cover, no mark
-    // Members unknown (older daemon) with 2 panes: two default marks.
-    cable_swarm_t two = {"e", "Two", 2, 2};
-    pod_model_swarms(&M, &two, NULL, NULL, 1, "e", NULL, 0);
-    render(0);
-    CHECK(default_marks_in(262, 86, 196) == 2);
-    // The Tab screen has no pane diagram now, and members unknown list no rows.
-    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
-    render(0);
-    CHECK(count_rect(ht_rgb(0x9aa09a)) == 0 && find_text("No panes in this tab") != NULL);
-    CHECK(pod_mark_runs("zzz") == POD_DEFAULT_MARK_RUNS && pod_mark_runs(NULL) == POD_DEFAULT_MARK_RUNS);
-}
-
-
-// ---- the album grid ---------------------------------------------------------------------------------------
-
-enum { COVER = 196, COL_X0 = 34, COL_PITCH = 228, ROW_Y0 = 104, ROW_PITCH = 280 };
-#define RING_BLUE ht_rgb(0x0a84ff)
-static int dots_in(int x, int y, int side) {   // the 12 px (cards) and 9 px (captions) state dots inside a box
+static int dots_in(int x, int y, int side) {   // the state dots (green, amber) inside a box
     int n = 0;
     for (int i = 0; i < S.count; i++) {
         const ht_run_t *r = &S.runs[i];
-        if (r->pro_kind != K_RECT || r->w != 12 || (r->fg != ht_rgb(0x34c759) && r->fg != ht_rgb(0xff9f0a))) continue;
+        if (r->pro_kind != K_RECT_AA || (r->fg != ht_rgb(0x35734f) && r->fg != ht_rgb(0xbf861e))) continue;
         ht_rect_t b = ht_run_bounds(r);
         if (b.x >= x && b.y >= y && b.x + b.w <= x + side && b.y + b.h <= y + side) n++;
     }
@@ -226,7 +120,17 @@ static int count_in(int kind, int x, int y, int side) {
     }
     return n;
 }
-static void cover_xy(int i, int *x, int *y) { *x = COL_X0 + i % 3 * COL_PITCH; *y = ROW_Y0 + i / 3 * ROW_PITCH; }
+// The cover gradients (164 x 164), in draw order.
+static int cover_arts(ht_rect_t out[16]) {
+    int n = 0;
+    for (int i = 0; i < S.count && n < 16; i++) {
+        ht_rect_t b = ht_run_bounds(&S.runs[i]);
+        if (S.runs[i].pro_kind == POD_GRAD && b.w == COVER && b.h == COVER) out[n++] = b;
+    }
+    return n;
+}
+static int near_(int a, int b) { return a >= b - 1 && a <= b + 1; }
+
 // Every tab lists the same first `per` agents (the roster holds 32): a real mark in every pane of every cover.
 static void build_shared(int tabs, int per) {
     pod_model_reset(&M);
@@ -248,150 +152,503 @@ static void build_shared(int tabs, int per) {
     pod_nav_init(&N);
 }
 
-// 1 to 24 tabs, 0 to 9 panes a tab, every scroll position, members known or counts only: always within the run and hit
-// budgets, and the same count whatever the clock says (the screen is static).
-static int max_runs;
-static void grid_test_budget(void) {
-    static const int tabs_for[] = {1, 2, 5, 7, 12, 24};
-    for (int j = 0; j < 6; j++)
-        for (int per = 0; per <= 9; per++)
-            for (int known = 0; known < 2; known++) {
-                if (known) build_shared(tabs_for[j], per); else build(tabs_for[j], per, false);
-                if (per) {
-                    pod_model_turn(&M, known ? "m0" : "t0k0", "started", NULL, 0, 10);
-                    if (known && per > 1) pod_model_question(&M, "m1", "ok?");
-                }
-                for (int k = 0; k < per && known; k++)   // a task each, so Recent holds them
-                    if (strcmp(ids[0][k], "m0") && strcmp(ids[0][k], "m1")) (pod_model_turn(&M, ids[0][k], "started", NULL, 0, 0), pod_model_turn(&M, ids[0][k], "done", NULL, 0, 20 + (uint32_t)k));
-                for (int row = 0; row <= pod_tabs_max_row(&M); row += 2) {
-                    pod_nav_init(&N);
-                    pod_nav_act(&N, &M, POD_A_SCROLL, row, 0);
-                    render(1000);
-                    int want = S.count;
-                    if (want > max_runs) max_runs = want;
-                    CHECK(want > 0 && want <= HT_RUNS && F.hit_count <= 32);
-                    for (uint32_t t = 1000; t < 3000; t += 331) { render(t); CHECK(S.count == want); }
-                }
-            }
-    // The worst: nine panes, every mark a light (Cursor) chip, a mover on every card, eight recent agents.
-    build_shared(12, 9);
-    for (int k = 0; k < 9; k++) { pod_model_agent(&M, ids[0][k], "x", "cursor", "mac"); pod_model_turn(&M, ids[0][k], "started", NULL, 0, 5 + (uint32_t)k); }
-    for (int row = 0; row <= pod_tabs_max_row(&M); row += 2) {
-        pod_nav_init(&N); pod_nav_act(&N, &M, POD_A_SCROLL, row, 0);
-        render(100);
-        CHECK(S.count <= HT_RUNS && F.hit_count <= 32);
+// ---- the Recent and Tab lists --------------------------------------------------------------------------------
+
+// The footer's left: the mark (3 bars, CI_EQ, in the footer) + the count in Bold + "working", only when `n` agents work (n > 0).
+static int foot_eq_runs(void) {
+    int c = 0;
+    for (int i = 0; i < S.count; i++)
+        if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x2d6a51) && S.runs[i].w == 5 && S.runs[i].y >= FOOT_Y) c++;
+    return c;
+}
+static bool foot_working(int n) {
+    char num[8];
+    snprintf(num, sizeof num, "%d", n);
+    const ht_run_t *c = NULL, *w = NULL;
+    for (int i = 0; i < S.count; i++) {
+        const ht_run_t *r = &S.runs[i];
+        if (r->pro_kind != K_TEXT || r->y < FOOT_Y) continue;
+        if (r->pro_font == &ci_bd_23 && !strcmp(r->text, num)) c = r;
+        if (r->pro_font == &ci_rg_23 && !strcmp(r->text, "working")) w = r;
     }
+    return c && w && c->fg == CI_INK_RGB && c->x < w->x && c->x > 32;
 }
 
-// Six covers (Recent and five tabs of six panes): every pane draws its mark, and the busy ones their dots.
+// No heading: the first row sits right under the bar (its title names the tab), and Back says where it came from.
+static void test_list_no_heading(void) {
+    build(1, 3, true);
+    pod_model_turn(&M, "t0k0", "started", NULL, 0, 10);
+    (pod_model_turn(&M, "t0k2", "started", NULL, 0, 0), pod_model_turn(&M, "t0k2", "done", NULL, 0, 20));
+    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
+    render(5000);
+    const ht_run_t *a = find_text("agent00"), *b = find_text("agent01"), *c = find_text("agent02");
+    CHECK(a && b && c && a->y < b->y && b->y < c->y);
+    CHECK(find_hit(POD_A_OPEN_AGENT, 0) && find_hit(POD_A_OPEN_AGENT, 0)->y == LIST_Y0);   // the first row's top is the bar's foot
+    CHECK(find_text("Tab0") && find_text("Tab0")->y < LIST_Y0 && find_text("Tab0")->pro_font == &ci_bd_30);   // the title, once
+    CHECK(find_text("3 panes") == NULL && find_text("TAB") == NULL);
+    CHECK(find_text("Tabs") && find_text("Tabs")->y < LIST_Y0 && find_hit(POD_A_BACK, 0));   // Back reads Tabs from the grid
+    CHECK(a->pro_font == &ci_rg_33 && a->fg == CI_INK_RGB && a->x == 106);   // the working row's name is ink too
+    CHECK(find_text("Claude \xc2\xb7 mac") && find_text("Claude \xc2\xb7 mac")->pro_font == &ci_rg_23 && find_text("Claude \xc2\xb7 mac")->fg == CI_MUTED_RGB);
+    CHECK(count_kind(K_IMAGE) >= 3 && S.count <= budget());
+    CHECK(S.background == CI_GROUND_RGB);
+    // The footer: the working mark, "1" in Bold and "working" (t0k0 works), and the pane count.
+    CHECK(find_text("Scroll to browse") == NULL && find_text("3 PANES"));
+    CHECK(foot_working(1) && foot_eq_runs() == 3);
+    // Recent: the agents that had a task, Back (no origin), "N AGENTS".
+    pod_nav_init(&N);
+    pod_nav_act(&N, &M, POD_A_OPEN_TAB, POD_TAB_RECENT, 0);
+    render(5000);
+    CHECK(find_text("Recent") && find_text("Recent")->y < LIST_Y0 && find_text("Back") && find_hit(POD_A_BACK, 0));
+    CHECK(find_text("agent00") && find_text("agent02") && !find_text("agent01") && find_text("2 AGENTS"));   // t0k1 had no task
+    CHECK(foot_working(1) && foot_eq_runs() == 3);
+    CHECK(find_text("Claude \xc2\xb7 mac") != NULL);   // no recap line any more: Engine and Machine
+}
+
+// Seven agents: four rows show whole and a fifth peeks above the footer (its hit stops at it); each row is 112 px with its rule.
+// A drag scrolls by rows to the last four.
+static void test_list_five_rows(void) {
+    build_shared(1, 7);
+    for (int k = 0; k < 7; k++) pod_model_turn(&M, ids[0][k], "started", NULL, 0, 5);
+    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
+    render(100);
+    int rows = 0;
+    for (int k = 0; k < 7; k++) {
+        const pod_hit_t *h = find_hit(POD_A_OPEN_AGENT, k);
+        if (!h) continue;
+        rows++;
+        CHECK(h->h == (k < 4 ? ROW_H : FOOT_Y - h->y) && h->y == LIST_Y0 + k * ROW_H && h->x == 0 && h->w == 720 && !strcmp(h->id, ids[0][k]));
+    }
+    CHECK(rows == 5 && S.count <= budget());
+    CHECK(pod_tab_max_row(&N, &M) == 3 && pod_tab_pitch() == ROW_H && pod_scroll_pitch(&N) == ROW_H && pod_scroll_max(&N, &M) == 3);
+    int rules = 0;
+    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_RECT && S.runs[i].w == 720 && S.runs[i].pro_height == 1 && S.runs[i].y > LIST_Y0 && S.runs[i].y < FOOT_Y) rules++;
+    CHECK(rules == 4);   // the fifth row's rule is under the footer
+    pod_nav_act(&N, &M, POD_A_SCROLL, 9, 0);
+    render(100);
+    CHECK(find_hit(POD_A_OPEN_AGENT, 6) && find_hit(POD_A_OPEN_AGENT, 3) && !find_hit(POD_A_OPEN_AGENT, 2) && S.count <= budget());
+    CHECK(find_hit(POD_A_OPEN_AGENT, 3)->y == LIST_Y0 && find_hit(POD_A_OPEN_AGENT, 6)->y + ROW_H <= FOOT_Y);
+}
+
+// Working, Finished, Needs you and Offline: the word in its colour, the time above it (only working and done have one); Ready has no meta.
+static void test_list_meta_words(void) {
+    build(1, 5, true);
+    pod_model_turn(&M, "t0k0", "started", NULL, 0, 10);
+    pod_model_turn(&M, "t0k1", "started", NULL, 0, 0);
+    pod_model_turn(&M, "t0k1", "activity", NULL, 48, 10);
+    pod_model_turn(&M, "t0k1", "done", NULL, 0, 20);
+    pod_model_question(&M, "t0k2", "ok?");
+    M.agents[pod_agent_index(&M, pod_model_find(&M, "t0k4"))].state = POD_OFFLINE;
+    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
+    render(4000);
+    const ht_run_t *w = find_text("Working"), *d = find_text("Finished"), *q = find_text("Needs you"), *r = find_text("Ready"), *o = find_text("Offline");
+    CHECK(w && d && q && o);
+    CHECK(w->fg == ht_rgb(0x377052) && q->fg == ht_rgb(0x956616));
+    CHECK(d->fg == CI_MUTED_RGB && o->fg == CI_MUTED_RGB);
+    CHECK(w->pro_font == &ci_bd_20 && o->pro_font == &ci_bd_20);
+    CHECK(w->x + w->w == 720 - 32 && o->x + o->w == 720 - 32);   // right-aligned at the margin
+    CHECK(find_text("0:48") && find_text("0:48")->pro_font == &ci_rg_22 && find_text("0:48")->y < d->y);   // the time over the word
+    CHECK(find_text("0:03") != NULL);                            // the working row counts on from its start (4 s - 1 s)
+    CHECK(r == NULL);   // Ready (t0k3): no time, no dash, no word
+    for (int i = 0; i < S.count; i++) {
+        const ht_run_t *t = &S.runs[i];
+        if (t->pro_kind == K_TEXT && t->y >= LIST_Y0 + 3 * ROW_H && t->y < LIST_Y0 + 4 * ROW_H) CHECK(t->x + t->w < 400);   // only the name and "Engine · Machine"
+    }
+    const ht_run_t *dash = find_text("\xe2\x80\x94");
+    CHECK(dash && dash->y < q->y);                               // asking, ready and offline: no time
+    CHECK(S.count <= budget());
+}
+
+// The footer counts the working agents of the whole list (not only the rows on screen); none: "None working", no mark.
+static void test_list_footer_working(void) {
+    build(1, 7, true);
+    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
+    render(1000);
+    const ht_run_t *none = find_exact("None working");
+    CHECK(none && none->y >= FOOT_Y && none->x == 32 && none->fg == CI_MUTED_RGB && foot_eq_runs() == 0 && find_text("7 PANES"));
+    CHECK(!find_exact("working") && !foot_working(0));
+    pod_model_turn(&M, ids[0][5], "started", NULL, 0, 0);   // below the fold
+    pod_model_turn(&M, ids[0][6], "started", NULL, 0, 0);
+    render(1000);
+    CHECK(foot_working(2) && foot_eq_runs() == 3 && !find_exact("None working") && find_text("7 PANES"));
+    const ht_run_t *eq = NULL;
+    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x2d6a51) && S.runs[i].y >= FOOT_Y) { eq = &S.runs[i]; break; }
+    CHECK(eq && eq->x >= 32 && eq->x < 40);
+    render(1000 + 150);   // the bars move
+    int moved = 0;
+    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x2d6a51) && S.runs[i].y >= FOOT_Y && S.runs[i].y != eq->y) moved++;
+    CHECK(moved > 0);
+}
+
+// A 60-character name ends in "…" and stops before the meta column; so does a long machine name.
+static void test_list_long_name_ellipsis(void) {
+    build(1, 1, true);
+    pod_model_turn(&M, ids[0][0], "started", NULL, 0, 0);   // working: it has a meta column
+    char longname[80];
+    for (int i = 0; i < 60; i++) longname[i] = (char)('a' + i % 26);
+    longname[60] = 0;
+    pod_model_agent(&M, ids[0][0], longname, "claude", "a-very-long-machine-name-that-keeps-going-and-going-on");
+    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
+    render(0);
+    const ht_run_t *n = NULL, *sub = NULL, *word = find_text("Working");
+    for (int i = 0; i < S.count; i++) {
+        if (S.runs[i].pro_kind != K_TEXT) continue;
+        if (!strncmp(S.runs[i].text, "abcdef", 6)) n = &S.runs[i];
+        if (!strncmp(S.runs[i].text, "Claude", 6)) sub = &S.runs[i];
+    }
+    CHECK(n && sub && word);
+    size_t len = strlen(n->text), sl = strlen(sub->text);
+    CHECK(len > 3 && !strcmp(n->text + len - 3, "\xe2\x80\xa6") && sl > 3 && !strcmp(sub->text + sl - 3, "\xe2\x80\xa6"));
+    CHECK(n->x + n->w <= word->x - 8 && sub->x + sub->w <= word->x - 8);   // clear of the state word and the time
+    CHECK(n->x >= 106 && n->pro_font == &ci_rg_33);
+    // A Vietnamese name is cut on a character, never inside one.
+    pod_model_agent(&M, ids[0][0], "\xc4\x90\xe1\xba\xb7" "t l\xe1\xbb\x8b" "ch MMMMMMMMMMMMMMMMMMMMMMMMMM", "claude", "mac");
+    render(0);
+    const ht_run_t *vi = find_text("\xc4\x90\xe1\xba\xb7t");
+    CHECK(vi && vi->x + vi->w <= word->x - 8);
+    for (const unsigned char *p = (const unsigned char *)vi->text; *p; p++) if (*p >= 0x80 && *p < 0xc0) CHECK(p > (const unsigned char *)vi->text && (p[-1] >= 0x80));   // continuation bytes follow a lead
+    CHECK(!strcmp(vi->text + strlen(vi->text) - 3, "\xe2\x80\xa6"));
+}
+
+// A tab with no rows to list: "No panes yet." and its line, no rows, "No panes" in the footer. An empty Recent says so too.
+static void test_list_empty_tab(void) {
+    build(0, 0, true);
+    pod_model_swarms(&M, sw, NULL, NULL, 0, "", NULL, 0);
+    cable_swarm_t none = {"z", "Shells", 0, 2};   // no agent: not listed
+    pod_model_swarms(&M, &none, NULL, NULL, 1, "z", NULL, 0);
+    CHECK(M.tab_count == 0);
+    cable_swarm_t one = {"e", "Empty", 1, 1};   // members unknown (older daemon): no rows to list
+    pod_model_swarms(&M, &one, NULL, NULL, 1, "e", NULL, 0);
+    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
+    render(0);
+    const ht_run_t *h = find_text("No panes yet.");
+    CHECK(h && h->pro_font == &ci_rg_43 && h->fg == CI_INK_RGB && near_(h->x + h->w / 2, 360));
+    CHECK(find_text("This tab is managed in Harness.") && find_text("This tab is managed in Harness.")->pro_font == &ci_rg_25);
+    CHECK(find_exact("No panes") != NULL && find_exact("No panes")->y >= FOOT_Y && find_text("Scroll to browse") == NULL && foot_eq_runs() == 0);
+    for (int i = 0; i < F.hit_count; i++) CHECK(F.hits[i].action != POD_A_OPEN_AGENT);
+    CHECK(find_hit(POD_A_BACK, 0) != NULL && find_text("Empty") && find_text("Empty")->y < LIST_Y0);
+    pod_nav_init(&N);
+    pod_nav_act(&N, &M, POD_A_OPEN_TAB, POD_TAB_RECENT, 0);
+    render(0);
+    CHECK(find_text("No recent agents.") != NULL && find_text("No panes yet.") == NULL && find_exact("No agents") != NULL);
+    for (int i = 0; i < F.hit_count; i++) CHECK(F.hits[i].action != POD_A_OPEN_AGENT);
+}
+
+// Nine agents, every mark a light one, a banner and a bell: still within the budget.
+static void test_list_budget(void) {
+    build_shared(1, 9);
+    for (int k = 0; k < 9; k++) { pod_model_agent(&M, ids[0][k], "x", "cursor", "mac"); pod_model_turn(&M, ids[0][k], "started", NULL, 0, 5 + (uint32_t)k); }
+    pod_model_unread_add(&M, "m0", "x", "done", 5, 100);
+    for (int b = 0; b < 2; b++) {
+        banner = b;
+        for (int recent = 0; recent < 2; recent++)
+            for (int scroll = 0; scroll <= 4; scroll++) {
+                pod_nav_init(&N);
+                pod_nav_act(&N, &M, POD_A_OPEN_TAB, recent ? POD_TAB_RECENT : 0, 0);
+                pod_nav_act(&N, &M, POD_A_SCROLL, scroll, 0);
+                render(100);
+                CHECK(S.count <= budget() && F.hit_count <= 32);
+            }
+    }
+    banner = false;
+}
+
+// ---- the album grid ---------------------------------------------------------------------------------------
+
+// Six covers: the art boxes (164 x 164) at x {52, 278, 505} and y {113, 368}, each card's hit the 213 px column.
+static void test_tabs_grid_geometry(void) {
+    build(5, 2, true);
+    render(0);
+    ht_rect_t art[16];
+    CHECK(cover_arts(art) == 6);
+    for (int i = 0; i < 6; i++) {
+        CHECK(near_(art[i].x, COL_X[i % 3]) && near_(art[i].y, i < 3 ? 113 : 368));
+        const pod_hit_t *h = find_hit(POD_A_OPEN_TAB, i ? i - 1 : POD_TAB_RECENT);
+        CHECK(h && h->w == 213 && h->h >= 230 && h->x + (h->w - COVER) / 2 + 0 >= art[i].x - 26 && h->x <= art[i].x && h->x + h->w >= art[i].x + COVER);
+        CHECK(h->y == art[i].y && h->y + h->h <= FOOT_Y && h->x >= 0 && h->x + h->w <= 720);
+    }
+    CHECK(tab_hits() == 6 && S.count <= budget());
+    // The names and counts sit under the art, left-aligned with it: 30 / 23.
+    const ht_run_t *rn = find_text("Recent"), *tn = find_text("Tab3");
+    CHECK(rn && rn->pro_font == &ci_rg_30 && near_(rn->x, COL_X[0]) && rn->y > 113 + COVER && rn->y < 113 + COVER + 40);
+    CHECK(tn && tn->pro_font == &ci_rg_30 && near_(tn->x, COL_X[1]) && tn->y > 368 + COVER);
+    const ht_run_t *cn = find_text("2 panes");
+    CHECK(cn && cn->pro_font == &ci_rg_23 && cn->fg == CI_MUTED_RGB && cn->y > 113 + COVER);
+    CHECK(S.background == CI_GROUND_RGB && find_text("Tabs") && find_text("Harness") && find_hit(POD_A_INBOX, 0));
+}
+
+// The chosen cover: a 5 px blue ring with a 5 px gap (the ground between), its name blue; no other cover has one.
+static void test_tabs_selected_ring(void) {
+    build(3, 2, true);
+    pod_model_swarms(&M, sw, (const char *const **)idl, idn, 3, "s1", NULL, 0);   // Tab1 is the window's selected tab
+    render(0);
+    CHECK(find_text("Tab1") && find_text("Tab1")->fg == CI_BLUE_RGB);
+    CHECK(find_text("Tab0")->fg == CI_INK_RGB && find_text("Tab2")->fg == CI_INK_RGB && find_text("Recent")->fg == CI_INK_RGB);
+    int x, y, rings = 0, gaps = 0;
+    cover_xy(2, &x, &y);   // cover 2 is Tab1
+    for (int i = 0; i < S.count; i++) {
+        const ht_run_t *r = &S.runs[i];
+        ht_rect_t b = ht_run_bounds(r);
+        if (r->pro_kind != K_RECT_AA) continue;
+        if (r->fg == CI_BLUE_RGB && b.w == COVER + 20) { rings++; CHECK(b.x == x - 10 && b.y == y - 10 && b.h == COVER + 20); CHECK(i + 1 < S.count); }
+        if (r->fg == CI_GROUND_RGB && b.w == COVER + 10) { gaps++; CHECK(b.x == x - 5 && b.y == y - 5 && b.h == COVER + 10 && i > 0); }
+    }
+    CHECK(rings == 1 && gaps == 1);   // ring 10 px out, ground 5 px out: a 5 px band, a 5 px gap
+    // The ring is drawn before the cover, the ground in between.
+    int ri = -1, gi = -1, ci = -1;
+    for (int i = 0; i < S.count; i++) {
+        ht_rect_t b = ht_run_bounds(&S.runs[i]);
+        if (S.runs[i].pro_kind == K_RECT_AA && S.runs[i].fg == CI_BLUE_RGB && b.w == COVER + 20) ri = i;
+        if (S.runs[i].pro_kind == K_RECT_AA && S.runs[i].fg == CI_GROUND_RGB && b.w == COVER + 10) gi = i;
+        if (S.runs[i].pro_kind == POD_GRAD && b.w == COVER && b.x == x && b.y == y) ci = i;
+    }
+    CHECK(ri >= 0 && ri < gi && gi < ci);
+}
+
+// The ribbon shows only on a cover whose agents are working: eq, "Working" and the count; Recent counts its working agents.
+static void ribbon_setup(void) {   // Tab0 has one agent working (two panes), Tab1 only an asking one, Tab2 none
+    build(3, 2, true);
+    pod_model_turn(&M, "t0k0", "started", NULL, 0, 10);
+    pod_model_turn(&M, "t1k0", "started", NULL, 0, 10);
+    (pod_model_turn(&M, "t1k0", "started", NULL, 0, 0), pod_model_turn(&M, "t1k0", "done", NULL, 0, 11));
+    pod_model_question(&M, "t1k1", "ok?");
+}
+static const ht_run_t *foot_text(int c, const char *text) {   // a text run inside cover c's foot band (31 px)
+    int x, y; cover_xy(c, &x, &y);
+    for (int i = 0; i < S.count; i++) {
+        const ht_run_t *r = &S.runs[i];
+        if (r->pro_kind == K_TEXT && !strcmp(r->text, text) && r->x >= x && r->x < x + COVER && r->y >= y + COVER - 31 && r->y < y + COVER) return r;
+    }
+    return NULL;
+}
+static int foot_eq_bars(int c) {   // the eq's three bars: 5 px wide, light green, inside the band
+    int x, y, n = 0; cover_xy(c, &x, &y);
+    for (int i = 0; i < S.count; i++) {
+        const ht_run_t *r = &S.runs[i];
+        if (r->pro_kind == K_RECT && r->w == 5 && r->fg == ht_rgb(0xa6e0b5) && r->x >= x && r->x < x + COVER && r->y >= y + COVER - 31 && r->y < y + COVER) n++;
+    }
+    return n;
+}
+static void test_tabs_ribbon_only_when_working(void) {
+    ribbon_setup();
+    render(20);
+    const ht_run_t *p = foot_text(1, "Working"), *cnt = foot_text(1, "1");
+    CHECK(p && p->fg == ht_rgb(0xffffff) && p->pro_font == &ci_rg_20 && cnt && cnt->fg == ht_rgb(0xffffff) && cnt->x > p->x + 40);
+    int x, y; cover_xy(1, &x, &y);
+    CHECK(p->x > x + 30 && cnt->x + cnt->w <= x + COVER - 8 && foot_eq_bars(1) == 3);
+    CHECK(foot_text(0, "Working") && foot_text(0, "1") && foot_eq_bars(0) == 3);   // Recent counts t0k0
+    CHECK(!foot_text(2, "Working") && foot_eq_bars(2) == 0);    // asking only: no ribbon
+    CHECK(!foot_text(3, "Working") && foot_eq_bars(3) == 0);    // idle
+    CHECK(pod_tabs_ribbon(&M, 0) && !pod_tabs_ribbon(&M, 1));
+    pod_model_turn(&M, "t0k1", "started", NULL, 0, 12);          // two working in a tab: the count says 2
+    render(30);
+    CHECK(foot_text(1, "2") != NULL && foot_text(0, "2") != NULL);
+    // Nobody working: no ribbon anywhere, nothing for the glue to wake for.
+    build(3, 2, true);
+    render(0);
+    CHECK(find_text("Working") == NULL && !pod_tabs_ribbon(&M, 0));
+    // The eq moves with the clock; the run count does not.
+    ribbon_setup();
+    render(1000);
+    int count = S.count;
+    static ht_scene_t prev;
+    memcpy(&prev, &S, sizeof S);
+    render(1000 + POD_TABS_BAR_MS);
+    CHECK(S.count == count);
+    int diff = 0;
+    for (int i = 0; i < count; i++) if (memcmp(&S.runs[i], &prev.runs[i], sizeof S.runs[i])) { diff++; CHECK(S.runs[i].pro_kind == K_RECT && S.runs[i].w == 5); }
+    CHECK(diff > 0);
+}
+
+// 9 tabs: "PAGE 1 / 2" (and "PAGE 2 / 2" on the next page); 5 tabs and 7 agents: "5 TABS · 7 AGENTS"; "N working" at the left.
+static void test_tabs_footer_pages(void) {
+    build(9, 1, true);
+    CHECK(pod_tabs_pages(&M) == 2);
+    render(0);
+    const ht_run_t *pg = find_text("PAGE 1 / 2");
+    CHECK(pg && pg->pro_font == &ci_rg_20 && pg->y >= FOOT_Y && pg->x + pg->w == 720 - 32 && !find_text("TABS"));
+    CHECK(find_text("0 working") && find_text("0 working")->x == 32 && find_text("0 working")->pro_font == &ci_rg_23);
+    pod_nav_act(&N, &M, POD_A_SCROLL, 2, 0);
+    render(0);
+    CHECK(find_text("PAGE 2 / 2") != NULL && find_text("PAGE 1 / 2") == NULL);
+    F.tabs_moving = true; F.tabs_off = pod_tabs_pitch() / 2 - 20;   // mid-drag: the page nearer the offset
+    ht_scene_clear(&S, ht_rgb(0xffffff)); F.hit_count = 0; pod_render(&F, &N, &M, 0);
+    CHECK(find_text("PAGE 1 / 2") != NULL);
+    build_shared(5, 7);
+    pod_model_turn(&M, "m0", "started", NULL, 0, 10);
+    render(0);
+    CHECK(pod_tabs_pages(&M) == 1);
+    CHECK(find_text("5 TABS \xc2\xb7 7 AGENTS") != NULL && find_text("1 working") != NULL && !find_text("PAGE 1 / 1"));
+    build(1, 1, true);
+    render(0);
+    CHECK(find_text("1 TAB \xc2\xb7 1 AGENT") != NULL);
+}
+
+// Tabs holding no agent get no cover: only Recent is drawn, and the bar counts the tabs that are shown.
+static void test_tabs_hide_agentless(void) {
+    pod_model_reset(&M);
+    cable_swarm_t two[2] = {{"a", "Alpha", 0, 0}, {"b", "Beta", 0, 1}};
+    pod_model_swarms(&M, two, NULL, NULL, 2, "a", NULL, 0);
+    pod_model_link(&M, true);
+    pod_nav_init(&N);
+    render(0);
+    CHECK(M.tab_count == 0 && find_text("Alpha") == NULL && find_text("Beta") == NULL && find_text("Empty") == NULL);
+    CHECK(find_text("Recent") != NULL && find_hit(POD_A_OPEN_TAB, 0) == NULL);
+}
+
+// The worst frame: six covers of 2 to 9 panes, every agent working, a light mark in every third pane, a bell and a banner.
+// Always within the budget, the same count at every clock, and the ribbon of every shown cover kept at rest.
+static int max_runs;
+static void test_tabs_budget(void) {
+    static const int tabs_for[] = {1, 2, 5, 7, 12, 24};
+    for (int b = 0; b < 2; b++) {
+        banner = b;
+        for (int j = 0; j < 6; j++)
+            for (int per = 0; per <= 9; per++)
+                for (int known = 0; known < 2; known++) {
+                    if (known) build_shared(tabs_for[j], per); else build(tabs_for[j], per, false);
+                    if (per) {
+                        pod_model_turn(&M, known ? "m0" : "t0k0", "started", NULL, 0, 10);
+                        if (known && per > 1) pod_model_question(&M, "m1", "ok?");
+                        pod_model_unread_add(&M, known ? "m0" : "t0k0", "x", "done", 5, 100);
+                    }
+                    for (int k = 0; k < per && known; k++)   // a task each, so Recent holds them
+                        if (strcmp(ids[0][k], "m0") && strcmp(ids[0][k], "m1")) (pod_model_turn(&M, ids[0][k], "started", NULL, 0, 0), pod_model_turn(&M, ids[0][k], "done", NULL, 0, 20 + (uint32_t)k));
+                    for (int row = 0; row <= pod_tabs_max_row(&M); row += 2) {
+                        pod_nav_init(&N);
+                        pod_nav_act(&N, &M, POD_A_SCROLL, row, 0);
+                        render(1000);
+                        int want = S.count;
+                        if (want > max_runs) max_runs = want;
+                        CHECK(want > 0 && want <= budget() && F.hit_count <= 32);
+                        for (uint32_t t = 1000; t < 3000; t += 331) { render(t); CHECK(S.count == want); }
+                    }
+                }
+        // Every agent working in every cover: nine light marks, a ribbon on each, eight recent agents.
+        for (int per = 2; per <= 9; per += 7) {
+            build_shared(12, per);
+            for (int k = 0; k < per; k++) { pod_model_agent(&M, ids[0][k], "x", "cursor", "mac"); pod_model_turn(&M, ids[0][k], "started", NULL, 0, 5 + (uint32_t)k); }
+            pod_model_unread_add(&M, "m0", "x", "done", 5, 100);
+            for (int row = 0; row <= pod_tabs_max_row(&M); row += 2) {
+                pod_nav_init(&N); pod_nav_act(&N, &M, POD_A_SCROLL, row, 0);
+                render(100);
+                CHECK(S.count <= budget() && F.hit_count <= 32);
+                int pl = 0; for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && !strcmp(S.runs[i].text, "Working")) pl++;
+                int covers = 1 + 12, first = row * 3, shown = covers - first < 6 ? covers - first : 6;
+                CHECK(pl == shown);   // the ribbons are never dropped at rest
+            }
+        }
+    }
+    banner = false;
+}
+
+// Six covers (Recent and five tabs of six panes): every pane draws its mark, the busy ones their dots, until the frame runs short.
 static void grid_test_six_covers(void) {
     build_shared(5, 6);
     pod_model_turn(&M, "m0", "started", NULL, 0, 10);
     pod_model_question(&M, "m1", "ok?");
     render(500);
-    CHECK(F.hit_count == 6 && S.count <= HT_RUNS);
-    for (int i = 1; i < 6; i++) {
-        int x, y;
-        cover_xy(i, &x, &y);
-        // Every cover wears a ribbon (eight runs), so the last covers lose their marks first; the selected one keeps all six
-        // (a mark in each pane; Cursor's light mark is an image on a chip).
-        CHECK(i == 1 ? count_in(K_IMAGE, x, y, COVER) == 6 : count_in(K_IMAGE, x, y, COVER) <= 6);
-        CHECK(count_in(K_RECT, x, y, COVER) >= 6 + 2 || i > 1);   // cards and the light marks' chips
-    }
-    // Six covers of six busy panes cost more than a frame holds: the dots go first, the last covers' first, the selected one's last.
+    CHECK(tab_hits() == 6 && S.count <= budget());
     int x1, y1, x5, y5;
     cover_xy(1, &x1, &y1); cover_xy(5, &x5, &y5);
-    CHECK(dots_in(x1, y1, COVER) <= 2 && dots_in(x5, y5, COVER) <= dots_in(x1, y1, COVER));   // the eight-run ribbons crowd the dots out first
-    // With four panes a cover and a ribbon on each, the dots still all fit: every busy pane has its dot, on every cover.
-    build_shared(5, 4);
+    CHECK(count_in(K_IMAGE, x1, y1, COVER) == 6);   // the selected cover keeps all six marks
+    CHECK(count_in(K_IMAGE, x5, y5, COVER) <= 6);
+    CHECK(dots_in(x1, y1, COVER) == 2 && dots_in(x5, y5, COVER) <= dots_in(x1, y1, COVER));   // the last covers lose their dots first
+    // With two panes a cover everything fits: every busy pane has its dot, on every cover.
+    build_shared(5, 2);
     pod_model_turn(&M, "m0", "started", NULL, 0, 10);
     pod_model_question(&M, "m1", "ok?");
     render(500);
     for (int i = 1; i < 6; i++) {
         int x, y;
         cover_xy(i, &x, &y);
-        CHECK(dots_in(x, y, COVER) <= 2 && count_in(K_IMAGE, x, y, COVER) <= 4);   // m0 working (green), m1 asking (amber)
-        CHECK(i != 1 || count_in(K_IMAGE, x, y, COVER) == 4);   // the selected cover keeps its marks
+        CHECK(dots_in(x, y, COVER) == 2 && count_in(K_IMAGE, x, y, COVER) == 2);   // m0 working (green), m1 asking (amber)
     }
-    CHECK(count_in(POD_TRI, 0, 54, 720) == 0);               // no triangles on the grid (the status bar's play triangle is above it)
-    CHECK(count_kind(POD_CELL) == 0);
+    CHECK(count_in(POD_TRI, 0, 88, 720) == 0 && count_kind(POD_CELL) == 0);   // no triangles, no pets
 }
 
-// The chosen tab is ringed in blue and its name is blue; no other is.
-static void grid_test_chosen_ring(void) {
-    build(3, 2, true);
-    pod_model_swarms(&M, sw, (const char *const **)idl, idn, 3, "s1", NULL, 0);   // Tab1 is the window's selected tab
+// Counts only (an older daemon): the tabs' minis are blank with the default mark; Recent has its agents' marks.
+static void tabs_test_no_ids(void) {
+    build(2, 3, false);
     render(0);
-    CHECK(find_text("Tab1") && find_text("Tab1")->fg == RING_BLUE);
-    CHECK(find_text("Tab0")->fg == ht_rgb(0x111111) && find_text("Tab2")->fg == ht_rgb(0x111111) && find_text("Recent")->fg == ht_rgb(0x111111));
-    int rings = 0, x, y;
-    cover_xy(2, &x, &y);   // cover 2 is Tab1
-    for (int i = 0; i < S.count; i++) {
-        const ht_run_t *r = &S.runs[i];
-        if (r->pro_kind != K_RECT || r->fg != RING_BLUE) continue;
-        rings++;
-        ht_rect_t b = ht_run_bounds(r);
-        CHECK(b.x < x && b.x + b.w > x + COVER && b.y < y && b.y + b.h > y + COVER && b.x >= x - 12 && b.w <= COVER + 24);
-    }
-    CHECK(rings == 1);
+    int x1, y1, x2, y2;
+    cover_xy(1, &x1, &y1); cover_xy(2, &x2, &y2);
+    CHECK(count_in(K_IMAGE, x1, y1, COVER) == 0 && count_in(K_IMAGE, x2, y2, COVER) == 0);   // the tabs' panes are blank
+    CHECK(find_text("3 panes") != NULL);
+    CHECK(count_rect(ht_rgb(0x9aa09a)) == 6);   // both tabs' three panes, each with the default mark's outline
+    CHECK(find_hit(POD_A_OPEN_TAB, 0) != NULL && find_hit(POD_A_OPEN_TAB, 1) != NULL);
 }
 
-// A tab with no panes: a grey cover with a "+" ring, captioned Empty.
-static void grid_test_empty_tab(void) {
-    pod_model_reset(&M);
-    cable_swarm_t two[2] = {{"a", "Alpha", 0, 0}, {"b", "Beta", 0, 0}};
-    pod_model_swarms(&M, two, NULL, NULL, 2, "a", NULL, 0);
-    pod_model_link(&M, true);
-    pod_nav_init(&N);
+// A pane whose agent or engine has no mark shows the default mark, never an empty pane; a tab with no panes is the grid icon.
+static void tabs_test_default_mark(void) {
+    build(1, 2, true);
+    pod_model_agent(&M, ids[0][1], "blank", "", "mac");
+    pod_model_agent(&M, ids[0][0], "odd", "zzz-unknown", "mac");
+    for (int k = 0; k < 2; k++) (pod_model_turn(&M, ids[0][k], "started", NULL, 0, 0), pod_model_turn(&M, ids[0][k], "done", NULL, 0, 1 + (uint32_t)k));   // tasks: Recent lists them
     render(0);
-    CHECK(find_text("Empty") != NULL && find_text("Empty")->pro_font == &ht_pro_24 && find_text("0 panes") == NULL);
     int x, y;
     cover_xy(1, &x, &y);
-    int arcs = 0;
+    CHECK(count_rect(ht_rgb(0x9aa09a)) == 4);   // the tab's two panes, and Recent's two agents
+    int in_tab = 0;
     for (int i = 0; i < S.count; i++) {
         ht_rect_t b = ht_run_bounds(&S.runs[i]);
-        if (S.runs[i].pro_kind == POD_ARC && b.x > x && b.x + b.w < x + COVER && b.y > y && b.y + b.h < y + COVER) arcs++;
+        if (S.runs[i].pro_kind == K_RECT && S.runs[i].fg == ht_rgb(0x9aa09a)) {
+            CHECK(b.w == b.h && (b.w == 44 || b.w == 28));
+            if (b.x >= x && b.x < x + COVER) in_tab++;
+        }
     }
-    CHECK(arcs == 1);                                       // the ring
-    CHECK(count_in(K_RECT, x, y, COVER) == 2);              // the plus: two bars (the cover itself is a gradient)
-    CHECK(count_in(K_IMAGE, x, y, COVER) == 0 && find_hit(POD_A_OPEN_TAB, 0) != NULL);
-}
-
-// Recent: up to 8 agents' marks in a 4 x 2 grid of white squares, a dot on the working ones; "N agents" and what is working.
-static void grid_test_recent_face(void) {
-    build_shared(1, 9);
-    for (int k = 0; k < 9; k++) (pod_model_turn(&M, ids[0][k], "started", NULL, 0, 0), pod_model_turn(&M, ids[0][k], "done", NULL, 0, 20 + (uint32_t)k));
-    pod_model_turn(&M, "m3", "started", NULL, 0, 30);
-    pod_model_turn(&M, "m4", "started", NULL, 0, 30);
-    render(40);
-    CHECK(count_in(K_IMAGE, COL_X0, ROW_Y0, COVER) == 8);   // the newest 8 of 9
-    CHECK(dots_in(COL_X0, ROW_Y0, COVER) == 2);
-    CHECK(find_text("8 agents") != NULL);
-    CHECK(find_text("Working") != NULL);   // the ribbon says what the caption no longer does (the status bar still says "2 working")
-    pod_model_reset(&M);                                    // nobody recent: the clock face, "0 agents"
-    cable_swarm_t one = {"a", "Alpha", 1, 1};
-    pod_model_swarms(&M, &one, NULL, NULL, 1, "a", NULL, 0);
+    CHECK(in_tab == 2 && find_text(">_") != NULL);
+    pod_model_reset(&M);
     pod_model_link(&M, true);
+    pod_nav_init(&N);
+    cable_swarm_t two = {"e", "Two", 2, 2};   // members unknown (older daemon) with 2 panes: two default marks
+    pod_model_swarms(&M, &two, NULL, NULL, 1, "e", NULL, 0);
     render(0);
-    CHECK(find_text("0 agents") != NULL && count_in(K_IMAGE, COL_X0, ROW_Y0, COVER) == 0);
+    CHECK(count_rect(ht_rgb(0x9aa09a)) == 2);
+    pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);   // the list holds no rows for unknown members
+    render(0);
+    CHECK(count_rect(ht_rgb(0x9aa09a)) == 0 && find_text("No panes yet.") != NULL);
 }
 
-// The runs that are not text, the glass or the status bar: covers, rings, cards, marks, dots (y >= the glass top).
+// One pane fills the cover; two or more are two columns; an offline agent's mini is faded; a tab of many panes ends in "+N".
+static void tabs_test_minis(void) {
+    build_shared(3, 1);
+    render(0);
+    int x, y;
+    cover_xy(1, &x, &y);
+    int one = 0, w1 = 0;
+    for (int i = 0; i < S.count; i++) {
+        ht_rect_t b = ht_run_bounds(&S.runs[i]);
+        if (S.runs[i].pro_kind == K_RECT_AA && b.x >= x && b.y >= y && b.x + b.w <= x + COVER && b.y + b.h <= y + COVER && b.w > 100) { one++; w1 = b.w; }
+    }
+    CHECK(one == 1 && w1 == COVER - 26);   // 13 px padding all round
+    build_shared(3, 2);
+    render(0);
+    int two = 0;
+    for (int i = 0; i < S.count; i++) {
+        ht_rect_t b = ht_run_bounds(&S.runs[i]);
+        if (S.runs[i].pro_kind == K_RECT_AA && b.x >= x && b.y >= y && b.x + b.w <= x + COVER && b.y + b.h <= y + COVER && b.h > 100) { two++; CHECK(b.w == 66); }
+    }
+    CHECK(two == 2);
+    M.agents[1].state = POD_OFFLINE;
+    render(0);
+    CHECK(count_in(K_IMAGE, x, y, COVER) == 2);
+    int faded = 0;
+    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_IMAGE && S.runs[i].radius > 0 && S.runs[i].radius < 255) faded++;
+    CHECK(faded >= 1);
+    build_shared(3, 12);
+    render(0);
+    CHECK(find_text("+5") != NULL && count_in(K_IMAGE, x, y, COVER) <= 7);
+}
+
+// The runs that are not text, the bar or the footer.
 static int lowest_cover_edge(void) {
     int low = 0;
     for (int i = 0; i < S.count; i++) {
         ht_rect_t b = ht_run_bounds(&S.runs[i]);
-        if (b.w >= 720 || b.y < 54 || (S.runs[i].pro_kind == K_RECT && b.w == 6 && b.h == 6)) continue;   // the glass, the status bar, the page dots
+        if (b.w >= 720 || b.y < LIST_Y0 || b.y >= FOOT_Y) continue;   // the glass, the bar, the footer
         if (b.y + b.h > low) low = b.y + b.h;
     }
     return low;
-}
-static int page_dots(int *dark) {   // the page dots: 6 px circles; how many, and the position of the dark one
-    int n = 0;
-    *dark = -1;
-    for (int i = 0; i < S.count; i++)
-        if (S.runs[i].pro_kind == K_RECT && S.runs[i].w == 6 && S.runs[i].pro_height == 6) { if (S.runs[i].fg == ht_rgb(0x4a4e5a)) *dark = n; n++; }
-    return n;
 }
 
 // Two rows of covers a page, whole pages: nothing of the next row shows at rest, the frame's scroll is the page's first row.
@@ -400,107 +657,103 @@ static void grid_test_scroll(void) {
     CHECK(pod_tabs_pitch() == 2 * ROW_PITCH && pod_tabs_pages(&M) == 2 && pod_tabs_max_row(&M) == 2);
     render(0);
     CHECK(find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT) && find_hit(POD_A_OPEN_TAB, 4) && !find_hit(POD_A_OPEN_TAB, 5));   // covers 0..5 only
-    CHECK(F.hit_count == 6);
+    CHECK(tab_hits() == 6);
     CHECK(find_text("Tab4") != NULL && find_text("Tab5") == NULL);
-    CHECK(lowest_cover_edge() <= ROW_Y0 + ROW_PITCH + COVER + 90);   // nothing below the second row's captions
-    CHECK(F.hits[5].y + F.hits[5].h <= 720 && F.hits[5].y + F.hits[5].h <= ROW_Y0 + ROW_PITCH + 300);
-    int dark;
-    CHECK(page_dots(&dark) == 2 && dark == 0);
+    CHECK(lowest_cover_edge() <= FOOT_Y);                   // nothing below the footer's rule
+    for (int i = 0; i < F.hit_count; i++) if (F.hits[i].action == POD_A_OPEN_TAB) CHECK(F.hits[i].y + F.hits[i].h <= FOOT_Y);
     pod_nav_act(&N, &M, POD_A_SCROLL, 2, 0);               // the second page: covers 6..10
     render(0);
-    CHECK(!find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT) && find_hit(POD_A_OPEN_TAB, 5) && find_hit(POD_A_OPEN_TAB, 9) && F.hit_count == 5);
+    CHECK(!find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT) && find_hit(POD_A_OPEN_TAB, 5) && find_hit(POD_A_OPEN_TAB, 9) && tab_hits() == 5);
     CHECK(find_hit(POD_A_OPEN_TAB, 5)->y == ROW_Y0 && find_hit(POD_A_OPEN_TAB, 9)->y == ROW_Y0 + ROW_PITCH);
-    CHECK(page_dots(&dark) == 2 && dark == 1);
+    CHECK(find_text("PAGE 2 / 2"));
     pod_nav_act(&N, &M, POD_A_SCROLL, 50, 0);               // past the end: the draw clamps
     render(0);
     CHECK(find_hit(POD_A_OPEN_TAB, 9) && !find_hit(POD_A_OPEN_TAB, 4));
     const pod_hit_t *last = find_hit(POD_A_OPEN_TAB, 9);
-    CHECK(last->y + last->h <= 720 && last->x >= 0 && last->x + last->w <= 720);
-    pod_nav_act(&N, &M, POD_A_SCROLL, 3, 0);                // an odd row: its page
-    pod_nav_init(&N); pod_nav_act(&N, &M, POD_A_SCROLL, 1, 0);
+    CHECK(last->y + last->h <= FOOT_Y && last->x >= 0 && last->x + last->w <= 720);
+    pod_nav_init(&N); pod_nav_act(&N, &M, POD_A_SCROLL, 1, 0);   // an odd row: its page
     render(0);
     CHECK(find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT) != NULL);
     pod_nav_act(&N, &M, POD_A_SCROLL, -100, 0);
     render(0);
     CHECK(find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT) != NULL);
-    build(4, 1, true);                                      // five covers: nothing to scroll, no dots
+    build(4, 1, true);                                      // five covers: nothing to scroll
     CHECK(pod_tabs_max_row(&M) == 0 && pod_tabs_pages(&M) == 1);
     render(0);
-    CHECK(page_dots(&dark) == 0);
-    F.tabs_moving = true; F.tabs_off = 200; ht_scene_clear(&S, ht_rgb(0xffffff)); pod_render(&F, &N, &M, 0);   // one page does not move
+    CHECK(find_text("PAGE 1 / 1") == NULL);
+    F.tabs_moving = true; F.tabs_off = 200; ht_scene_clear(&S, ht_rgb(0xffffff)); F.hit_count = 0; pod_render(&F, &N, &M, 0);   // one page does not move
     CHECK(find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT)->y == ROW_Y0);
     build(0, 0, true);
     render(0);
-    CHECK(find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT) != NULL && F.hit_count == 1);
+    CHECK(find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT) != NULL && tab_hits() == 1);
 }
 
 static void render_at(int off, uint32_t now) {
     memset(&F, 0, sizeof F);
     ht_scene_clear(&S, ht_rgb(0xffffff));
     F.scene = &S;
+    F.banner = banner;
     F.tabs_moving = true;
     F.tabs_off = off;
     pod_render(&F, &N, &M, now);
 }
 
-// While the grid is dragged it is drawn at the pixel offset: both pages, the rows that meet the glass, the status bar over
-// whatever has scrolled under it, the hits clipped to the glass; on a page boundary it is the resting screen.
+// While the grid is dragged it is drawn at the pixel offset: both pages, the rows that meet the glass, the bar and the footer
+// over whatever has scrolled under them, the hits clipped to the glass; on a page boundary it is the resting screen.
 static void grid_test_motion(void) {
     build(10, 2, true);                                     // 11 covers, 2 pages
     int rest0;
     render(0);
     rest0 = S.count;
     render_at(0, 0);
-    CHECK(S.count == rest0 && F.hit_count == 6 && find_hit(POD_A_OPEN_TAB, 0)->y == ROW_Y0);   // offset 0: the resting page 0
+    CHECK(S.count == rest0 && tab_hits() == 6 && find_hit(POD_A_OPEN_TAB, 0)->y == ROW_Y0);   // offset 0: the resting page 0
     render_at(2 * ROW_PITCH, 0);
-    CHECK(F.hit_count == 5 && find_hit(POD_A_OPEN_TAB, 5)->y == ROW_Y0 && !find_hit(POD_A_OPEN_TAB, 4));   // a boundary: the resting page 1
-    render_at(300, 0);                                      // 300 px into the first page
+    CHECK(tab_hits() == 5 && find_hit(POD_A_OPEN_TAB, 5)->y == ROW_Y0 && !find_hit(POD_A_OPEN_TAB, 4));   // a boundary: the resting page 1
+    render_at(100, 0);                                      // 100 px into the first page
     const pod_hit_t *h = find_hit(POD_A_OPEN_TAB, 2);       // cover 3 (tab 2), the second row: it moved up by the offset
-    CHECK(h && h->x == COL_X0 && h->y == ROW_Y0 + ROW_PITCH - 300);
-    CHECK(find_hit(POD_A_OPEN_TAB, 5) && find_hit(POD_A_OPEN_TAB, 5)->y == ROW_Y0 + 2 * ROW_PITCH - 300);   // the next page's first row
-    CHECK(find_text("Tab5") != NULL && find_text("Tab8") == NULL);   // row 3 (covers 9, 10) peeks in at 644: its cover shows, its name (850) does not
-    CHECK(find_hit(POD_A_OPEN_TAB, 8) && find_hit(POD_A_OPEN_TAB, 8)->y == ROW_Y0 + 3 * ROW_PITCH - 300 && find_hit(POD_A_OPEN_TAB, 8)->y + find_hit(POD_A_OPEN_TAB, 8)->h == 720);
-    for (int i = 0; i < F.hit_count; i++) CHECK(F.hits[i].y >= 54 && F.hits[i].y + F.hits[i].h <= 720);
-    // The status bar is drawn last: every run after its gradient lies in the bar, and nothing before it is in the way.
-    int bar = -1;
-    for (int i = 0; i < S.count; i++) { ht_rect_t b = ht_run_bounds(&S.runs[i]); if (b.y == 0 && b.h == 54 && b.w == 720) bar = i; }
-    CHECK(bar >= 0);
-    for (int i = bar; i < S.count; i++) CHECK(ht_run_bounds(&S.runs[i]).y < 54 && ht_run_bounds(&S.runs[i]).y + ht_run_bounds(&S.runs[i]).h <= 56);
-    int dark;
-    CHECK(page_dots(&dark) == 2 && dark == 1);              // 300 of 560: nearer the second page
-    render_at(200, 0);
-    CHECK(page_dots(&dark) == 2 && dark == 0);
+    CHECK(h && h->x == COL_X[0] - 24 && h->y == ROW_Y0 + ROW_PITCH - 100);
+    CHECK(find_hit(POD_A_OPEN_TAB, 5) && find_hit(POD_A_OPEN_TAB, 5)->y == ROW_Y0 + 2 * ROW_PITCH - 100 && find_hit(POD_A_OPEN_TAB, 5)->y + find_hit(POD_A_OPEN_TAB, 5)->h == FOOT_Y);
+    CHECK(find_hit(POD_A_OPEN_TAB, 0) && find_hit(POD_A_OPEN_TAB, 0)->y == LIST_Y0 + 1);   // the first row's card, clipped under the bar
+    CHECK(find_text("Tab2") != NULL && find_text("Tab5") == NULL && find_text("Tab8") == NULL);   // row 2: its cover shows, its name is below the glass; row 3 is gone
+    for (int i = 0; i < F.hit_count; i++) if (F.hits[i].action == POD_A_OPEN_TAB) CHECK(F.hits[i].y >= LIST_Y0 && F.hits[i].y + F.hits[i].h <= FOOT_Y);
+    // The footer and the bar are drawn last: every run after the footer's gradient lies in the footer or the bar.
+    int foot = -1;
+    for (int i = 0; i < S.count; i++) { ht_rect_t b = ht_run_bounds(&S.runs[i]); if (b.y == FOOT_Y && b.h == 720 - FOOT_Y && b.w == 720) foot = i; }
+    CHECK(foot >= 0);
+    for (int i = foot; i < S.count; i++) { ht_rect_t b = ht_run_bounds(&S.runs[i]); CHECK(b.y >= FOOT_Y || b.y + b.h <= LIST_Y0 + 2); }
+    CHECK(find_text("PAGE 1 / 2") != NULL);                 // 100 of 510: nearer the first page
+    render_at(300, 0);
+    CHECK(find_text("PAGE 2 / 2") != NULL);
     // A mid-motion row that has scrolled wholly under the bar is not drawn; a row below the glass neither.
     render_at(400, 0);
-    CHECK(find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT) == NULL);   // row 0 at 104 - 400: wholly under the bar, gone
+    CHECK(find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT) == NULL);   // row 0 at 113 - 400: wholly under the bar, gone
     render_at(-100, 0);                                     // the end pulled down: the first page lower, nothing before it
     CHECK(find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT)->y == ROW_Y0 + 100 && find_hit(POD_A_OPEN_TAB, 5) == NULL);
 }
 
-// Run budget in motion: 24 tabs, nine marked panes a cover, the worst two partial pages (12 covers), every offset.
+// Run budget in motion: 24 tabs, nine marked panes a cover, the worst two partial pages, every offset.
 static void grid_test_motion_budget(void) {
-    for (int per = 0; per <= 9; per += (per < 6 ? 2 : 1)) {
+    for (int per = 1; per <= 9; per += (per < 6 ? 2 : 1)) {
         build_shared(24, per);
         for (int k = 0; k < per; k++) { pod_model_agent(&M, ids[0][k], "x", k % 2 ? "cursor" : "claude", "mac"); pod_model_turn(&M, ids[0][k], "started", NULL, 0, 5 + (uint32_t)k); }
         if (per > 1) pod_model_question(&M, "m1", "ok?");
-        int pages = pod_tabs_pages(&M), most = 0, worst_total = 0;
+        pod_model_unread_add(&M, "m0", "x", "done", 5, 100);
+        int pages = pod_tabs_pages(&M), most = 0;
         CHECK(pages == 5);                                  // 25 covers: 9 rows
-        for (int off = -170; off <= 4 * 560 + 170; off += 11) {
+        for (int off = -255; off <= 4 * 510 + 255; off += 11) {
             render_at(off, 100);
-            int dark;
-            CHECK(S.count > 0 && S.count <= HT_RUNS && F.hit_count <= 32 && page_dots(&dark) == pages);
+            CHECK(S.count > 0 && S.count <= budget() && F.hit_count <= 32);
             if (S.count > most) most = S.count;
-            worst_total += F.hit_count;
         }
-        CHECK(most > 40 && worst_total > 0);
+        CHECK(most > 30);
     }
-    // Resting is constant: the same count at every clock, and no more than the worst of the motion.
+    // Resting is constant: the same count at every clock, and the same as the page-aligned motion.
     build_shared(24, 9);
     for (int row = 0; row <= pod_tabs_max_row(&M); row += 2) {
         pod_nav_init(&N); pod_nav_act(&N, &M, POD_A_SCROLL, row, 0);
         render(0);
         int want = S.count;
-        for (uint32_t t = 0; t < 3000; t += 331) { render(t); CHECK(S.count == want); render_at(row / 2 * 560, t); CHECK(S.count == want); }
+        for (uint32_t t = 0; t < 3000; t += 331) { render(t); CHECK(S.count == want); render_at(row / 2 * 510, t); CHECK(S.count == want); }
     }
 }
 
@@ -509,23 +762,25 @@ static void grid_test_taps(void) {
     build(4, 2, true);
     render(0);
     const pod_hit_t *h = find_hit(POD_A_OPEN_TAB, POD_TAB_RECENT);
-    CHECK(h && h->id[0] == 0 && h->x == COL_X0 && h->y == ROW_Y0);
+    CHECK(h && h->id[0] == 0 && h->x == COL_X[0] - 24 && h->y == ROW_Y0);
     pod_nav_act(&N, &M, (pod_action_t)h->action, h->arg, 0);
     CHECK(N.depth == 2 && N.stack[1].view == POD_V_TAB && N.stack[1].tab == POD_TAB_RECENT);
     pod_nav_init(&N);
     render(0);
     h = find_hit(POD_A_OPEN_TAB, 2);
     CHECK(h && !strcmp(h->id, "s2"));
-    CHECK(h->x == COL_X0 && h->y == ROW_Y0 + ROW_PITCH);   // cover 3 is row 1, column 0
+    CHECK(h->x == COL_X[0] - 24 && h->y == ROW_Y0 + ROW_PITCH);   // cover 3 is row 1, column 0
     pod_nav_act(&N, &M, POD_A_OPEN_TAB, h->arg, 0);
     CHECK(N.depth == 2 && N.stack[1].tab == 2 && !strcmp(N.stack[1].tab_id, "s2"));
-    for (int i = 0; i < F.hit_count; i++) {                // every hit is on the glass and big enough to tap
-        CHECK(F.hits[i].w >= 150 && F.hits[i].x >= 0 && F.hits[i].x + F.hits[i].w <= 720 && F.hits[i].y >= 54 && F.hits[i].y + F.hits[i].h <= 720);
-        CHECK(F.hits[i].action == POD_A_OPEN_TAB);
+    pod_nav_init(&N);
+    render(0);
+    for (int i = 0; i < F.hit_count; i++) {                // every card hit is on the glass and big enough to tap
+        if (F.hits[i].action != POD_A_OPEN_TAB) continue;
+        CHECK(F.hits[i].w == 213 && F.hits[i].x >= 0 && F.hits[i].x + F.hits[i].w <= 720 && F.hits[i].y >= LIST_Y0 && F.hits[i].y + F.hits[i].h <= FOOT_Y);
     }
 }
 
-// The captions: name in 32, count line in 24 grey; working in green, asking in amber, each after a dot; the status bar.
+// The captions: name in Regular 30, the count line in 23 muted; "N working" in the footer only.
 static void grid_test_captions(void) {
     build(3, 2, true);
     pod_model_turn(&M, "t0k0", "started", NULL, 0, 10);
@@ -533,16 +788,16 @@ static void grid_test_captions(void) {
     pod_model_question(&M, "t2k1", "ok?");
     render(20);
     const ht_run_t *name = find_text("Tab0"), *sub = find_text("2 panes");
-    CHECK(name && sub && name->pro_font == &ht_pro_32 && sub->pro_font == &ht_pro_24 && sub->fg == ht_rgb(0x7b7d84));
-    CHECK(name->fg == RING_BLUE);                           // Tab0 is the selected one
-    CHECK(!find_text("1 asking"));   // the captions are the name and the count alone (the status bar keeps "3 working")
-    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && S.runs[i].y > 54 && strstr(S.runs[i].text, "working")) CHECK(0);
-    CHECK(find_text("Tabs") != NULL && find_text("3 working") != NULL && find_text("3 working")->fg == ht_rgb(0x2fa84f));   // the status bar: working and asking
+    CHECK(name && sub && name->pro_font == &ci_rg_30 && sub->pro_font == &ci_rg_23 && sub->fg == CI_MUTED_RGB);
+    CHECK(name->fg == CI_BLUE_RGB);                         // Tab0 is the selected one
+    CHECK(!find_text("1 asking"));
+    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && S.runs[i].y > LIST_Y0 && S.runs[i].y < FOOT_Y && strstr(S.runs[i].text, "working")) CHECK(0);
+    CHECK(find_text("Tabs") != NULL && find_text("Tabs")->pro_font == &ci_bd_30 && find_text("3 working") != NULL && find_text("3 working")->y >= FOOT_Y);   // working and asking
     CHECK(find_text("Tab1") != NULL && find_text("Tab2") != NULL && find_text("Recent") != NULL && find_text("3 agents") != NULL);   // Recent: the three with tasks
-    for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_RECT && S.runs[i].w == 9 && S.runs[i].pro_height == 9) CHECK(0);   // no caption dots
 }
 
-static void render_test_connecting(void) {
+// Connection lost (the cable is down): the stack stays where it is, nothing on it is live, and it comes back with the link.
+static void render_test_connection_lost(void) {
     build(2, 2, true);
     pod_nav_act(&N, &M, POD_A_OPEN_TAB, 0, 0);
     pod_nav_act(&N, &M, POD_A_OPEN_AGENT, 0, 0);
@@ -550,37 +805,14 @@ static void render_test_connecting(void) {
     char who[ID_MAX]; strcpy(who, N.stack[N.depth - 1].agent);
     pod_model_link(&M, false);
     render(0);
-    CHECK(find_text("Connecting") != NULL);
+    CHECK(find_text("Connection lost.") != NULL && find_text("Connecting") == NULL);
     CHECK(count_kind(K_IMAGE) == 0);
     for (int i = 0; i < S.count; i++) CHECK(S.runs[i].pro_kind != POD_CELL);
-    CHECK(F.hit_count == 1 && F.hits[0].action == POD_A_BACK);
+    CHECK(F.hit_count == 0);
     CHECK(N.depth == depth && !strcmp(N.stack[N.depth - 1].agent, who));
-    const ht_run_t *c = find_text("Connecting");
-    CHECK(c->fg == ht_rgb(0x7b7d84) && c->pro_font == &ht_pro_32);
     pod_model_link(&M, true);
     render(0);
-    CHECK(find_text("Connecting") == NULL);
-}
-
-static void transport_test_shape(void) {
-    build(1, 1, true);
-    int runs[2];
-    for (int talking = 0; talking < 2; talking++) {
-        memset(&F, 0, sizeof F);
-        ht_scene_clear(&S, ht_rgb(0xffffff));
-        F.scene = &S;
-        pod_transport(&F, talking);
-        runs[talking] = S.count;
-        CHECK(F.hit_count == 5);
-        for (int i = 0; i < F.hit_count; i++) {
-            CHECK(F.hits[i].w >= 80 && F.hits[i].h >= 80);
-            CHECK(F.hits[i].y >= POD_TRANSPORT_Y && F.hits[i].y + F.hits[i].h <= 720);
-        }
-        CHECK(find_hit(POD_A_TABS, 0) && find_hit(POD_A_PANES, 0) && find_hit(POD_A_PREV, 0) && find_hit(POD_A_TALK, 0) &&
-              find_hit(POD_A_NEXT, 0) && !find_hit(POD_A_RECAP, 0));
-        CHECK(!find_text("SEND") && !find_text("TALK") && find_text("TABS") && find_text("PANES"));
-    }
-    CHECK(runs[0] == runs[1] && runs[0] == POD_TRANSPORT_RUNS);
+    CHECK(find_text("Connection lost.") == NULL);
 }
 
 // M12: a send whose turn never came: after POD_SENT_WAIT_MS the agent is no longer counted as working anywhere. (A real
@@ -602,126 +834,32 @@ static void tabs_test_stale_working(void) {
     CHECK(find_text("3 panes") == NULL && find_text("1 working") == NULL);   // the Tab screen has no head
 }
 
-// ---- the Playing ribbon ---------------------------------------------------------------------------------------------
-static int ribbon_runs_in(int c, int *bars_out /* [3] heights */, int *discs) {   // runs in the cover's foot band; bar heights
-    int x, y, n = 0, nb = 0;
-    cover_xy(c, &x, &y);
-    if (discs) *discs = 0;
-    for (int i = 0; i < S.count; i++) {
-        const ht_run_t *r = &S.runs[i];
-        ht_rect_t b = ht_run_bounds(r);
-        if (b.x < x || b.x + b.w > x + COVER || b.y < y + COVER - 38 || b.y + b.h > y + COVER) continue;
-        n++;
-        if (r->pro_kind == K_RECT && r->fg == ht_rgb(0x34c759) && r->w == 5 && nb < 3 && bars_out) bars_out[nb++] = r->pro_height;
-        if (r->pro_kind == K_RECT && r->w == 24 && discs) (*discs)++;
-    }
-    return n;
-}
-static void ribbon_setup(void) {   // Tab0 has one agent working (two panes), Tab1 only an asking one, Tab2 none
-    build(3, 2, true);
-    pod_model_turn(&M, "t0k0", "started", NULL, 0, 10);
-    pod_model_turn(&M, "t1k0", "started", NULL, 0, 10);
-    (pod_model_turn(&M, "t1k0", "started", NULL, 0, 0), pod_model_turn(&M, "t1k0", "done", NULL, 0, 11));
-    pod_model_question(&M, "t1k1", "ok?");
-}
-static const ht_run_t *foot_text(int c, const char *text) {   // a text run inside cover c's foot band
-    int x, y; cover_xy(c, &x, &y);
-    for (int i = 0; i < S.count; i++) {
-        const ht_run_t *r = &S.runs[i];
-        if (r->pro_kind == K_TEXT && !strcmp(r->text, text) && r->x >= x && r->x < x + COVER && r->y >= y + COVER - 38 && r->y < y + COVER) return r;
-    }
-    return NULL;
-}
-static void ribbon_test_draws(void) {
-    ribbon_setup();
-    render(20);
-    int disc;
-    CHECK(ribbon_runs_in(1, NULL, &disc) == 8 && disc == 1);      // Tab0: band (2), bars (3), PLAYING, disc, count
-    const ht_run_t *p = foot_text(1, "Working"), *cnt = foot_text(1, "1");
-    CHECK(p && p->fg == ht_rgb(0xffffff) && p->pro_font == &ht_pro_24 && cnt && cnt->x > p->x + 60);
-    int x, y; cover_xy(1, &x, &y);
-    CHECK(p->x > x && p->x < x + COVER / 2);
-    CHECK(foot_text(0, "Working") && foot_text(0, "1"));          // Recent counts its working agents (t0k0)
-    CHECK(!foot_text(2, "Working") && ribbon_runs_in(2, NULL, &disc) == 0);   // asking only: no ribbon
-    CHECK(!foot_text(3, "Working") && ribbon_runs_in(3, NULL, &disc) == 0);   // idle
-    CHECK(!find_text("1 asking"));   // (the status bar keeps its "N working")
-    // Two working agents in a tab: the disc says 2.
-    pod_model_turn(&M, "t0k1", "started", NULL, 0, 12);
-    render(30);
-    CHECK(foot_text(1, "2") != NULL && foot_text(0, "2") != NULL);
-}
-static void ribbon_test_bars(void) {
-    ribbon_setup();
-    int seen[3] = {0, 0, 0}, last[3] = {0, 0, 0};
-    int hs[3];
-    static ht_scene_t prev;
-    for (int k = 0; k < 6; k++) {
-        uint32_t now = 900 + (uint32_t)k * 300;
-        render(now);
-        int cnt = S.count;
-        ribbon_runs_in(1, hs, NULL);
-        for (int b = 0; b < 3; b++) { CHECK(hs[b] == 8 || hs[b] == 14 || hs[b] == 20); seen[hs[b] == 8 ? 0 : hs[b] == 14 ? 1 : 2]++; }
-        CHECK(hs[0] != hs[1] && hs[1] != hs[2] && hs[0] != hs[2]);   // three different heights at once
-        if (k) {
-            CHECK(cnt == prev.count);
-            int diff = 0;
-            for (int i = 0; i < cnt; i++) if (memcmp(&S.runs[i], &prev.runs[i], sizeof S.runs[i])) {
-                diff++;
-                CHECK(S.runs[i].pro_kind == K_RECT && S.runs[i].w == 5 && S.runs[i].fg == ht_rgb(0x34c759));   // only bar runs differ
-            }
-            CHECK(diff == 6);                                         // all three bars moved on both ribbons (Recent and Tab0)
-            CHECK(hs[0] != last[0]);
-        }
-        memcpy(&prev, &S, sizeof S);
-        memcpy(last, hs, sizeof hs);
-        render(now + 299);   // within the same step: identical
-        CHECK(!memcmp(&S.runs[0], &prev.runs[0], sizeof S.runs[0]) && S.count == prev.count);
-        { int h2[3]; ribbon_runs_in(1, h2, NULL); CHECK(!memcmp(h2, hs, sizeof hs)); }
-    }
-    CHECK(seen[0] == 6 && seen[1] == 6 && seen[2] == 6);              // each state in each bar's turn
-}
-// 1..24 tabs, every page, working agents everywhere: the same run count in every step, within the budget.
-static void ribbon_test_budget(void) {
-    static const int tabs_for[] = {1, 2, 5, 7, 12, 24};
-    for (int j = 0; j < 6; j++)
-        for (int per = 1; per <= 9; per += 4) {
-            build_shared(tabs_for[j], per);
-            for (int k = 0; k < per; k++) pod_model_turn(&M, ids[0][k], "started", NULL, 0, 10);
-            for (int row = 0; row <= pod_tabs_max_row(&M); row += 2) {
-                pod_nav_init(&N); pod_nav_act(&N, &M, POD_A_SCROLL, row, 0);
-                render(1000);
-                int want = S.count;
-                CHECK(want <= HT_RUNS && F.hit_count <= 32);
-                for (uint32_t t = 1000; t < 3000; t += 100) { render(t); CHECK(S.count == want); }
-                int pl = 0; for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && !strcmp(S.runs[i].text, "Working")) pl++;
-                int covers = 1 + tabs_for[j], first = row * 3, shown = covers - first < 6 ? covers - first : 6;
-                CHECK(pl == shown);                                   // never dropped at rest
-            }
-        }
-}
-
 int main(void) {
-    grid_test_budget();
+    test_list_footer_working();
+    test_tabs_grid_geometry();
+    test_tabs_selected_ring();
+    test_tabs_ribbon_only_when_working();
+    test_tabs_footer_pages();
+    test_tabs_hide_agentless();
+    test_tabs_budget();
+    tabs_test_minis();
     grid_test_six_covers();
-    grid_test_chosen_ring();
-    grid_test_empty_tab();
-    grid_test_recent_face();
     grid_test_scroll();
     grid_test_motion();
     grid_test_motion_budget();
     grid_test_taps();
     grid_test_captions();
-    tab_test_rows();
-    tab_test_empty();
     tabs_test_no_ids();
     tabs_test_default_mark();
     tabs_test_stale_working();
-    ribbon_test_draws();
-    ribbon_test_bars();
-    ribbon_test_budget();
-    render_test_connecting();
-    transport_test_shape();
-    tab_test_many_rows();
+    test_list_no_heading();
+    test_list_five_rows();
+    test_list_meta_words();
+    test_list_long_name_ellipsis();
+    test_list_empty_tab();
+    test_list_budget();
+    render_test_connection_lost();
     printf("test_pod_views_tabs: %d checks ok (most runs in a Tabs frame: %d of %d)\n", checks, max_runs, HT_RUNS);
     return 0;
 }
+

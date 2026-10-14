@@ -361,7 +361,7 @@ static void nav_test_tab_identity(void) {
     static const char *x[] = {"a1", "a2", "a3"}, *y[] = {"a4"};
     const char *const *ids[3] = {NULL, x, y};
     uint8_t cnt[3] = {0, 3, 1};
-    cable_swarm_t it[3] = {{"s0", "Inbox", 0, 0}, {"s1", "Build", 3, 3}, {"s2", "Docs", 1, 1}};
+    cable_swarm_t it[3] = {{"s0", "Inbox", 1, 1}, {"s1", "Build", 3, 3}, {"s2", "Docs", 1, 1}};
     pod_model_swarms(&M, it, ids, cnt, 3, "s1", NULL, 0);
     CHECK(pod_nav_sync(&N, &M).fx == POD_FX_NONE);
     CHECK(N.depth == 3 && N.stack[1].tab == 2 && top()->tab == 2);
@@ -755,7 +755,30 @@ static void nav_test_attention_and_steps(void) {
     CHECK(act(POD_A_FOLLOW, 99, 0).fx == POD_FX_NONE);
 }
 
+static void test_origin_label(void) {
+    fresh();
+    CHECK(!strcmp(pod_nav_origin(&N, &M), "Back"));   // the root
+    to_agent(0, 0);
+    CHECK(!strcmp(pod_nav_origin(&N, &M), "Build"));
+    act(POD_A_TABS, 0, 0);
+    to_agent(1, 0);
+    CHECK(!strcmp(pod_nav_origin(&N, &M), "Docs"));
+    act(POD_A_TABS, 0, 0);
+    act(POD_A_OPEN_TAB, POD_TAB_RECENT, 0);
+    CHECK(!strcmp(pod_nav_origin(&N, &M), "Tabs"));   // the Recent list itself came from Tabs (its view shows "Back")
+    act(POD_A_OPEN_AGENT, 0, 0);
+    CHECK(top()->view != POD_V_TAB && !strcmp(pod_nav_origin(&N, &M), "Recent"));
+    act(POD_A_TABS, 0, 0);
+    act(POD_A_INBOX, 0, 0);
+    CHECK(!strcmp(pod_nav_origin(&N, &M), "Tabs"));   // the Inbox view itself shows "Back"
+    pod_model_unread_add(&M, "a3", "Gamma", "Shipped.", 5, 100);
+    act(POD_A_OPEN_NOTIF, 0, 0);
+    CHECK(top()->view == POD_V_RECAP || top()->view == POD_V_AGENT);
+    CHECK(!strcmp(pod_nav_origin(&N, &M), "Inbox"));
+}
+
 int main(void) {
+    test_origin_label();
     nav_test_grid_scroll();
     nav_test_open_by_state();
     nav_test_prev_next_wrap();

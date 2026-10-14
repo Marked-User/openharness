@@ -540,6 +540,67 @@ class FastUpdates(unittest.TestCase):
             self.assertEqual(restart.call_count, 1)
         self.assertFalse((self.state / 'approved.json').exists())
 
+    def terminal_update(self, ready, daemon='1.1.0', system=False, errors=(), restart=None):
+        """`harness update` against a checked state; returns (exit, printed, update_all mock)."""
+        self.state.mkdir(exist_ok=True)
+        update.write(self.state / 'check.json', {'errors': list(errors)})
+        update.write(self.state / 'system.json', {'available': system})
+        printed = io.StringIO()
+        running = [self.bundled]
+        def apply():
+            if restart:
+                update.RESTART_REQUIRED.write_text(json.dumps({'status': restart}))
+            elif ready:
+                running[0] = ready
+        with patch.object(update, 'check') as check, patch.object(update, 'prepared', return_value=ready), \
+             patch.object(update, 'selected', side_effect=lambda: running[0]), \
+             patch.object(update, 'update_all', side_effect=apply) as update_all, \
+             patch.object(update, 'daemon_version', return_value=daemon), patch('sys.stdout', printed):
+            result = update.main(['update'])
+        self.assertTrue(check.call_args.kwargs['force_system'])
+        return result, printed.getvalue(), update_all
+
+    def test_terminal_update_says_what_runs_when_nothing_is_newer(self):
+        result, printed, update_all = self.terminal_update(None, daemon='1.0.0')
+        self.assertEqual(result, 0)
+        update_all.assert_not_called()
+        self.assertIn('Harness is up to date: hn 1.0.0, CLI 1.0.0, daemon 1.0.0.', printed)
+
+    def test_terminal_update_applies_everything_and_checks_the_daemon_runs_it(self):
+        staged = self.root / 'staged'
+        staged.mkdir()
+        for name in update.FILES:
+            (staged / name).write_bytes(('new ' + name).encode())
+        result, printed, update_all = self.terminal_update(staged)
+        self.assertEqual(result, 0)
+        update_all.assert_called_once()
+        self.assertIn('Updated: hn 1.1.0, CLI 1.1.0, daemon 1.1.0.', printed)
+        with self.assertRaisesRegex(ValueError, 'The daemon runs 1.0.0, not CLI 1.1.0'):
+            self.terminal_update(staged, daemon='1.0.0')
+        with self.assertRaisesRegex(ValueError, 'The daemon runs nothing'):
+            self.terminal_update(staged, daemon=None)
+
+    def test_terminal_update_of_the_system_asks_for_the_restart(self):
+        result, printed, update_all = self.terminal_update(None, system=True, restart='ready')
+        self.assertEqual(result, 0)
+        update_all.assert_called_once()
+        self.assertIn('Restart to finish: systemctl reboot', printed)
+
+    def test_terminal_update_refuses_while_a_restart_is_pending_and_when_nothing_could_be_checked(self):
+        with self.assertRaisesRegex(ValueError, 'could not be checked'):
+            self.terminal_update(None, errors=['offline'])
+        update.RESTART_REQUIRED.write_text('{"status":"ready"}')
+        with self.assertRaisesRegex(ValueError, 'Restart to finish the system update first'):
+            update.update_from_terminal()
+
+    def test_daemon_version_reads_the_runtime_status(self):
+        with patch.object(update, 'urlopen', return_value=Response(b'{"version":"0.3.89","pid":1}')):
+            self.assertEqual(update.daemon_version(), '0.3.89')
+        with patch.object(update, 'urlopen', return_value=Response(b'{"pid":1}')):
+            self.assertIsNone(update.daemon_version())
+        with patch.object(update, 'urlopen', side_effect=OSError('refused')):
+            self.assertIsNone(update.daemon_version())
+
     def test_failed_privileged_update_does_not_authorize_later_activation(self):
         self.state.mkdir()
         update.write(self.state / 'system.json', {'available': True})
@@ -948,10 +1009,17 @@ class RuntimeSupervision(unittest.TestCase):
               ('systemctl', '--user', 'is-active', '--quiet', 'hn-screen.service')]
 
     def restart(self, pids, cli_changed=True):
-        calls = []
+        """Restart against `pids` in turn, the last repeated, on a clock that only sleeping moves."""
+        calls, answers, clock = [], list(pids), [0.0]
+        ask = lambda: answers.pop(0) if len(answers) > 1 else answers[0]
         with patch.object(update, 'run', side_effect=lambda *args, **kwargs: calls.append(args) or ''), \
-             patch.object(update, 'runtime_pids', side_effect=pids):
-            update.restart(cli_changed)
+             patch.object(update, 'runtime_pids', side_effect=ask), \
+             patch.object(update.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(update.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            try:
+                update.restart(cli_changed)
+            finally:
+                self.waited = clock[0]
         return calls
 
     def test_the_units_daemon_is_restarted_and_must_serve_afterwards(self):
@@ -970,6 +1038,15 @@ class RuntimeSupervision(unittest.TestCase):
         for after in [(2288, None), (2288, 43000), (None, 43000), (None, None)]:
             with self.subTest(after=after), self.assertRaisesRegex(ValueError, 'not running under harness-daemon.service'):
                 self.restart([(None, None), after])
+            self.assertGreaterEqual(self.waited, update.RUNTIME_ANSWER_SECONDS, 'it gave the daemon its time first')
+
+    def test_a_daemon_that_answers_a_few_seconds_late_is_activated(self):
+        # 2026-10-13, an Orange Pi: wait-runtime was satisfied, /api/status answered 4 s later, and a
+        # single check at once had rolled the update back.
+        calls = self.restart([(1347, 1347), (None, 43000), (None, 43000), (None, 43000), (43000, 43000)])
+        self.assertEqual(calls, [('systemctl', '--user', 'restart', 'harness-daemon.service'),
+                                 ('/usr/lib/harness-os/wait-runtime',), *self.SCREEN])
+        self.assertEqual(self.waited, 3)
 
     def test_the_unit_bounds_a_stop_and_kills_only_its_main_process(self):
         # The restart above waits for the old core to stop; systemd's default 90 s held an update

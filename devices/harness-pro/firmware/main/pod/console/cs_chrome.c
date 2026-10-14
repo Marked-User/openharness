@@ -20,7 +20,7 @@ void cs_text(ht_scene_t *s, int x, int cy, int w, const ht_pro_font_t *f, unsign
 void cs_dot(ht_scene_t *s, int cx, int cy, char state, uint32_t now_ms)
 {
     (void)now_ms;
-    unsigned rgb = state == 'g' ? CS_RUN : state == 'q' ? CS_ASK : state == 'd' ? CS_MUTED : state == 'r' ? CS_FAIL : 0x33363d;
+    unsigned rgb = state == 'g' ? CS_RUN : state == 'q' ? CS_ASK : state == 'd' ? CS_MUTED : state == 'r' ? CS_FAIL : CS_TRACK;
     ht_pro_rect_aa(s, cx - 6, cy - 6, 12, 12, 6, C(rgb));
 }
 
@@ -62,7 +62,7 @@ static int bell_chip(ht_scene_t *s, int right, int cy, int unread, int *out_x)
     char t[8];
     snprintf(t, sizeof t, "%d", unread);
     int tw = ht_pro_width(&cs_mono_18, t), cw = 10 + 18 + 7 + tw + 10, x = right - cw, y = cy - 15;
-    ht_pro_rect_aa_stroke(s, x, y, cw, 30, 8, C(0x26282d), C(0x15161a));
+    ht_pro_rect_aa_stroke(s, x, y, cw, 30, 8, C(CS_EDGE), C(CS_RAISED));
     const int gx = x + 10, gy = cy - 9;
     ht_pro_rect(s, gx + 7, gy, 4, 3, 1, C(CS_INK));         // the knob
     ht_pro_rect(s, gx + 3, gy + 2, 12, 11, 5, C(CS_INK));   // the dome
@@ -79,7 +79,7 @@ void cs_bar(pod_out_frame_t *f, const char *const crumbs[], int n, int running, 
 {
     ht_scene_t *s = f->scene;
     bool talk = input != NULL;
-    ht_pro_rect(s, 0, 0, POD_W, CS_BAR_H, 0, C(talk ? 0x14122a : 0x0b0c0e));
+    ht_pro_rect(s, 0, 0, POD_W, CS_BAR_H, 0, C(talk ? CS_VOICE_BAR : CS_GROUND));
     ht_pro_rect(s, 0, talk ? CS_BAR_H - 2 : CS_BAR_H - 1, POD_W, talk ? 2 : 1, 0, C(talk ? CS_FOCUS : CS_BORDER));
     const int cy = 36;
     int lw = ht_pro_width(&cs_sb_22, "\xe2\x97\x86");   // ◆
@@ -134,7 +134,7 @@ void cs_bar(pod_out_frame_t *f, const char *const crumbs[], int n, int running, 
         if (x + w > limit) w = limit - x;
         if (w <= 0) break;
         if (!cur) {
-            ht_pro_rect_aa(s, x - 10, cy - 18, w + 20, 36, 8, C(0x121316));
+            ht_pro_rect_aa(s, x - 10, cy - 18, w + 20, 36, 8, C(CS_RAISED));
             pod_hit_add(f, x - 10, 0, w + 20, CS_BAR_H, POD_A_BACK, n - 1 - i);
         }
         text(s, x, cy, w, font, cur ? CS_INK : CS_MUTED, crumbs[i]);
@@ -142,7 +142,7 @@ void cs_bar(pod_out_frame_t *f, const char *const crumbs[], int n, int running, 
         if (!cur) {
             x += 14;
             int sw = ht_pro_width(&cs_rg_24, "/");
-            text(s, x, cy, sw + 2, &cs_rg_24, 0x3a3d44, "/");
+            text(s, x, cy, sw + 2, &cs_rg_24, CS_TRACK, "/");
             x += sw + 14;
         }
     }
@@ -154,24 +154,6 @@ void cs_bar(pod_out_frame_t *f, const char *const crumbs[], int n, int running, 
     if (ask_w) {
         int x0 = ask_x - (bell_w ? CHIP_GAP / 2 : CHIP_REACH), x1 = ask_x + ask_w + 2 * CHIP_REACH;   // to the screen edge: nothing is right of it
         pod_hit_add(f, x0, 0, (x1 > POD_W ? POD_W : x1) - x0, CS_BAR_H, POD_A_ATTENTION, 0);
-    }
-}
-
-void cs_hints(pod_out_frame_t *f, const char *const keys[], const char *const labels[], int n)
-{
-    ht_scene_t *s = f->scene;
-    const int y = POD_W - CS_HINT_H, cy = y + CS_HINT_H / 2;
-    ht_pro_rect(s, 0, y, POD_W, 1, 0, C(CS_BORDER));
-    int x = 24;
-    for (int i = 0; i < n; i++) {
-        int kw = ht_pro_width(&cs_mono_15, keys[i]), cw = kw + 16 + 2;
-        ht_pro_rect_aa_stroke(s, x, cy - 13, cw, 26, 6, C(0x26282d), C(0x15161a));
-        text(s, x + 9, cy, kw + 2, &cs_mono_15, 0xb4b8c0, keys[i]);
-        x += cw + 8;
-        int lw = ht_pro_width(&cs_rg_17, labels[i]);
-        if (x + lw > POD_W - 24) lw = POD_W - 24 - x;
-        if (lw > 0) text(s, x, cy, lw, &cs_rg_17, 0x5f646d, labels[i]);
-        x += lw + 26;
     }
 }
 
@@ -190,3 +172,10 @@ void cs_working_mark(ht_scene_t *s, int x, int y, uint32_t now_ms) { mark(s, x, 
 void cs_working_mark_small(ht_scene_t *s, int x, int y, uint32_t now_ms) { mark(s, x, y, now_ms, 4, 2, 18); }
 
 int cs_runs(const pod_out_frame_t *f) { return f->scene->count; }
+
+unsigned cs_mix(unsigned a, unsigned b, unsigned pct)
+{
+    unsigned r = 0;
+    for (int sh = 0; sh <= 16; sh += 8) r |= ((((a >> sh) & 0xff) * pct + ((b >> sh) & 0xff) * (100 - pct)) / 100) << sh;
+    return r;
+}

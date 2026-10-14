@@ -1,12 +1,13 @@
 #include "pod_draw.h"
 #include <string.h>
+#include "display/pro_canvas.h"
 
 static int imin(int a, int b) { return a < b ? a : b; }
 static int imax(int a, int b) { return a > b ? a : b; }
 
 // Per-kind parameters, packed into run->text.
 typedef struct { int16_t cx16, cy16; uint16_t r16, w16; int16_t ux, uy, cosh; } arc_params_t;
-typedef struct { uint16_t top, bottom; } grad_params_t;
+typedef struct { uint16_t top, bottom; uint8_t aa; } grad_params_t;
 _Static_assert(sizeof(arc_params_t) <= HT_TEXT_BYTES, "arc parameters fit run->text");
 _Static_assert(sizeof(grad_params_t) <= HT_TEXT_BYTES, "gradient parameters fit run->text");
 
@@ -329,9 +330,27 @@ bool pod_grad(ht_scene_t *s, int x, int y, int w, int h, int radius, uint16_t to
     if (!r) return false;
     r->radius = (uint8_t)imin(imax(0, radius), imin(w, h) / 2);
     r->fg = top;
-    grad_params_t p = {top, bottom};
+    grad_params_t p = {top, bottom, 0};
     memcpy(r->text, &p, sizeof p);
     return true;
+}
+void pod_grad_aa(ht_scene_t *s, int x, int y, int w, int h, int radius, uint16_t top, uint16_t bottom)
+{
+    if (!pod_grad(s, x, y, w, h, radius, top, bottom)) return;
+    ht_run_t *r = &s->runs[s->count - 1];
+    grad_params_t p = {top, bottom, 1};
+    memcpy(r->text, &p, sizeof p);
+}
+// A vertical rect of neutral grey, dithered between in the grey levels RGB565 has (r = b, g = 2r + 1), so no channel leads another into a tint.
+void pod_grad_gray(ht_scene_t *s, int x, int y, int w, int h, uint16_t top, uint16_t bottom)
+{
+    if (!pod_grad(s, x, y, w, h, 0, top, bottom)) return;
+    grad_params_t p = {top, bottom, 2};
+    memcpy(s->runs[s->count - 1].text, &p, sizeof p);
+}
+static unsigned luma8(uint16_t v)
+{
+    return ((v >> 11) * 255 / 31 + ((v >> 5) & 63) * 255 / 63 + (v & 31) * 255 / 31) / 3;
 }
 static void grad_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
 {
@@ -343,6 +362,29 @@ static void grad_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
     for (int y = y0; y < y1; y++) {
         int row = y - r->y, dy = row, inset = 0;
         uint16_t ink = mix565(p.bottom, p.top, (unsigned)row, (unsigned)last);
+        if (p.aa == 2) {   // neutral grey, ordered-dithered between the two nearest grey levels (4 x 4 Bayer) so the steps vanish
+            static const uint8_t bayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+            unsigned l0 = luma8(p.top), l1 = luma8(p.bottom);
+            unsigned lq = ((l0 * (unsigned)(last - row) + l1 * (unsigned)row) * 31 * 16 + (unsigned)last * 255 / 2) / ((unsigned)last * 255);
+            uint16_t *d = out + (y - clip.y) * clip.w - clip.x;
+            for (int x = x0; x < x1; x++) {
+                unsigned v = (lq >> 4) + ((lq & 15) > bayer[(y & 3) * 4 + (x & 3)] ? 1 : 0);
+                if (v > 31) v = 31;
+                d[x] = (uint16_t)((v << 11) | ((v ? 2 * v + 1 : 0) << 5) | v);
+            }
+            continue;
+        }
+        if (p.aa == 1) {
+            uint16_t *d = out + (y - clip.y) * clip.w - clip.x;
+            int cy = row < rad ? row : row >= r->pro_height - rad ? r->pro_height - 1 - row : -1;
+            for (int x = x0; x < x1; x++) {
+                int dx = x - r->x, cx = dx < rad ? dx : dx >= r->w - rad ? r->w - 1 - dx : -1;
+                unsigned cov = cx < 0 || cy < 0 ? 16 : ht_pro_corner_cover(rad, cx, cy);
+                if (cov >= 16) d[x] = ink;
+                else if (cov) d[x] = ht_pro_over(ink, d[x], cov * 255 / 16);
+            }
+            continue;
+        }
         if (dy >= r->pro_height - rad) dy = r->pro_height - 1 - dy;
         if (dy < rad) {
             int vertical = rad - 1 - dy;

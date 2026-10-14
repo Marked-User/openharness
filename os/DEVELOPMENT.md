@@ -366,7 +366,9 @@ so their layout and pane references survive reconnects without a cloud account.
 Signed in (`HARNESS_TUI_DESK_SIGNED_IN=sync`), this computer's windows join the
 account's shared tabs, as the desktop app's do at sign-in, under the names the
 app shows. On sign-out the harnesses running on this computer stay in their
-windows; another machine's go with the account. An older hn reads `off` alone. These settings are confined to
+windows; another machine's go with the account. An older hn reads `off` alone. A
+screen unit that sets `HARNESS_TUI_DESK_SIGNED_IN` keeps its value; the VM tests,
+whose computers share one account, set it `off`. These settings are confined to
 the OS launcher; ordinary hn installs are unchanged.
 
 The installed system keeps hn's standard status bar. Super+u records an update

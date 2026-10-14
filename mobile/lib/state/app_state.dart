@@ -1,3 +1,7 @@
+import '../core/test_run.dart';
+import '../measurement/product_measurement.dart';
+import '../measurement/setup_transport.dart';
+
 import 'dart:async';
 import 'dart:math' show Random;
 
@@ -268,6 +272,8 @@ class AppNotifier extends ChangeNotifier {
   final AuthSession session;
   AppConfig config;
   late ApiClient api;
+  late final ProductMeasurement productMeasurement;
+  final _measurementConnections = <String, void Function(ProductOutcome)>{};
 
   /// Says whether this device is signed in, and signs it out: [ViewerServices.login], the app's own
   /// session. The name is the desktop's, where the harness CLI holds the session instead.
@@ -1036,6 +1042,7 @@ class AppNotifier extends ChangeNotifier {
     required AuthSession authSession,
     ConfigStore? configStore,
     this.connectionForTest,
+    ProductMeasurement? productMeasurement,
     SignInClient? cliLogin,
     PeerLinkClient? peerLinks,
     ViewerServices? viewer,
@@ -1089,7 +1096,56 @@ class AppNotifier extends ChangeNotifier {
     _groupSyncOverride = groupSync;
     _autonomousEnv = this.config.autonomousEnv;
     api = _newApiClient();
+    this.productMeasurement =
+        productMeasurement ??
+        ProductMeasurement(
+          surface: kIsWeb ? 'web' : 'phone',
+          automatic: !kUnderTest,
+          sendSetup: (report) =>
+              sendSetupMeasurement(this.config.apiBaseUrl, report),
+        );
+    addListener(_syncProductMeasurement);
     _initDeviceLog();
+  }
+
+  void _syncProductMeasurement() {
+    final scope =
+        !signingIn &&
+            status == AppStatus.authenticated &&
+            currentUser?.id != null
+        ? (api, currentUser!.id)
+        : null;
+    productMeasurement.account(
+      scope,
+      choice: () => api.productUsageSettings(),
+      send: api.productUsageReport,
+    );
+    if (scope == null) _measurementConnections.clear();
+  }
+
+  // Connection keys already belong to the app. Only fixed outcomes reach measurement, never the key.
+  void _measureConnection(
+    String key,
+    ConnectionStatus status,
+    ProductFlow flow,
+  ) {
+    if (status == ConnectionStatus.connecting ||
+        status == ConnectionStatus.reconnecting) {
+      if (_measurementConnections.length < 64) {
+        _measurementConnections.putIfAbsent(
+          key,
+          () => productMeasurement.begin(flow),
+        );
+      }
+    } else {
+      _measurementConnections
+          .remove(key)
+          ?.call(
+            status == ConnectionStatus.connected
+                ? ProductOutcome.ok
+                : ProductOutcome.failed,
+          );
+    }
   }
 
   /// Straight to the backend, signed with this app's own session.
@@ -1669,6 +1725,7 @@ class AppNotifier extends ChangeNotifier {
   }) async {
     final login = viewer.emailLogin;
     if (_disposed || signingIn) return;
+    final measureSignIn = productMeasurement.begin(ProductFlow.signIn);
     final revision = _invalidateAuthWork();
     _closedHistory.clear();
     _lastError = null;
@@ -1678,15 +1735,22 @@ class AppNotifier extends ChangeNotifier {
     try {
       await login.signIn(email: email, code: code);
       if (!_authWorkCurrent(revision)) return;
+      measureSignIn(ProductOutcome.ok);
       status = AppStatus.bootstrapping;
       notifyListeners();
       await _enterSignedIn(revision);
     } catch (_) {
+      measureSignIn(ProductOutcome.failed);
       if (_authWorkCurrent(revision)) {
         status = AppStatus.unauthenticated;
       }
       rethrow;
     } finally {
+      measureSignIn(
+        _authWorkCurrent(revision)
+            ? ProductOutcome.unknown
+            : ProductOutcome.cancelled,
+      );
       if (_authWorkCurrent(revision)) {
         signingIn = false;
         notifyListeners();
@@ -1700,6 +1764,7 @@ class AppNotifier extends ChangeNotifier {
   Future<void> signInWithScan(String code) async {
     final login = viewer.emailLogin;
     if (_disposed || signingIn) return;
+    final measureSignIn = productMeasurement.begin(ProductFlow.signIn);
     final revision = _invalidateAuthWork();
     _closedHistory.clear();
     _lastError = null;
@@ -1709,15 +1774,22 @@ class AppNotifier extends ChangeNotifier {
     try {
       await login.signInWithScan(code, label: phoneClientDescriptor().name);
       if (!_authWorkCurrent(revision)) return;
+      measureSignIn(ProductOutcome.ok);
       status = AppStatus.bootstrapping;
       notifyListeners();
       await _enterSignedIn(revision);
     } catch (_) {
+      measureSignIn(ProductOutcome.failed);
       if (_authWorkCurrent(revision)) {
         status = AppStatus.unauthenticated;
       }
       rethrow;
     } finally {
+      measureSignIn(
+        _authWorkCurrent(revision)
+            ? ProductOutcome.unknown
+            : ProductOutcome.cancelled,
+      );
       if (_authWorkCurrent(revision)) {
         signingIn = false;
         notifyListeners();
@@ -2034,7 +2106,10 @@ class AppNotifier extends ChangeNotifier {
       );
       if (!current()) return;
       if (registration == DeviceLogRegistration.frozen) {
-        appLog.info('link', '$short refused ($reason): the device list is frozen');
+        appLog.info(
+          'link',
+          '$short refused ($reason): the device list is frozen',
+        );
         // The machine's password form says so (deviceListNeedsReview), from the listing.
         unawaited(_syncPendingDevices());
         _trustRounds[machineId] = _trustSettleRounds;
@@ -2045,7 +2120,10 @@ class AppNotifier extends ChangeNotifier {
         return;
       }
       if (registration == DeviceLogRegistration.registered) {
-        appLog.info('link', '$short refused ($reason): this phone joined the device list');
+        appLog.info(
+          'link',
+          '$short refused ($reason): this phone joined the device list',
+        );
       }
       final pinned = await _holdsMachineKey(machineId);
       if (!current()) return;
@@ -2150,6 +2228,11 @@ class AppNotifier extends ChangeNotifier {
     final settling =
         nextStatus == ConnectionStatus.disconnected &&
         _trustSettling.contains(machineId);
+    _measureConnection(
+      machineId,
+      settling ? ConnectionStatus.connecting : nextStatus,
+      ProductFlow.remoteConnect,
+    );
     machine.connectionStatus = settling
         ? ConnectionStatus.connecting
         : nextStatus;
@@ -2296,7 +2379,9 @@ class AppNotifier extends ChangeNotifier {
   /// fact the log keeps itself ([_beginDeviceLogSignIn]), never something the backend says, so
   /// there is nothing to read first.
   void _registerDeviceLog(int revision) {
-    if (!_authWorkCurrent(revision) || status != AppStatus.authenticated || _deviceLogRegistered == revision) {
+    if (!_authWorkCurrent(revision) ||
+        status != AppStatus.authenticated ||
+        _deviceLogRegistered == revision) {
       return;
     }
     _deviceLogRegistered = revision;
@@ -2740,29 +2825,38 @@ class AppNotifier extends ChangeNotifier {
     void Function(String stage)? onProgress,
   }) async {
     if (password.isEmpty) return 'Enter the remote password first';
-    final result = await peerLinks.connect(
-      machineId,
-      password,
-      onProgress: onProgress,
-      displayName: machineStates[machineId]?.machine.displayName,
-      label: phoneClientDescriptor().name,
-    );
-    if (result.error != null) return result.error;
-    final targetId = result.linkedMachineId ?? machineId;
-    final state = machineStates[targetId];
-    // Already in by another way meanwhile — see [_keepsOpenConnection]: nothing to redial.
-    if (state != null && !_keepsOpenConnection(state)) {
-      state.needsLink = false;
-      state.agentLoadStatus = AgentLoadStatus.idle;
-      notifyListeners();
-      // The old WsConn closed itself permanently on NO_PEER_LINK — connFor() would otherwise see a
-      // matching endpointKey and hand back that dead connection instead of dialing a fresh one.
-      await _pool?.closeMachine(targetId);
-      _connectMachine(state);
+    final finish = productMeasurement.begin(ProductFlow.computerLink);
+    try {
+      final result = await peerLinks.connect(
+        machineId,
+        password,
+        onProgress: onProgress,
+        displayName: machineStates[machineId]?.machine.displayName,
+        label: phoneClientDescriptor().name,
+      );
+      finish(result.error == null ? ProductOutcome.ok : ProductOutcome.failed);
+      if (result.error != null) return result.error;
+      final targetId = result.linkedMachineId ?? machineId;
+      final state = machineStates[targetId];
+      // Already in by another way meanwhile — see [_keepsOpenConnection]: nothing to redial.
+      if (state != null && !_keepsOpenConnection(state)) {
+        state.needsLink = false;
+        state.agentLoadStatus = AgentLoadStatus.idle;
+        notifyListeners();
+        // The old WsConn closed itself permanently on NO_PEER_LINK — connFor() would otherwise see a
+        // matching endpointKey and hand back that dead connection instead of dialing a fresh one.
+        await _pool?.closeMachine(targetId);
+        _connectMachine(state);
+      }
+      // One password, the whole group: this machine learns the phone's other machines, and they it.
+      unawaited(_syncGroup(targetId, spread: true));
+      return null;
+    } catch (_) {
+      finish(ProductOutcome.failed);
+      rethrow;
+    } finally {
+      finish(ProductOutcome.unknown);
     }
-    // One password, the whole group: this machine learns the phone's other machines, and they it.
-    unawaited(_syncGroup(targetId, spread: true));
-    return null;
   }
 
   // -- the account's devices: the device key log (viewer/device_log_sync.dart) --------------------
@@ -2873,7 +2967,11 @@ class AppNotifier extends ChangeNotifier {
 
   /// [confirm]: "It's mine" for the one device named — the account's other devices are told too, and
   /// stop showing it as new.
-  Future<void> _dismissInLog({String? pub, List<String>? pubs, bool confirm = false}) async {
+  Future<void> _dismissInLog({
+    String? pub,
+    List<String>? pubs,
+    bool confirm = false,
+  }) async {
     final log = _deviceLog;
     if (log == null) return;
     try {
@@ -2890,7 +2988,10 @@ class AppNotifier extends ChangeNotifier {
       // This phone's own key rides each read, so the backend counts it as used (not as abandoned).
       fetch: (since) async => api.deviceKeys(
         since,
-        self: await viewer.keys.identity().then<String?>((i) => b64e(i.pub), onError: (Object _) => null),
+        self: await viewer.keys.identity().then<String?>(
+          (i) => b64e(i.pub),
+          onError: (Object _) => null,
+        ),
       ),
       append: (entry) => api.appendDeviceKey(entry),
       // "It's mine", once for the account: read what other devices confirmed, share what this one does.
@@ -3065,11 +3166,13 @@ class AppNotifier extends ChangeNotifier {
     if (deviceRemovals.any((r) => r.pub == n.pub)) return;
     deviceRemovals.add(n);
     devicesRevision++;
-    unawaited(agentNotices.system.showAccountNotice(
-      key: n.red ? 'removedBy:${n.signer}:${n.pub}' : 'removed:${n.pub}',
-      title: n.title,
-      body: n.sentence,
-    ));
+    unawaited(
+      agentNotices.system.showAccountNotice(
+        key: n.red ? 'removedBy:${n.signer}:${n.pub}' : 'removed:${n.pub}',
+        title: n.title,
+        body: n.sentence,
+      ),
+    );
     if (!_disposed) notifyListeners();
   }
 
@@ -3097,10 +3200,14 @@ class AppNotifier extends ChangeNotifier {
     } catch (_) {
       return;
     }
-    if (_disposed || gen != _pendingSyncGen || status != AppStatus.authenticated) return;
+    if (_disposed ||
+        gen != _pendingSyncGen ||
+        status != AppStatus.authenticated)
+      return;
     final frozen = listing.frozen != null;
     final tooMany = listing.registerError == 'TOO_MANY';
-    final frozenChanged = frozen != _deviceListFrozen || tooMany != _deviceListTooMany;
+    final frozenChanged =
+        frozen != _deviceListFrozen || tooMany != _deviceListTooMany;
     _deviceListFrozen = frozen;
     _deviceListTooMany = tooMany;
     final pending = listing.pending.toSet();
@@ -3121,9 +3228,14 @@ class AppNotifier extends ChangeNotifier {
       for (final d in listing.departed)
         if (!_failedDismissals.contains(d.pub)) d,
     ];
-    final same = listEquals([for (final m in next) m.pub], [for (final m in newDevices) m.pub]);
-    final sameDeparted =
-        listEquals([for (final d in nextDeparted) d.pub], [for (final d in departedDevices) d.pub]);
+    final same = listEquals(
+      [for (final m in next) m.pub],
+      [for (final m in newDevices) m.pub],
+    );
+    final sameDeparted = listEquals(
+      [for (final d in nextDeparted) d.pub],
+      [for (final d in departedDevices) d.pub],
+    );
     if (same && sameDeparted && !frozenChanged) return;
     newDevices
       ..clear()
@@ -3159,7 +3271,8 @@ class AppNotifier extends ChangeNotifier {
 
   /// The account's devices as this phone verified them. A seam of its own so a test can answer
   /// without a real device log.
-  Future<DeviceLogListing> deviceListing() async => await _deviceLog?.list() ?? DeviceLogListing.empty;
+  Future<DeviceLogListing> deviceListing() async =>
+      await _deviceLog?.list() ?? DeviceLogListing.empty;
 
   DateTime? _deviceLogReadAt;
 
@@ -3170,7 +3283,9 @@ class AppNotifier extends ChangeNotifier {
     final log = _deviceLog;
     if (log == null) return;
     final now = DateTime.now();
-    if (_deviceLogReadAt case final last? when now.difference(last) < const Duration(seconds: 30)) return;
+    if (_deviceLogReadAt case final last?
+        when now.difference(last) < const Duration(seconds: 30))
+      return;
     _deviceLogReadAt = now;
     unawaited(log.ensureRegistered());
   }
@@ -3182,14 +3297,20 @@ class AppNotifier extends ChangeNotifier {
   /// [shown] is the banner's set as it was when the list was read: pass it when the page awaited
   /// anything in between, or a device announced meanwhile — never shown — would be dismissed unseen.
   /// Without it, the banner as it is now.
-  void seenNewDevices({Iterable<String> pending = const [], Iterable<String>? shown}) {
+  void seenNewDevices({
+    Iterable<String> pending = const [],
+    Iterable<String>? shown,
+  }) {
     final bannerPubs = (shown ?? newDevices.map((d) => d.pub)).toList();
     if (bannerPubs.isEmpty && pending.isEmpty) return;
     // Exactly what was shown, never "all": a device added since (and not yet shown) stays pending.
     // And a device that left before anyone looked is cleared by its own "Got it" only: opening the
     // list is not that.
     final departed = {for (final d in departedDevices) d.pub};
-    final marked = {...pending, ...bannerPubs}.where((p) => !departed.contains(p)).toList();
+    final marked = {
+      ...pending,
+      ...bannerPubs,
+    }.where((p) => !departed.contains(p)).toList();
     // Nothing marked: a read of `pending` under way (the one a startup replay starts, which takes a
     // departed key's stale "New device" down) is not stale — let it land.
     if (marked.isEmpty) return;
@@ -3215,7 +3336,11 @@ class AppNotifier extends ChangeNotifier {
       return;
     }
     _pendingSyncGen++;
-    unawaited(liftSuspension ? _dismissInLog(pub: pub, confirm: true) : _dismissInLog(pubs: [pub], confirm: true));
+    unawaited(
+      liftSuspension
+          ? _dismissInLog(pub: pub, confirm: true)
+          : _dismissInLog(pubs: [pub], confirm: true),
+    );
     notifyListeners();
   }
 
@@ -3231,7 +3356,8 @@ class AppNotifier extends ChangeNotifier {
   /// Every add and remove on the account as this phone verified it. A seam of its own so a test can
   /// answer without a real device log.
   Future<DeviceLogHistory> deviceHistory() async =>
-      await _deviceLog?.history() ?? const DeviceLogHistory(rows: [], complete: false);
+      await _deviceLog?.history() ??
+      const DeviceLogHistory(rows: [], complete: false);
 
   /// Take [pub] out of the account on every device. Null when done, else why not.
   Future<String?> removeDevice(String pub) async {
@@ -3357,23 +3483,32 @@ class AppNotifier extends ChangeNotifier {
   /// Pairs with [machineId] by the one-time code its desktop app showed, then reconnects it — the
   /// QR's way in, where [connectWithPassword] is the password's. Null on success, or what to show.
   Future<String?> connectWithCode(String machineId, String code) async {
-    final result = await peerLinks.connectWithCode(
-      machineId,
-      code,
-      label: phoneClientDescriptor().name,
-      displayName: machineStates[machineId]?.machine.displayName,
-    );
-    if (result.error != null) return result.error;
-    final state = machineStates[result.linkedMachineId ?? machineId];
-    if (state != null && !_keepsOpenConnection(state)) {
-      state.needsLink = false;
-      state.agentLoadStatus = AgentLoadStatus.idle;
-      notifyListeners();
-      await _pool?.closeMachine(state.machine.machineId);
-      _connectMachine(state);
+    final finish = productMeasurement.begin(ProductFlow.computerLink);
+    try {
+      final result = await peerLinks.connectWithCode(
+        machineId,
+        code,
+        label: phoneClientDescriptor().name,
+        displayName: machineStates[machineId]?.machine.displayName,
+      );
+      finish(result.error == null ? ProductOutcome.ok : ProductOutcome.failed);
+      if (result.error != null) return result.error;
+      final state = machineStates[result.linkedMachineId ?? machineId];
+      if (state != null && !_keepsOpenConnection(state)) {
+        state.needsLink = false;
+        state.agentLoadStatus = AgentLoadStatus.idle;
+        notifyListeners();
+        await _pool?.closeMachine(state.machine.machineId);
+        _connectMachine(state);
+      }
+      unawaited(_syncGroup(result.linkedMachineId ?? machineId, spread: true));
+      return null;
+    } catch (_) {
+      finish(ProductOutcome.failed);
+      rethrow;
+    } finally {
+      finish(ProductOutcome.unknown);
     }
-    unawaited(_syncGroup(result.linkedMachineId ?? machineId, spread: true));
-    return null;
   }
 
   /// Whether a machine just linked (by password or code) is already connected — let in meanwhile
@@ -8450,6 +8585,8 @@ class AppNotifier extends ChangeNotifier {
 
   @override
   void dispose() {
+    productMeasurement.dispose();
+    _measurementConnections.clear();
     _disposed = true;
     // A sign-in page still up has nobody left to come back to: its listener goes.
     if (signInProvider != null) viewer.login.cancel();

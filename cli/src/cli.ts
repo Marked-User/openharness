@@ -40,7 +40,8 @@ import { registry } from './lib/registry.js'
 import { readSafeModeMarker } from './lib/daemonSafeMode.js'
 import { SpawnLockBusyError, describeSpawnLockBusyPlainly, describeSpawnLockFailure, describeSpawnLockOwner, describeSpawnLockWaitPlainly, withSpawnLock } from './lib/daemonSpawnLock.js'
 import { stopDaemonProcess } from './lib/daemonStop.js'
-import { installedPlatform, serviceDefinition, startUnderPlatform } from './lib/platformDaemon.js'
+import { installedPlatform, osDaemonUnit, serviceDefinition, startUnderPlatform } from './lib/platformDaemon.js'
+import { askRuntimePort, readCgroup, takeRuntimeBack } from './lib/osUnitTakeover.js'
 import { serviceCommand, serviceCommandDeps } from './lib/serviceCommand.js'
 import { flashCommand } from './lib/flash.js'
 import { awaitLoginCallback, extractCallbackParams, LOGIN_TIMEOUT_MESSAGE, type LoginCallbackParams } from './lib/loginCallback.js'
@@ -69,7 +70,7 @@ import { describeMasterStatus, readStatusFile } from './harnessd/master.js'
 import { namedNode } from './harnessd/processName.js'
 import { probeThisMaster, startMaster, startMasterInForeground } from './masterProcess.js'
 import { startServiceProcess } from './serviceProcess.js'
-import { isLocalSocketName, localSocketPath, refuseServedDataFolder } from './lib/localSocket.js'
+import { askDataFolderServer, isLocalSocketName, localSocketPath, refuseServedDataFolder } from './lib/localSocket.js'
 import { legacyDaemonStatus, localDaemonStatus } from './lib/daemonEndpoint.js'
 import { runAutonomousDeviceCommand } from './lib/autonomous-device/command.js'
 import { E2eeStore, identitySpent, peekIdentityPub } from './lib/e2ee/store.js'
@@ -89,6 +90,7 @@ import { ensureManagedGrid, ensureManagedRuntime } from './lib/runtimeInstall.js
 // which silently costs the daemon every pane it would have discovered. See lib/childLocale.ts.
 ensureUtf8Locale()
 import { prepareLogFile } from './lib/log.js'
+import { privacyCommand } from './lib/privacyCommand.js'
 
 
 // Daemon stdout/stderr. Capped at LOG_MAX_BYTES — see prepareLogFile/trimLogFile in lib/log.ts.
@@ -115,6 +117,7 @@ Machine:
   harness login --json         emit machine-readable NDJSON instead of opening a browser (for GUI clients)
   harness login --entry-point=desktop   record which surface started the sign-in (GUI clients; default cli)
   harness auth status --json   print {loggedIn,...} for this computer's saved session
+  harness privacy status|on|off   view or change product usage sharing for this account
   harness start                start the adapter using the saved SSO session
   harness start -f             run the daemon in the FOREGROUND (for a supervisor; logs to stdout): harnessd's
                                master, as launchd and systemd run it, its core and services its children
@@ -1386,6 +1389,23 @@ async function launch(foreground: boolean, repair: boolean = false): Promise<voi
     const repaired = await repairManagedRuntimes(foreground)
     if (repaired) runtimeNode = repaired
   }
+  // Harness OS: run by harness-daemon.service, first take the runtime back from a daemon an older CLI
+  // started outside the unit, or this start finds it taken and the unit restarts in vain (osUnitTakeover.ts).
+  if (foreground && osDaemonUnit(process.platform, process.env)) {
+    const socket = localSocketPath(env.ADAPTER_DATA_DIR, env.PORT)
+    await takeRuntimeBack({
+      who: async () => {
+        const server = socket ? await askDataFolderServer(socket, 1_000) : 'none'
+        return typeof server === 'object' ? server : askRuntimePort(daemonPort())
+      },
+      cgroupOf: readCgroup,
+      alive: (pid) => isAlive(pid),
+      signal: (pid, signal) => process.kill(pid, signal),
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      now: () => Date.now(),
+      log: (line) => console.log(line),
+    })
+  }
   // Foreground mode (a supervisor: launchd, systemd, a terminal) → harnessd's master in this process, as
   // launchd and systemd run it, the core its child. The core ran here on its own before, and a core with no
   // master must hand each update over itself (core/updateHandoff.ts). HARNESS_NO_MASTER=1 still runs the
@@ -2496,6 +2516,9 @@ if (cmd === 'version' || cmd === '--version' || cmd === '-v') { console.log(VERS
 
 
 switch (cmd) {
+  case 'privacy':
+    privacyCommand(args[0], flags.includes('--json')).catch(onError)
+    break
   case 'send':
     sendCommand(rest).then(code => { process.exitCode = code }).catch(onError)
     break

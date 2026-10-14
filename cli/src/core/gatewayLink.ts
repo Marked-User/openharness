@@ -59,6 +59,9 @@ export interface GatewayLinkDeps {
  *  remote clients would wait in the core's memory meanwhile. */
 export const GATEWAY_BUFFER_LIMIT = 16 * 1024 * 1024
 
+/** Optional counters yield long before relay traffic does. Never queue measurements for a restart. */
+export const GATEWAY_USAGE_BUFFER_LIMIT = 64 * 1024
+
 /** How long a pairing may take: the code is typed on one screen and checked over the relay, round by round. */
 export const PAIR_WAIT_MS = 120_000
 
@@ -174,6 +177,8 @@ export function createGatewayLink(deps: GatewayLinkDeps) {
   }
 
   const port: GatewayPort = {
+    usageLaunch: (signal) => { if (deps.buffered() < GATEWAY_USAGE_BUFFER_LIMIT) send('usageLaunch', { signal }) },
+    usageCounter: (metric) => { if (deps.buffered() < GATEWAY_USAGE_BUFFER_LIMIT) send('usageCounter', { metric }) },
     connect: () => { dial = 'connect'; need(); send('connect') },
     serveThisComputerOnly: () => { dial = 'local'; send('thisComputerOnly') },
     holdRequests: () => { requestsOpen = false; send('hold') },

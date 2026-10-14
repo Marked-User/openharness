@@ -34,6 +34,7 @@ enum SettingsSection {
     ],
   ),
   notifications(AppIcons.bell, 'Notifications'),
+  privacy(AppIcons.shieldCheck, 'Privacy'),
   shortcuts(AppIcons.keyboard, 'Keyboard shortcuts'),
   connectors(AppIcons.plug, 'Connectors'),
   usage(AppIcons.chartNoAxesColumn, 'Usage'),
@@ -118,6 +119,7 @@ const _kSettingsGroups = [
     // work — and NOT inside it, which is where the alert switch started. A sound is not a look,
     // and somebody turning one off does not think to look under Appearance for it.
     SettingsSection.notifications,
+    SettingsSection.privacy,
     SettingsSection.shortcuts,
   ]),
   // What agents may do with Harness is the account's: Labs ▸ Experimental (owner, 2026-10-12).

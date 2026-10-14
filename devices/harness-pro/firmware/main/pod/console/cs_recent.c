@@ -14,7 +14,7 @@ enum { PADX = 24, LOGO = 44, TEXT_X = PADX + LOGO + 16 };
 // (its recap's first line, or the activity). Colours follow the state.
 static const char *line_of(const pod_agent_t *a, pod_state_t st, unsigned *rgb)
 {
-    *rgb = 0xa3a7af;
+    *rgb = CS_MUTED;
     if (st == POD_ASKING && a->question[0]) { *rgb = CS_ASK; return a->question; }
     if (st == POD_WORKING && a->activity[0]) return a->activity;
     if (a->failed) *rgb = CS_FAIL;
@@ -36,11 +36,11 @@ int cs_rows(pod_out_frame_t *f, const pod_model_t *m, const pod_agent_t *const l
     for (int i = 0; i < CS_ROWS_MAX && first + i < n; i++, drawn++) {
         const pod_agent_t *a = list[first + i];
         pod_state_t st = pod_model_eff(m, a);
-        const int y = CS_ROWS_TOP + i * CS_ROW_H, cy = y + 36, right = POD_W - PADX;
-        cs_logo(s, PADX, y + 20, LOGO, a->engine);
+        const int y = CS_ROWS_TOP + i * CS_ROW_H, cy = y + 34, right = POD_W - PADX;
+        cs_logo(s, PADX, y + 18, LOGO, a->engine);
 
         char t[12] = "";   // an unknown time draws nothing
-        unsigned tc = 0x5f646d;
+        unsigned tc = CS_DIM;
         if (st == POD_ASKING) { snprintf(t, sizeof t, "ask"); tc = CS_ASK; }
         else if (st == POD_WORKING) { pod_fmt_time(t, sizeof t, pod_agent_secs(a, now_ms)); tc = CS_RUN; }
         else if (a->elapsed_s) pod_fmt_time(t, sizeof t, pod_agent_secs(a, now_ms));
@@ -58,14 +58,14 @@ int cs_rows(pod_out_frame_t *f, const pod_model_t *m, const pod_agent_t *const l
         if (tab_col) {
             const pod_tab_t *tab = pod_tab_of(m, a);
             const char *where = tab ? tab->name : a->machine;
-            if (avail - nw - 10 > 20) cs_text(s, x + nw + 10, cy, avail - nw - 10, &cs_rg_22, 0x5f646d, where);
+            if (avail - nw - 10 > 20) cs_text(s, x + nw + 10, cy, avail - nw - 10, &cs_rg_22, CS_DIM, where);
         }
 
         unsigned lc;
         char line[POD_ACTIVITY_BYTES];
         one_line(line, sizeof line, line_of(a, st, &lc));
-        cs_text(s, TEXT_X, y + 76, right - TEXT_X, &cs_rg_27, lc, line);
-        ht_pro_rect(s, 0, y + CS_ROW_H - 1, POD_W, 1, 0, C(0x15161a));
+        cs_text(s, TEXT_X, y + 72, right - TEXT_X, &cs_rg_27, lc, line);
+        ht_pro_rect(s, 0, y + CS_ROW_H - 1, POD_W, 1, 0, C(CS_RAISED));
         pod_hit_add_id(f, 0, y, POD_W, CS_ROW_H, POD_A_OPEN_AGENT, first + i, a->id);
     }
     return drawn;
@@ -73,6 +73,8 @@ int cs_rows(pod_out_frame_t *f, const pod_model_t *m, const pod_agent_t *const l
 
 int cs_rows_max(const pod_nav_t *nav, const pod_model_t *m)
 {
+    const pod_frame_t *f = nav->depth ? &nav->stack[nav->depth - 1] : NULL;
+    if (f && f->tab != POD_TAB_RECENT) return cs_tab_pages(nav, m) - 1;   // a tab's cards: the frame's scroll is the page
     const pod_agent_t *list[POD_AGENTS_MAX];
     int n = pod_nav_list(nav, m, list, POD_AGENTS_MAX);
     return n > CS_ROWS_MAX ? n - CS_ROWS_MAX : 0;
@@ -85,8 +87,6 @@ void cs_view_recent(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, ui
     cs_counts(m, &running, &asking);
     const char *const crumbs[] = {"Overview", "Recent"};
     cs_bar(f, crumbs, 2, running, asking, cs_unread(m), NULL, now_ms);
-    const char *const keys[] = {"tap", "\xe2\x86\x90 \xe2\x86\x92", "\xe2\x86\x91", "\xe2\x86\x93"}, *const labels[] = {"open", "tabs", "back", "home"};
-    cs_hints(f, keys, labels, 4);
 
     const pod_agent_t *list[POD_AGENTS_MAX];
     int n = pod_nav_list(nav, m, list, POD_AGENTS_MAX);

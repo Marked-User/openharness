@@ -16,6 +16,9 @@ unsigned pod_pet_runs(const char *engine, pod_scene_t scene);
 // started_ms and holds its last step.
 void pod_pet_draw(ht_scene_t *s, int x, int y, int side, const char *engine, pod_scene_t scene,
                   uint32_t clock_ms, uint32_t started_ms);
+// The same on a ground of ground_rgb (0xRRGGBB): the listening waves fade toward it instead of white.
+void pod_pet_draw_on(ht_scene_t *s, int x, int y, int side, const char *engine, pod_scene_t scene,
+                     uint32_t clock_ms, uint32_t started_ms, uint32_t ground_rgb);
 #define POD_PET_STEP_MS 33   // 1000 / 30: the frame rate of anything drawn in code from the clock
 #define POD_CS_ANIM_MS 66    // Console: the equaliser, the spinner and the working mark (about 15 fps; a new height every 66 ms)
 #define POD_CS_WAVE_MS 100   // Console: the voice wave (square bars)

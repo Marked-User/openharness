@@ -17,7 +17,15 @@ pub struct State {
     wifi_pane: Option<u64>,
     install_tab: Option<String>,
     wifi_tab: Option<String>,
+    /// The Wi-Fi form was opened for this spell offline; closed, it is not forced on again until the
+    /// computer has been online and lost its network once more.
+    offline_offered: bool,
+    /// When this spell offline began: a boot whose network is still coming up is not one.
+    offline_since: Option<std::time::Instant>,
 }
+
+/// How long the network must stay gone before the Wi-Fi form comes forward by itself.
+pub const OFFLINE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub fn live(app: &App) -> bool { app.os_session && app.os_live && !app.headless }
 
@@ -35,6 +43,51 @@ pub fn entry_wifi(app: &App) -> Option<u64> {
 pub fn tick(app: &mut App) {
     if !app.os_session || app.tick % 8 != 0 { return }
     app.os_welcome.welcome_panes.retain(|id| app.panes.contains_key(id));
+    if !app.os_live && !app.headless {
+        offer_wifi(app, online(&read("/proc/net/route"), &read("/proc/net/ipv6_route")), std::time::Instant::now());
+    }
+}
+
+fn read(path: &str) -> String { std::fs::read_to_string(path).unwrap_or_default() }
+
+/// With the network gone, the Wi-Fi form comes forward by itself, once per spell offline, after the
+/// grace a boot or a roaming hop needs. On required sign-in it covers the sign-in page and closes back
+/// to it when it connects; signed in, it is a tab like Super+w's, and local work stays a tab away.
+/// Never in the middle of a sign-in, and never before this computer's daemon can run the form.
+pub fn offer_wifi(app: &mut App, online: bool, now: std::time::Instant) {
+    if online {
+        app.os_welcome.offline_offered = false;
+        app.os_welcome.offline_since = None;
+        return
+    }
+    let since = *app.os_welcome.offline_since.get_or_insert(now);
+    if app.os_welcome.offline_offered || now.duration_since(since) < OFFLINE_GRACE { return }
+    if crate::account::entry_required(app) {
+        if entry_wifi(app).is_some() || !crate::account::entry_idle(app) { return }
+    } else if app.read_only() || wifi_open(app) {
+        return
+    }
+    if app.link(&crate::input::shell_machine(app, None)).is_none() { return }
+    app.os_welcome.offline_offered = true;
+    local_dialog(app, "Wi-Fi", "/usr/bin/hn-os wifi", false);
+}
+
+/// The Wi-Fi form is already somewhere in the workspace: offering it again would only steal focus.
+fn wifi_open(app: &App) -> bool {
+    app.os_welcome.wifi_pane.is_some_and(|id| app.panes.get(&id).is_some_and(|pane| pane.dead.is_none()))
+}
+
+/// A route out of this computer: a default route, IPv4 or IPv6, on an interface that is up and not
+/// loopback (`/proc/net/route`, `/proc/net/ipv6_route`), which NetworkManager sets once it connects.
+pub fn online(v4: &str, v6: &str) -> bool {
+    let up = |flags: &str| u32::from_str_radix(flags, 16).is_ok_and(|flags| flags & 1 != 0);
+    v4.lines().skip(1).any(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        f.len() > 3 && f[0] != "lo" && f[1] == "00000000" && up(f[3])
+    }) || v6.lines().any(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        f.len() >= 10 && f[9] != "lo" && f[0].bytes().all(|b| b == b'0') && f[0].len() == 32 && f[1] == "00" && up(f[8])
+    })
 }
 
 fn split_starter(app: &mut App, pane: u64, dir: Dir, command: &str) {
@@ -308,6 +361,75 @@ mod tests {
         let text = contents(&render(&mut app));
         assert!(text.contains("Sign in to Harness"), "closing networking returns to required sign-in: {text}");
         assert!(!text.contains("PRIVATE_WORKSPACE_CONTENT"));
+    }
+
+    #[test]
+    fn online_needs_a_default_route_that_is_up_and_not_loopback() {
+        let head = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n";
+        assert!(online(&format!("{head}wlan0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n"), ""));
+        assert!(!online(&format!("{head}wlan0\t0001A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0\n"), ""), "a local subnet alone is not online");
+        assert!(!online(&format!("{head}wlan0\t00000000\t0101A8C0\t0002\t0\t0\t600\t00000000\t0\t0\t0\n"), ""), "a route that is down");
+        assert!(!online("", ""));
+        let zero = "0".repeat(32);
+        assert!(online("", &format!("{zero} 00 {zero} 00 fe800000000000000000000000000001 00000400 00000001 00000000 00000003 wlan0\n")));
+        assert!(!online("", &format!("{zero} 00 {zero} 00 {zero} ffffffff 00000001 00000000 00200200 lo\n")), "the kernel's unreachable default on lo");
+    }
+
+    /// An installed OS computer whose daemon can run the Wi-Fi form.
+    fn installed() -> App {
+        let mut app = fixture(100, 30);
+        app.os_live = false;
+        app.fleet.local_id = "local-daemon".into();
+        app.connect("local-daemon");
+        app.fleet.machines.push(crate::fleet::Machine { shared: false, id: "local-daemon".into(), name: "This computer".into(),
+            local: true, status: "running".into(), reach: crate::fleet::Reach::Ready });
+        app
+    }
+
+    #[tokio::test]
+    async fn offline_brings_the_wifi_form_forward_after_the_grace_once_per_spell() {
+        use std::time::{Duration, Instant};
+        for signed_in in [false, true] {
+            let mut app = installed();
+            if !signed_in { crate::account::begin_entry(&mut app); }
+            assert_eq!(crate::account::entry_required(&app), !signed_in);
+            let start = Instant::now();
+            offer_wifi(&mut app, true, start);
+            assert!(app.os_welcome.wifi_tab.is_none(), "online: nothing changes");
+            offer_wifi(&mut app, false, start);
+            offer_wifi(&mut app, false, start + OFFLINE_GRACE - Duration::from_secs(1));
+            assert!(app.os_welcome.wifi_tab.is_none(), "a network still coming up is not offline");
+            offer_wifi(&mut app, false, start + OFFLINE_GRACE);
+            let opened = app.os_welcome.wifi_tab.clone();
+            assert!(opened.is_some(), "offline (signed in: {signed_in}): the Wi-Fi form opens");
+            assert_eq!(app.tab().id, *opened.as_ref().unwrap());
+            // Closed with Esc and still offline: it does not come back on every tick.
+            app.os_welcome.wifi_tab = None;
+            offer_wifi(&mut app, false, start + OFFLINE_GRACE * 3);
+            assert!(app.os_welcome.wifi_tab.is_none());
+            // Online again, then offline again past the grace: it comes forward again.
+            offer_wifi(&mut app, true, start + OFFLINE_GRACE * 4);
+            offer_wifi(&mut app, false, start + OFFLINE_GRACE * 4);
+            assert!(app.os_welcome.wifi_tab.is_none());
+            offer_wifi(&mut app, false, start + OFFLINE_GRACE * 5);
+            assert!(app.os_welcome.wifi_tab.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_form_waits_for_the_daemon_and_never_interrupts_a_sign_in_or_a_read_only_client() {
+        use std::time::Instant;
+        let late = Instant::now() + OFFLINE_GRACE * 2;
+        let mut app = fixture(100, 30);
+        app.os_live = false;
+        offer_wifi(&mut app, false, Instant::now());
+        offer_wifi(&mut app, false, late);
+        assert!(app.os_welcome.wifi_tab.is_none(), "not before this computer's daemon can run the form");
+        let mut app = installed();
+        app.client_flags.push("read-only".into());
+        offer_wifi(&mut app, false, Instant::now());
+        offer_wifi(&mut app, false, late);
+        assert!(app.os_welcome.wifi_tab.is_none(), "a read-only client changes nothing");
     }
 
     #[tokio::test]

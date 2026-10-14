@@ -3,7 +3,7 @@ import { decodeGatewayBinary, encodeGatewayBinary, GatewayBinary, GATEWAY_CALLS 
 import { RelayConnectError } from '../lib/relayFrames.js'
 import { decodeTerminalLocal, encodeTerminalLocal, TerminalBinaryKind, type TerminalBinaryClear } from '../lib/terminalBinary.js'
 import type { GatewayEvents, LaneSeal } from './api.js'
-import { createGatewayLink, GATEWAY_BUFFER_LIMIT, LANE_WAIT_MS, laneOf, OWED_MAX, PAIR_WAIT_MS, WINDOW_GATEWAY_GONE } from './gatewayLink.js'
+import { createGatewayLink, GATEWAY_BUFFER_LIMIT, GATEWAY_USAGE_BUFFER_LIMIT, LANE_WAIT_MS, laneOf, OWED_MAX, PAIR_WAIT_MS, WINDOW_GATEWAY_GONE } from './gatewayLink.js'
 import { ON_DEMAND_START_MS } from './serviceLinks.js'
 
 const STREAM = '00000000-0000-4000-8000-000000000001'
@@ -97,18 +97,36 @@ describe('the gateway in its own process, as the core sees it', () => {
     expect(link.port.device('phone-1', 'autonomous_device_result', { c: 3 })).toBe(true)
     link.port.deviceClient('phone-1', 'PUB')
     link.port.windowOpened('tui')
+    link.port.usageCounter?.('create_requests')
+    link.port.usageLaunch?.({ id: 'creation-fixture-1', phase: 'start' })
     await link.port.local('local:w', { type: 'e2ee_pairings_list', payload: {} })
     expect(link.port.terminalBinary('phone-1', bytesOf('hi'))).toBe(true)
     // An id the binary frame cannot carry: refused, never sent half-framed.
     register(link, 'x'.repeat(300))
     expect(link.port.terminalBinary('x'.repeat(300), bytesOf('hi'))).toBe(false)
-    expect(kinds().slice(1)).toEqual(['broadcast', 'commander', 'user', 'reply', 'target', 'terminal', 'observer', 'device', 'deviceClient', 'windowOpened', 'localFrame'])
+    expect(kinds().slice(1)).toEqual(['broadcast', 'commander', 'user', 'reply', 'target', 'terminal', 'observer', 'device', 'deviceClient', 'windowOpened', 'usageCounter', 'usageLaunch', 'localFrame'])
     expect(sent[4]).toEqual({ kind: 'reply', connId: 'phone-1', type: 'agents_list', requestId: 'r-1', payload: { agents: [] } })
     const framed = decodeGatewayBinary(binary[0])!
     expect(framed).toMatchObject({ kind: GatewayBinary.remote, id: 'phone-1' })
     expect(decodeTerminalLocal(framed.bytes)).toEqual(bytesOf('hi'))
     await link.stop()
     expect(kinds().at(-1)).toBe('stop')
+  })
+
+  it('drops optional measurement before relay traffic and never wakes a stopped gateway', () => {
+    const { link, kinds, setBuffered, want } = setup()
+    link.port.usageCounter?.('create_requests')
+    expect(kinds()).toEqual([])
+    expect(want).not.toHaveBeenCalled()
+    link.connected()
+    setBuffered(GATEWAY_USAGE_BUFFER_LIMIT)
+    link.port.usageCounter?.('create_requests')
+    link.port.usageLaunch?.({ id: 'creation-fixture-1', phase: 'start' })
+    link.port.broadcast({ type: 'turn_started' })
+    expect(kinds()).toEqual(['start', 'broadcast'])
+    setBuffered(0)
+    link.port.usageCounter?.('create_requests')
+    expect(kinds().at(-1)).toBe('usageCounter')
   })
 
   it('drops what would pile up on the socket to a gateway that reads nothing, and says so once a minute', () => {

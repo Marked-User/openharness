@@ -83,6 +83,8 @@ const json = (value: unknown): string => JSON.stringify(value)
 const bytes = (raw: RawData): Uint8Array => new Uint8Array(Array.isArray(raw) ? Buffer.concat(raw) : raw instanceof ArrayBuffer ? raw : Buffer.from(raw))
 
 export class FakeBackend {
+  /** Opt-in fixture: older scenarios keep the endpoint absent, as on an older backend. */
+  productUsage: { enabled: boolean; revision: number; reports: Record<string, unknown>[]; stallReports?: boolean } | null = null
   readonly seen: string[] = []
   /** What `GET /api/agent-messages` answers: the account's tabs and who is in each; null, a 404. */
   agentMessages: Record<string, unknown> | null = null
@@ -131,6 +133,28 @@ export class FakeBackend {
       res.setHeader('content-type', 'application/json')
       if (backend.down) { res.statusCode = 503; res.end(json({ success: false, error: { code: 'UNAVAILABLE' } })); return }
       if (!machine) { res.statusCode = 401; res.end(json({ success: false, error: { code: 'UNAUTHORIZED' } })); return }
+      const usage = backend.productUsage
+      if (usage && req.url === '/api/product-usage/settings' && req.method === 'GET') {
+        res.end(json({ success: true, data: { enabled: usage.enabled, revision: usage.revision } })); return
+      }
+      if (usage && req.method === 'POST' && ['/api/product-usage/settings', '/api/product-usage/report'].includes(req.url ?? '')) {
+        if (usage.stallReports && req.url === '/api/product-usage/report') { req.resume(); return }
+        let body = ''
+        req.on('data', chunk => { body += String(chunk) })
+        req.on('end', () => {
+          const parsed = JSON.parse(body) as Record<string, unknown>
+          if (req.url === '/api/product-usage/settings') {
+            usage.enabled = parsed.enabled === true; usage.revision++
+            res.end(json({ success: true, data: { enabled: usage.enabled, revision: usage.revision } }))
+          } else if (!usage.enabled || parsed.revision !== usage.revision) {
+            res.end(json({ success: true, data: { accepted: false, reason: 'CHOICE_CHANGED' } }))
+          } else {
+            usage.reports.push(parsed)
+            res.end(json({ success: true, data: { accepted: true } }))
+          }
+        })
+        return
+      }
       if (req.method === 'GET' && req.url?.split('?')[0] === '/api/machines') {
         res.end(json({ success: true, data: { machines: backend.rows() } }))
         return

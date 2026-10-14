@@ -319,6 +319,9 @@ jobs:
       - name: Boot, operate, install and reboot the real image
         if: ${{ inputs.checks != 'session' && inputs.checks != 'recovery' && inputs.checks != 'browser' && inputs.checks != 'browser-suspend' }}
         env:
+          # The account Harness OS requires before its workspace opens (vm.py account_ticket).
+          HARNESS_TEST_EMAIL: ${{ secrets.HARNESS_TEST_EMAIL }}
+          HARNESS_TEST_OTP: ${{ secrets.HARNESS_TEST_OTP }}
           OS_WORKLOAD_SOURCE_RUN: ${{ inputs.workload_seed_run_id }}
           OS_MEMORY_MIB: ${{ inputs.memory_mib || '2048' }}
           OS_LIVE_TRANSPORT: ${{ inputs.live_transport || 'cdrom' }}
@@ -491,6 +494,8 @@ jobs:
           sudo chmod a+rw /dev/kvm
       - name: Install the selected driver offline and reboot with 1 GiB
         env:
+          HARNESS_TEST_EMAIL: ${{ secrets.HARNESS_TEST_EMAIL }}
+          HARNESS_TEST_OTP: ${{ secrets.HARNESS_TEST_OTP }}
           REUSED_IMAGE: ${{ inputs.image_run_id }}
         run: |
           args=(--iso os/dist/*.iso)
@@ -530,6 +535,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf python3-pil tesseract-ocr
           sudo chmod a+rw /dev/kvm
       - name: Install the selected NVIDIA driver offline and reboot encrypted
+        env:
+          HARNESS_TEST_EMAIL: ${{ secrets.HARNESS_TEST_EMAIL }}
+          HARNESS_TEST_OTP: ${{ secrets.HARNESS_TEST_OTP }}
         run: python3 os/tests/nvidia_install_vm.py --iso os/dist/*.iso
       - name: Retain exact-image NVIDIA installation evidence
         if: always()

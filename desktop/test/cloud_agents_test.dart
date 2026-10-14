@@ -23,6 +23,7 @@ class CloudConnection extends RenameConnection {
   final sent = <Map<String, dynamic>>[];
   final raw = <(String, Map<String, dynamic>)>[];
   Map<String, dynamic> sendReply = {'ok': true};
+  int extraMessages = 0;
 
   @override
   Future<Map<String, dynamic>> request(
@@ -47,8 +48,10 @@ class CloudConnection extends RenameConnection {
             'from': 'agent',
             'text': 'They have 9:30 or 11:00. Which one?',
           },
+          for (var i = 0; i < extraMessages; i++)
+            {'id': 'x$i', 'from': 'agent', 'text': 'Older line number $i'},
         ],
-        'total': 2,
+        'total': 2 + extraMessages,
       };
     }
     return super.request(type, payload: payload, timeout: timeout);
@@ -419,6 +422,45 @@ void main() {
       again.error,
       'Connect Fo in Connections (Add custom, https://mcp.api.wajo.ai/fo).',
     );
+  });
+
+  testWidgets('the dial scrolls a focused cloud conversation', (tester) async {
+    final (app, connection) = await setUp(tester, cloudFrame());
+    connection.extraMessages = 60;
+    await app.addAgentToSwarm('m', 'cloud_1');
+    await mount(tester, app);
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pumpAndSettle();
+    final list = find.byKey(const ValueKey('cloud-conversation'));
+    ScrollPosition position() =>
+        tester.widget<ListView>(list).controller!.position;
+    expect(app.focusedPane?.agentId, 'cloud_1');
+    expect(position().pixels, 0);
+    expect(position().maxScrollExtent, greaterThan(100));
+
+    Future<void> dial(Map<String, dynamic> p) =>
+        app.handleEventForTest('m', {'type': 'dial_scroll', 'payload': p});
+    await dial({'phase': 'down', 'dy': 0});
+    // Terminal convention: a positive dy shows earlier lines, here older messages.
+    await dial({'phase': 'move', 'dy': 20});
+    expect(position().pixels, 50);
+    await dial({'phase': 'move', 'dy': -8});
+    expect(position().pixels, 30);
+    await dial({'phase': 'move', 'dy': -100});
+    expect(position().pixels, 0, reason: 'clamped at the newest message');
+    await dial({'phase': 'move', 'dy': 20});
+    await dial({'phase': 'up', 'dy': 0, 'velocity': 400});
+    final released = position().pixels;
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(position().pixels, greaterThan(released), reason: 'the fling');
+    await dial({'phase': 'down', 'dy': 0});
+    final stopped = position().pixels;
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(position().pixels, stopped, reason: 'a touch stops the fling');
+
+    // Gone from the screen, the pane no longer takes the dial.
+    await tester.pumpWidget(const SizedBox());
+    await dial({'phase': 'move', 'dy': 20});
   });
 
   testWidgets(

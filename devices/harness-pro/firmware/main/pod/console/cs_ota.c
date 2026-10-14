@@ -49,16 +49,16 @@ void cs_view_ota(pod_out_frame_t *f, const char *from, const char *to, int pct, 
     snprintf(log[4], sizeof log[4], "check version \xc2\xb7 project \xc2\xb7 chip rev");
     snprintf(log[5], sizeof log[5], "restart into %.20s", to);
     const int cur = restarting ? 5 : pct >= 100 ? 3 : 2, top = py + 14 + 10 + 20 + 30, h = 6 * 46 + 28;
-    ht_pro_rect_aa_stroke(s, x, top, w, h, 16, C(CS_BORDER), C(0x0c0d0f));
+    ht_pro_rect_aa_stroke(s, x, top, w, h, 16, C(CS_BORDER), C(CS_RAISED));
     for (int i = 0; i < 6; i++) {
         const int cy = top + 14 + i * 46 + 23, dx = x + 18 + 7;
         if (i < cur) ht_pro_rect_aa(s, dx - 7, cy - 7, 14, 14, 7, C(CS_RUN));
         else if (i == cur) {
-            pod_arc(s, dx * 16, cy * 16, 6 * 16, 2 * 16, 0, 180, C(0x24262b));
+            pod_arc(s, dx * 16, cy * 16, 6 * 16, 2 * 16, 0, 180, C(CS_EDGE));
             pod_arc(s, dx * 16, cy * 16, 6 * 16, 2 * 16, 60, 120, C(CS_FOCUS));
         } else {
-            pod_arc(s, dx * 16, cy * 16, 6 * 16, 2 * 16, 0, 180, C(0x3a3d44));
+            pod_arc(s, dx * 16, cy * 16, 6 * 16, 2 * 16, 0, 180, C(CS_TRACK));
         }
-        cs_text(s, x + 18 + 14 + 14, cy, w - 18 - 14 - 14 - 18, &cs_mono_18, i < cur ? 0x9a9ea7 : i == cur ? CS_INK : 0x5f646d, log[i]);
+        cs_text(s, x + 18 + 14 + 14, cy, w - 18 - 14 - 14 - 18, &cs_mono_18, i < cur ? CS_MUTED : i == cur ? CS_INK : CS_DIM, log[i]);
     }
 }

@@ -1905,6 +1905,10 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onExperimentalWrite: (body) => agentSettings.experimentalWrite(body),
     onAgentSettingsRead: () => agentSettings.settingsRead(),
     onAgentSettingsWrite: (body) => agentSettings.settingsWrite(body),
+    onProductFeedback: (body) => proxyBackend('POST', '/api/product-usage/feedback', body),
+    onProductUsageReport: (body) => proxyBackend('POST', '/api/product-usage/report', body),
+    onProductUsageRead: () => proxyBackend('GET', '/api/product-usage/settings'),
+    onProductUsageWrite: (body) => proxyBackend('POST', '/api/product-usage/settings', body),
     onStore: (method, path, body) => proxyBackend(method, path, body),
   }, { socketPath: localSocketPath(env.ADAPTER_DATA_DIR, env.PORT), allowPortFallback: true })
   try { saveDaemonPort(env.ADAPTER_DATA_DIR, env.PORT, hookPort) } catch (error) {

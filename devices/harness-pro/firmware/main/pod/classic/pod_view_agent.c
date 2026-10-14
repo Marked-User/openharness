@@ -1,13 +1,13 @@
-// The Agent screen: for an agent that is working, asking, or idle with nothing to recap. The pet as album art, the name,
-// "Tab . Machine" and a state chip, then by state the live bar and the activity, or the question box.
-// Also the helpers this screen, Recap and Talking share (pod_view_shared.h).
+// The Agent screen (Classic Index): for an agent that is working, asking, offline, or idle with nothing to recap. The head
+// (pet, name, "Tab . Machine"), the metadata band, then by state the activity, the question box or a line of copy, and Talk.
+// Also the helpers this screen, Recap and Talking share (pod_view_shared.h), and the head and band Recap reuses.
+#include "pod/classic/ci.h"
 #include "pod/pod_view_shared.h"
 
 #include <stdio.h>
 #include <string.h>
 
 static int imin(int a, int b) { return a < b ? a : b; }
-static int imax(int a, int b) { return a > b ? a : b; }
 #define C pod_c
 
 const pod_agent_t *pod_view_agent_of(const pod_nav_t *nav, const pod_model_t *m)
@@ -18,7 +18,7 @@ const pod_agent_t *pod_view_agent_of(const pod_nav_t *nav, const pod_model_t *m)
 
 // ---- text helpers ---------------------------------------------------------------------------------------
 
-int pod_wrap(const char *text, const ht_pro_font_t *font, int width, int max_rows, char rows[][POD_ROW_MAX])
+static int wrap_rows(const char *text, const ht_pro_font_t *font, int width, int max_rows, char rows[][POD_ROW_MAX], bool hard)
 {
     int n = 0;
     const char *p = text ? text : "";
@@ -42,6 +42,24 @@ int pod_wrap(const char *text, const ht_pro_font_t *font, int width, int max_row
             while (*w && *w != ' ' && *w != '\n') w++;
             size_t wl = (size_t)(w - p);
             if (!wl) break;
+            char cut[POD_ROW_MAX];
+            bool wide = wl >= POD_ROW_MAX;
+            if (hard && !used && !wide) { memcpy(cut, p, wl); cut[wl] = 0; wide = ht_pro_width(font, cut) > width; }
+            if (hard && !used && wide) {   // a word wider than the row (a URL): hard-break it
+                size_t k = 0;
+                for (size_t i = 1; i <= wl && i < POD_ROW_MAX; i++) {
+                    if (i < wl && ((unsigned char)p[i] & 0xc0) == 0x80) continue;   // inside a sequence
+                    memcpy(cut, p, i);
+                    cut[i] = 0;
+                    if (k && ht_pro_width(font, cut) > width) break;
+                    k = i;
+                }
+                memcpy(row, p, k);
+                row[k] = 0;
+                used = k;
+                p += k;
+                break;
+            }
             char cand[POD_ROW_MAX];
             if (used + (used ? 1 : 0) + wl >= POD_ROW_MAX) break;
             memcpy(cand, row, used);
@@ -60,6 +78,16 @@ int pod_wrap(const char *text, const ht_pro_font_t *font, int width, int max_row
         n++;
     }
     return n;
+}
+
+// Console's wrap: a word wider than the row stays whole (the row buffer's limit drops the text). Classic's keeps going (ci_wrap).
+int pod_wrap(const char *text, const ht_pro_font_t *font, int width, int max_rows, char rows[][POD_ROW_MAX])
+{
+    return wrap_rows(text, font, width, max_rows, rows, false);
+}
+int pod_wrap_hard(const char *text, const ht_pro_font_t *font, int width, int max_rows, char rows[][POD_ROW_MAX])
+{
+    return wrap_rows(text, font, width, max_rows, rows, true);
 }
 
 void pod_text_center(ht_scene_t *s, int cx, int y, int width, const ht_pro_font_t *font, uint16_t ink, const char *text)
@@ -145,10 +173,10 @@ void pod_lcd_pill(ht_scene_t *s, int x, int y, int width, const pod_agent_t *a, 
 
 // ---- the screen -----------------------------------------------------------------------------------------
 
-// Option A, "iPod classic Now Playing": the pet as album art on the left, the name and state chip beside it, then the
-// live bar and the activity text across the full width.
-enum { ART_X = 26, ART_Y = 84, ART = 196, ART_PET = 180, HEAD_X = 248, HEAD_R = 694, BAR_X = 28, BAR_W = 664,
-       BODY_Y = ART_Y + ART + 14, ACT_ROWS = 8, ACT_PITCH = 34 };
+#define MIDDOT "\xc2\xb7"
+#define ELLIPSIS "\xe2\x80\xa6"
+enum { PET_X = 32, PET_Y = 104, PET_SIDE = 104, HEAD_X = 152, NAME_Y = 110, WHO_Y = 165, BAND_Y = 221,
+       LABEL_Y = 324, BODY_Y = 357, LINE = 42, BODY_W = 656, STEP_PITCH = 37, ASK_X = 32, ASK_PAD = 23 };
 
 // The scene the agent shows now, by state. Idle and done rest (REST, not the relaxing face: owner, 2026-10-10).
 // SEND plays on the voice screen (pod_view_talk.c), not here.
@@ -157,8 +185,7 @@ static pod_scene_t scene_for(pod_state_t st)
     return st == POD_WORKING ? POD_SCENE_WORK : st == POD_ASKING ? POD_SCENE_ASK : POD_SCENE_REST;
 }
 
-// What changes on this screen: the pet at its own steps, and the LCD pill's three bars (pod_eq, a 900 ms triangle drawn
-// in whole pixels, so a new height about every 30 ms) plus its seconds while the agent works.
+// What changes on this screen: the pet at its own steps, and the band's equaliser while the agent works.
 uint32_t pod_view_agent_next_ms(const pod_nav_t *nav, const pod_model_t *m, uint32_t now_ms)
 {
     const pod_agent_t *a = pod_view_agent_of(nav, m);
@@ -169,112 +196,110 @@ uint32_t pod_view_agent_next_ms(const pod_nav_t *nav, const pod_model_t *m, uint
     return st == POD_WORKING && ms > cap ? cap : ms;
 }
 
-// End a row with "…" that fits the width (drops whole codepoints to make room). For text the model had to cut.
-static void ellipsize(char row[POD_ROW_MAX], int width)
+// `row` followed by "…", trimmed so the whole fits max_w (the last visible line of cut or clipped text).
+void ci_dotted(char out[POD_ROW_MAX], const char *row, const ht_pro_font_t *font, int max_w)
 {
-    static const char dots[] = "\xe2\x80\xa6";
-    size_t n = strlen(row);
-    if (n >= 3 && !memcmp(row + n - 3, dots, 3)) return;
+    char t[POD_ROW_MAX];
+    snprintf(t, sizeof t, "%s", row);
+    size_t n = strlen(t);
+    while (n && (t[n - 1] == ' ' || t[n - 1] == '.' || t[n - 1] == ',')) t[--n] = 0;
+    if (n >= 3 && !memcmp(t + n - 3, ELLIPSIS, 3)) { snprintf(out, POD_ROW_MAX, "%s", t); return; }
     for (;;) {
-        if (n + sizeof dots <= POD_ROW_MAX) {
-            memcpy(row + n, dots, sizeof dots);
-            if (!n || ht_pro_width(&ht_pro_24, row) <= width) return;
-        }
-        if (!n) return;
-        do n--; while (n && ((unsigned char)row[n] & 0xc0) == 0x80);
-        row[n] = 0;
+        snprintf(out, POD_ROW_MAX, "%s" ELLIPSIS, t);
+        if (!n || ht_pro_width(font, out) <= max_w) return;
+        do n--; while (n && ((unsigned char)t[n] & 0xc0) == 0x80);
+        t[n] = 0;
+        while (n && t[n - 1] == ' ') t[--n] = 0;
     }
 }
 
-
-// The chip: a pill with a dot and the state text. Always 3 runs.
-static void state_chip(ht_scene_t *s, int x, int y, uint16_t fill, uint16_t ink, const char *label)
+// The head (pet, name, "Tab . Machine") and the band (Tokens on the right only when `tokens`, else Engine), shared by Agent and Recap. The pet of an offline agent
+// cannot fade (it is drawn from cells and arcs), so it shows the engine's logo, faded to half, on the pale cover.
+void ci_agent_head(pod_out_frame_t *f, const pod_model_t *m, const pod_agent_t *a, pod_state_t st, uint32_t now_ms, bool tokens)
 {
-    const int h = 38;
-    int tw = ht_pro_width(&ht_pro_24, label), w = 16 + 12 + 8 + tw + 16;
-    ht_pro_rect(s, x, y, w, h, h / 2, fill);
-    ht_pro_rect(s, x + 16, y + h / 2 - 6, 12, 12, 6, ink);
-    ht_pro_text(s, x + 36, y + (h - ht_pro_24.height) / 2, tw, &ht_pro_24, ink, label);
+    ht_scene_t *s = f->scene;
+    if (st == POD_OFFLINE) {
+        ht_pro_rect_aa_stroke(s, PET_X, PET_Y, PET_SIDE, PET_SIDE, 14, ht_rgb(0xdcdfd8), ht_rgb(0xefefe9));
+        // The largest logo the engine has (pet engines carry the small sizes only).
+        static const int sizes[] = {0, 44, 36};
+        bool drawn = false;
+        for (int i = 0; i < 3 && !drawn; i++) {
+            const int logo = i ? sizes[i] : pod_logo_cover_size(PET_SIDE);
+            drawn = pod_logo_draw_faded(s, PET_X + (PET_SIDE - logo) / 2, PET_Y + (PET_SIDE - logo) / 2, logo, a->engine, 128);
+        }
+        if (!drawn) pod_mark_default_big(s, PET_X + (PET_SIDE - 56) / 2, PET_Y + (PET_SIDE - 56) / 2, 56, ht_rgb(0xefefe9));
+    } else {
+        pod_pet_draw_on(s, PET_X, PET_Y, PET_SIDE, a->engine, scene_for(st), now_ms, 0, 0xf6f6f0);
+    }
+    char name[sizeof a->name];
+    snprintf(name, sizeof name, "%s", a->name);
+    for (char *c = name; *c; c++) if (*c == '\n' || *c == '\r' || *c == '\t') *c = ' ';
+    ci_text(s, HEAD_X, NAME_Y, POD_W - CI_MARGIN - HEAD_X, &ci_rg_41, CI_INK, name);
+    const pod_tab_t *tab = pod_tab_of(m, a);
+    char who[2 * CABLE_NAME_MAX + 4];
+    const char *tn = tab && tab->name[0] ? tab->name : "", *mn = a->machine;
+    snprintf(who, sizeof who, "%s%s%s", tn, *tn && *mn ? " " MIDDOT " " : "", mn);
+    ci_text(s, HEAD_X, WHO_Y, POD_W - CI_MARGIN - HEAD_X, &ci_rg_23, CI_MUTED, who);
+    const int32_t el = st == POD_WORKING ? (int32_t)pod_agent_secs(a, now_ms) : st == POD_DONE && a->elapsed_s ? (int32_t)a->elapsed_s : -1;
+    ci_band(s, BAND_Y, st, el, a->engine, tokens && a->tokens_in >= 0 ? a->tokens_in : -1, a->tokens_out, now_ms);
+}
+
+// The caps label ("RIGHT NOW"): Bold 20, muted. One run, so no tracking (the mockup's 1 px adds about 8 px).
+void ci_caps(ht_scene_t *s, int x, int y, const char *label)
+{
+    ht_pro_text(s, x, y, ht_pro_width(&ci_bd_20, label), &ci_bd_20, CI_MUTED, label);
+}
+
+// "Updated just now" (under 60 s) / "Updated 3m ago" / "Updated 2h ago"; false when the event time is unknown.
+bool ci_updated(char *out, size_t n, const pod_agent_t *a, uint32_t now_ms)
+{
+    if (!a->has_event || !a->event_ms) return false;
+    uint32_t d = (int32_t)(now_ms - a->event_ms) > 0 ? now_ms - a->event_ms : 0;
+    if (d < 60000) snprintf(out, n, "Updated just now");
+    else if (d < 3600000) snprintf(out, n, "Updated %um ago", (unsigned)(d / 60000));
+    else snprintf(out, n, "Updated %uh ago", (unsigned)(d / 3600000));
+    return true;
 }
 
 void pod_view_agent(pod_out_frame_t *f, const pod_nav_t *nav, const pod_model_t *m, uint32_t now_ms)
 {
     ht_scene_t *s = f->scene;
-    pod_status(f, "Recap", true, 0);   // the tab name is in the head; this screen is the entry to the recap
     const pod_agent_t *a = pod_view_agent_of(nav, m);
-    if (a) {
-        pod_state_t st = pod_model_eff(m, a);
-        bool ask = st == POD_ASKING, working = st == POD_WORKING;
-        // The art: pet-less engines keep their own cover at this size; a pet stands on the glass itself (owner,
-        // 2026-10-10: the mockup's pale lavender square read as a white patch behind the pet on the device).
-        if (pod_pet_for(a->engine)) {
-            pod_pet_draw(s, ART_X + (ART - ART_PET) / 2, ART_Y + (ART - ART_PET) / 2, ART_PET, a->engine,
-                         scene_for(st), now_ms, 0);
-        } else {
-            pod_pet_draw(s, ART_X, ART_Y, ART, a->engine, scene_for(st), now_ms, 0);
-        }
-        // The name on one line, cut with "..." (owner, 2026-10-11: a second line broke the title), then
-        // "<Tab> . <Machine>", then the chip. A newline in the name is a space.
-        char name[sizeof a->name];
-        snprintf(name, sizeof name, "%s", a->name);
-        for (char *c = name; *c; c++) if (*c == '\n' || *c == '\r' || *c == '\t') *c = ' ';
-        // The name alone runs to the screen's 16 px margin, past the head's HEAD_R: 446 px cut a name the Recap
-        // (479 px) showed whole.
-        // Idle draws no status: the head drops by half the chip and its gap so it stays centred on the art (owner,
-        // 2026-10-11: the pet looked pushed down next to a shorter head).
-        const int head_y = 92 + (st == POD_IDLE ? (POD_LINE_GAP + 38) / 2 : 0);
-        ht_pro_text(s, HEAD_X, head_y, POD_W - 16 - HEAD_X, &ht_pro_32, C(0x111111), name);
-        const int who_y = pod_under_32(head_y);
-        int who_rows = pod_who_line(s, HEAD_X, who_y, HEAD_R - HEAD_X, nav, m, a);
-        // The status goes one gap under the last line's baseline (6 + 17 into its cell): the LCD pill when working,
-        // else a small chip. The engine is its own line above the tab, not after the chip.
-        const int status_y = who_y + (who_rows ? (who_rows - 1) * POD_WHO_PITCH + 6 + 17 : -POD_LINE_GAP) + POD_LINE_GAP;
-        const int chip_y = status_y - 2;
-        // The bar and body sit at 304 / 327 unless the head (a two line name) reaches them: then they move down.
-        const int head_end = status_y + (working ? POD_LCD_H : 38);
-        const int shift = imax(0, head_end + 8 - 304);
-        if (working) {
-            pod_lcd_pill(s, HEAD_X, status_y, HEAD_R - HEAD_X, a, now_ms);
-        } else if (ask) {
-            state_chip(s, HEAD_X, chip_y, C(0xfff1dc), C(0xb46a00), "Needs you");
-        } else if (st == POD_OFFLINE) {
-            state_chip(s, HEAD_X, chip_y, C(0xeceeec), C(0xa0a4a0), "Offline");
-        } else {
-            if (st == POD_DONE) state_chip(s, HEAD_X, chip_y, C(0xeceeec), C(0x7b7d84), "Done");   // idle: no chip (owner, 2026-10-11)
-        }
-
-        if (ask) {
-            const int h32 = ht_pro_32.height, h24 = ht_pro_24.height;
-            char rows[3][POD_ROW_MAX];
-            int n = pod_wrap(a->question, &ht_pro_32, BAR_W - 36, 3, rows);
-            int top = 306 + shift, box_h = 16 + n * h32 + 8 + h24 + 16;
-            ht_pro_rect(s, BAR_X, top, BAR_W, box_h, 14, C(0xfff1dc));
-            for (int i = 0; i < n; i++)
-                ht_pro_text(s, BAR_X + 18, top + 16 + i * h32, BAR_W - 36, &ht_pro_32, C(0x111111), rows[i]);
-            int ay = top + 16 + n * h32 + 8, aw = ht_pro_width(&ht_pro_24, "Answer in the Harness app");
-            ht_pro_rect(s, BAR_X + 18, ay + h24 / 2 - 7, 14, 14, 7, C(0xff9f0a));
-            ht_pro_text(s, BAR_X + 40, ay, aw, &ht_pro_24, C(0xb46a00), "Answer in the Harness app");
-        } else if (working) {
-            // Only a working agent has a body: its activity, right under the head (no live bar: the LCD pill already
-            // plays, owner 2026-10-10). An idle or done one has nothing under the head.
-            char rows[ACT_ROWS][POD_ROW_MAX];
-            // Rows between the head and the transport; the previous steps (at most two lines reserved) share them.
-            const int top = BODY_Y + shift, avail = imin(ACT_ROWS, (POD_TRANSPORT_Y - 6 - top) / ACT_PITCH);
-            // Classic shows the last three steps since the turn began or its question closed (the model keeps six for Console).
-            const int steps = imin(imin(a->step_count, a->fresh_steps), 3);
-            const int reserve = imin(steps, 2);
-            // The footer's word (a->verb) is the pill's; the body is always the progress sentence.
-            int n = pod_wrap(a->activity, &ht_pro_24, BAR_W, avail - reserve, rows);
-            if (a->activity_cut && a->activity[0] && n > 0) ellipsize(rows[n - 1], BAR_W);
-            for (int i = 0; i < n; i++)
-                ht_pro_text(s, BAR_X, top + i * ACT_PITCH, BAR_W, &ht_pro_24, C(0x111111), rows[i]);
-            // What the agent did before, newest first, one grey line each (ht_pro_text ends a long one with an ellipsis):
-            // the tools it started (`turn.activity` `step`) and the sentences it wrote, in the order they came.
-            for (int i = 0; i < steps && n + i < avail; i++) {
-                const char *step = a->steps[i];
-                ht_pro_text(s, BAR_X, top + (n + i) * ACT_PITCH, imin(ht_pro_width(&ht_pro_24, step), BAR_W), &ht_pro_24, C(0x7b7d84), step);
-            }
-        }
+    ci_bar(f, NULL, pod_nav_origin(nav, m), f->unread, true);
+    if (!a) { ci_talk(f, false); return; }
+    const pod_state_t st = pod_model_eff(m, a);
+    ci_agent_head(f, m, a, st, now_ms, false);
+    char rows[3][POD_ROW_MAX];
+    if (st == POD_WORKING) {
+        ci_caps(s, CI_MARGIN, LABEL_Y, "RIGHT NOW");
+        char fallback[24];
+        const char *act = a->activity;
+        if (!act[0]) { snprintf(fallback, sizeof fallback, "%s" ELLIPSIS, pod_working_verb(pod_agent_secs(a, now_ms))); act = fallback; }
+        int n = ci_wrap(act, &ci_rg_32, BODY_W, 3, rows);
+        if (a->activity_cut && a->activity[0] && n > 0) ci_dotted(rows[n - 1], rows[n - 1], &ci_rg_32, BODY_W);
+        for (int i = 0; i < n; i++) ci_text(s, CI_MARGIN, BODY_Y + i * LINE, BODY_W, &ci_rg_32, CI_INK, rows[i]);
+        int y = BODY_Y + n * LINE + 12;
+        // The newest two steps since the turn began or its question closed, one muted line each.
+        const int steps = imin(imin(a->step_count, a->fresh_steps), 2);
+        for (int i = 0; i < steps; i++, y += STEP_PITCH) ci_text(s, CI_MARGIN, y, BODY_W, &ci_rg_22, CI_MUTED, a->steps[i]);
+        char up[24];
+        if (ci_updated(up, sizeof up, a, now_ms)) ci_text(s, CI_MARGIN, y + 7, BODY_W, &ci_rg_20, ht_rgb(0x7b827c), up);
+    } else if (st == POD_ASKING) {
+        int n = ci_wrap(a->question, &ci_rg_32, BODY_W - ASK_PAD - 18, 3, rows);
+        if (!n) n = ci_wrap("Needs your answer.", &ci_rg_32, BODY_W, 1, rows);
+        const int top = LABEL_Y + 2, h = 2 * ASK_PAD - 10 + n * LINE;
+        ht_pro_rect(s, ASK_X, top, BODY_W, h, 0, CI_ASK_FILL);
+        ht_pro_rect(s, ASK_X, top, 4, h, 0, CI_ASK_BAR);
+        for (int i = 0; i < n; i++) ci_text(s, ASK_X + ASK_PAD, top + 19 + i * LINE, BODY_W - ASK_PAD - 18, &ci_rg_32, CI_INK, rows[i]);
+        ci_text(s, CI_MARGIN, top + h + 12, BODY_W, &ci_rg_23, CI_MUTED, "Answer it in the Harness app.");
+    } else if (st == POD_OFFLINE) {
+        char line[2 * CABLE_NAME_MAX + 40];
+        ci_text(s, CI_MARGIN, LABEL_Y + 2, BODY_W, &ci_rg_32, CI_INK, "That machine is offline.");
+        snprintf(line, sizeof line, "Reconnect %s in Harness to continue.", a->machine[0] ? a->machine : "it");
+        ci_text(s, CI_MARGIN, LABEL_Y + 55, BODY_W, &ci_rg_23, CI_MUTED, line);
+    } else {
+        ci_text(s, CI_MARGIN, LABEL_Y + 2, BODY_W, &ci_rg_32, CI_INK, "Ready when you are.");
+        ci_text(s, CI_MARGIN, LABEL_Y + 55, BODY_W, &ci_rg_23, CI_MUTED, "Send a new voice instruction to this agent.");
     }
-    pod_transport(f, false);
+    ci_talk(f, m->linked && (st == POD_IDLE || st == POD_WORKING || st == POD_DONE));
 }

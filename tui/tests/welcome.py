@@ -15,6 +15,8 @@ import tempfile
 import time
 import urllib.request
 
+from account_fixture import signed_in_account
+
 ROOT = Path(__file__).resolve().parents[1]
 PORT = int(os.environ.get('HN_WELCOME_TEST_PORT', '19787'))
 assert 19780 <= PORT <= 19789
@@ -32,6 +34,9 @@ ENV.update(HOME=str(BASE), HN_TMPDIR=str(BASE), HN_SOCKET_NAME=PREFIX, PORT=str(
            TERM='xterm-256color', COLORTERM='truecolor', SHELL='/bin/sh', RUST_BACKTRACE='1',
            HARNESS_TUI_DESK='off', HARNESS_TUI_NOTIFY='off', HN_DESKTOP='off',
            MOCK_WELCOME='1', MOCK_NEW_UI='1', MOCK_RECONNECT='1')
+# Sign-in is required (#1276). The mock daemon says signed in; once it is stopped below, the
+# saved offline account is what lets a signed-in person reopen local work without a network.
+signed_in_account(ENV, BASE)
 OUTPUT = Path(os.environ['HN_WELCOME_OUTPUT']) if os.environ.get('HN_WELCOME_OUTPUT') else None
 if OUTPUT: OUTPUT.mkdir(parents=True, exist_ok=True)
 

@@ -10,7 +10,7 @@
 #include "pro_canvas.h"
 
 #define C(rgb) ht_rgb(rgb)
-enum { PADX = 28, TEXT_W = POD_W - 2 * PADX, SUM_Y = 261, SUM_PITCH = 47, TILE_H = 54, TILE_Y = POD_W - 68 - TILE_H, ROWS_ALL = 8, GAP = 6, TILES_MAX = 4 };
+enum { PADX = 28, TEXT_W = POD_W - 2 * PADX, SUM_Y = 261, SUM_PITCH = 47, TILE_H = 54, TILE_Y = POD_W - CS_FOOT_H - 6 - TILE_H, ROWS_ALL = 8, GAP = 6, TILES_MAX = 4 };
 
 static EXT_RAM_BSS_ATTR char rows_buf[ROWS_ALL][POD_ROW_MAX];
 
@@ -80,9 +80,6 @@ void cs_view_recap(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, uin
     cs_bar(f, crumbs, 1, running, asking, cs_unread(m), NULL, now_ms);
     if (!a) return;
     cs_back_hit(f, crumbs[0]);
-    const char *const keys[] = {"hold", "\xe2\x86\x90 \xe2\x86\x92", "\xe2\x86\x91", "\xe2\x86\x93"};
-    const char *const labels[] = {"talk", "panes", "back", "home"};
-    cs_hints(f, keys, labels, 4);
     cs_hero(f, nav, m, a, now_ms);
 
     // the tiles that have data
@@ -110,8 +107,8 @@ void cs_view_recap(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, uin
     if (!a->recap_lines) {
         cs_text(s, PADX, SUM_Y + 17, TEXT_W, &cs_rg_24, CS_MUTED, "No recap yet.");
     } else {
-        const int floor_y = n ? TILE_Y - 8 : POD_W - CS_HINT_H - 12, rows = layout(a, (floor_y - SUM_Y) / SUM_PITCH);
-        for (int r = 0; r < rows; r++) cs_text(s, PADX, SUM_Y + SUM_PITCH / 2 + r * SUM_PITCH, TEXT_W, &cs_rg_36, 0xe3e5e9, rows_buf[r]);
+        const int floor_y = n ? TILE_Y - 8 : POD_W - CS_FOOT_H - 12, rows = layout(a, (floor_y - SUM_Y) / SUM_PITCH);
+        for (int r = 0; r < rows; r++) cs_text(s, PADX, SUM_Y + SUM_PITCH / 2 + r * SUM_PITCH, TEXT_W, &cs_rg_36, CS_INK2, rows_buf[r]);
     }
 
     // widths: every tile its natural width; spare room spread evenly, a shortfall taken from TOKENS (its in/out is cut). When even

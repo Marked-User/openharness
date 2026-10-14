@@ -320,7 +320,7 @@ static void workspace_setup(void) {
     for(int i=0;i<s.tab_count;i++) {
         snprintf(s.tabs[i].id,sizeof s.tabs[i].id,"tab-%d",i);
         snprintf(s.tabs[i].name,sizeof s.tabs[i].name,"%s",names[i]);
-        s.tabs[i].panes=i;
+        s.tabs[i].panes=i; s.tabs[i].agents=1;
     }
     scene_take();
 }
@@ -1609,6 +1609,7 @@ int main(int argc, char **argv) {
     for(int i=4;i<24;i++) {
         snprintf(s.tabs[i].id,sizeof s.tabs[i].id,"tab-%d",i);
         snprintf(s.tabs[i].name,sizeof s.tabs[i].name,"Workspace %d",i);
+        s.tabs[i].agents=1;
     }
     strcpy(s.selected_tab,"tab-23"); dispatch((action_t){.kind=A_TABS}); scene_take();
     assert(ht_tab_carousel_index(&tab_carousel)==23 && s.hits[0].value==23);
@@ -1628,6 +1629,12 @@ int main(int argc, char **argv) {
     ui_swarms_replace(s.tabs,2,"tab-1");
     habitat_touch(false,233,233,30075); scene_take();
     assert(tab_switches==23 && !starts && s.hit_count==3 && ht_tab_carousel_index(&tab_carousel)==0);
+    // A tab holding no agent (only shells, or nothing) is not listed.
+    {
+        cable_swarm_t mixed[3]={{"shell","Shell",0,1},{"tab-0","M2",1,1},{"none","Nothing",0,0}};
+        ui_swarms_replace(mixed,3,"shell");
+        assert(s.tab_count==1 && !strcmp(s.tabs[0].id,"tab-0") && workspace_index("shell")<0);
+    }
     ui_swarms_replace(NULL,0,NULL); scene_take(); portrait(dir,"tabs-empty");
     assert(s.view==MESSAGE && !s.loading && workspace.phase==HT_WORKSPACE_IDLE); // removed pending tab fails explicitly
     dispatch((action_t){.kind=A_TABS}); scene_take();

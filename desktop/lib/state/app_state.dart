@@ -1,3 +1,5 @@
+import '../measurement/product_measurement.dart';
+import '../measurement/setup_transport.dart';
 import 'attached_task_delivery.dart';
 import 'task_route.dart';
 import '../core/permission_modes.dart';
@@ -648,6 +650,8 @@ class AppNotifier extends ChangeNotifier {
 
   AppConfig config;
   late ApiClient api;
+  late final ProductMeasurement productMeasurement;
+  final _measurementConnections = <String, void Function(ProductOutcome)>{};
 
   /// Signs in, and says whether this computer is signed in: the harness CLI in a desktop build,
   /// [ViewerServices.login] in a viewer build — which has no CLI — under one name, so every call
@@ -3194,6 +3198,7 @@ class AppNotifier extends ChangeNotifier {
     AgentPrefetch? agentPrefetch,
     this.desktopUpdater,
     this.connectionForTest,
+    ProductMeasurement? productMeasurement,
     SignInClient? cliLogin,
     CliLink? cliLink,
     PeerLinkClient? peerLinks,
@@ -3244,6 +3249,19 @@ class AppNotifier extends ChangeNotifier {
     this.peerLinks = peerLinks ?? this.viewer?.links ?? this.cliLink;
     _autonomousEnv = this.config.autonomousEnv;
     api = _newApiClient();
+    this.productMeasurement =
+        productMeasurement ??
+        ProductMeasurement(
+          surface: kIsWeb
+              ? 'web'
+              : this.viewer == null
+              ? 'desktop'
+              : 'phone',
+          automatic: !kUnderTest,
+          sendSetup: (report) =>
+              sendSetupMeasurement(this.config.apiBaseUrl, report),
+        );
+    addListener(_syncProductMeasurement);
     _initDeviceLog();
     // `grid.AppTheme.palette`, not the prefs store: main.dart copies the saved
     // choice into the palette notifier while rebuilding, so the store fires
@@ -3264,6 +3282,48 @@ class AppNotifier extends ChangeNotifier {
     addListener(_firstArrivalBehindTour);
     _autoRenameTabs = appearancePrefsStore.value.autoRenameTabs;
     appearancePrefsStore.addListener(_autoRenameChanged);
+  }
+
+  void _syncProductMeasurement() {
+    final scope =
+        signedIn &&
+            !signingIn &&
+            !signingOut &&
+            status == AppStatus.authenticated &&
+            currentUser?.id != null
+        ? (api, currentUser!.id)
+        : null;
+    productMeasurement.account(
+      scope,
+      choice: () => api.productUsageSettings(),
+      send: api.productUsageReport,
+    );
+    if (scope == null) _measurementConnections.clear();
+  }
+
+  // Connection keys already belong to the app. Only fixed outcomes reach measurement, never the key.
+  void _measureConnection(
+    String key,
+    ConnectionStatus status,
+    ProductFlow flow,
+  ) {
+    if (status == ConnectionStatus.connecting ||
+        status == ConnectionStatus.reconnecting) {
+      if (_measurementConnections.length < 64) {
+        _measurementConnections.putIfAbsent(
+          key,
+          () => productMeasurement.begin(flow),
+        );
+      }
+    } else {
+      _measurementConnections
+          .remove(key)
+          ?.call(
+            status == ConnectionStatus.connected
+                ? ProductOutcome.ok
+                : ProductOutcome.failed,
+          );
+    }
   }
 
   /// Through the local CLI in a desktop build; straight to the backend, signed, in a viewer.
@@ -3399,6 +3459,27 @@ class AppNotifier extends ChangeNotifier {
   /// tile of a machine, rather than only the focused one, call [panesFor]
   /// instead; those are the transport-wide events, and they are marked.
   TerminalSession? get activeTerminal => focusedPane?.session;
+
+  /// Dial scroll handlers of the mounted cloud chat panes. A cloud harness has no
+  /// terminal session to scroll, so its conversation registers here, by machine
+  /// and agent, for as long as it is on screen.
+  final _cloudScrollHandlers =
+      <(String, String), void Function(int phase, int dy, int velocity)>{};
+
+  /// Called by a cloud chat pane while mounted; returns how to withdraw it.
+  VoidCallback registerCloudScroll(
+    String machineId,
+    String agentId,
+    void Function(int phase, int dy, int velocity) handler,
+  ) {
+    final key = (machineId, agentId);
+    _cloudScrollHandlers[key] = handler;
+    return () {
+      if (identical(_cloudScrollHandlers[key], handler)) {
+        _cloudScrollHandlers.remove(key);
+      }
+    };
+  }
 
   bool get canAddPane => panes.length < maxPanes;
 
@@ -4607,6 +4688,22 @@ class AppNotifier extends ChangeNotifier {
 
   /// Shared with [_prepareEnvironment]: runs the provisioner, updates
   /// [environmentReadiness] as it streams progress, and reports the outcome.
+  void _measureSetup(EnvironmentReadiness value) {
+    productMeasurement.setupFacts({
+      ProductFlow.setup: switch (value.phase) {
+        EnvironmentSetupPhase.ready => 'ready',
+        EnvironmentSetupPhase.failed => 'failed',
+        _ => 'running',
+      },
+      for (final entry in value.steps.entries)
+        switch (entry.key) {
+          EnvironmentStep.harness => ProductFlow.setupHarness,
+          EnvironmentStep.tmux => ProductFlow.setupTmux,
+          EnvironmentStep.clipboard => ProductFlow.setupClipboard,
+        }: entry.value.name,
+    });
+  }
+
   Future<EnvironmentReadiness> _runProvisioner({
     EnvironmentReadiness? resumeFrom,
     bool install = false,
@@ -4616,6 +4713,7 @@ class AppNotifier extends ChangeNotifier {
     final provisioner = environmentProvisioner ?? EnvironmentProvisioner();
     final result = await provisioner.ensureReady(
       onProgress: (value) {
+        _measureSetup(value);
         if (quiet &&
             value.phase != EnvironmentSetupPhase.ready &&
             value.phase != EnvironmentSetupPhase.failed) {
@@ -4643,6 +4741,7 @@ class AppNotifier extends ChangeNotifier {
       install: install,
       mode: mode,
     );
+    _measureSetup(result);
     environmentReadiness = result;
     return result;
   }
@@ -5811,8 +5910,16 @@ class AppNotifier extends ChangeNotifier {
   }
 
   Future<void> _checkForUpdates(Completer<ManualUpdateCheck> completion) async {
+    final finish = productMeasurement.begin(ProductFlow.updateCheck);
     try {
       final result = await _updater.check();
+      finish(
+        result.status == DesktopUpdateCheckStatus.failed
+            ? ProductOutcome.failed
+            : result.status == DesktopUpdateCheckStatus.disabled
+            ? ProductOutcome.cancelled
+            : ProductOutcome.ok,
+      );
       _recordUpdateCheck(result, manual: true);
       completion.complete(
         ManualUpdateCheck(
@@ -5823,6 +5930,7 @@ class AppNotifier extends ChangeNotifier {
         ),
       );
     } catch (error) {
+      finish(ProductOutcome.failed);
       debugPrint('AppNotifier.checkForUpdates: $error');
       const failed = DesktopUpdateCheck.failed();
       _recordUpdateCheck(failed);
@@ -5899,6 +6007,7 @@ class AppNotifier extends ChangeNotifier {
     }
     // Reassigned once the manifest has been re-read below; the failure messages
     // at the end name whichever build was actually attempted.
+    final finish = productMeasurement.begin(ProductFlow.updateStage);
     var info = chosen;
     isInstallingUpdate = true;
     updateDownloadFraction = null;
@@ -5924,6 +6033,7 @@ class AppNotifier extends ChangeNotifier {
         // one is keyed on there being an offer — which there is not any more.
         // Dropping the offer IS the state, and the dialog that asked turns
         // itself into "You're up to date" on the false return.
+        finish(ProductOutcome.cancelled);
         availableUpdate = null;
         updateError = null;
         return false;
@@ -5950,9 +6060,12 @@ class AppNotifier extends ChangeNotifier {
         },
       );
       if (staged == null) {
+        finish(ProductOutcome.failed);
         updateError = 'Could not download and verify Harness ${info.version}.';
         return false;
       }
+      // A staged download is observable; successful relaunch is not. Never delay the update for reporting.
+      finish(ProductOutcome.ok);
       final applied = await updater.applyStaged(staged, selfPid: pid);
       if (!applied) {
         updateError =
@@ -5962,9 +6075,11 @@ class AppNotifier extends ChangeNotifier {
       flushAppLog();
       exit(0);
     } catch (error) {
+      finish(ProductOutcome.failed);
       updateError = 'Could not install Harness ${info.version}: $error';
       return false;
     } finally {
+      finish(ProductOutcome.unknown);
       isInstallingUpdate = false;
       updateDownloadFraction = null;
       if (!_disposed) notifyListeners();
@@ -5975,6 +6090,7 @@ class AppNotifier extends ChangeNotifier {
   /// button of its own to name it — the browser opens on the sign-in page's chooser.
   Future<void> login([SignInProvider? provider]) async {
     if (_disposed || signingIn || signingOut || signOutError != null) return;
+    final measureSignIn = productMeasurement.begin(ProductFlow.signIn);
     final wasGuest = isGuest;
     final revision = _invalidateAuthWork();
     _closedHistory.clear();
@@ -6006,6 +6122,7 @@ class AppNotifier extends ChangeNotifier {
         },
       );
       if (!_authWorkCurrent(revision)) return;
+      measureSignIn(ProductOutcome.ok);
       _loginAuthorized = true;
       pendingAuthorizeUrl = null;
       _resetLoginBrowser();
@@ -6024,6 +6141,7 @@ class AppNotifier extends ChangeNotifier {
       // The first sign-in on this computer offers Add Phone; a later one does not.
       unawaited(_offerPhoneAfterSignIn(revision));
     } catch (error) {
+      measureSignIn(ProductOutcome.failed);
       if (!_authWorkCurrent(revision)) return;
       status = wasGuest ? AppStatus.authenticated : AppStatus.unauthenticated;
       _lastError = error.toString();
@@ -6032,6 +6150,11 @@ class AppNotifier extends ChangeNotifier {
         unawaited(_becomeGuest(revision: revision));
       }
     } finally {
+      measureSignIn(
+        _authWorkCurrent(revision)
+            ? ProductOutcome.unknown
+            : ProductOutcome.cancelled,
+      );
       // Takes the in-app browser view down once the redirect has landed; a no-op
       // where the page opened in a browser of its own.
       unawaited(closeSignInPage());
@@ -6169,6 +6292,7 @@ class AppNotifier extends ChangeNotifier {
         client is! PhoneSignInClient) {
       return;
     }
+    final finish = productMeasurement.begin(ProductFlow.signIn);
     final wasGuest = isGuest;
     final revision = _invalidateAuthWork();
     previousAccountEmail = currentUser?.email;
@@ -6201,6 +6325,7 @@ class AppNotifier extends ChangeNotifier {
         },
       );
       if (!_authWorkCurrent(revision)) return;
+      finish(ProductOutcome.ok);
       _loginAuthorized = true;
       _clearPhoneSignIn();
       notifyListeners();
@@ -6211,6 +6336,7 @@ class AppNotifier extends ChangeNotifier {
       }
       _guestDeskRestorePending = false;
     } catch (error) {
+      finish(ProductOutcome.failed);
       if (!_authWorkCurrent(revision)) return;
       status = wasGuest ? AppStatus.authenticated : AppStatus.unauthenticated;
       _lastError = error.toString();
@@ -6219,6 +6345,11 @@ class AppNotifier extends ChangeNotifier {
         unawaited(_becomeGuest(revision: revision));
       }
     } finally {
+      finish(
+        _authWorkCurrent(revision)
+            ? ProductOutcome.unknown
+            : ProductOutcome.cancelled,
+      );
       if (_authWorkCurrent(revision)) {
         _loginAuthorized = false;
         _clearPhoneSignIn();
@@ -6689,6 +6820,13 @@ class AppNotifier extends ChangeNotifier {
         final settling =
             nextStatus == ConnectionStatus.disconnected &&
             _trustSettling.contains(machineId);
+        _measureConnection(
+          machineId,
+          settling ? ConnectionStatus.connecting : nextStatus,
+          machine.isLocalMachine
+              ? ProductFlow.workspaceConnect
+              : ProductFlow.remoteConnect,
+        );
         machine.connectionStatus = settling
             ? ConnectionStatus.connecting
             : nextStatus;
@@ -7632,6 +7770,7 @@ class AppNotifier extends ChangeNotifier {
     _MachineLinkAttempt attempt,
     void Function(String)? onProgress,
   ) async {
+    final measureLink = productMeasurement.begin(ProductFlow.computerLink);
     String? error;
     try {
       final result = await peerLinks.connect(
@@ -7666,6 +7805,7 @@ class AppNotifier extends ChangeNotifier {
     } catch (_) {
       error = 'Could not link this machine. Try again.';
     } finally {
+      measureLink(error == null ? ProductOutcome.ok : ProductOutcome.failed);
       if (identical(_machineLinks[machineId], attempt)) {
         _machineLinks.remove(machineId);
       }
@@ -10494,6 +10634,10 @@ class AppNotifier extends ChangeNotifier {
         ownerAgentId: agent.id,
       );
       swarm.panes.insert(insertion, pane);
+      // Counts opening a pane with a URL or a known launch error, not rendering its private page.
+      productMeasurement.begin(ProductFlow.viewerOpen)(
+        agent.viewerError == null ? ProductOutcome.ok : ProductOutcome.failed,
+      );
       // The same bookkeeping a split does when it grows the grid by one:
       // pins past the insertion slide right, and the shape is re-derived.
       swarm.pinnedSlots.updateAll(
@@ -17198,11 +17342,17 @@ class AppNotifier extends ChangeNotifier {
         // A finger going down is the gesture; moves and the inertial tail
         // must not keep asking macOS for focus after the person switches away.
         if (phase == 0) _requestDeviceWindow(machine);
-        activeTerminal?.scroll(
-          phase,
-          (payload['dy'] as num?)?.round() ?? 0,
-          (payload['velocity'] as num?)?.round() ?? 0,
-        );
+        final dy = (payload['dy'] as num?)?.round() ?? 0;
+        final velocity = (payload['velocity'] as num?)?.round() ?? 0;
+        final pane = focusedPane;
+        final cloudScroll = pane?.agentId == null
+            ? null
+            : _cloudScrollHandlers[(pane!.machineId, pane.agentId!)];
+        if (cloudScroll != null) {
+          cloudScroll(phase, dy, velocity);
+        } else {
+          activeTerminal?.scroll(phase, dy, velocity);
+        }
         return;
       case 'dial_selection':
         final reply = const ['search', 'match'].contains(payload['op'])
@@ -17874,6 +18024,8 @@ class AppNotifier extends ChangeNotifier {
 
   @override
   void dispose() {
+    productMeasurement.dispose();
+    _measurementConnections.clear();
     if (cliLogin case final CliLogin cli) {
       cli.waitingNote.removeListener(_loginWaitingChanged);
     }

@@ -25,7 +25,7 @@ import {
 import { trackSocketLiveness } from './hub.js'
 import { guardedSend, guardedSendJson } from './wsSend.js'
 import { attachNodeRole, PRESENCE_TTL_SEC } from './nodeRole.js'
-import { presenceTracker, presenceWriteDue, recordTurnStarted, touchClientOnlineDay, touchMachineOnlineDay, touchUserOnlineDay, type PresenceWriteState } from './dailyTracking.js'
+import { presenceTracker, presenceWriteDue, recordTurnStarted, touchClientOnlineDay, touchMachineOnlineDay, touchUserOnlineDay, TUI_SURFACES, type ClientSurface, type PresenceWriteState } from './dailyTracking.js'
 import { countryCodeFromHeaders } from './clientGeo.js'
 import { recordCreatedAgent, recordDeletedAgent } from './agentTracker.js'
 import type { Frame } from './tunnel.js'
@@ -308,11 +308,20 @@ async function attachAdapter(ws: WebSocket, machineId: string, userId: string, c
   )
   // `harness tui` on this computer: the daemon reports it like a window but names the surface, and it
   // is kept out of the desktop app's table (`user_daily_client_presence`, schema.prisma).
-  const touchTuiPresence = presenceTracker(
-    (now, isNewConnection) => touchClientOnlineDay(userId, 'tui', now, { isNewConnection }),
-    (kind, err) => logger.warn('tui presence tracking failed', { machineId, userId, kind, error: String(err) }),
-    userPresenceFloors,
-  )
+  // One tracker per surface it reports (TUI_SURFACES): each is its own row and its own write floor.
+  const tuiTrackers = new Map<ClientSurface, ReturnType<typeof presenceTracker>>()
+  const touchTuiPresence = (surface: ClientSurface, kind: 'open' | 'ping') => {
+    let track = tuiTrackers.get(surface)
+    if (!track) {
+      track = presenceTracker(
+        (now, isNewConnection) => touchClientOnlineDay(userId, surface, now, { isNewConnection }),
+        (k, err) => logger.warn('tui presence tracking failed', { machineId, userId, surface, kind: k, error: String(err) }),
+        userPresenceFloors,
+      )
+      tuiTrackers.set(surface, track)
+    }
+    track(kind)
+  }
 
   // The node role — down subscription, presence, `__clients` resync, node_status — is shared with
   // every other backer of a machine and lives in nodeRole.ts. Only the delivery and teardown are
@@ -436,9 +445,11 @@ async function attachAdapter(ws: WebSocket, machineId: string, userId: string, c
       if (app.type === 'app_presence') {
         const { kind, surface } = (app.payload ?? {}) as { kind?: unknown; surface?: unknown }
         if (typeof kind !== 'string' || !APP_PRESENCE_KINDS.has(kind)) return
-        // No surface = the desktop app (every daemon before this field, and the desktop window now).
-        if (surface === 'tui') touchTuiPresence(kind as 'open' | 'ping')
-        else touchUserPresence(kind as 'open' | 'ping')
+        // No surface = the desktop app (every daemon before this field, and the desktop window now). A
+        // TUI says where it runs (TUI_SURFACES); a name this backend does not know counts as nothing,
+        // never as the desktop app.
+        if (surface === undefined) touchUserPresence(kind as 'open' | 'ping')
+        else if (typeof surface === 'string' && TUI_SURFACES.has(surface)) touchTuiPresence(surface as ClientSurface, kind as 'open' | 'ping')
         return
       }
       // The machine appending to its account's device key log (lib/deviceKeyLog.ts): its own key, or a

@@ -457,11 +457,36 @@ model Subdomain {
   @@map("subdomains")
 }
 
-/// Harness Analytics — ADDITIVE counters only (see docs/design/harness-analytics.md).
-/// Safe to sum along engine, mode, origin, machine, and day. A union of intervals or a distinct
-/// count must NEVER live here: splitting one by engine and re-summing double-counts concurrency,
-/// which is the exact error the wall-clock metric exists to prevent. Those live on
-/// AnalyticsDailyMachine at (machine, day) granularity instead.
+/// Account control only; no report times, usage counters or machine inventory.
+model ProductUsagePreference {
+  id       String  @id @default(auto()) @map("_id") @db.ObjectId
+  userId   String  @unique
+  enabled  Boolean
+  revision Int     @default(1)
+
+  @@map("product_usage_preferences")
+}
+
+/// Only fleet-wide counters. Never add an account, machine, agent, location or event timestamp.
+model ProductUsageTotal {
+  id     String   @id @default(auto()) @map("_id") @db.ObjectId
+  dayUtc DateTime
+  metric String
+  value  Int
+
+  @@unique([dayUtc, metric])
+  @@map("product_usage_totals")
+}
+
+/// Random report receipt, used only to prevent retries counting twice. No identity or report body.
+model ProductUsageReceipt {
+  id        String   @id @map("_id")
+  expiresAt DateTime
+
+  @@map("product_usage_receipts")
+}
+
+/// Legacy individual counters. New ingestion is disabled; dayUtc TTL removes these after 35 days.
 model AnalyticsDailyBucket {
   id               String   @id @default(auto()) @map("_id") @db.ObjectId
   userId           String
@@ -489,6 +514,7 @@ model AnalyticsDailyBucket {
   @@map("analytics_daily_buckets")
 }
 
+/// Legacy, no longer written. Retained only until the 35-day dayUtc expiry.
 /// Harness Analytics — NON-ADDITIVE metrics plus the reporting heartbeat. Exactly one row per
 /// machine per day. A row with all-zero counters means "the machine was up and idle"; a MISSING row
 /// means "we have no data". The UI must never render those two states the same way.
@@ -535,9 +561,8 @@ model AnalyticsMachineState {
   @@map("analytics_machine_states")
 }
 
-/// Presence/remote-usage tracking — separate from the Analytics family above (not opt-in, not
-/// collector-reported; derived directly from the relays: web-ws in src/lib/webWs.ts, device-ws in
-/// src/lib/deviceWs.ts, adapter-ws in src/lib/adapterWs.ts).
+/// Legacy presence histories: new writes are disabled and dayUtc expires after 35 days.
+/// The comments below document old records for historical readers, not current collection.
 
 /// Per-day record of whether a user had the desktop app open, and on which machine. One row per
 /// (user, machine, UTC day): "user online that day" is therefore a DISTINCT count of `userId`, while
@@ -576,7 +601,8 @@ model UserDailyPresence {
 /// Per-day record of a user on a surface other than the desktop app — `UserDailyPresence` stays the
 /// desktop app's alone. One row per (user, surface, UTC day); DAU is a distinct `userId`.
 /// `surface`: 'tui' (`harness tui`, reported by the local daemon like a desktop window: adapter-ws
-/// `app_presence { surface: 'tui' }`, src/lib/adapterWs.ts), 'mobile' / 'web' (the app's and the
+/// `app_presence { surface: 'tui' }`, src/lib/adapterWs.ts) — 'harness-os' / 'harness-os-pi' when that
+/// TUI is Harness OS on a PC / on an Orange Pi (cli lib/windowSurfaces.ts) —, 'mobile' / 'web' (the app's and the
 /// browser's own web-ws sockets, declared with `?client=` — src/lib/webWs.ts; the daemon's relay
 /// socket declares nothing and is never counted). `connections` = sessions opened that day (for
 /// mobile/web one per machine socket); a session spanning midnight gives the next day `0`.

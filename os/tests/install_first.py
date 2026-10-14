@@ -82,6 +82,10 @@ def check_installed_controls(vm, result, folder):
     result['checks'].append('Wayland clipboard round trip')
     vm.keys('ctrl', 'b')
     vm.keys('c')
+    # A new tab's shell opens the agent picker at its first prompt; text typed before then reaches
+    # the shell, after it the picker. Close the picker once it is up, then type into the shell.
+    if vm.screen_shows('installed-prefix-picker', 'enter choose', timeout=10):
+        vm.keys('esc')
     time.sleep(.5)
     vm.type_probe('echo prefix-tab-ready')
     vm.keys('ret')

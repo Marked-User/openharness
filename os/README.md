@@ -16,11 +16,14 @@ After shutdown, remove the USB and boot the installed disk. If disconnected,
 the Wi-Fi page opens first and advances automatically when connected; Ethernet
 skips that step. OpenCode starts on the left with two real terminals on the right.
 There is no trial choice or installation dock.
-
-**Next build:** the OS finishes Wi-Fi or Ethernet setup before launching hn.
-hn then requires a Harness account before opening the workspace. The USB
-installer remains available offline. An already signed-in account can reopen
-local work during a temporary network outage.
+The OS finishes Wi-Fi or Ethernet setup before launching hn, and hn requires a
+Harness account before opening the workspace; signing out returns to that page.
+An already signed-in account can reopen local work during a temporary network
+outage. When the network stays gone for 10 seconds, the Wi-Fi page comes forward
+by itself (over the sign-in page, or as a tab when signed in), once per outage.
+`harness update` updates everything Super+u does from a terminal, and says which
+version the daemon runs afterwards. After an update, the daemon always runs
+under `harness-daemon.service`, even where an older CLI started one beside it.
 
 Later launches restore existing work. The installed system keeps hn’s standard
 status bar. Ctrl+b, then c opens a terminal in a new tab. Projects live under

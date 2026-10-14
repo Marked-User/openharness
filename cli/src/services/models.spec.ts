@@ -14,7 +14,7 @@ import { gridCapableEngines } from '../lib/gridLaunch.js'
 import { ensureGridInstalled } from '../lib/gridInstall.js'
 import { clearGridMcpUrlCache } from '../lib/gridMcpUrl.js'
 import {
-  forgetGridModels, gridAnnotation, gridInventory, keystrokePrewarm, listAllGridModels, listGridModels, observeMachineList, onGridModelsChanged,
+  forgetGridModels, gridAnnotation, gridInventory, gridServingNodes, keystrokePrewarm, listAllGridModels, listGridModels, observeMachineList, onGridModelsChanged,
   presentGridSections, retargetPrewarm, warmGridModels, type GridSection,
 } from '../lib/gridModels.js'
 import { resolveGridTarget } from '../lib/gridTarget.js'
@@ -50,6 +50,7 @@ vi.mock('../lib/gridModels.js', () => ({
   forgetGridModels: vi.fn(),
   gridAnnotation: vi.fn((grid: { state: string }) => ({ state: grid.state })),
   gridInventory: vi.fn(),
+  gridServingNodes: vi.fn(),
   keystrokePrewarm: vi.fn(async () => 'started'),
   listAllGridModels: vi.fn(async () => []),
   listGridModels: vi.fn(async () => []),
@@ -86,12 +87,14 @@ const local = vi.hoisted(() => ({
   options: {} as Record<string, any>,
   list: vi.fn(async (_grid: string | null, _force?: boolean): Promise<Record<string, unknown>> => ({ models: [], busy: false, observedAt: 'now' })),
   act: vi.fn(async (_grid: string | null, _modelId: unknown, _action: string): Promise<Record<string, unknown>> => ({})),
+  communityGrid: vi.fn(async (): Promise<string | null> => 'Omagrid'),
 }))
 vi.mock('../lib/localModels.js', () => ({
   LocalModels: class {
     constructor(options: Record<string, unknown>) { local.options = options }
     list = local.list
     act = local.act
+    communityGrid = local.communityGrid
   },
 }))
 
@@ -585,6 +588,24 @@ describe('the models service', () => {
         access.ensure.mockReset()
       })
 
+      it('a start or stop with `community` runs on the community grid of this computer’s OS, not the account’s', async () => {
+        const { ask } = setup([], named)
+        local.act.mockClear()
+        await ask('grid_fleet_model_start', { modelId: 'org/Model-GGUF', community: true })
+        await ask('grid_fleet_model_stop', { modelId: 'org/Model-GGUF', community: true })
+        // A download is the same file wherever it runs: on the account's grid, `community` or not.
+        await ask('grid_fleet_model_download', { modelId: 'org/Model-GGUF', community: true })
+        await ask('grid_fleet_model_start', { modelId: 'org/Model-GGUF', community: 'yes' })
+        expect(local.act.mock.calls).toEqual([
+          ['Omagrid', 'org/Model-GGUF', 'start'], ['Omagrid', 'org/Model-GGUF', 'stop'],
+          ['kelvin-1a2b3c4d', 'org/Model-GGUF', 'download'], ['kelvin-1a2b3c4d', 'org/Model-GGUF', 'start'],
+        ])
+        local.communityGrid.mockResolvedValueOnce(null)
+        local.act.mockClear()
+        expect(await ask('grid_fleet_model_start', { modelId: 'org/Model-GGUF', community: true })).toEqual({ error: 'This computer is in no community grid.' })
+        expect(local.act).not.toHaveBeenCalled()
+      })
+
       it('answers what the act answers, as it is', async () => {
         local.act.mockResolvedValueOnce({ operation: { action: 'start', modelId: 'org/Model-GGUF' } })
         local.act.mockResolvedValueOnce({ error: 'fixture refusal' })
@@ -651,6 +672,8 @@ describe('the models service', () => {
         expect(local.options.machineName()).toBe('Studio')
         expect(core.account.machineName).toHaveBeenCalled()
         expect(local.options.inventory).toBe(gridInventory)
+        // Another grid's nodes are read without taking it for the own grid.
+        expect(local.options.servingNodes).toBe(gridServingNodes)
         expect(appEngineOps).toHaveBeenCalledWith(process.env)
         expect(local.options.appEngines).toEqual({ engines: 'app' })
         await local.options.appModels()

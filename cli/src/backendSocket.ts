@@ -1,3 +1,4 @@
+import { productUsageLaunch, productUsageRequest } from './lib/productUsageSignals.js'
 import { isLocalOnly, withoutUpdate } from './lib/cardUpdate.js'
 import type { PurgeAgentService } from './lib/purgeAgentService.js'
 import { MESSAGES_REQUESTS, SHARE_REQUESTS, type Asker, type LocalWindows, type WindowSurface, type BackendNotice, type GatewayEvents, type GatewayPort, type ModelsPort, type RemoteClient, type RemoteRole, type RemoteTransport } from './core/api.js'
@@ -818,7 +819,16 @@ export class BackendSocket {
     if (env.LOG_FRAMES && !MESSAGE_REQUESTS.has(type) && !ROUTE_COMMAND_TYPES.has(type) && !type.startsWith('terminal_') && !type.startsWith('viewer_') && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'scm_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && type !== 'orchestrator' && type !== 'api_connections' && type !== 'connectors' && type !== 'browser_open' && type !== 'browser_callback' && type !== 'phone_pair' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) {
       logFrame('←', connId ? `conn:${sid(connId)}` : 'backend', frame)
     }
-    const reply = (t: string, rid: unknown, p: Record<string, unknown>): void => this.emitReply(connId, t, rid, p)
+    const launchMeasured = productUsageLaunch(type, (frame.payload as { creationId?: unknown } | undefined)?.creationId,
+      signal => this.toGateway('usage', gateway => gateway.usageLaunch?.(signal)))
+    const measured = productUsageRequest(type, (metric) => this.toGateway('usage', (gateway) => gateway.usageCounter?.(metric)))
+    const reply = (t: string, rid: unknown, p: Record<string, unknown>): void => {
+      if (t === type) {
+        measured(p.error ?? (p.failure as { code?: unknown } | undefined)?.code, p.state, !!p.agent, p.ok)
+        launchMeasured(p.error ?? (p.failure as { code?: unknown } | undefined)?.code, p.state, !!p.agent, (p.held as { service?: unknown } | undefined)?.service)
+      }
+      this.emitReply(connId, t, rid, p)
+    }
     // Who may act as this machine's owner: a process here, or the owner's own paired app or browser, whose
     // session the gateway says is a `web` one. A device or an observer may not.
     const owner = local || role === 'web'

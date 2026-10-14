@@ -14,7 +14,7 @@ import { CATALOG, services } from './catalog.js'
 import { addApiKey, addCustom, cards, customCode, disconnect, finish, Flows, signInFor } from './connect.js'
 import * as gateway from './gateway.js'
 import { LocalSignIn, probe } from './oauth.js'
-import { forgetPage, PageServer, rememberPage, runningPage } from './page.js'
+import { forgetPage, PAGE_BUILD, PageServer, rememberPage, runningPage } from './page.js'
 import { refresh } from './renew.js'
 import { call, OFFICIAL_HOSTS } from './call.js'
 import { connectionsCommand } from './command.js'
@@ -451,10 +451,25 @@ describe('the page', () => {
   it('is reused only when it proves it is ours, and forgotten only by itself', async () => {
     rememberPage(vault, Number(new URL(page.origin).port), page.key)
     expect(await runningPage(vault)).toBe(`${page.origin}/#${page.key}`)
-    writePrivate(join(vault.root, 'page.json'), { port: Number(new URL(page.origin).port), key: 'not-this-servers' })
+    writePrivate(join(vault.root, 'page.json'), { port: Number(new URL(page.origin).port), key: 'not-this-servers', version: PAGE_BUILD, pid: 1 })
     expect(await runningPage(vault)).toBeNull()
     forgetPage(vault, Number(new URL(page.origin).port), 'not-this-servers')
     expect(await runningPage(vault)).toBeNull()
+  })
+
+  it('is not reused when an earlier release runs it: that one is stopped, and a new page starts', async () => {
+    const port = Number(new URL(page.origin).port)
+    const stopped: number[] = []
+    rememberPage(vault, port, page.key, 'an-earlier-release', 4242)
+    expect(readPrivate(join(vault.root, 'page.json'))).toEqual({ port, key: page.key, version: 'an-earlier-release', pid: 4242 })
+    expect(await runningPage(vault, PAGE_BUILD, pid => stopped.push(pid))).toBeNull()
+    expect(stopped).toEqual([4242])
+    // One from before the release was written down: not reused, and with no pid, left to stop by itself.
+    writePrivate(join(vault.root, 'page.json'), { port, key: page.key })
+    expect(await runningPage(vault, PAGE_BUILD, pid => stopped.push(pid))).toBeNull()
+    expect(stopped).toEqual([4242])
+    rememberPage(vault, port, page.key)
+    expect(await runningPage(vault, PAGE_BUILD, pid => stopped.push(pid))).toBe(`${page.origin}/#${page.key}`)
   })
 })
 

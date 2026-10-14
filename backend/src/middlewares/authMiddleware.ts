@@ -20,6 +20,8 @@ export function shouldSkipAuth(url: string): boolean {
   const path = url.split('?')[0]
   return (
     path === '/api/health' ||
+    // Explicitly enabled, credential-free setup totals; its own schema and workload budget apply.
+    path === '/api/product-usage/setup' ||
     // Web-driven SSO login (pre-session): /authorize returns the SSO URL, /exchange trades the code
     // for the SSO access token, /logout-url returns the SSO end-session URL. All fetched by web XHR.
     path === '/api/auth/authorize' ||
@@ -106,7 +108,8 @@ export function registerAuthMiddleware(
       // Except the Grid profile route: its caller is the Grid control plane asking on the person's
       // behalf, from a datacenter, and stamping that would relabel them (routes/grid.ts).
       const countryCode = countryCodeFromHeaders(request.headers)
-      if (countryCode && !isGridProfileRequest(request)) void stampUserCountry(auth.user.sub, countryCode)
+      if (countryCode && !isGridProfileRequest(request)
+          && !request.url.split('?')[0].startsWith('/api/product-usage/')) void stampUserCountry(auth.user.sub, countryCode)
       return
     }
     return reply.code(auth.status).send({

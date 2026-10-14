@@ -313,6 +313,20 @@ export class GridModelsService {
     }
   }
 
+  /** Another grid's nodes, for what this computer serves on it — never waking it, and never taking it for
+   *  the account's own (only [inventory] says that). Answered from its picture at once, as [sections] answers:
+   *  an aged one is read again in the background, so a model list never waits on another grid's network
+   *  (an unreachable one held it 10 s a grid). */
+  async servingNodes(gridName: string): Promise<GridInventoryAnswer> {
+    const tracked = await this.track(await this.rowFor(gridName))
+    if (this.due(tracked)) void this.refresh(tracked).catch(() => {})
+    return {
+      state: tracked.picture.state,
+      nodes: tracked.picture.state === 'awake' ? tracked.rawNodes : [],
+      status: tracked.info?.value?.status ?? null,
+    }
+  }
+
   private async rowFor(gridName: string): Promise<GridRow> {
     return (await this.gridRows(null)).find((row) => row.name === gridName) ?? nameOnlyRow(gridName)
   }
@@ -783,6 +797,11 @@ export function observeMachineList(body: unknown, localComputerId: string): void
 /** The Model Manager's inventory of the own grid (`LocalModels`' injected `inventory`). */
 export function gridInventory(gridName: string, force: boolean): Promise<GridInventoryAnswer> {
   return service.inventory(gridName, force)
+}
+
+/** Another grid's nodes, for what this computer serves there (`LocalModels`' injected `servingNodes`). */
+export function gridServingNodes(gridName: string): Promise<GridInventoryAnswer> {
+  return service.servingNodes(gridName)
 }
 
 /** Make every read due again — for a caller that has just changed what a grid serves. */

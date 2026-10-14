@@ -123,6 +123,8 @@ conversation history. Describe only collaboration controls present in this TUI.
   supported hardware. Display brightness keys keep a nonzero minimum; keyboard
   illumination can be turned off independently.
 - Super+u starts updates after installation; the Update button is clickable too.
+- `harness update` does the same from a terminal: the OS package when one is out, then hn, the CLI
+  and its daemon, and says which version the daemon runs afterwards. `harness --version` is the CLI's.
   No confirmation or password is needed. Restart only when ready. Updates keep projects and running
   work; flashing another USB is not the everyday update workflow.
 

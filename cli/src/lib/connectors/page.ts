@@ -5,13 +5,16 @@
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { statSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { addCustom, cards, disconnect, Flows, signInFor } from './connect.js'
 import { services, type GatewayRow } from './catalog.js'
 import { ICONS } from './generated/icons.js'
 import { PAGE_FILES } from './generated/page.js'
 import { ConnectorError, locked, readPrivate, validateCode, writePrivate, type Store } from './store.js'
 import * as gateway from './gateway.js'
+import { VERSION } from '../../version.js'
 
 const IDLE_MS = 15 * 60_000
 const GATEWAY_CACHE_MS = 60_000
@@ -149,12 +152,22 @@ export class PageServer {
   }
 }
 
-/** The running page's address, when page.json names a live one that proves it is ours. */
-export async function runningPage(vault: Store): Promise<string | null> {
+/**
+ * The running page's address, when page.json names a live one that proves it is ours and runs this
+ * release. One an earlier release started (Harness OS's own CLI at the welcome screen, before an update)
+ * is not reused: it runs that release's code. One from before the account's connections (vaultSync.ts)
+ * disconnected without recording it, so the account's copy brought the connection straight back. It is
+ * asked to stop when its pid is known; one from before the pid was written stops once nothing opens it.
+ */
+export async function runningPage(vault: Store, version = PAGE_BUILD, stop = stopPage): Promise<string | null> {
   let data: Record<string, unknown> | null
   try { data = readPrivate(join(vault.root, 'page.json')) } catch { return null }
   const port = data?.port
   if (typeof port !== 'number' || port < 1024 || port > 65535 || typeof data!.key !== 'string') return null
+  if (data!.version !== version) {
+    if (typeof data!.pid === 'number') stop(data!.pid)
+    return null
+  }
   const origin = `http://127.0.0.1:${port}`
   // An unrelated process can reclaim an expired page's port: never send it the capability.
   const nonce = randomBytes(32).toString('hex')
@@ -169,8 +182,26 @@ export async function runningPage(vault: Store): Promise<string | null> {
   return null
 }
 
-export function rememberPage(vault: Store, port: number, key: string): void {
-  writePrivate(join(vault.root, 'page.json'), { port, key })
+/**
+ * This release and which build of it. An unreleased build says 0.0.1, as Harness OS's own CLI does, so
+ * the version alone cannot tell the OS image's page from an update's: the file running this can.
+ */
+function thisBuild(): string {
+  try {
+    const file = statSync(fileURLToPath(import.meta.url))
+    return `${VERSION}+${file.size}.${Math.round(file.mtimeMs)}`
+  } catch { return VERSION }
+}
+export const PAGE_BUILD = thisBuild()
+
+export function rememberPage(vault: Store, port: number, key: string, version = PAGE_BUILD, pid = process.pid): void {
+  writePrivate(join(vault.root, 'page.json'), { port, key, version, pid })
+}
+
+/** Stop an earlier release's page; one that is gone, or not ours to signal, is left alone. */
+function stopPage(pid: number): void {
+  if (pid === process.pid) return
+  try { process.kill(pid, 'SIGTERM') } catch { /* Gone already. */ }
 }
 
 /** A newer launcher may already own page.json: remove only this instance's. */

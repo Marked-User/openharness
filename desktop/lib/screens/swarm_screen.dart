@@ -110,6 +110,7 @@ import '../widgets/rename_agent_dialog.dart';
 import '../widgets/delete_agent_dialog.dart';
 import '../widgets/fork_agent_dialog.dart';
 import '../widgets/restart_agent_action.dart';
+import '../measurement/task_feedback.dart';
 import '../widgets/new_agent_dialog.dart';
 import '../widgets/box_chrome.dart';
 import '../widgets/new_harness_form.dart';
@@ -6809,6 +6810,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       ),
     ),
     'app.add_phone': () => unawaited(_addPhone()),
+    'app.product_feedback': () => unawaited(showTaskFeedback(context, choice: () => app.api.productUsageSettings(), send: app.api.productUsageFeedback)),
     'app.store': _openStore,
     'app.daemon': _openCompanions,
     'app.daemon_talk': _talkToDaemon,

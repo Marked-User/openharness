@@ -10,7 +10,7 @@
 #include "pro_canvas.h"
 
 #define C(rgb) ht_rgb(rgb)
-enum { PET = 200, WAVE_N = 36, WAVE_H = 90, BAR_W = 9, BAR_GAP = 6, VIOLET_HI = 0xb9b2ff, AREA_H = POD_W - CS_BAR_H - CS_HINT_H };
+enum { PET = 200, WAVE_N = 36, WAVE_H = 90, BAR_W = 9, BAR_GAP = 6, VIOLET_HI = 0xb9b2ff, AREA_H = POD_W - CS_BAR_H - CS_FOOT_H };
 
 static int tri(uint32_t t, uint32_t period)   // 0..100
 {
@@ -45,7 +45,7 @@ static void sending(ht_scene_t *s, const pod_model_t *m, const pod_agent_t *a, i
     char where[2 * CABLE_NAME_MAX + 4];
     snprintf(where, sizeof where, "%s%s%s", tab ? tab->name : "", tab && a->machine[0] ? " \xc2\xb7 " : "", a->machine);
     int sx = x + 22 + 28 + 12 + tw + 12;
-    if (where[0] && sx < x + w - 22) cs_text(s, sx, y + 32, x + w - 22 - sx, &cs_rg_17, 0x5f646d, where);
+    if (where[0] && sx < x + w - 22) cs_text(s, sx, y + 32, x + w - 22 - sx, &cs_rg_17, CS_DIM, where);
     const int ty = y + 18 + 28 + 18, tw2 = w - 44, fw = tw2 * 4 / 10;
     ht_pro_rect(s, x + 22, ty, tw2, 4, 2, C(CS_BORDER));
     int fx = (int)(now_ms % 1400 * (uint32_t)(tw2 + fw) / 1400) - fw, l = fx < 0 ? 0 : fx, r = fx + fw > tw2 ? tw2 : fx + fw;
@@ -69,8 +69,6 @@ void cs_view_talk(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, uint
         sending(s, m, a, top + PET + 20, now_ms);
         return;
     }
-    const char *const keys[] = {"tap"}, *const labels[] = {"send"};
-    cs_hints(f, keys, labels, 1);
     const int top = CS_BAR_H + (AREA_H - (PET + 20 + WAVE_H + 20 + 28)) / 2, wy = top + PET + 20 + WAVE_H / 2;
     pod_pet_draw(s, (POD_W - PET) / 2, top, PET, a->engine, POD_SCENE_LISTEN, now_ms, nav->talk_started_ms);
     wave(s, wy, f->mic_level, now_ms);
@@ -83,6 +81,6 @@ void cs_view_talk(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, uint
     const char *tap = "Tap anywhere to send";   // the pill (.vo-tap): the hold was the start, any new tap is the send
     const int pw = ht_pro_width(&cs_sb_22, tap) + 44, ph = 44, px = (POD_W - pw) / 2, py = ly + 14 + 12;
     ht_pro_rect_aa_stroke(s, px, py, pw, ph, ph / 2, C(0x4a40a6), C(0x2a2550));
-    cs_text(s, px + 22, py + ph / 2, pw - 40, &cs_sb_22, 0xedeef0, tap);
+    cs_text(s, px + 22, py + ph / 2, pw - 40, &cs_sb_22, CS_INK, tap);
     pod_hit_add(f, 0, 0, POD_W, POD_W, POD_A_TALK, 0);   // LAST: hits are scanned last to first, so no crumb or chip steals the send
 }

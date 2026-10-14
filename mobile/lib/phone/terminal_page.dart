@@ -1,3 +1,4 @@
+import '../measurement/task_feedback.dart';
 import 'dart:async';
 import 'dart:ui' as ui;
 
@@ -2516,6 +2517,14 @@ class _TerminalPageState extends State<TerminalPage>
                 icon: LucideIcons.logOut300,
                 label: 'Leave the sample',
                 onTap: () => sample.leave(),
+              ),
+            if (SampleMode.maybeOf(context) == null)
+              PhoneSheetAction(
+                icon: LucideIcons.messageSquareText300,
+                label: 'Rate task outcome',
+                onTap: () => showTaskFeedback(context,
+                  choice: () => widget.notifier.api.productUsageSettings(),
+                  send: widget.notifier.api.productUsageFeedback),
               ),
             PhoneSheetAction(
               icon: LucideIcons.settings300,

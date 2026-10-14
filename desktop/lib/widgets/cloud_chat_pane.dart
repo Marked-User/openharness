@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -71,15 +72,85 @@ class _CloudChatPaneState extends State<CloudChatPane> {
   String? _error;
   int _readAt = -1;
 
+  // The dial scrolls this conversation as it scrolls a terminal (same scale, speed
+  // and fling decay as terminal_panel.dart), except that this list is reversed:
+  // its offset grows toward OLDER messages, so the sign flips to keep the
+  // direction on screen the same.
+  static const _dialScale = 2.5;
+  static const _dialStopVelocity = 40.0;
+  static const _dialDecayPerSecond = 0.002;
+  VoidCallback? _unregisterDial;
+  Timer? _dialInertia;
+  double _dialVelocity = 0;
+  int? _lastInertiaMicros;
+
+  void _registerDial() {
+    _unregisterDial?.call();
+    _unregisterDial = widget.notifier.registerCloudScroll(
+      widget.machineId,
+      widget.agent.id,
+      _dialScroll,
+    );
+  }
+
+  void _dialScroll(int phase, int dy, int velocity) {
+    if (phase == 0) _cancelDialInertia();
+    if (dy != 0) _applyDialDelta(dy * _dialScale);
+    if (phase == 2) _startDialInertia(velocity.toDouble());
+  }
+
+  void _applyDialDelta(double delta) {
+    if (!_scroll.hasClients) return;
+    final position = _scroll.position;
+    position.jumpTo(
+      (position.pixels + delta)
+          .clamp(position.minScrollExtent, position.maxScrollExtent)
+          .toDouble(),
+    );
+  }
+
+  void _startDialInertia(double velocity) {
+    _cancelDialInertia();
+    if (velocity.abs() < _dialStopVelocity) return;
+    _dialVelocity = velocity;
+    _lastInertiaMicros = DateTime.now().microsecondsSinceEpoch;
+    _dialInertia = Timer.periodic(const Duration(milliseconds: 16), (_) {
+      if (!mounted) {
+        _cancelDialInertia();
+        return;
+      }
+      final now = DateTime.now().microsecondsSinceEpoch;
+      final elapsed = math.min((now - (_lastInertiaMicros ?? now)) / 1e6, 0.05);
+      _lastInertiaMicros = now;
+      _applyDialDelta(_dialVelocity * elapsed * _dialScale);
+      _dialVelocity *= math.pow(_dialDecayPerSecond, elapsed).toDouble();
+      if (_dialVelocity.abs() < _dialStopVelocity) _cancelDialInertia();
+    });
+  }
+
+  void _cancelDialInertia() {
+    _dialInertia?.cancel();
+    _dialInertia = null;
+    _dialVelocity = 0;
+    _lastInertiaMicros = null;
+  }
+
   @override
   void initState() {
     super.initState();
+    _registerDial();
     unawaited(_load());
   }
 
   @override
   void didUpdateWidget(CloudChatPane old) {
     super.didUpdateWidget(old);
+    if (old.agent.id != widget.agent.id ||
+        old.machineId != widget.machineId ||
+        old.notifier != widget.notifier) {
+      _cancelDialInertia();
+      _registerDial();
+    }
     // The frame says how many messages its conversation holds: read again when that moves.
     if (old.agent.id != widget.agent.id ||
         (widget.agent.cloud?.messages ?? 0) != _readAt) {
@@ -89,6 +160,8 @@ class _CloudChatPaneState extends State<CloudChatPane> {
 
   @override
   void dispose() {
+    _unregisterDial?.call();
+    _cancelDialInertia();
     _prompt.dispose();
     _promptFocus.dispose();
     _scroll.dispose();

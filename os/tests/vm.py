@@ -84,6 +84,58 @@ print('HN_LIVE_MEDIA=' + json.dumps(dict(mode=mode, payload=str(payload), payloa
         result['checks'].append('The mounted writable Harness USB is rejected as an installation target')
 
 
+# Harness OS requires an account before its workspace opens (#1276). The fixture signs in the way a
+# headless box does: a box ticket the account issues (backend issueBoxTicket), spent in the guest by
+# `harness login --ticket`. The account is a review account with a fixed email code; both come from
+# the repository's secrets (HARNESS_TEST_EMAIL, HARNESS_TEST_OTP), never from this public file.
+ACCOUNT_API = 'https://apiv2.autonomous.ai'
+HARNESS_API = 'https://harness-api.autonomous.ai'
+
+
+def account_ticket():
+    """A one-time, 30-minute sign-in ticket for the test account. Never logs a token."""
+    import urllib.error
+    import urllib.request
+    email, code = os.environ.get('HARNESS_TEST_EMAIL'), os.environ.get('HARNESS_TEST_OTP')
+    if not email or not code:
+        raise RuntimeError('Harness OS requires an account: set HARNESS_TEST_EMAIL and HARNESS_TEST_OTP.')
+
+    def post(url, body, token=None):
+        headers = {'Content-Type': 'application/json', 'Accept': 'application/json', 'Location': 'en-US',
+                   'User-Agent': 'Harness-OS-VM-Test/1'}  # the account API refuses a bare client
+        if token:
+            headers['Authorization'] = 'Bearer ' + token
+        request = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method='POST')
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read() or b'{}')
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(f'{url} answered {error.code}') from None
+
+    post(ACCOUNT_API + '/api/v1/customers/send-login-verification', {'email': email})
+    signed = post(ACCOUNT_API + '/api/v1/customers/sign-in', {'email': email, 'otp': code, 'grant_type': 'otp'})
+    token = (signed.get('data') or {}).get('access_token') if signed.get('status') == 1 else None
+    if not token:
+        raise RuntimeError('The test account did not sign in.')
+    ticket = (post(HARNESS_API + '/api/auth/box/ticket', {}, token).get('data') or {}).get('ticket')
+    if not ticket:
+        raise RuntimeError('Harness issued no sign-in ticket for the test account.')
+    return ticket
+
+
+def form_text(path):
+    """OCR an OS form or hn page as sign_in_vm.py reads them: both draw light text, hn on a shaded
+    panel that global thresholding mistakes for ink, so the known dark palette is normalized first."""
+    from PIL import Image, ImageOps
+    readable = path.with_name(path.stem + '-ocr.png')
+    with Image.open(path) as frame:
+        ink = frame.convert('L').point(lambda value: 0 if value >= 96 else 255)
+        ink = ink.resize((frame.width * 2, frame.height * 2), Image.Resampling.NEAREST)
+        ImageOps.expand(ink, border=24, fill=255).save(readable)
+    return subprocess.check_output(['tesseract', str(readable), 'stdout', '--psm', '6'],
+                                   text=True, stderr=subprocess.DEVNULL, timeout=15)
+
+
 class VM:
     def __init__(self, folder, iso, firmware, memory, live_transport='cdrom', cpu=None, video='virtio-vga', audio=False, apple_model=None):
         self.folder, self.iso, self.firmware, self.memory = folder, iso, firmware, memory
@@ -293,6 +345,59 @@ class VM:
         self.command('/usr/lib/harness-os/wait-runtime', timeout=160)
         self.boot_event('harness-ready')
 
+    def form_shows(self, name, text, timeout=90):
+        """Wait until the framebuffer shows `text`: the OS network form runs before hn, so no
+        `hn capture-pane` can read it, and hn's sign-in page is a dialog over its panes."""
+        deadline = time.monotonic() + timeout
+        while True:
+            self.screenshot(name)
+            seen = form_text(self.folder / (name + '.png'))
+            (self.folder / (name + '.txt')).write_text(seen)
+            if text.lower() in seen.lower():
+                return
+            if time.monotonic() >= deadline:
+                raise AssertionError(f'{text} was not visible; see {name}.png')
+            time.sleep(1)
+
+    def sign_in(self, name='sign-in'):
+        """Sign the installed system in to the test account at hn's required sign-in page (#1276),
+        as a headless box is signed in. Runs as the logged-in user; needs the network."""
+        self.command('nm-online -q --timeout=60', timeout=70)
+        # Concurrent test VMs share the test account, and signed in, hn shows the account's shared
+        # tabs: another VM's windows would fill this screen. Keep this computer's tabs to itself.
+        self.command('mkdir -p ~/.config/systemd/user/hn-screen.service.d && printf "[Service]\\n'
+                     'Environment=HARNESS_TUI_DESK_SIGNED_IN=off\\n" > ~/.config/systemd/user/hn-screen.service.d/test-desk.conf && '
+                     'systemctl --user daemon-reload && systemctl --user restart hn-screen && '
+                     'for n in $(seq 1 60); do pgrep -u "$(id -u)" -x "hn|harness-tui" >/dev/null && '
+                     'tr "\\0" "\\n" < /proc/$(pgrep -u "$(id -u)" -nx "hn|harness-tui")/environ | '
+                     'grep -qx HARNESS_TUI_DESK_SIGNED_IN=off && exit 0; sleep 1; done; exit 1', timeout=75)
+        self.form_shows(name + '-required', 'Sign in to Harness')
+        output, status = self.command('harness login --json --ticket=' + shlex.quote(account_ticket()),
+                                      timeout=120, check=False)
+        # The result line shares the serial stream with shell-integration escapes and with the banner
+        # of the daemon the sign-in restarts: find it anywhere, and let the daemon have the last word.
+        results = []
+        for found in re.finditer(r'\{"type":"result"[^\r\n]*\}', output):
+            try:
+                results.append(json.loads(found.group(0)))
+            except json.JSONDecodeError:
+                pass
+        if status or any(result.get('status') == 'error' for result in results):
+            raise RuntimeError('The test account sign-in failed: ' + json.dumps(results[-1:] or output[-300:]))
+        self.command('for n in $(seq 1 60); do curl -s http://127.0.0.1:18473/api/status | '
+                     'grep -q \'"signedIn":true\' && exit 0; sleep 1; done; exit 1', timeout=75)
+        # Signed in from outside hn (as a phone's setup does), hn learns it at its next account check,
+        # at most a minute away: the page leaves once it has.
+        deadline = time.monotonic() + 90
+        while True:
+            self.screenshot(name + '-signed-in')
+            if 'sign in to harness' not in form_text(self.folder / (name + '-signed-in.png')).lower():
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError('Required sign-in stayed on screen after the account signed in.')
+            time.sleep(2)
+        self.boot_event('signed-in')
+
     def wait_unlock(self):
         # OCR reads the actual framebuffer; a process or serial prompt alone
         # cannot prove the intended unlock screen was shown to the user.
@@ -413,6 +518,7 @@ def check_graphical_keyboard(vm, name, *, allow_welcome=False):
     # first graphical frame. The saved workspace must actually be visible
     # before sending its shortcut; otherwise early keystrokes can be lost.
     deadline = time.monotonic() + 30
+    dismissed = False
     while time.monotonic() < deadline:
         vm.screenshot(name + '-ready')
         visible = subprocess.check_output(
@@ -420,6 +526,13 @@ def check_graphical_keyboard(vm, name, *, allow_welcome=False):
             text=True, stderr=subprocess.DEVNULL, timeout=10)
         if workspace_text_visible(visible, allow_welcome=allow_welcome):
             break
+        # Offline for 10 s, a signed-in hn brings the Wi-Fi form forward as a tab (os_welcome
+        # offer_wifi). Escape closes it, as a person who means to work offline does, once.
+        if not dismissed and 'connecttowi-fi' in re.sub(r'\s+', '', visible).lower():
+            vm.screenshot(name + '-offline-wifi-offered')
+            vm.keys('esc')
+            dismissed = True
+            deadline = max(deadline, time.monotonic() + 15)
         time.sleep(.25)
     else:
         raise RuntimeError('The graphical workspace did not render before keyboard input.')
@@ -527,22 +640,19 @@ def check_first_use(vm, user, folder, installed=False):
     assert defaults.get('update') == 'disable', 'The packaged agent must remain managed by system updates'
     if installed:
         vm.command('test ! -e /etc/harness-live && test "$(id -un)" = me')
-        vm.command('for n in $(seq 1 40); do hn capture-pane -p | grep -q "Connect to Wi-Fi" && exit 0; sleep .5; done; exit 1', timeout=30)
-        vm.screenshot('installed-network-first')
-        vm.command('! pgrep -u 1000 -x opencode')
+        # 0.1.4 (#1276): the OS network form owns first setup, before hn and before any agent,
+        # and neither Escape nor a workspace shortcut gets past it while offline.
+        vm.form_shows('installed-network-first', 'Connect to Wi-Fi')
+        vm.command('! pgrep -u 1000 -f "^/usr/lib/harness/hn$" && ! pgrep -u 1000 -x opencode')
         vm.keys('esc')
-        vm.command('hn capture-pane -p | grep -q "Connect to Wi-Fi"')
-        # Networking must never trap the owner. Use the compositor shortcut,
-        # then prove real keyboard input reaches a shell while still offline.
         vm.keys('meta_l', 't')
-        # capture-pane trims trailing cells, including the prompt's last space.
-        vm.command("for n in $(seq 1 30); do hn capture-pane -p | grep -Eq '^\\[me@harness [^]]*\\]\\$$' && exit 0; sleep .25; done; exit 1", timeout=15)
-        vm.type_probe('echo offline-terminal-ready')
-        vm.keys('ret')
-        vm.command('for n in $(seq 1 30); do hn capture-pane -p | grep -qx offline-terminal-ready && exit 0; sleep .5; done; exit 1', timeout=20)
-        vm.screenshot('installed-offline-terminal')
-        vm.keys('ctrl', 'd')
-        vm.command('for n in $(seq 1 30); do hn capture-pane -p | grep -q "Connect to Wi-Fi" && exit 0; sleep .5; done; exit 1', timeout=20)
+        vm.form_shows('installed-network-still-required', 'Connect to Wi-Fi')
+        vm.command('! pgrep -u 1000 -x opencode')
+        # Connected, hn opens on required sign-in; the account signs in, and only then does the
+        # workspace (welcome, its terminals and the agent) begin.
+        vm.monitor('set_link', name='hnnet', up=True)
+        vm.sign_in('installed')
+        vm.screenshot('installed-signed-in')
     else:
         vm.command('test "$(uname -n)" = harness && test "$(id -nu 1000)" = me && test -f /etc/harness-live')
         vm.command('nmcli networking off')
@@ -685,28 +795,34 @@ def check_first_use(vm, user, folder, installed=False):
     vm.keys('meta_l', 'm')
     time.sleep(1)
     vm.screenshot('01d-connect-computer')
-    # Fresh USB users are signed out. The connection panel must lead to the
-    # normal local sign-in flow, with a cancellable return to the trial.
-    vm.type_probe('sign in')
-    vm.keys('ret')
-    # Sign in opens hn's own account page (#897): Google, Apple, the phone, or keep using locally.
-    # The phone needs no browser in the VM. Its `harness login` is hn's child, and Esc cancels it.
-    assert vm.screen_shows('01d-account', 'with your phone'), 'Sign in must open the account page'
-    vm.keys('down')
-    vm.keys('down')
-    vm.keys('ret')
-    login_process = '[/]usr/lib/harness/cli.mjs login'
-    vm.command('for n in $(seq 1 20); do pgrep -u 1000 -f ' + shlex.quote(login_process) +
-               ' >/dev/null && exit 0; sleep 1; done; exit 1', timeout=30)
-    time.sleep(2)
-    vm.screenshot('01d-connect-sign-in')
-    vm.keys('esc')
-    vm.command('for n in $(seq 1 20); do ! pgrep -u 1000 -f ' + shlex.quote(login_process) +
-               ' >/dev/null && exit 0; sleep 1; done; exit 1', timeout=30)
-    # Back to the work it was opened over, whether Esc closed the page or only stopped sign-in.
-    if vm.screen_shows('01d-account-cancelled', 'harness account', timeout=2):
+    if installed:
+        # Signed in already (required since #1276): the account page's third row is Sign out, so the
+        # signed-out walk below would end this session. Leave the connection panel as it opened.
         vm.keys('esc')
-    time.sleep(1)
+        time.sleep(1)
+    else:
+        # Fresh USB users are signed out. The connection panel must lead to the
+        # normal local sign-in flow, with a cancellable return to the trial.
+        vm.type_probe('sign in')
+        vm.keys('ret')
+        # Sign in opens hn's own account page (#897): Google, Apple, the phone, or keep using locally.
+        # The phone needs no browser in the VM. Its `harness login` is hn's child, and Esc cancels it.
+        assert vm.screen_shows('01d-account', 'with your phone'), 'Sign in must open the account page'
+        vm.keys('down')
+        vm.keys('down')
+        vm.keys('ret')
+        login_process = '[/]usr/lib/harness/cli.mjs login'
+        vm.command('for n in $(seq 1 20); do pgrep -u 1000 -f ' + shlex.quote(login_process) +
+                   ' >/dev/null && exit 0; sleep 1; done; exit 1', timeout=30)
+        time.sleep(2)
+        vm.screenshot('01d-connect-sign-in')
+        vm.keys('esc')
+        vm.command('for n in $(seq 1 20); do ! pgrep -u 1000 -f ' + shlex.quote(login_process) +
+                   ' >/dev/null && exit 0; sleep 1; done; exit 1', timeout=30)
+        # Back to the work it was opened over, whether Esc closed the page or only stopped sign-in.
+        if vm.screen_shows('01d-account-cancelled', 'harness account', timeout=2):
+            vm.keys('esc')
+        time.sleep(1)
     if not installed:
         # F10 reaches the dock without consuming the agent's ordinary Tab key.
         vm.keys('f10')
@@ -733,7 +849,9 @@ def check_first_use(vm, user, folder, installed=False):
     assert interactive_status == 0, 'The visible bundled agent must accept keyboard input and display its reply'
     # The real agent receives the local guide, knows both shortcut layers, and
     # creates work that the later offline installation must preserve.
-    vm.type_probe('what are the os shortcuts for a new harness and connecting a computer and does ctrl b still work')
+    # Short on purpose: the check reads the agent's visible screen, and a long answer scrolls the
+    # Super shortcuts off it (run 38380548451 answered correctly, only the Ctrl+b lines still shown).
+    vm.type_probe('in three short lines what are the os shortcuts for a new harness and connecting a computer and does ctrl b still work')
     vm.keys('ret')
     _, guide_status = vm.command(user('sh -c ' + shlex.quote(
         'for n in $(seq 1 120); do hn capture-pane -p > /tmp/hn-first-guide.txt; '

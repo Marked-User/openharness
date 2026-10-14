@@ -27,6 +27,7 @@ import 'phone_navigation.dart' show phoneRoute;
 import 'phone_name_store.dart';
 import 'phone_sheet.dart';
 import 'settings_row.dart';
+import 'privacy_page.dart';
 import 'welcome/how_it_works.dart';
 import 'welcome/focus_hints.dart';
 import 'tty_controls.dart';
@@ -166,6 +167,14 @@ class _Body extends StatelessWidget {
           // alone, and that is deliberate: it is the only row here anybody opens twice.
           // No Stats row: counters this app keeps about itself are nobody's daily question.
           buildUsageSettingsRow(context, notifier),
+          if (_sample(context) == null)
+            SettingsRow(title: 'Privacy', onTap: () => Navigator.of(context).push(
+              phoneRoute((_) => PrivacyPage(request: ({bool? enabled}) async {
+                final value = await notifier.api.productUsageSettings(enabled: enabled);
+                notifier.productMeasurement.savedChoice(value);
+                return value;
+              }, feedback: notifier.api.productUsageFeedback)),
+            )),
           // The computers this phone reaches — here rather than a menu of their own: linking one is
           // a once-a-while errand, and Find already reaches every agent on them.
           // Each computer's sheet there holds what the account can do to it — try it again, rename
