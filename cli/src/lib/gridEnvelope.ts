@@ -1,11 +1,17 @@
 /**
- * The refusal envelope `grid --json` writes on stderr beside its plain sentence, one JSON line:
- * `{"error": {"code", "message", "status"}}` (autonomous-grid `cli/json_error.py`). Grid reads compare
- * its `code` (`gridReader.ts`); the sign-in hand-off shows its `message` (`gridHandoff.ts`). ⚠️ That
- * message is a subprocess's text on a person's screen, so control characters become spaces and it is
- * bounded; the `code` is compared, never shown, and is left exactly as sent.
+ * The refusal envelope `grid --json` writes on stderr beside its plain sentence, one JSON line: the
+ * contract's `CliErrorEnvelope` (`gridProtocol.ts`, grid-protocol `cli-error`), whose names are read here
+ * through it. Grid reads compare its `code` (`gridReader.ts`); the sign-in hand-off shows its `message`
+ * (`gridHandoff.ts`). ⚠️ That message is a subprocess's text on a person's screen, so control characters
+ * become spaces and it is bounded; the `code` is compared, never shown, and is left exactly as sent.
  */
-export interface GridEnvelope { code: string | null; message: string | null }
+import type { CliErrorEnvelope } from './gridProtocol.js'
+import type { Unchecked } from './gridUnchecked.js'
+
+type CliError = CliErrorEnvelope['error']
+
+/** One envelope as read: its `code`, and its `message` once displayable — null when none was left. */
+export interface GridEnvelope { code: CliError['code']; message: CliError['message'] | null }
 
 /** Fits `grid`'s rendering of a control-plane refusal (request line ~70 + ≤400 chars of reply). */
 const MAX_MESSAGE_CHARS = 600
@@ -27,7 +33,10 @@ export function gridEnvelopes(stderr: string): GridEnvelope[] {
   return stderr.split('\n').flatMap((line) => {
     let parsed: unknown
     try { parsed = line.trim().startsWith('{') ? JSON.parse(line.trim()) : null } catch { return [] }
-    const error = isObject(parsed) && isObject(parsed.error) ? parsed.error : null
-    return error ? [{ code: typeof error.code === 'string' ? error.code : null, message: displayable(error.message) }] : []
+    if (!isObject(parsed)) return []
+    const envelope: Unchecked<CliErrorEnvelope> = parsed
+    if (!isObject(envelope.error)) return []
+    const error: Unchecked<CliError> = envelope.error
+    return [{ code: typeof error.code === 'string' ? error.code : null, message: displayable(error.message) }]
   })
 }

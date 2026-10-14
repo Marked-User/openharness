@@ -38,7 +38,10 @@ const MIN_ABSENT_READS = 2
  * [MIN_ABSENT_READS] answers, not [GRID_MODEL_RETENTION_MS]. Without this, a model stopped on another
  * computer stayed in this one's Shared with you for over two minutes, offered and failing (only the
  * computer that stopped it knows at once: `provenStopped`). Three awake memos (15s each), so one slow look
- * between them still counts as the grid answering throughout.
+ * between them still counts as the grid answering throughout. A master's respawn or takeover is no wake
+ * either: the overview lists nodes by their last heartbeat in the grid's database, inside the node TTL, so a
+ * new master's first answer lists what the old one's last did; the seconds of 502/503 between them read as
+ * unknown, after which the full [GRID_MODEL_RETENTION_MS] applies.
  */
 const AWAKE_CONTINUITY_MS = 45_000
 

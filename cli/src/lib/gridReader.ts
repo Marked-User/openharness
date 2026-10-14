@@ -32,6 +32,7 @@ import {
   type GridOverview, type LastKnown as WireLastKnown, type LastKnownNode, type NodeModelCapability,
   type OverviewModel, type OverviewNode, type ProviderDiscovery,
 } from './gridProtocol.js'
+import type { Unchecked } from './gridUnchecked.js'
 
 /** The owner status of a grid the platform's reaper slept (grid-apis `grid_sleep_state.ASLEEP`), as
  *  `grid info --json` passes it through. Only the grid's owner sees a status at all. */
@@ -90,10 +91,6 @@ export type GridRead =
   | { kind: 'unreachable' }
 
 type Json = Record<string, unknown>
-/** An object off the wire: the contract's key names — so a renamed field fails `tsc` here — with every value
- *  still unchecked. The generated types keep an index signature (a newer server may add keys), which would
- *  erase the names from `keyof`, so the declared keys are picked out first. */
-type Unchecked<T> = { [K in keyof T as string extends K ? never : number extends K ? never : K]?: unknown }
 const isObject = (value: unknown): value is Json => !!value && typeof value === 'object' && !Array.isArray(value)
 const text = (value: unknown): string =>
   typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, MAX_TEXT) : ''

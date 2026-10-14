@@ -213,8 +213,8 @@ sets `enable_thinking:false` at startup — needed, because a zero budget alone 
 every token thinking [run]. `--thinking on` enables it; either applies only to a new start.
 
 **6. Prove it answers — once, bounded.** A successful `join` means *starting*, not ready. First wait
-for the relay to list it (a call before that answers `No providers available for this model`, which
-is "not yet", not "broken"):
+for the relay to list it (a call before that answers `No providers available for this model`, or
+`model_not_found` on a grid that has served other models, which is "not yet", not "broken"):
 
     # engine on this computer: its own checks first, then the relay
     "$GRID_FLEET" verify --at http://127.0.0.1:PORT/v1 --model MODEL_ALIAS --kind llama.cpp --grid GRID --alias MODEL_ALIAS
@@ -299,8 +299,8 @@ Say what failed and stop; translate every message, never repeat a raw line that 
     then `"$GRID_FLEET" init`, then the step again. Never `grid login`: it is a second sign-in. Only
     `harness grid setup` saying this computer is not signed in to Harness is theirs: `harness login`,
     the only command ever theirs.
-  - **`No providers available for this model`** right after a join → not registered yet; wait as
-    step 6 says.
+  - **`No providers available for this model`** right after a join, or `model_not_found` (404) on a
+    grid that has served other models → not registered yet; wait as step 6 says.
   - **`exceeds the available context size`** (an agent may show it as a garbled "expected array
     `choices`") → served with too small a window: leave, and join again with the longest context
     that fits (step 5) — never under 64K.

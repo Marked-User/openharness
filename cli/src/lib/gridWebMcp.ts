@@ -108,10 +108,11 @@ export function mcpServersConfig(mcpUrl: string, keyVar: string): string {
  *    wire, `_reject_server_tools` in `shared/agent/cli_seat.py`) and the pane prints `API Error: 400
  *    Unsupported tool type: web_search_20250305`.
  *  * `WebFetch` DOES fetch the page from this machine — and then summarises it through a haiku call
- *    on the SAME base URL. The grid's relay serves only the models its nodes run and answers any
- *    other name `503 no_providers_available` (grid-src `private_server/relay.py`; only the reserved
- *    `auto` is routed), so the fetch succeeds and the tool still fails. An earlier version of this
- *    comment left `WebFetch` enabled on the belief that a local fetch made it safe; it does not.
+ *    on the SAME base URL. The grid's relay serves only the models its nodes run (only the reserved
+ *    `auto` is routed), and refuses a name none of its engines ever served at once with `404
+ *    model_not_found` (grid-protocol 0.1.1 `ModelNotFound`; a grid that has never had an engine says
+ *    `503 no_providers_available`), so the fetch succeeds and the tool still fails. An earlier version
+ *    of this comment left `WebFetch` enabled on the belief that a local fetch made it safe; it does not.
  *
  * The cost is not the failed calls: a model offered a familiar dead tool reaches for it FIRST, spends
  * turns on the refusal, and only then finds `mcp__harness__web_search`, the search the grid actually

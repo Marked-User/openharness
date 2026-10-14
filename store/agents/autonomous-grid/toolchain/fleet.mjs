@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createLog, verifyEngine, verifyModel, verifyRelay, relayOnlyRefusal } from '../lib/verify.mjs';
 import { join, resolve } from 'node:path';
-import { atomicJson, DEFAULT_CONFIG, execute, gridJson, harnessNameFor, nameJoin, readConfig, runTracked } from '../lib/fleet.mjs';
+import { atomicJson, DEFAULT_CONFIG, execute, gridJson, harnessNameFor, nameJoin, PACKAGE, readConfig, runTracked } from '../lib/fleet.mjs';
 import { createCollector } from '../lib/telemetry.mjs';
 import { discoverMachines } from '../lib/harness.mjs';
 import { inventory, machineState, summarize } from '../lib/inventory.mjs';
@@ -38,10 +38,15 @@ try {
     if(args.length && !(args.length===1 && args[0]==='--json')) throw new Error('Use: fleet status [--json]');
     console.log(JSON.stringify(await readStatus(workspace),null,2));
   } else if (command === 'doctor') {
+    // The floor setup.sh holds Grid to, read from VERSIONS so the two cannot disagree — quoted or not, as the
+    // shell that sources it would take it.
+    const { readFile } = await import('node:fs/promises');
+    const floor = (await readFile(join(PACKAGE, 'VERSIONS'), 'utf8')).match(/^GRID_MIN_VERSION=(["']?)(\d+\.\d+\.\d+)\1\s*$/m)?.[2];
+    if (!floor) throw new Error(`${join(PACKAGE, 'VERSIONS')} names no GRID_MIN_VERSION="X.Y.Z", so the Grid floor is unknown. Reinstall this package.`);
     const result = await execute({ transport: 'local' }, ['version']);
     const version = result.stdout.match(/\d+\.\d+\.\d+/)?.[0];
-    const [a=0,b=0,c=0] = (version || '').split('.').map(Number);
-    if (!result.ok || !(a > 0 || b > 3 || (b === 3 && c >= 47))) throw new Error('Grid >= 0.3.47 is required. Run toolchain/setup.sh or update the selected Harness runtime.');
+    const [a=0,b=0,c=0] = (version || '').split('.').map(Number), [x,y,z] = floor.split('.').map(Number);
+    if (!result.ok || !(a > x || (a === x && (b > y || (b === y && c >= z))))) throw new Error(`Grid >= ${floor} is required. Run toolchain/setup.sh or update the selected Harness runtime.`);
     console.log(`ok   Grid ${version}\nok   Node ${process.versions.node}\nok   local fleet viewer\ninfo Paired Harness machines use encrypted connections; SSH targets use existing keys`);
   } else if (command === 'discover') {
     if (args.length && (args.length !== 1 || args[0] !== '--add')) throw new Error('Use: fleet discover [--add]');
