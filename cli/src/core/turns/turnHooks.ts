@@ -126,7 +126,6 @@ export function createTurnHooks({
     }
     const complete = async (): Promise<CapturedStopOutcome> => {
       deadline = performance.now() + STOP_COMPLETION_WAIT_MS
-      if (!confirmed()) return state() === 'superseded' ? 'superseded' : 'held'
       if (noEffect) return 'completed'
       const context: HookTurnContext = { ...hookTurns,
         turnState: id => id === sessionId && state() === 'current' ? original!.snapshot() : undefined,
@@ -158,6 +157,11 @@ export function createTurnHooks({
       if (state() === 'superseded') return Promise.resolve('superseded')
       if (completion) return completion
       if (owner) execution = owner
+      // Admission recovery can finish before its reader is ready. Until the
+      // original turn can start its effect, a temporary hold is still retryable.
+      try {
+        if (!confirmed()) return Promise.resolve(state() === 'superseded' ? 'superseded' : 'held')
+      } catch { return Promise.resolve(state() === 'superseded' ? 'superseded' : 'held') }
       return completion = complete().catch(() => state() === 'superseded' ? 'superseded' : 'held')
     }
   }

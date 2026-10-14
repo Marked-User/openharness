@@ -93,6 +93,37 @@ describe('turn hooks', () => {
       expect(run.deps.drain).toHaveBeenCalledTimes(2)
     })
 
+    it.each(['identityHold', 'interpretationHold'] as const)('retries the original Stop when its initial %s clears before any effect starts', async field => {
+      const run = retained()
+      run.session[field] = 'original evidence temporarily unavailable'
+      expect(await run.stop(run.execution)).toBe('held')
+      expect(run.deps.drain).not.toHaveBeenCalled()
+      expect(run.deps.emit).not.toHaveBeenCalled()
+      delete run.session[field]
+      const result = run.stop(run.execution)
+      await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+      expect(await result).toBe('completed')
+      expect(run.state.turnOpen).toBe(false)
+      expect(run.deps.emit).toHaveBeenCalledExactlyOnceWith('s1', END)
+      expect(run.deps.mirror.noteEngineStopped).toHaveBeenCalledExactlyOnceWith('s1')
+      expect(await run.stop(run.execution)).toBe('completed')
+      expect(run.deps.drain).toHaveBeenCalledTimes(2)
+    })
+
+    it('retries an unavailable initial proof before starting the original Stop effect', async () => {
+      const run = retained()
+      run.execution.verify.mockImplementationOnce(() => { throw Error('fixture journal proof temporarily unavailable') })
+      expect(await run.stop(run.execution)).toBe('held')
+      expect(run.deps.drain).not.toHaveBeenCalled()
+      const result = run.stop(run.execution)
+      await vi.advanceTimersByTimeAsync(STOP_HOOK_GRACE_MS)
+      expect(await result).toBe('completed')
+      expect(run.deps.emit).toHaveBeenCalledExactlyOnceWith('s1', END)
+      expect(run.deps.mirror.noteEngineStopped).toHaveBeenCalledExactlyOnceWith('s1')
+      expect(await run.stop(run.execution)).toBe('completed')
+      expect(run.deps.drain).toHaveBeenCalledTimes(2)
+    })
+
     it.each([undefined, 'error'])('keeps a no-original-turn notification from closing a later reconstructed question (%s)', async status => {
       const run = setup('claude')
       const stop = run.hooks.captureStop(run.deps.resolve('s1')!, { sessionId: 's1', status }, () => true)

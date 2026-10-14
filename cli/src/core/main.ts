@@ -1829,7 +1829,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onNotice: (listener) => experimentHooks.onNotice(listener), messagesChanged: () => ports.messages?.settingsChanged() })
   const nativeHookOwners = createNativeHookOwnerReader()
   const { server: hookServer, port: hookPort, localSocket, startRecovery: recoverNativeHooks,
-    stopRecovery: stopNativeHooks, recoveryReady } = await startHookServer(daemonPort(), {
+    stopRecovery: stopNativeHooks, drainAndStopRecovery: drainNativeHooks, recoveryReady } = await startHookServer(daemonPort(), {
     onAutonomousDeviceRequest: async (method, target, body) => {
       // Until the pieces below are built; after, a piece that could not be is refused by the requests
       // that need it, and the rest (list, status, revoke) answer from the pairings.
@@ -2655,7 +2655,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // stops being `bootHandoff` HERE, and not a line earlier: everything the teardown releases exists by now.
   // A straight-line assignment, never a wait: if the body never reaches this line the handler stays
   // `bootHandoff`, and the fix still lands.
-  const updateTeardown = (): TeardownStep[] => { stopNativeHooks(); heldLaunches.close(); installedHooks?.close(); externalResumes?.stop(); launches.stop(); return [
+  const updateTeardown = (): TeardownStep[] => { const nativeDrained = drainNativeHooks(); heldLaunches.close(); installedHooks?.close(); externalResumes?.stop(); launches.stop(); return [
+    ['the native hook receipts', () => nativeDrained],
     ['the registry', () => registry.flush({ exiting: true })], ['the updater', () => daemonBoot.updaterBeside?.()],
     ['the reconciler', () => agentReconciler.stop()],
     ['the timers', () => { clearInterval(logTrimTimer); clearInterval(runtimeReconcileTimer); clearInterval(paneTitleSyncTimer) }],
@@ -2692,7 +2693,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
    *  which restarts any other exit (harnessd/protocol.ts). */
   const forGood = (reason: string): boolean => reason === 'revoked' || reason === 'busy'
   const shutdown = async (signal: string): Promise<void> => {
-    stopNativeHooks()
+    const nativeDrained = drainNativeHooks()
     heldLaunches.close()
     installedHooks?.close()
     externalResumes?.stop()
@@ -2709,9 +2710,12 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // Mid-handoff everything below is already being torn down, and nothing has been started yet: leave
     // — a second teardown of closed servers is noise.
     if (updateHandoff.restarting()) {
+      stopNativeHooks()
       try { if (readPid() === process.pid) rmSync(PID_FILE, { force: true }) } catch { /* ignore */ }
       process.exit(0)
     }
+    deadline.at('the native hook receipts')
+    await nativeDrained
     // Release the serial port first. It is exclusive, and a daemon that exits still holding it makes
     // esptool fail in a way that reads exactly like dead hardware.
     void ports.devices?.stop()

@@ -311,3 +311,27 @@ before all dispatched receipt writes finish; that explanation needs a regression
 and a bounded correction. Full-disk setup also fills storage after discovery
 binding but before initial hook admission; review requires a confirmed setup
 precondition while retaining recovery assertions. No merge or release occurred.
+
+Graceful shutdown now stops new admissions synchronously, allows only terminal
+receipt writes already dispatched to settle for at most one second, and then
+revokes storage. Immediate stop still revokes immediately. Private HTTP tests
+prove durable recovery without redispatch, absolute timeout, write rejection,
+and no new publication from an accepted or rejected claim suspended across the
+shutdown cutoff. The rejected-claim regression failed before its final guard;
+independent review approved that boundary. Focused types and shutdown/Stop tests
+pass in `20261014T043606.552401Z-85825` (9.1 and 10.5 seconds).
+
+The retained Claude Stop also memoized a temporary hold before any effect began.
+Two tests reproduced that with identity and interpretation holds, and review
+found the same problem when initial journal verification throws. All three fail
+before correction. Initial confirmation is now retryable; after the original
+effect begins, its result remains memoized and fenced to its original turn.
+All 126 turn-hook tests pass. The full core coverage gate and affected restart
+end-to-end lanes must still run on these changes.
+
+The paused-core failures are regressions: both exact hook-client cases pass on
+main `f9c261a038` in [run 38359280628](https://github.com/autonomous-ai/openharness/actions/runs/38359280628),
+and the intervening main changes leave their client, hook declarations and test
+inputs unchanged. They cannot be waived as baseline failures. The emitted
+Claude/Codex hook needs to retain its original caller before the short-lived
+shell exits, while the server still requires fresh native engine proof.

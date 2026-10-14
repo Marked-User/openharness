@@ -496,8 +496,110 @@ async function httpFixture(blocked: (agentId: string) => boolean = () => false, 
     })
     return { status: response.status, body: await response.json() }
   }
-  return { post, prompts, registered, reasons, startRecovery: started.startRecovery, stopRecovery: started.stopRecovery, recoveryReady: started.recoveryReady }
+  return { post, prompts, registered, reasons, startRecovery: started.startRecovery, stopRecovery: started.stopRecovery,
+    drainAndStopRecovery: started.drainAndStopRecovery, recoveryReady: started.recoveryReady }
 }
+
+it.each(['accepted', 'rejected'] as const)('does not publish a %s admission whose claim finishes after graceful shutdown starts', async decision => {
+  let release!: () => void
+  const gate = new Promise<void>(done => { release = done }), finishing = vi.fn(), claimed = vi.fn()
+  vi.doMock('../engines/kit/nativeHookJournal.js', async original => {
+    const actual = await original<typeof import('../engines/kit/nativeHookJournal.js')>()
+    return { ...actual, createNativeHookJournal: (options: Parameters<typeof actual.createNativeHookJournal>[0]) => {
+      const journal = actual.createNativeHookJournal(options)
+      return { ...journal, claim: async (...args: Parameters<typeof journal.claim>) => {
+        const claim = await journal.claim(...args)
+        claimed(); await gate
+        return { ...claim, finish: async (value: Parameters<typeof claim.finish>[0]) => { finishing(); await claim.finish(value) } }
+      } }
+    } }
+  })
+  if (decision === 'rejected') writeFileSync(transcript, header(A, true))
+  const ready = vi.fn(), f = await httpFixture(undefined, undefined, { onNativeRecoveryReady: ready })
+  expect((await f.post({}, { id: 'fixture-claim-during-shutdown' })).body).toEqual({ pending: true })
+  expect(claimed).toHaveBeenCalledOnce()
+  ready.mockClear()
+  await f.drainAndStopRecovery()
+  release()
+  await new Promise(resolve => setTimeout(resolve, 25))
+  expect(finishing).not.toHaveBeenCalled()
+  expect(f.registered).not.toHaveBeenCalled()
+  expect(f.prompts).toEqual([])
+  expect(ready).not.toHaveBeenCalled()
+})
+
+it('finishes only an already-dispatched terminal receipt during graceful shutdown and recovers without redispatch', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(done => { release = done })
+  vi.doMock('../engines/kit/nativeHookJournal.js', async original => {
+    const actual = await original<typeof import('../engines/kit/nativeHookJournal.js')>()
+    return { ...actual, createNativeHookJournal: (options: Parameters<typeof actual.createNativeHookJournal>[0]) => {
+      const journal = actual.createNativeHookJournal(options)
+      return { ...journal, claim: async (...args: Parameters<typeof journal.claim>) => {
+        const claim = await journal.claim(...args)
+        return { ...claim, finish: async (value: Parameters<typeof claim.finish>[0]) => { await gate; await claim.finish(value) } }
+      } }
+    } }
+  })
+  const ready = vi.fn(), order = { id: 'fixture-graceful-terminal-receipt' }
+  const f = await httpFixture(undefined, undefined, { onNativeRecoveryReady: ready })
+  expect((await f.post({}, order)).body).toEqual({ pending: true })
+  expect(f.registered).toHaveBeenCalledOnce()
+  ready.mockClear()
+  let done = false
+  const draining = f.drainAndStopRecovery()
+  expect(f.drainAndStopRecovery()).toBe(draining)
+  void draining.then(() => { done = true })
+  await new Promise(resolve => setTimeout(resolve, 25))
+  expect(done).toBe(false)
+  expect(f.recoveryReady(registry.byAgent(source)!)).toBe(false)
+  expect(await f.post({}, { id: 'fixture-during-graceful-drain' })).toMatchObject({ status: 202, body: { pending: false, retry: true } })
+  release(); await draining
+  expect(ready).not.toHaveBeenCalled()
+  expect(f.registered).toHaveBeenCalledOnce()
+  await new Promise<void>(resolve => server!.close(() => resolve()))
+  const recovered = await httpFixture()
+  expect(await recovered.post({}, order)).toEqual({ status: 200, body: { ok: true } })
+  expect(recovered.registered).not.toHaveBeenCalled()
+  expect(recovered.prompts).toEqual([])
+})
+
+it.each(['deadline', 'immediate stop', 'write rejection'] as const)('bounds terminal receipt draining after %s without inventing an outcome', async mode => {
+  let release!: () => void, fail!: (error: Error) => void
+  const gate = new Promise<void>((done, reject) => { release = done; fail = reject })
+  vi.doMock('../engines/kit/nativeHookJournal.js', async original => {
+    const actual = await original<typeof import('../engines/kit/nativeHookJournal.js')>()
+    return { ...actual, createNativeHookJournal: (options: Parameters<typeof actual.createNativeHookJournal>[0]) => {
+      const journal = actual.createNativeHookJournal(options)
+      return { ...journal, claim: async (...args: Parameters<typeof journal.claim>) => {
+        const claim = await journal.claim(...args)
+        return { ...claim, finish: async (value: Parameters<typeof claim.finish>[0]) => { await gate; await claim.finish(value) } }
+      } }
+    } }
+  })
+  const f = await httpFixture(), order = { id: 'fixture-bounded-terminal-drain' }
+  expect((await f.post({}, order)).body).toEqual({ pending: true })
+  expect(f.registered).toHaveBeenCalledOnce()
+  vi.useFakeTimers()
+  try {
+    let done = false
+    const draining = f.drainAndStopRecovery()
+    void draining.then(() => { done = true })
+    await vi.advanceTimersByTimeAsync(600)
+    expect(done).toBe(false)
+    expect(f.drainAndStopRecovery()).toBe(draining)
+    if (mode === 'immediate stop') f.stopRecovery()
+    else if (mode === 'write rejection') fail(Error('fixture result unavailable'))
+    else await vi.advanceTimersByTimeAsync(400)
+    await draining
+    expect(done).toBe(true)
+  } finally { vi.useRealTimers(); release() }
+  await new Promise<void>(resolve => server!.close(() => resolve()))
+  const recovered = await httpFixture()
+  expect((await recovered.post({}, order)).body).toEqual({ pending: true })
+  expect(recovered.recoveryReady(registry.byAgent(source)!)).toBe(false)
+  expect(recovered.registered).not.toHaveBeenCalled()
+})
 
 async function afterTerminal(run: (journal: ReturnType<typeof import('../engines/kit/nativeHookJournal.js')['createNativeHookJournal']>) => Promise<void>) {
   vi.doMock('../engines/kit/nativeHookJournal.js', async original => {

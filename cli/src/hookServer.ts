@@ -418,7 +418,7 @@ export function startHookServer(
   handlers: HookServerHandlers,
   options: HookServerOptions = {},
 ): Promise<{ server: http.Server; port: number; localSocket: LocalSocketServer | null; startRecovery(): void;
-  stopRecovery(): void; recoveryReady(row: RegisteredSession): boolean }> {
+  stopRecovery(): void; drainAndStopRecovery(): Promise<void>; recoveryReady(row: RegisteredSession): boolean }> {
   const hookCredential = loadOrCreateHookCredential(env.ADAPTER_DATA_DIR)
   const admissions = createPendingAdmissions({ isProcessCurrent: (key, scope) => admissionProcessScope(registry.byAgent(key)) === scope })
   let admissionArrival = 0
@@ -445,7 +445,14 @@ export function startHookServer(
   }
   const receiptCapacity = options.admissionReceiptCapacity ?? 65_536
   const bytesCapacity = options.admissionBytesCapacity ?? 16 * 1024 * 1024
-  let closed = false, boot: string | undefined
+  let closed = false, quiescing = false, boot: string | undefined
+  const terminalWrites = new Set<Promise<void>>()
+  const finishTerminal = (claim: NativeHookClaim, result: Record<string, unknown>) => {
+    const writing = claim.finish(result)
+    terminalWrites.add(writing)
+    void writing.then(() => terminalWrites.delete(writing), () => terminalWrites.delete(writing))
+    return writing
+  }
   const durableDirectory = join(env.ADAPTER_DATA_DIR, 'native-hook-deliveries')
   type Journal = Awaited<ReturnType<NativeHookStorage['effects']>>
   let nativeStorage: NativeHookStorage | undefined
@@ -541,7 +548,7 @@ export function startHookServer(
         && [...history.records.values()].some(receipt => receipt.preparing?.intake) }
       catch { return false }
     })
-    context.ready = value && !closed && !waiting
+    context.ready = value && !closed && !quiescing && !waiting
     if (!context.ready) { recovered.delete(context.key); return }
     recovered.add(context.key)
     for (const row of registry.list()) {
@@ -558,6 +565,7 @@ export function startHookServer(
   }
   const recoveryReady = (row: RegisteredSession): boolean => {
     if (row.engine === 'terminal') return true
+    if (closed || quiescing) return false
     if (!closed && recoveryStarted) {
       try { if (durableProcesses.get(durableKey(row))?.ready) return true } catch { /* This process remains held. */ }
     }
@@ -600,7 +608,7 @@ export function startHookServer(
     }
     snapshot.verify()
     const owner = registry.byAgent(row.agentId)
-    if (closed || !owner?.active || durableKey(owner) !== context.key) {
+    if (closed || quiescing || !owner?.active || durableKey(owner) !== context.key) {
       throw new IdentityReadUnavailable('the native hook recovery owner changed')
     }
     restoreDeliveryOrder(context, row, snapshot.deliveries)
@@ -614,10 +622,10 @@ export function startHookServer(
   ])
   const verifiedMutation = async (body: BoundHookBody, retained?: { caller: NativeHookCaller | undefined },
     confirmed?: (verify: () => void) => void): Promise<RegisteredSession | null> => {
-    if (closed) return null
+    if (closed || quiescing) return null
     const caller = retained ? retained.caller : await captureCaller(body)
     const owner = await verifiedBoundMutation(body, handlers, caller)
-    if (closed || !owner) return null
+    if (closed || quiescing || !owner) return null
     const identity = paneReadIdentity(owner)
     try {
       const native = await handlers.readNativeHookOwner?.(owner, caller?.owner(owner))
@@ -642,7 +650,7 @@ export function startHookServer(
       recoveryHeld(owner.agentId, reason)
       throw new IdentityReadUnavailable(reason)
     }
-    return !closed && paneReadIdentity(registry.byAgent(owner.agentId)) === identity ? registry.byAgent(owner.agentId)! : null
+    return !closed && !quiescing && paneReadIdentity(registry.byAgent(owner.agentId)) === identity ? registry.byAgent(owner.agentId)! : null
   }
   // Filled in once the port is bound: the Host a request must name is the port actually taken.
   let hosts: ReadonlySet<string> = new Set()
@@ -663,6 +671,7 @@ export function startHookServer(
       })).values()] : [])
   }
   const retainLegacyStop = async (body: BoundHookBody, id: string, firedAt: number | undefined): Promise<StopAcknowledgement> => {
+    if (closed || quiescing) return { status: 202, reply: { pending: false, retry: true, detail: 'Waiting for the daemon to finish stopping.' } }
     const fingerprint = createHash('sha256').update(JSON.stringify([body, firedAt])).digest('hex')
     const previous = legacyStops.get(id)
     if (previous) {
@@ -693,7 +702,7 @@ export function startHookServer(
     const original = structuredClone(body)
     const caller = (async () => ({ caller: await captureCaller(original) }))().catch(error => ({ error }))
     let running = false, started = false, reported = false
-    const current = () => !closed && !isRecentlyDeleted(owner.agentId) && !isRecentlyDeleted(sessionId)
+    const current = () => !closed && !quiescing && !isRecentlyDeleted(owner.agentId) && !isRecentlyDeleted(sessionId)
       && admissionProcessScope(registry.byAgent(owner.agentId)) === legacyOwner.scope
       && registry.byAgent(owner.agentId)?.sessionId === sessionId
     const holdKey = `legacy-stop:${id}`
@@ -728,7 +737,7 @@ export function startHookServer(
       verify()
     }
     const attempt = () => {
-      if (closed || running || runningLegacyStops >= 4) return
+      if (closed || quiescing || running || runningLegacyStops >= 4) return
       if (!current() || !notCancelled()) { finish(); return }
       legacyStopRetries.delete(id); legacyStopRetries.set(id, attempt)
       running = true; runningLegacyStops++
@@ -747,7 +756,7 @@ export function startHookServer(
             started = true
           }
           const outcome = await effect({ current, verify: () => verify(), confirm })
-          if (closed) return
+          if (closed || quiescing) return
           if (outcome === 'completed' || outcome === 'superseded') finish()
           else hold('Waiting for the original Stop turn to be confirmed; Cancel can resolve this hold.')
         } catch (error) {
@@ -813,6 +822,9 @@ export function startHookServer(
     recovery?: { agentId: string; key: string; owner?: NativeHookOwner }; wire?: NativeHookWireIdentity },
     respond: (status: number, reply: unknown, ownership?: NativeHookAcknowledgement['outcome']) => void,
   ): Promise<void> => {
+    if (closed || quiescing) {
+      respond(202, { pending: false, retry: true, detail: 'Waiting for the daemon to finish stopping.' }); return
+    }
     // Every rejection below says WHY, out loud. They used to be silent, and a hook that arrives and
     // is dropped looks exactly like a hook that never fired — which is precisely the confusion behind
     // "the agent is running in my terminal but the list does not show it".
@@ -923,7 +935,7 @@ export function startHookServer(
     if (isRecentlyDeleted(body.sessionId)) { ignore('deleted'); return }
     let context: DurableProcess
     try {
-      if (closed) return
+      if (closed || quiescing) return
       const owner = await handlers.readNativeHookOwner?.(processAgent, native.recovery?.owner ?? caller?.owner(processAgent))
       context = await durableProcess(processAgent, owner)
       if (native.recovery && context.key !== native.recovery.key) return
@@ -964,7 +976,7 @@ export function startHookServer(
     let reservation: string | undefined
     let durable: NativeHookDelivery, earlierPreparing = false
     try {
-      if (closed) return
+      if (closed || quiescing) return
       if (preparing) {
         ready(context, false)
         reservation = `${context.key}\u0000${deliveryId}`
@@ -1072,7 +1084,7 @@ export function startHookServer(
     const stopCurrent = processAgent.sessionId === body.sessionId && stopScope === scope ? stopWitness : undefined
     let followupFingerprint: string | undefined
     const live = () => registry.byAgent(processAgent.agentId)
-    const current = () => !closed && !isRecentlyDeleted(processAgent.agentId) && !isRecentlyDeleted(body.sessionId)
+    const current = () => !closed && !quiescing && !isRecentlyDeleted(processAgent.agentId) && !isRecentlyDeleted(body.sessionId)
       && live()?.active !== false && scopeOf(live()) === scope
     const held = (reason: string) => {
       const holds = admissionHolds.get(processAgent.agentId) ?? new Map<string, string>()
@@ -1223,6 +1235,9 @@ export function startHookServer(
               return { kind: 'hold', reason: 'Waiting for the original Stop turn to be confirmed; Cancel can resolve this hold.' }
             }
           }
+          // A rejected claim can also outlive the shutdown cutoff. The drain
+          // owns only writes already dispatched, never a new terminal outcome.
+          if (closed || quiescing) return { kind: 'hold', reason: 'Waiting for the daemon to finish stopping.' }
           const status = decision.kind === 'accept' || decision.reason !== 'invalid_session_registration' ? 200 : 400
           const reply = decision.kind === 'accept' ? { ok: true } : status === 400 ? { error: 'invalid session registration' }
             : { ignored: true, reason: decision.reason }
@@ -1232,7 +1247,10 @@ export function startHookServer(
           if (decision.kind === 'accept' && !notified) { claim.verify(); notified = true; notify() }
           terminalResult ??= { status, reply, accepted: decision.kind === 'accept', arrival: admissionOrder.arrival,
             ...(carriesStop && decision.kind === 'accept' ? { stop: stopOutcome } : {}) }
-          await claim.finish(terminalResult)
+          await finishTerminal(claim, terminalResult)
+          // Graceful shutdown may retain this write, never its callbacks or a
+          // fresh attachment. Abrupt shutdown still revokes the journal itself.
+          if (closed || quiescing) return { kind: 'hold', reason: 'Waiting for the daemon to finish stopping.' }
           ownership = undefined
           context.claims.delete(deliveryId); context.restored.add(deliveryId)
           // Completion is final even if restoring the next frontier fails. A
@@ -1307,7 +1325,7 @@ export function startHookServer(
     } finally { recovering.delete(context.key) }
   }
   const recoveryPass = () => {
-    if (closed) return
+    if (closed || quiescing) return
     for (const retry of [...legacyStopRetries.values()]) { if (runningLegacyStops >= 4) break; retry() }
     {
       const rows = registry.list().filter(row => row.active && row.processIdentity && row.engine !== 'terminal')
@@ -1328,9 +1346,9 @@ export function startHookServer(
           recovering.add(scope)
           void (async () => {
             const native = await handlers.readNativeHookOwner?.(row)
-            if (closed) return
+            if (closed || quiescing) return
             const context = await durableProcess(row, native)
-            if (!closed && !recovering.has(context.key) && !recovered.has(context.key)) await recover(row, context)
+            if (!closed && !quiescing && !recovering.has(context.key) && !recovered.has(context.key)) await recover(row, context)
           })().catch(error => {
             if (!closed) recoveryHeld(row.agentId, `Waiting for native hook recovery: ${error instanceof Error ? error.message : 'process unavailable'}`.slice(0, 1024))
           }).finally(() => { recovering.delete(scope) })
@@ -1345,7 +1363,7 @@ export function startHookServer(
   const replayHolds = new Map<number, string>()
   const clientReplay = createNativeHookReplay({
     readOutbox: async (shard, current) => (await storage()).readOutbox(shard, current),
-    send: (request, current, remainingMs) => sendNativeHookRequest(request, hookCredential, () => !closed && current(), remainingMs),
+    send: (request, current, remainingMs) => sendNativeHookRequest(request, hookCredential, () => !closed && !quiescing && current(), remainingMs),
     onHeld: (shard, id, reason) => {
       if (!reason) { replayHolds.delete(shard); return }
       const detail = `${id ?? `shard ${shard}`}: ${reason}`
@@ -1355,7 +1373,7 @@ export function startHookServer(
     },
   })
   const startRecovery = () => {
-    if (closed || recoveryStarted) return
+    if (closed || quiescing || recoveryStarted) return
     recoveryStarted = true
     recoveryTimer = setTimeout(recoveryPass, 0); recoveryTimer.unref()
     if (options.nativeClientReplay) clientReplay.start()
@@ -1397,6 +1415,9 @@ export function startHookServer(
       // CLI, which is acceptable on loopback.
       const localOk = req.headers['x-adapter-local'] === '1'
       const hookOk = hookCredentialMatches(hookCredential, req.headers['x-harness-hook-token'])
+      if (hookOk && (closed || quiescing) && (url.startsWith('/api/hook/') || url.startsWith('/api/native-hook/'))) {
+        json(202, { pending: false, retry: true, detail: 'Waiting for the daemon to finish stopping.' }); return
+      }
 
       if (url.startsWith('/api/autonomous-device/')) {
         const peer = req.socket.remoteAddress
@@ -1565,7 +1586,7 @@ export function startHookServer(
           const fired = hookFiredAt(req)
           const stop = { sessionId: body.sessionId, status: body.status, transcriptPath: body.transcriptPath, ...(fired ? { firedAt: fired } : {}) }
           if (handlers.stopHookDelayMs) setTimeout(() => {
-            if (!closed && paneReadIdentity(registry.byAgent(owner.agentId)) === identity) handlers.onTurnStop?.(stop)
+            if (!closed && !quiescing && paneReadIdentity(registry.byAgent(owner.agentId)) === identity) handlers.onTurnStop?.(stop)
           }, handlers.stopHookDelayMs)
           else handlers.onTurnStop?.(stop)
         }
@@ -1901,12 +1922,31 @@ export function startHookServer(
     })
   }
   const server = http.createServer(handle)
-  const stopRecovery = () => {
-    closed = true; clearTimeout(recoveryTimer); admissions.close(); waitingAttaches.clear()
+  const quiesce = () => {
+    quiescing = true; clearTimeout(recoveryTimer); admissions.close(); waitingAttaches.clear()
     legacyStopRetries.clear()
     void clientReplay.close().catch(error => console.warn('[hooks] client replay cleanup remains held', error))
+  }
+  let drained: Promise<void> | undefined, endDrain: (() => void) | undefined
+  const stopRecovery = () => {
+    closed = true; quiesce(); endDrain?.()
     for (const context of durableProcesses.values()) context.journal.close()
     void closeStorage().catch(error => console.warn('[hooks] storage cleanup remains held', error))
+  }
+  const drainAndStopRecovery = (): Promise<void> => {
+    if (drained) return drained
+    quiesce()
+    // Only exact terminal writes already dispatched can finish. No new effect,
+    // retry, worker or cold claim participates in this bounded shutdown grace.
+    const pending = [...terminalWrites]
+    let timer: ReturnType<typeof setTimeout>
+    drained = new Promise<void>(done => {
+      endDrain = done
+      timer = setTimeout(done, 1_000)
+      void Promise.allSettled(pending).then(() => done())
+      if (closed) done()
+    }).finally(() => { clearTimeout(timer); endDrain = undefined; stopRecovery() })
+    return drained
   }
   const close = server.close.bind(server)
   server.close = callback => {
@@ -1942,13 +1982,13 @@ export function startHookServer(
       console.log(`[hooks] listening on 127.0.0.1:${actual} (SessionStart/SessionEnd callbacks)`)
       if (!options.deferNativeRecovery) startRecovery()
       const socketPath = options.socketPath
-      if (!socketPath) { resolve({ server, port: actual, localSocket: null, startRecovery, stopRecovery, recoveryReady }); return }
+      if (!socketPath) { resolve({ server, port: actual, localSocket: null, startRecovery, stopRecovery, drainAndStopRecovery, recoveryReady }); return }
       // The private socket is mandatory when opting into multi-user startup. A duplicate daemon
       // must not survive on a random port while another one owns this user's socket.
       listenLocalSocket(handle, socketPath).then(
         (localSocket) => {
           console.log(`[hooks] listening on ${socketPath}`)
-          resolve({ server, port: actual, localSocket, startRecovery, stopRecovery, recoveryReady })
+          resolve({ server, port: actual, localSocket, startRecovery, stopRecovery, drainAndStopRecovery, recoveryReady })
         },
         (error: unknown) => {
           if (options.allowPortFallback) {
@@ -1958,7 +1998,7 @@ export function startHookServer(
             return
           }
           console.warn(`[hooks] local socket unavailable (${socketPath}): ${error instanceof Error ? error.message : error}`)
-          resolve({ server, port: actual, localSocket: null, startRecovery, stopRecovery, recoveryReady })
+          resolve({ server, port: actual, localSocket: null, startRecovery, stopRecovery, drainAndStopRecovery, recoveryReady })
         },
       )
     })
