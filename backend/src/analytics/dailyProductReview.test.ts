@@ -63,3 +63,11 @@ it('uses complete calendar months rather than adding daily installations into MA
   ], new Date('2026-10-13'))
   expect(r.monthlyRetention).toMatchObject({ from: '2026-09-01', untilExclusive: '2026-10-01', percent: 60 })
 })
+
+it('does not turn old collector work into zero D28 retention during rollout', () => {
+  const rows = [row('2026-09-14', 'working_installation_days', 10), row('2026-10-12', 'working_installation_days', 8)]
+  const cohort = (input: typeof rows) => dailyProductReview(input, new Date('2026-10-14')).retention[2].cohorts.find(c => c.day === '2026-09-14')
+  expect(cohort(rows)).toMatchObject({ measurementAvailable: false, returned: null, percent: null })
+  expect(cohort([...rows, row('2026-09-14', 'measurement_v2_installation_days', 10)]))
+    .toMatchObject({ measurementAvailable: true, returned: 0, percent: 0 })
+})

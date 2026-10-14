@@ -67,8 +67,10 @@ export function dailyProductReview(rows: Row[], now: Date) {
       const stamp = today - (lag + 7 - i) * DAY, cohort = byDay.get(dayKey(stamp)) ?? {}
       const denominator = cohort.working_installation_days ?? 0
       const followUpObserved = (byDay.get(dayKey(stamp + lag * DAY))?.working_installation_days ?? 0) > 0
-      const returned = denominator && followUpObserved ? cohort[`d${lag}_returning_work_installations`] ?? 0 : null
-      return { day: dayKey(stamp), workingInstallations: denominator || null, returned,
+      // Older collectors reported work but had no D28 counter. Their missing metric is unknown, not zero retention.
+      const measurementAvailable = lag !== 28 || (cohort.measurement_v2_installation_days ?? 0) > 0
+      const returned = denominator && followUpObserved && measurementAvailable ? cohort[`d${lag}_returning_work_installations`] ?? 0 : null
+      return { day: dayKey(stamp), workingInstallations: denominator || null, returned, measurementAvailable,
         percent: returned === null ? null : rate(returned, denominator) }
     })
     return { day: lag, definition: `Observed work on both the cohort's UTC day and UTC day +${lag}. Installation counts, not people.`, cohorts }
