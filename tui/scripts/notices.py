@@ -78,7 +78,7 @@ def main():
     meta = json.loads(subprocess.check_output(['cargo', 'metadata', '--format-version', '1', '--locked'], cwd=TUI))
     lock = open(os.path.join(TUI, 'Cargo.lock')).read()
     locked = set(re.findall(r'\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"', lock))
-    crates = sorted((p for p in meta['packages'] if (p['name'], p['version']) in locked and p['name'] != 'harness-tui'),
+    crates = sorted((p for p in meta['packages'] if (p['name'], p['version']) in locked and p['name'] not in ('harness-tui', 'harness-term')),
                     key=lambda p: (p['name'], p['version']))
     groups = OrderedDict()  # licence text -> [crate ids]
     rows = []
