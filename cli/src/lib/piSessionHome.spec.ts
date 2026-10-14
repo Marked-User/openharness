@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
-import { bringPiSessionHome } from './gridSessionHome.js'
+import { bringPiSessionHome } from './piSessionHome.js'
 
 let root: string, configs: string, sessions: string
 const FOLDER = '--Users-me-harnesses-qwen-image--'
@@ -44,4 +44,6 @@ it('leaves a conversation that is already home, or anywhere else, alone', () => 
   expect(bringPiSessionHome(join(root, 'elsewhere', 'sessions', FOLDER, FILE), [configs], sessions)).toBeNull()
   expect(bringPiSessionHome(join(configs, 'c88e545a', 'auth.json'), [configs], sessions)).toBeNull()
   expect(bringPiSessionHome(null, [configs], sessions)).toBeNull()
+  // Pruned with its folder (30 days, gridConfigDir.ts) or removed: nothing to bring, and nothing thrown.
+  expect(bringPiSessionHome(join(configs, 'gone', 'sessions', FOLDER, FILE), [configs], sessions)).toBeNull()
 })

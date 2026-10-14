@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareResume } from '../../engines/launchPrep.js'
-import { bringPiSessionHome } from '../../engines/pi/gridSessionHome.js'
+import { bringPiSessionHome } from '../../lib/piSessionHome.js'
 import type { GridLaunchAnswer, GridLaunchOverride, GridLaunchRequest } from '../../lib/gridLaunchWire.js'
 import { dropPermissionFlagIfUnsupported } from '../../lib/engineLaunch.js'
 import { buildLaunchOverrides, type LaunchOverrides, type LaunchOverridesDeps } from '../../lib/launchOverrides.js'
@@ -10,7 +10,7 @@ import type { RegisteredSession } from '../../lib/registry.js'
 import { createLaunchHelpers, gridLaunchThrough, type LaunchHelperDeps } from './launch.js'
 
 vi.mock('../../engines/launchPrep.js', async (real) => ({ ...await real<object>(), prepareResume: vi.fn(() => ({ repairedItems: 0 })) }))
-vi.mock('../../engines/pi/gridSessionHome.js', () => ({ bringPiSessionHome: vi.fn(() => null) }))
+vi.mock('../../lib/piSessionHome.js', () => ({ bringPiSessionHome: vi.fn(() => null) }))
 vi.mock('../../lib/engineLaunch.js', async (real) => ({ ...await real<object>(), dropPermissionFlagIfUnsupported: vi.fn() }))
 // OpenCode's version is its own code, loaded for an OpenCode relaunch alone; a test may say it could not be.
 vi.mock('../../engines/inProcess.js', async (real) => {
@@ -204,6 +204,16 @@ describe('relaunch helpers', () => {
     expect(bringPiSessionHome).toHaveBeenCalledTimes(3)
     expect(log.mock.calls.map(([line]) => String(line))).toEqual([
       "[resume] a1 · pi's conversation brought home · /home/.pi/agent/sessions/--w--/s1.jsonl",
+    ])
+    // A copy that fails never costs the relaunch: it runs after the old Pi stopped.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.mocked(bringPiSessionHome).mockImplementationOnce(() => { throw new Error('EACCES') })
+    expect(() => helpers.prepareSessionResume(pi)).not.toThrow()
+    vi.mocked(bringPiSessionHome).mockImplementationOnce(() => { throw 'odd' })
+    expect(() => helpers.prepareSessionResume(pi)).not.toThrow()
+    expect(warn.mock.calls.map(([line]) => String(line))).toEqual([
+      "[resume] a1 · could not bring pi's conversation home · EACCES",
+      "[resume] a1 · could not bring pi's conversation home · odd",
     ])
     vi.unstubAllEnvs()
   })

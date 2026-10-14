@@ -22,6 +22,8 @@ export function bringPiSessionHome(transcriptPath: string | null | undefined, ro
     if (parts.length !== 4 || parts[0] === '..' || parts[1] !== 'sessions' || !parts[3].endsWith('.jsonl')) continue
     const home = join(sessionsDir, parts[2], parts[3])
     if (existsSync(home)) return home
+    // Pruned with its folder after 30 days (gridConfigDir.ts), or removed: nothing to bring.
+    if (!existsSync(transcriptPath)) return null
     mkdirSync(join(sessionsDir, parts[2]), { recursive: true, mode: 0o700 })
     copyFileSync(transcriptPath, home, constants.COPYFILE_EXCL)
     return home
