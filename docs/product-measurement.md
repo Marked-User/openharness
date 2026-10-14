@@ -19,6 +19,7 @@ automatically proven improvement. Changes still need review, tests and a deliber
 | Which features get tried and used again? | First measured installations and daily first/repeat feature reach | Locally deduplicated installation-days, not unique accounts. Reads the apps make on their own (history, history paging, Store list, model list; `PRODUCT_USAGE_AUTOMATIC_ACTIONS`) count reliability only and have no reach. |
 | Where do app flows break? | Setup, Harness/tmux/clipboard steps, sign-in, workspace/remote connections, computer linking, viewer-pane opening and manual update checking/staging | Fixed started/ok/failed/cancelled/unknown counts and coarse duration buckets. Opening a viewer pane is not rendering its content; staging an update is not a successful relaunch. |
 | Is measurement losing coverage? | Updated collector installation-days, pruned queues, full observation maps, unmatched app starts | Loss signals warrant caution. No signal does not prove complete collection. |
+| How many people use Harness, and do they come back? | People active / working / new per day and per app, and D1/D2/D3/D7 returns (backend rollup of 10-day pseudonymous marks) | Sharing accounts only, staff excluded; an app open across midnight counts on both days, so prefer working returns. Not available before `PRODUCT_USAGE_SUBJECT_KEY` is set. |
 
 Native signed-out sessions can explicitly enable **Share setup and sign-in counts**. It starts off
 on every app launch, sends no credentials/cookies, and never replays earlier actions. Setup state
@@ -34,7 +35,8 @@ The exact counter vocabulary is in [productUsage.ts](../backend/src/types/produc
 Daemon reports combine participating signed-in installations, including staff and both environments.
 App reports are surface-specific operation totals; never add them to daemon or relay counts.
 They are not all-user counts and are not directly comparable with earlier account-cohort reports
-or industry retention benchmarks. No per-person analytics history or joining key is stored.
+or industry retention benchmarks. Apart from the 10-day people marks below (a keyed pseudonym, deleted on opt-out), no per-person analytics
+history or joining key is stored.
 Authenticated requests still reach the service; infrastructure request logs and backups have their
 own retention, which the release owner must verify separately. The account preference remains
 linked to the account so the switch works everywhere.
@@ -71,8 +73,11 @@ fabrication; they are directional diagnostics, not trusted account acquisition m
 
 Both ingestion paths atomically add only UTC-day/metric totals plus an unlinked random retry receipt.
 Receipts expire within 36 days and totals within 396 days through the existing Mongo TTL indexes.
-No account deduplication markers, stable hashes or cross-device histories are introduced. Exact
-people-based DAU/MAU and cross-device retention are deliberately unavailable.
+No account deduplication markers or stable hashes enter these totals. People-based daily counts and
+D1/D2/D3/D7 returns come from one mark per sharing person per day under an HMAC pseudonym (no time,
+machine, agent, device, country or content), kept 10 days and then only as anonymous `people_*` totals;
+turning sharing off deletes the person's marks at once. Weekly/monthly people counts and longer returns
+are not collected.
 
 ## Each daily review
 
@@ -120,12 +125,20 @@ and expiry. Then release CLI, desktop and phone together. Check that the switch 
 stop when it is off. Old clients stop contributing individual daily histories when the backend changes;
 the historical reporting command will no longer be a current-usage source.
 
+People counts roll out in this order: deploy the backend without `PRODUCT_USAGE_SUBJECT_KEY` (no marks
+are written); release desktop, phone and CLI with the updated "See what's shared" text; then set the key
+(32+ random characters, in the Helm secret). The first D1 is available two days later, D7 eight days
+later. Rotating the key: delete every `product_usage_activity` document first. Losing the key while
+marks live prevents deleting a person's marks when they turn sharing off.
+
 Suggested visible release note:
 
 > Harness now shares limited product usage counts by default to help us find broken or slow flows.
 > These counts do not include your prompts, responses, code, files or project details. Turn sharing
 > off for your account in Settings → Privacy → Share product usage data, or use `harness privacy off`.
 > Existing opt-outs stay off. Optional feedback sends only the answer you choose.
+> With sharing on, Harness also keeps which days you used it and through which app, under an
+> coded ID instead of your account, for 10 days, then only as combined totals.
 
 Sharing off prevents subsequent admission of new reports and clears local queues at the next
 successful preference check. An already admitted operation may finish. Combined totals cannot be

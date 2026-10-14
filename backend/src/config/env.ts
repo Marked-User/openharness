@@ -178,6 +178,9 @@ const envSchema = z.object({
   HARNESS_CHECKOUT_CALLBACK_URL: z.string().default(''),
   // Shared with agent-manager. 32 raw bytes encoded as base64; required when billing is enabled.
   HARNESS_CREDENTIAL_ENCRYPTION_KEY: z.string().default(''),
+  // Keys the pseudonym of a person's 10-day activity marks (lib/productUsage.ts `markActivity`).
+  // Empty: no marks are written. Set it only after the apps describing the marks have shipped.
+  PRODUCT_USAGE_SUBJECT_KEY: z.string().refine(v => v === '' || v.length >= 32, 'must be at least 32 characters').default(''),
 
   // Comma-separated emails granted role=admin on first creation.
   ADMIN_EMAILS: z.string().default(''),

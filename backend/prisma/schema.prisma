@@ -486,6 +486,23 @@ model ProductUsageReceipt {
   @@map("product_usage_receipts")
 }
 
+/// One UTC day a person used Harness while sharing product usage, under a keyed pseudonym
+/// (HMAC of the user id; never the id itself). Expires 10 days after the day; the hourly rollup
+/// keeps only anonymous `people_*` totals. Deleted at once when the person turns sharing off.
+model ProductUsageActivity {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  subject   String
+  dayUtc    DateTime
+  surfaces  String[]
+  worked    Boolean  @default(false)
+  signupDay DateTime
+  staff     Boolean
+  expiresAt DateTime
+
+  @@unique([subject, dayUtc])
+  @@map("product_usage_activity")
+}
+
 /// Legacy individual counters. New ingestion is disabled; dayUtc TTL removes these after 35 days.
 model AnalyticsDailyBucket {
   id               String   @id @default(auto()) @map("_id") @db.ObjectId

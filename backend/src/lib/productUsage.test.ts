@@ -9,10 +9,14 @@ const db = vi.hoisted(() => ({
   userDailyPresence: { deleteMany: vi.fn() }, userDailyClientPresence: { deleteMany: vi.fn() },
   userDailyRemoteUsage: { deleteMany: vi.fn() }, userDailyDevicePresence: { deleteMany: vi.fn() },
   machineDailyPresence: { deleteMany: vi.fn() }, agentDailyPresence: { deleteMany: vi.fn() },
+  productUsageActivity: { upsert: vi.fn(), update: vi.fn(), deleteMany: vi.fn() },
+  user: { findUnique: vi.fn() },
   $transaction: vi.fn(), $runCommandRaw: vi.fn(),
 }))
 vi.mock('./prisma.js', () => ({ prisma: db }))
-import { deleteLegacyProductUsage, ensureProductUsageExpiry, ingestProductUsage, ingestSetupUsage, productUsageChoice, recordRelayUsage, setProductUsageChoice } from './productUsage.js'
+// A configured key, so deletion through setProductUsageChoice and the legacy delete path is real.
+vi.mock('../config/env.js', () => ({ env: { PRODUCT_USAGE_SUBJECT_KEY: 'k'.repeat(32) } }))
+import { activitySubject, deleteActivity, deleteLegacyProductUsage, ensureProductUsageExpiry, markActivity, resetActivityMarksForTests, ingestProductUsage, ingestSetupUsage, productUsageChoice, recordRelayUsage, setProductUsageChoice } from './productUsage.js'
 import type { ProductUsageReport } from '../types/productUsage.js'
 
 const report: ProductUsageReport = { schemaVersion: 1, revision: 0, id: 'cf1c5a03-388c-4265-b5fb-a4c3d47e407f', day: '2026-10-13', counters: { turns_started: 4, turns_ended: 3 } }
@@ -22,6 +26,8 @@ beforeEach(() => {
   db.$transaction.mockImplementation((fn: (tx: typeof db) => unknown) => fn(db))
   db.productUsagePreference.findUnique.mockResolvedValue(null)
   db.analyticsMachineState.findFirst.mockResolvedValue(null)
+  resetActivityMarksForTests()
+  db.user.findUnique.mockResolvedValue({ createdAt: new Date('2026-10-01T08:00:00Z'), email: 'person@example.com' })
 })
 
 it('keeps the client and server vocabulary identical', () => {
@@ -109,11 +115,14 @@ it('the legacy delete path erases all six linked activity collections', async ()
   await deleteLegacyProductUsage('account')
   for (const name of ['userDailyPresence', 'userDailyClientPresence', 'userDailyRemoteUsage', 'userDailyDevicePresence', 'machineDailyPresence', 'agentDailyPresence'] as const)
     expect(db[name].deleteMany).toHaveBeenCalledWith({ where: { userId: 'account' } })
+  expect(db.productUsageActivity.deleteMany).toHaveBeenCalledWith({ where: { subject: activitySubject('account', 'k'.repeat(32)) } })
 })
 
 it('installs required unique keys independently of schema push, then expiry for all histories', async () => {
   await ensureProductUsageExpiry()
-  expect(db.$runCommandRaw).toHaveBeenCalledTimes(12)
+  expect(db.$runCommandRaw).toHaveBeenCalledTimes(14)
+  expect(db.$runCommandRaw.mock.calls[12][0]).toMatchObject({ createIndexes: 'product_usage_activity', indexes: [{ key: { expiresAt: 1 }, expireAfterSeconds: 0 }] })
+  expect(db.$runCommandRaw.mock.calls[13][0]).toMatchObject({ createIndexes: 'product_usage_activity', indexes: [{ key: { subject: 1, dayUtc: 1 }, unique: true }] })
   expect(db.$runCommandRaw.mock.calls[0][0]).toMatchObject({ createIndexes: 'product_usage_preferences', indexes: [{ key: { userId: 1 }, unique: true }] })
   expect(db.$runCommandRaw.mock.calls[1][0]).toMatchObject({ createIndexes: 'product_usage_totals', indexes: [{ key: { dayUtc: 1, metric: 1 }, unique: true }] })
   expect(db.$runCommandRaw.mock.calls[2][0]).toMatchObject({ createIndexes: 'product_usage_receipts', indexes: [{ expireAfterSeconds: 0 }] })
@@ -161,4 +170,105 @@ it('keeps the native app collectors and anonymous transport identical', () => {
     expect(readFileSync(new URL(`../../../desktop/lib/measurement/${file}`, import.meta.url), 'utf8'))
       .toBe(readFileSync(new URL(`../../../mobile/lib/measurement/${file}`, import.meta.url), 'utf8'))
   }
+})
+
+describe('activity marks', () => {
+  const KEY = 'k'.repeat(32)
+  const at = new Date('2026-10-13T12:00:00Z')
+
+  it('writes one pseudonymous mark per person per day, never the account id', async () => {
+    await markActivity('PRIVATE_ACCOUNT', at, { surface: 'desktop' }, KEY)
+    expect(db.productUsageActivity.upsert).toHaveBeenCalledOnce()
+    const call = db.productUsageActivity.upsert.mock.calls[0][0]
+    const subject = activitySubject('PRIVATE_ACCOUNT', KEY)
+    expect(subject).toMatch(/^[0-9a-f]{32}$/)
+    expect(call).toEqual({
+      where: { subject_dayUtc: { subject, dayUtc: new Date('2026-10-13') } },
+      update: { surfaces: { push: 'desktop' } },
+      create: { subject, dayUtc: new Date('2026-10-13'), surfaces: ['desktop'], worked: false,
+        signupDay: new Date('2026-10-01'), staff: false, expiresAt: new Date('2026-10-23') },
+    })
+    expect(JSON.stringify(call)).not.toContain('PRIVATE_ACCOUNT')
+    expect(JSON.stringify(call)).not.toContain('person@example.com')
+  })
+
+  it('writes nothing without a key or while sharing is off', async () => {
+    await markActivity('a', at, { surface: 'desktop' }, '')
+    db.productUsagePreference.findUnique.mockResolvedValue({ enabled: false, revision: 3 })
+    await markActivity('a', at, { surface: 'desktop' }, KEY)
+    expect(db.productUsageActivity.upsert).not.toHaveBeenCalled()
+  })
+
+  it('costs one write per person, surface and kind a day, however often pings arrive', async () => {
+    for (let i = 0; i < 5; i++) await markActivity('a', at, { surface: 'desktop' }, KEY)
+    await markActivity('a', at, { surface: 'mobile' }, KEY)
+    for (let i = 0; i < 3; i++) await markActivity('a', at, { worked: true }, KEY)
+    expect(db.productUsageActivity.upsert).toHaveBeenCalledTimes(3)
+    expect(db.productUsageActivity.upsert.mock.calls[2][0].update).toEqual({ worked: true })
+  })
+
+  it('starts a new day at UTC midnight', async () => {
+    await markActivity('a', new Date('2026-10-13T23:59:59.999Z'), { surface: 'web' }, KEY)
+    await markActivity('a', new Date('2026-10-14T00:00:00.000Z'), { surface: 'web' }, KEY)
+    expect(db.productUsageActivity.upsert.mock.calls.map(c => c[0].where.subject_dayUtc.dayUtc))
+      .toEqual([new Date('2026-10-13'), new Date('2026-10-14')])
+  })
+
+  it('marks staff so the rollup can leave them out', async () => {
+    db.user.findUnique.mockResolvedValue({ createdAt: at, email: 'Someone@Autonomous.AI' })
+    await markActivity('a', at, { worked: true }, KEY)
+    expect(db.productUsageActivity.upsert.mock.calls[0][0].create).toMatchObject({ staff: true, worked: true, surfaces: [] })
+  })
+
+  it('retries a lost first-insert race as an update', async () => {
+    db.productUsageActivity.upsert.mockRejectedValueOnce(Object.assign(new Error('dup'), { code: 'P2002' }))
+    await markActivity('a', at, { surface: 'tui' }, KEY)
+    expect(db.productUsageActivity.update).toHaveBeenCalledWith({
+      where: { subject_dayUtc: { subject: activitySubject('a', KEY), dayUtc: new Date('2026-10-13') } },
+      data: { surfaces: { push: 'tui' } },
+    })
+  })
+
+  it('deletes the person\'s marks when sharing is turned off, and writes no more that day', async () => {
+    await markActivity('a', at, { surface: 'desktop' }, KEY)
+    db.productUsagePreference.upsert.mockResolvedValue({ enabled: false, revision: 2 })
+    await setProductUsageChoice('a', false)
+    expect(db.productUsageActivity.deleteMany).toHaveBeenCalledWith({ where: { subject: activitySubject('a', KEY) } })
+    db.productUsagePreference.findUnique.mockResolvedValue({ enabled: false, revision: 2 })
+    await markActivity('a', at, { surface: 'desktop' }, KEY)
+    expect(db.productUsageActivity.upsert).toHaveBeenCalledOnce()
+  })
+
+  it('turning sharing on deletes nothing', async () => {
+    db.productUsagePreference.upsert.mockResolvedValue({ enabled: true, revision: 3 })
+    await setProductUsageChoice('a', true)
+    expect(db.productUsageActivity.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('deletes nothing without a key', async () => {
+    await deleteActivity('a', '')
+    expect(db.productUsageActivity.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('removes a mark written while sharing was being turned off elsewhere', async () => {
+    // Sharing is on when this process checks, then another process saves off and deletes before the upsert lands.
+    db.productUsagePreference.findUnique
+      .mockResolvedValueOnce({ enabled: true, revision: 1 })
+      .mockResolvedValueOnce({ enabled: false, revision: 2 })
+    await markActivity('a', at, { surface: 'desktop' }, KEY)
+    expect(db.productUsageActivity.upsert).toHaveBeenCalledOnce()
+    expect(db.productUsageActivity.deleteMany).toHaveBeenCalledWith({ where: { subject: activitySubject('a', KEY) } })
+    db.productUsagePreference.findUnique.mockResolvedValue({ enabled: true, revision: 3 })
+    await markActivity('a', at, { surface: 'desktop' }, KEY)
+    expect(db.productUsageActivity.upsert).toHaveBeenCalledTimes(2) // not remembered as marked
+  })
+
+  it('never throws: a missing user or a database error writes nothing and is retried next time', async () => {
+    db.user.findUnique.mockResolvedValueOnce(null)
+    await expect(markActivity('gone', at, { surface: 'desktop' }, KEY)).resolves.toBeUndefined()
+    db.productUsageActivity.upsert.mockRejectedValueOnce(new Error('PRIVATE_DB_ERROR'))
+    await expect(markActivity('a', at, { surface: 'desktop' }, KEY)).resolves.toBeUndefined()
+    await markActivity('a', at, { surface: 'desktop' }, KEY)
+    expect(db.productUsageActivity.upsert).toHaveBeenCalledTimes(2)
+  })
 })

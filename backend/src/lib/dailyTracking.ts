@@ -1,13 +1,16 @@
-/** Relay signals contribute only daily fleet totals. Operational live presence stays in Redis.
- * No new account/machine/agent activity history is written here. Older row types remain readable
+/** Relay signals contribute daily fleet totals and, while sharing is on, a person's 10-day activity
+ * mark (lib/productUsage.ts markActivity). Operational live presence stays in Redis.
+ * No machine, agent or device history is written here. Older row types remain readable
  * during their bounded expiry window; their historical metrics must not be mixed with these totals.
  */
 import { utcDayKey } from '../types/analytics.js'
-import { recordRelayUsage } from './productUsage.js'
+import { markActivity, recordRelayUsage } from './productUsage.js'
 
 export interface PresenceTouchOpts { isNewConnection: boolean; countryCode?: string }
 
 export async function touchUserOnlineDay(userId: string, _machineId: string, now: Date, opts: { isNewConnection: boolean }): Promise<void> {
+  // The person is active today whether this is an open or a ping; only opens add a relay total.
+  void markActivity(userId, now, { surface: 'desktop' }).catch(() => {})
   if (opts.isNewConnection) await recordRelayUsage(userId, now, 'relay_desktop_opens')
 }
 export async function recordRemoteUsage(userId: string, _machineId: string, now: Date): Promise<void> {
@@ -20,6 +23,7 @@ export async function touchMachineOnlineDay(userId: string, _machineId: string, 
   if (opts.isNewConnection) await recordRelayUsage(userId, now, 'relay_machine_connections')
 }
 export async function recordTurnStarted(userId: string, _machineId: string, _agentId: string, now: Date): Promise<void> {
+  void markActivity(userId, now, { worked: true }).catch(() => {})
   await recordRelayUsage(userId, now, 'relay_turns_started')
 }
 
@@ -48,6 +52,7 @@ export const TUI_SURFACES: ReadonlySet<string> = new Set<ClientSurface>(['tui', 
 export async function touchClientOnlineDay(
   userId: string, surface: ClientSurface, now: Date, opts: { isNewConnection: boolean },
 ): Promise<void> {
+  void markActivity(userId, now, { surface }).catch(() => {})
   if (opts.isNewConnection) await recordRelayUsage(userId, now, `relay_${surface}_opens`)
 }
 

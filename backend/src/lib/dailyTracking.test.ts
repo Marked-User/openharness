@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const record = vi.hoisted(() => vi.fn())
-vi.mock('./productUsage.js', () => ({ recordRelayUsage: record }))
+const mark = vi.hoisted(() => vi.fn())
+vi.mock('./productUsage.js', () => ({ recordRelayUsage: record, markActivity: mark }))
 import { CLIENT_SURFACES, TUI_SURFACES, presenceTracker, presenceWriteDue, recordRemoteUsage, recordTurnStarted, touchClientOnlineDay, touchDeviceOnlineDay, touchMachineOnlineDay, touchUserOnlineDay } from './dailyTracking.js'
 
-beforeEach(() => { record.mockReset(); record.mockResolvedValue(undefined) })
+beforeEach(() => { record.mockReset(); record.mockResolvedValue(undefined); mark.mockReset(); mark.mockResolvedValue(undefined) })
 it('forwards only the choice identity and a fixed metric, never device, agent or location', async () => {
   const now = new Date('2026-10-13T12:00:00Z')
   await touchUserOnlineDay('account', 'PRIVATE_MACHINE', now, { isNewConnection: true })
@@ -16,13 +17,31 @@ it('forwards only the choice identity and a fixed metric, never device, agent or
   expect(JSON.stringify(record.mock.calls)).not.toContain('PRIVATE_')
   expect(JSON.stringify(record.mock.calls)).not.toContain('VN')
 })
-it('idle heartbeats add no analytics records', async () => {
+it('idle heartbeats add no relay totals but keep the person active', async () => {
   const now = new Date()
   await touchUserOnlineDay('a', 'm', now, { isNewConnection: false })
   await touchClientOnlineDay('a', 'tui', now, { isNewConnection: false })
   await touchDeviceOnlineDay('a', 'd', now, { isNewConnection: false })
   await touchMachineOnlineDay('a', 'm', now, { isNewConnection: false })
   expect(record).not.toHaveBeenCalled()
+  expect(mark.mock.calls).toEqual([['a', now, { surface: 'desktop' }], ['a', now, { surface: 'tui' }]])
+})
+
+it('marks the person, not the machine, agent or device', async () => {
+  const now = new Date('2026-10-13T12:00:00Z')
+  await touchUserOnlineDay('account', 'PRIVATE_MACHINE', now, { isNewConnection: true })
+  await touchClientOnlineDay('account', 'mobile', now, { isNewConnection: true })
+  await touchDeviceOnlineDay('account', 'PRIVATE_DEVICE', now, { isNewConnection: true, countryCode: 'VN' })
+  await recordTurnStarted('account', 'PRIVATE_MACHINE', 'PRIVATE_AGENT', now)
+  expect(mark.mock.calls).toEqual([
+    ['account', now, { surface: 'desktop' }], ['account', now, { surface: 'mobile' }], ['account', now, { worked: true }],
+  ])
+  expect(JSON.stringify(mark.mock.calls)).not.toContain('PRIVATE_')
+})
+
+it('a failing mark never reaches the socket', async () => {
+  mark.mockRejectedValue(new Error('PRIVATE'))
+  await expect(touchUserOnlineDay('a', 'm', new Date(), { isNewConnection: true })).resolves.toBeUndefined()
 })
 
 describe('presenceTracker', () => {

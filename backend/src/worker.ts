@@ -15,6 +15,7 @@ import { ensurePlans } from './lib/db/seed.js'
 import { prisma } from './lib/prisma.js'
 import { ensureProductUsageExpiry } from './lib/productUsage.js'
 import { machineBillingWorkerService } from './services/MachineBillingWorkerService.js'
+import { productUsagePeopleRollupService } from './services/ProductUsagePeopleRollupService.js'
 import { logger } from './utils/logger.js'
 
 // Singleton background process. HTTP/WS server.ts runs as a PM2 cluster and must never own schema
@@ -44,12 +45,14 @@ async function start(): Promise<void> {
     const hardExit = setTimeout(() => process.exit(0), 5000)
     hardExit.unref()
     machineBillingWorkerService.stop()
+    productUsagePeopleRollupService.stop()
     void Promise.allSettled([prisma.$disconnect(), closeBus()]).finally(() => process.exit(0))
   }
   process.on('SIGINT', () => shutdown('SIGINT'))
   process.on('SIGTERM', () => shutdown('SIGTERM'))
 
   machineBillingWorkerService.start()
+  productUsagePeopleRollupService.start()
   // PM2 wait_ready gates the singleton worker's "online" state on schema/catalog/backfill startup.
   // Plain node/tsx runs do not provide process.send and simply continue.
   process.send?.('ready')

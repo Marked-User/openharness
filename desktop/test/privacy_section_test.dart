@@ -38,6 +38,13 @@ void main() {
       await tester.tap(find.text('See what’s shared'));
       await tester.pumpAndSettle();
       expect(find.textContaining('random report receipt'), findsOneWidget);
+      expect(find.textContaining('kept 10 days'), findsOneWidget);
+      // A keyed code can be recomputed from the account id (that is how opt-out deletes it): pseudonymous, not anonymous.
+      expect(find.textContaining('anonymous code'), findsNothing);
+      expect(find.textContaining('coded ID instead of your account'), findsWidgets);
+      expect(find.textContaining('sign-up day'), findsOneWidget);
+      expect(find.textContaining('New reports create no per-person history'), findsNothing);
+      expect(find.textContaining('are not stored with the combined totals'), findsOneWidget);
       expect(
         find.textContaining('does not tell us whether your task succeeded'),
         findsOneWidget,

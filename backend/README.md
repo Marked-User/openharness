@@ -172,13 +172,14 @@ Confusing, or Missing a feature. A deliberate button press sends only the fixed 
 retry receipt. It cannot include text, a task identifier or content. Ambiguous retries keep the same
 receipt and answer. This is self-selected feedback, not the task success rate of all users.
 
-The three new collections have distinct purposes:
+The product usage collections have distinct purposes:
 
 | Collection | Fields retained | Lifetime |
 | --- | --- | --- |
 | `product_usage_preferences` | Account ID, enabled flag, revision | Saved account preference; no usage history |
 | `product_usage_totals` | UTC day, allowlisted metric, sum (plus DB primary key) | 396 days, approximately 13 months |
 | `product_usage_receipts` | Random report UUID and expiration date | Scheduled expiry 36 days from the report day |
+| `product_usage_activity` | HMAC subject (`PRODUCT_USAGE_SUBJECT_KEY`), UTC day, surfaces, worked flag, sign-up day, staff flag, expiry | 10 days (TTL); deleted on opt-out and `/api/analytics/delete`; written only while sharing is on and the key is set |
 
 No individual report body or arrival timestamp is stored. Receipt insertion and increments share a
 Mongo transaction so ambiguous retries cannot count twice. Saving a preference advances its revision;
@@ -193,7 +194,7 @@ The worker installs Mongo TTL indexes after schema setup. Expiry is asynchronous
 [TTL background worker](https://www.mongodb.com/docs/manual/core/index-ttl/) may delete later than
 the configured threshold. It also expires the eight legacy daily
 history collections after 35 days. The old collector endpoint accepts no new rows, relay tracking
-writes only global event totals, and the existing account deletion control covers the six former
+writes global event totals and, while sharing is on, the 10-day people marks, and the existing account deletion control covers the six former
 presence collections as well as the old collector tables. These database lifetimes do not assert
 anything about infrastructure access logs or backup retention; verify those separately before rollout.
 
