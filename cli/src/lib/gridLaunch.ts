@@ -73,11 +73,6 @@ import { HARNESS_MCP_SERVER_NAME } from './harnessWebTools.js'
 
 export * from './gridLaunchWire.js'
 
-/** Where Pi keeps the skills the user manages, handed back through our own settings.json. */
-function userPiSkillsDir(): string {
-  return join(homedir(), '.pi', 'agent', 'skills')
-}
-
 /**
  * Grok's real state directory — the one a private [GROK_HOME_VAR] borrows `sessions/` from.
  *
@@ -249,44 +244,38 @@ const webSearchWhenWired = (override: GridLaunchOverride): GridWebSearchStatus =
  * `api: openai-completions` makes Pi post to `<base>/chat/completions`, which is what the relay
  * serves. The context/cost numbers are Pi's own bookkeeping for its display; the grid decides what
  * the model really takes.
+ *
+ * Registered by an extension (`pi -e`), not written as a `models.json` under a `PI_CODING_AGENT_DIR`
+ * of our own. That variable moves Pi's WHOLE home: the person's settings, packages and auth went with
+ * it, and so did `sessions/`, so every model switch reopened Pi in a new directory where `--session`
+ * found nothing and the daemon fell back to a fresh conversation (2026-10-14). An extension adds the
+ * provider and leaves `~/.pi/agent` exactly as the person keeps it.
  */
-function piModelsJson(baseUrl: string, model: string, contextWindow?: number): string {
-  return JSON.stringify({
-    providers: {
-      [GRID_PROVIDER_ID]: {
-        name: 'Autonomous Grid',
-        baseUrl,
-        api: 'openai-completions',
-        // An env reference, not the key — nothing secret is written to disk.
-        apiKey: `$${GRID_KEY_VAR}`,
-        models: [{
-          id: model,
-          name: model,
-          reasoning: false,
-          input: ['text'],
-          // The real window when the relay reported one — the same fault as every engine here:
-          // told 200K, Pi never compacted before a smaller server refused the request.
-          contextWindow: contextWindow ?? 200000,
-          maxTokens: 8192,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        }],
-      },
-    },
-  }, null, 2)
+function piProviderExtension(baseUrl: string, model: string, contextWindow?: number): string {
+  const provider = {
+    name: 'Autonomous Grid',
+    baseUrl,
+    api: 'openai-completions',
+    // An env reference, not the key — nothing secret is written to disk.
+    apiKey: `$${GRID_KEY_VAR}`,
+    models: [{
+      id: model,
+      name: model,
+      reasoning: false,
+      input: ['text'],
+      // The real window when the relay reported one — the same fault as every engine here:
+      // told 200K, Pi never compacted before a smaller server refused the request.
+      contextWindow: contextWindow ?? 200000,
+      maxTokens: 8192,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }],
+  }
+  return `// Written by the machine adapter for this agent's grid launch. Adds the grid as a provider.\n`
+    + `export default function (pi) {\n  pi.registerProvider(${JSON.stringify(GRID_PROVIDER_ID)}, ${JSON.stringify(provider, null, 2).replace(/\n/g, '\n  ')})\n}\n`
 }
 
-/**
- * Pi's settings for the directory we own, which exists to hand back the one thing the redirection
- * takes away: the skills the user keeps in their real `~/.pi/agent/skills`.
- *
- * Deliberately NOT `defaultProjectTrust: always`. The Grid app set it because it drove Pi headless,
- * one process per turn, with nobody there to answer a prompt. Here the user is sitting in front of
- * an interactive pane, and silently pre-trusting every folder they open an agent in would be this
- * daemon deciding something it was not asked to decide.
- */
-function piSettingsJson(userSkillsDir: string): string {
-  return JSON.stringify({ skills: [userSkillsDir] }, null, 2)
-}
+/** The file [piProviderExtension] is written to, handed to Pi with `-e`. */
+const PI_PROVIDER_EXTENSION_FILE = 'grid-provider.ts'
 
 /**
  * Every engine that can be pointed at a grid, and how.
@@ -582,9 +571,9 @@ const GRID_ENGINE_CONTRACTS: Partial<Record<AgentEngine, GridEngineContract>> = 
     },
   },
 
-  // Pi reads its providers out of a config DIRECTORY, and `PI_CODING_AGENT_DIR` moves that
-  // directory. So it gets a private one per agent: the provider block lands there, the user's
-  // ~/.pi/agent/models.json is never opened, and their skills are handed back through settings.json.
+  // Pi takes the grid from an extension file in a directory this daemon owns, handed over with `-e`
+  // (see [piProviderExtension]): the person's own `~/.pi/agent` (settings, packages, sessions) is
+  // read as always and never written.
   //
   // The provider block has to name the model it serves, and Pi selects it as `grid/<model>` — so
   // something must always be named. No model chosen means the grid routes: `Auto` is the router's
@@ -595,16 +584,16 @@ const GRID_ENGINE_CONTRACTS: Partial<Record<AgentEngine, GridEngineContract>> = 
   // always creates on Auto and no longer offers a model field — a dead end, not a prompt to go and
   // pick something.
   pi: {
-    build: (override, machine) => {
+    build: (override) => {
       const model = override.model ?? GRID_ROUTER_MODEL
       return {
         env: { [GRID_KEY_VAR]: override.apiKey },
         args: ['--model', `${GRID_PROVIDER_ID}/${model}`],
         configDir: {
-          envVar: 'PI_CODING_AGENT_DIR',
+          arg: '-e',
+          pointAt: PI_PROVIDER_EXTENSION_FILE,
           files: [
-            { name: 'models.json', content: piModelsJson(relayBaseUrl(override.baseUrl), model, override.contextWindow) },
-            { name: 'settings.json', content: piSettingsJson(machine.piSkillsDir ?? userPiSkillsDir()) },
+            { name: PI_PROVIDER_EXTENSION_FILE, content: piProviderExtension(relayBaseUrl(override.baseUrl), model, override.contextWindow) },
           ],
         },
         // Pi has no MCP client, so there is nothing to hand the server to — with or without a url.
@@ -730,7 +719,7 @@ export function contractEnvVarNames(engine: AgentEngine): string[] {
   const built = buildGridEngineLaunch(engine, PROBE_OVERRIDE, { hermesSystemManaged: false })
   if (!built.ok) return []
   const names = Object.keys(built.launch.env)
-  if (built.launch.configDir) names.push(built.launch.configDir.envVar)
+  if (built.launch.configDir?.envVar) names.push(built.launch.configDir.envVar)
   return names
 }
 

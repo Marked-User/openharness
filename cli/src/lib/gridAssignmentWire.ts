@@ -14,19 +14,43 @@ export const GRID_MODEL_VARS: Partial<Record<AgentEngine, string>> = {
 export const GRID_CODEX_ENDPOINT = /model_providers\.[A-Za-z0-9_-]+\.base_url=(?:"([^"]+)"|(\S+))/
 export const GRID_ARGV_MODEL = /(?:^|\s)-m\s+(\S+)/
 export const GRID_PI_MODEL = /(?:^|\s)--model\s+([A-Za-z0-9_-]+)\/(\S+)/
+/** `-e <dir>/grid-provider.ts`, the extension a grid launch hands Pi (lib/gridLaunch.ts `piProviderExtension`). */
+export const GRID_PI_EXTENSION = /(?:^|\s)-e\s+(\S*\/grid-provider\.ts)(?=\s|$)/
+
+/** The provider id and block a grid-provider extension registers; null for any other source. */
+export function piProviderExtensionIn(source: string): { id: string; provider: Record<string, unknown> } | null {
+  const block = /pi\.registerProvider\(("[^"]+"), (\{[\s\S]*\})\)\s*\}\s*$/.exec(source)
+  if (!block) return null
+  try {
+    const id: unknown = JSON.parse(block[1]), provider: unknown = JSON.parse(block[2])
+    return typeof id === 'string' && !!provider && typeof provider === 'object' ? { id, provider: provider as Record<string, unknown> } : null
+  } catch { return null }
+}
 
 /** Null is positive evidence of no launch markers. An unreadable environment is handled by the caller. */
 export function gridAssignmentProcess(key: string, engine: AgentEngine, env: Record<string, string>, args: string): GridAssignmentProcess | null {
   const endpoint = GRID_ENDPOINT_VARS[engine]
+  // A Pi launched before its provider extension was pointed at a whole config directory instead, and is read that way
+  // until it is relaunched.
   const marker = engine === 'pi' ? 'PI_CODING_AGENT_DIR' : engine === 'opencode' ? 'OPENCODE_CONFIG' : endpoint
+  const extension = engine === 'pi' ? GRID_PI_EXTENSION.exec(args) : null
   const provider = marker ? null : GRID_CODEX_ENDPOINT.exec(args)
-  if (!(marker ? env[marker]?.trim() : provider)) return null
+  if (!(extension || (marker ? env[marker]?.trim() : provider))) return null
   const picked: Record<string, string> = {}
   for (const name of [marker, GRID_MODEL_VARS[engine]]) if (name && env[name] !== undefined) picked[name] = env[name]
   // Never forward the command line: it may carry a prompt, token or unrelated tool arguments.
-  const model = engine === 'pi' ? GRID_PI_MODEL.exec(args)?.[0]
+  const model = engine === 'pi' ? GRID_PI_MODEL.exec(args)?.[0].trim()
     : engine === 'codex' || engine === 'grok' ? GRID_ARGV_MODEL.exec(args)?.[0] : undefined
-  return { key, engine, env: picked, args: [provider?.[0], model].filter(Boolean).join(' ') }
+  return { key, engine, env: picked, args: [provider?.[0], extension?.[0].trim(), model].filter(Boolean).join(' ') }
+}
+
+/**
+ * [gridAssignmentProcess] over what a process gave: its environment, or null when that could not be read. Without
+ * one, only a launch command naming its grid counts (Pi's `-e` extension); a command naming none is not known, never
+ * "on its own login", since the unread environment may hold the grid.
+ */
+export function gridAssignmentEvidence(key: string, engine: AgentEngine, env: Record<string, string> | null, args: string): GridAssignmentProcess | null | undefined {
+  return env ? gridAssignmentProcess(key, engine, env, args) : gridAssignmentProcess(key, engine, {}, args) ?? undefined
 }
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)

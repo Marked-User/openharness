@@ -12,7 +12,6 @@
  * probe and the config directory writer) are exactly the parts worth stubbing in a spec.
  */
 
-import { join } from 'node:path'
 import type { NativeLaunch, NativeLaunchResult, NativeLaunchSource } from '../engines/nativeLaunch.js'
 import type { AgentEngine } from '../engines/types.js'
 import { subscriptionModelLaunch } from './subscriptionModel.js'
@@ -20,6 +19,7 @@ import { ownLoginProviderArgs } from '../engines/launches.js'
 import { namedAgentArgs, supportsNamedAgent } from './engineLaunch.js'
 import { profileEnvironment } from './engineHomes.js'
 import {
+  gridConfigHandOff,
   gridConflictingEnvToClear,
   type GridEngineLaunch,
   type GridLaunchAnswer,
@@ -330,12 +330,13 @@ async function prepareBaseLaunchOverrides(
     if (!tmux.ok) return tmux
     return { ok: true, commit: async () => {
       const env: Record<string, string> = { ...built.launch.env }
+      const args = [...built.launch.args]
       if (built.launch.configDir) {
-        const { envVar, files, pointAt, links } = built.launch.configDir
+        const { files, links } = built.launch.configDir
         try {
-          const dir = await deps.writeGridConfigDir(configKey, files, links ?? [])
-          // Pi is handed the directory; OpenCode's OPENCODE_CONFIG wants the file inside it.
-          env[envVar] = pointAt ? join(dir, pointAt) : dir
+          const handOff = gridConfigHandOff(built.launch.configDir, await deps.writeGridConfigDir(configKey, files, links ?? []))
+          Object.assign(env, handOff.env)
+          args.push(...handOff.args)
         } catch (error) {
           const detail = `could not write ${engine}'s grid configuration · ${error instanceof Error ? error.message : error}`
           return { ok: false, error: 'GRID_CONFIG_FAILED', detail, ...(deps.native ? { unavailable: 'native' } : {}) }
@@ -347,7 +348,7 @@ async function prepareBaseLaunchOverrides(
         ok: true,
         overrides: {
           env,
-          extraArgs: [...built.launch.args],
+          extraArgs: args,
           clearEnv: gridConflictingEnvToClear({ env }),
           gridLaunchRecord: { override: built.override, webSearch: built.launch.webSearch },
           ...(built.launch.sessionModel ? { sessionModel: built.launch.sessionModel } : {}),

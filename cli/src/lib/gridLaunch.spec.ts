@@ -16,6 +16,7 @@ import {
   type GridLaunchMachine,
   type GridLaunchOverride,
 } from './gridLaunch.js'
+import { piProviderExtensionIn } from './gridAssignmentWire.js'
 import { ENGINES, type AgentEngine } from '../engines/types.js'
 import { buildEngineLaunchArgv } from './engineLaunch.js'
 
@@ -43,12 +44,18 @@ function launchOf(engine: AgentEngine, override = WITH_MODEL, machine = PLAIN_MA
   return built.launch
 }
 
-it('borrows Grok conversations and Pi skills from the captured launch home', () => {
-  const machine = { ...PLAIN_MACHINE, grokHome: '/fixture/shell-grok', piSkillsDir: '/fixture/shell-pi/skills' }
+/** The provider Pi's grid launch registers, read the way the probe reads it back (lib/gridAssignment.ts). */
+function piProviderOf(launch: ReturnType<typeof launchOf>) {
+  const file = launch.configDir?.files.find((f) => f.name === launch.configDir?.pointAt)
+  const registered = file ? piProviderExtensionIn(file.content) : null
+  if (!registered) throw new Error('no provider extension')
+  return registered as { id: string; provider: { baseUrl: string; api: string; apiKey: string; models: { id: string; contextWindow: number }[] } }
+}
+
+it('borrows Grok conversations from the captured launch home', () => {
+  const machine = { ...PLAIN_MACHINE, grokHome: '/fixture/shell-grok' }
   expect(launchOf('grok', WITH_MODEL, machine).configDir!.links!.map(link => link.target))
     .toEqual(expect.arrayContaining(['/fixture/shell-grok/sessions']))
-  const settings = launchOf('pi', WITH_MODEL, machine).configDir!.files.find(file => file.name === 'settings.json')!
-  expect(JSON.parse(settings.content).skills).toEqual(['/fixture/shell-pi/skills'])
 })
 
 describe('parseGridLaunchOverride', () => {
@@ -210,33 +217,23 @@ describe('the launch each engine gets', () => {
     })
   })
 
-  it('gives Pi a config directory of ours, never the user\'s own', () => {
+  it('adds the grid to Pi through an extension, leaving the person\'s own Pi home where it is', () => {
     const launch = launchOf('pi')
     expect(launch.env).toEqual({ GRID_API_KEY: WIRE.apiKey })
     expect(launch.args).toEqual(['--model', 'grid/GLM-4.7-Flash'])
-    const configDir = launch.configDir
-    expect(configDir?.envVar).toBe('PI_CODING_AGENT_DIR')
-    const models = configDir?.files.find((file) => file.name === 'models.json')
-    expect(models).toBeDefined()
-    const parsed = JSON.parse(models!.content) as {
-      providers: Record<string, { baseUrl: string; api: string; apiKey: string }>
-    }
-    expect(parsed.providers.grid.baseUrl).toBe(RELAY_V1)
+    // `-e <file>`, never `PI_CODING_AGENT_DIR`: that moved Pi's settings, packages and sessions with it,
+    // and every model switch then reopened Pi with none of them (2026-10-14).
+    expect(launch.configDir).toMatchObject({ arg: '-e', pointAt: 'grid-provider.ts' })
+    expect(launch.configDir).not.toHaveProperty('envVar')
+    expect(launch.configDir?.files.map((file) => file.name)).toEqual(['grid-provider.ts'])
+    const { id, provider } = piProviderOf(launch)
+    expect(id).toBe('grid')
+    expect(provider.baseUrl).toBe(RELAY_V1)
     // `openai-completions` makes Pi post to <base>/chat/completions, which the relay serves.
-    expect(parsed.providers.grid.api).toBe('openai-completions')
+    expect(provider.api).toBe('openai-completions')
     // An env REFERENCE. Writing the key itself would put a live credential on disk, outliving the
     // agent and every reason it existed.
-    expect(parsed.providers.grid.apiKey).toBe('$GRID_API_KEY')
-    expect(models!.content).not.toContain(WIRE.apiKey)
-  })
-
-  it('hands Pi back the skills the redirection would otherwise hide', () => {
-    const settings = launchOf('pi').configDir?.files.find((file) => file.name === 'settings.json')
-    const parsed = JSON.parse(settings!.content) as Record<string, unknown>
-    expect((parsed.skills as string[])[0]).toContain('.pi')
-    // The Grid app set `defaultProjectTrust: always` because it drove Pi headless with nobody there
-    // to answer. Here a person is sitting in front of the pane, so the trust prompt stays theirs.
-    expect(parsed).not.toHaveProperty('defaultProjectTrust')
+    expect(provider.apiKey).toBe('$GRID_API_KEY')
   })
 
   it('routes Pi through Auto when the user picked no model, rather than refusing', () => {
@@ -246,12 +243,8 @@ describe('the launch each engine gets', () => {
     // never start: that dialog always creates on Auto and offers no model field.
     const launch = launchOf('pi', OVERRIDE)
     expect(launch.args).toEqual(['--model', 'grid/Auto'])
-    const models = launch.configDir?.files.find((file) => file.name === 'models.json')
-    const parsed = JSON.parse(models!.content) as {
-      providers: Record<string, { models: { id: string; name: string }[] }>
-    }
     // Named in the block too, not just in argv — Pi resolves `grid/Auto` against this list.
-    expect(parsed.providers.grid.models.map((m) => m.id)).toEqual(['Auto'])
+    expect(piProviderOf(launch).provider.models.map((m) => m.id)).toEqual(['Auto'])
   })
 
   it('never puts the key in argv, or on disk, for any engine', () => {
@@ -385,7 +378,6 @@ describe('the lists the core declares for every launch (lib/gridLaunchWire.ts), 
       CLAUDE_CODE_MAX_CONTEXT_TOKENS: 'a hint',
       // Each engine's own config pointer, written by that engine's launch into the daemon's own folder.
       OPENCODE_CONFIG: 'its own config file',
-      PI_CODING_AGENT_DIR: 'its own config folder',
     }
     // Set by no contract, and what outranks a grid when inherited (the module doc's first measurement).
     const INHERITED_ONLY = ['ANTHROPIC_API_KEY']
@@ -416,8 +408,9 @@ describe('gridEnvVarNames', () => {
     expect(gridEnvVarNames('claude')).not.toContain('GRID_MCP_AUTHORIZATION')
   })
 
-  it('includes the config-dir pointer for an engine that uses one', () => {
-    expect(gridEnvVarNames('pi')).toContain('PI_CODING_AGENT_DIR')
+  it('includes the config-dir pointer for an engine that uses one, and none for Pi, which is handed a flag', () => {
+    expect(gridEnvVarNames('opencode')).toContain('OPENCODE_CONFIG')
+    expect(gridEnvVarNames('pi')).toEqual(['GRID_API_KEY'])
   })
 
   it('covers every variable a launch WITH web tools sets, so returning to the own login clears them all', () => {
@@ -426,7 +419,7 @@ describe('gridEnvVarNames', () => {
     // was told it is back on its subscription model.
     for (const engine of gridCapableEngines()) {
       const launch = launchOf(engine, WITH_MCP)
-      const set = [...Object.keys(launch.env), ...(launch.configDir ? [launch.configDir.envVar] : [])]
+      const set = [...Object.keys(launch.env), ...(launch.configDir?.envVar ? [launch.configDir.envVar] : [])]
       for (const name of set) expect(gridEnvVarNames(engine), `${engine} sets ${name}`).toContain(name)
     }
   })
@@ -454,7 +447,7 @@ describe('gridConflictingEnvToClear', () => {
       const built = buildGridEngineLaunch(engine, { ...override, model: 'a-model' }, PLAIN_MACHINE)
       if (!built.ok) throw new Error(`${engine} refused`)
       const set = new Set(Object.keys(built.launch.env))
-      if (built.launch.configDir) set.add(built.launch.configDir.envVar)
+      if (built.launch.configDir?.envVar) set.add(built.launch.configDir.envVar)
       for (const name of gridConflictingEnvToClear(built.launch)) {
         expect(set.has(name), `${engine} both sets and clears ${name}`).toBe(false)
       }
@@ -990,12 +983,8 @@ describe('each engine is told the real context window', () => {
     expect(launchOf('codex', WITH_MODEL).args.join(' ')).not.toContain('model_context_window')
   })
 
-  it('Pi, in the window its models file declares', () => {
-    const models = (launch: ReturnType<typeof launchOf>) =>
-      JSON.parse(launch.configDir!.files.find((f) => f.name === 'models.json')!.content)
-    const [model] = Object.values<any>(models(launchOf('pi', WITH_WINDOW)).providers)[0].models
-    expect(model.contextWindow).toBe(131072)
-    const [unknown] = Object.values<any>(models(launchOf('pi', WITH_MODEL)).providers)[0].models
-    expect(unknown.contextWindow).toBe(200000)
+  it('Pi, in the window its provider extension declares', () => {
+    expect(piProviderOf(launchOf('pi', WITH_WINDOW)).provider.models[0].contextWindow).toBe(131072)
+    expect(piProviderOf(launchOf('pi', WITH_MODEL)).provider.models[0].contextWindow).toBe(200000)
   })
 })

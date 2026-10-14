@@ -31,7 +31,7 @@ import {
 import { setUpWithin } from '../../lib/setUpWithin.js'
 import { agentLaunchArgs, joinedInstructions } from '../../lib/agentAttribution.js'
 import { writeGridConfigDir } from '../../lib/gridConfigDir.js'
-import { describeGridLaunch, gridConflictingEnvToClear, type GridLaunchAnswer, type GridLaunchMachine, type GridLaunchRequest, type GridWebSearchStatus } from '../../lib/gridLaunchWire.js'
+import { describeGridLaunch, gridConfigHandOff, gridConflictingEnvToClear, type GridLaunchAnswer, type GridLaunchMachine, type GridLaunchRequest, type GridWebSearchStatus } from '../../lib/gridLaunchWire.js'
 import { profileEnvironment } from '../../lib/engineHomes.js'
 import { DEFAULT_HARNESS_PERMISSION, freshHarnessEnvironment } from '../../lib/harnessDefaults.js'
 import { buildHarnessSessionLabel } from '../../lib/harnessSessionLabel.js'
@@ -256,13 +256,14 @@ export function createAgentCreator({
       // An engine whose provider lives in a file gets a directory this daemon owns, never the
       // user's own dotfiles. The label is unique per creation, so two agents never share one.
       if (built.launch.configDir) {
-        const { envVar, files, pointAt, links } = built.launch.configDir
+        const { files, links } = built.launch.configDir
         try {
           const publication = native && publishConfig ? await publishConfig(label, files, links, current) : null
           if (publication && !native?.retain?.(publication.proof)) return stale()
           const dir = publication?.directory ?? await writeGridConfigDir(label, files, links)
-          // Pi is handed the directory; OpenCode's OPENCODE_CONFIG wants the file inside it.
-          gridLaunch.env[envVar] = pointAt ? join(dir, pointAt) : dir
+          const handOff = gridConfigHandOff(built.launch.configDir, dir)
+          Object.assign(gridLaunch.env, handOff.env)
+          gridLaunch.args = [...gridLaunch.args, ...handOff.args]
         } catch (error) {
           const detail = `could not write ${engine}'s grid configuration · ${error instanceof Error ? error.message : error}`
           console.warn(`[agent] create ${engine} refused · ${detail}`)

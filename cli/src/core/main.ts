@@ -2096,10 +2096,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   const gridLaunchMachine = async (engine: AgentEngine, native?: NativeLaunch): Promise<GridLaunchMachine> => ({
     hermesSystemManaged: existsSync(HERMES_SYSTEM_MANAGED_DIR),
     opencodeMajor: native ? native.opencodeMajor : engine === 'opencode' ? await opencodeMajorVersion() : null,
-    ...(native?.environment.HOME ? {
-      grokHome: nativeHookLocations(native.environment).GROK_HOME,
-      piSkillsDir: join(nativeHookLocations(native.environment).PI_AGENT_DIR, 'skills'),
-    } : {}),
+    ...(native?.environment.HOME ? { grokHome: nativeHookLocations(native.environment).GROK_HOME } : {}),
   })
 
   /**

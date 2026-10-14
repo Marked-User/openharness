@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareResume } from '../../engines/launchPrep.js'
+import { bringPiSessionHome } from '../../engines/pi/gridSessionHome.js'
 import type { GridLaunchAnswer, GridLaunchOverride, GridLaunchRequest } from '../../lib/gridLaunchWire.js'
 import { dropPermissionFlagIfUnsupported } from '../../lib/engineLaunch.js'
 import { buildLaunchOverrides, type LaunchOverrides, type LaunchOverridesDeps } from '../../lib/launchOverrides.js'
@@ -9,6 +10,7 @@ import type { RegisteredSession } from '../../lib/registry.js'
 import { createLaunchHelpers, gridLaunchThrough, type LaunchHelperDeps } from './launch.js'
 
 vi.mock('../../engines/launchPrep.js', async (real) => ({ ...await real<object>(), prepareResume: vi.fn(() => ({ repairedItems: 0 })) }))
+vi.mock('../../engines/pi/gridSessionHome.js', () => ({ bringPiSessionHome: vi.fn(() => null) }))
 vi.mock('../../lib/engineLaunch.js', async (real) => ({ ...await real<object>(), dropPermissionFlagIfUnsupported: vi.fn() }))
 // OpenCode's version is its own code, loaded for an OpenCode relaunch alone; a test may say it could not be.
 vi.mock('../../engines/inProcess.js', async (real) => {
@@ -174,6 +176,36 @@ describe('relaunch helpers', () => {
       '[resume] repaired 3 Codex reasoning items · backup: /b/rollout.bak',
       '[resume] repaired 1 Codex reasoning items · backup: /b/rollout.bak',
     ])
+  })
+
+  it("brings a Pi conversation an older grid launch left in the daemon's folder home before it resumes", () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const { helpers } = setup()
+    const old = '/data/grid-launch-config/c88e/sessions/--w--/s1.jsonl'
+    const pi = session({ engine: 'pi', transcriptPath: old })
+    vi.stubEnv('PI_CODING_AGENT_SESSION_DIR', '')
+    vi.stubEnv('PI_CODING_AGENT_DIR', '')
+    vi.mocked(bringPiSessionHome).mockReturnValueOnce('/home/.pi/agent/sessions/--w--/s1.jsonl')
+    helpers.prepareSessionResume(pi)
+    const [path, roots, sessions] = vi.mocked(bringPiSessionHome).mock.calls[0]!
+    expect(path).toBe(old)
+    expect(roots.map((root) => root.split('/').at(-1))).toEqual(['grid-engine-config', 'grid-launch-config'])
+    expect(sessions).toMatch(/\/agent\/sessions$/)
+    // Pi's own variables move where it keeps sessions, as they move where Pi looks for them.
+    vi.stubEnv('PI_CODING_AGENT_DIR', '/moved/agent')
+    helpers.prepareSessionResume(pi)
+    expect(vi.mocked(bringPiSessionHome).mock.calls[1]![2]).toBe('/moved/agent/sessions')
+    vi.stubEnv('PI_CODING_AGENT_SESSION_DIR', '/moved/sessions')
+    vi.mocked(bringPiSessionHome).mockReturnValueOnce(old)
+    helpers.prepareSessionResume(pi)
+    expect(vi.mocked(bringPiSessionHome).mock.calls[2]![2]).toBe('/moved/sessions')
+    // Said once, for the copy; nothing for a conversation already home, or another engine's.
+    helpers.prepareSessionResume(session({ engine: 'codex' }))
+    expect(bringPiSessionHome).toHaveBeenCalledTimes(3)
+    expect(log.mock.calls.map(([line]) => String(line))).toEqual([
+      "[resume] a1 · pi's conversation brought home · /home/.pi/agent/sessions/--w--/s1.jsonl",
+    ])
+    vi.unstubAllEnvs()
   })
 })
 

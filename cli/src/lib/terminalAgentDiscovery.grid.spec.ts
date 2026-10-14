@@ -89,6 +89,23 @@ describe('grid assignment on the live terminal discovery path', () => {
     expect(probe.agents[0].grid).toBeNull()
   })
 
+  it("reads a renamed Pi from the launcher's command line, and calls it known only when that names a grid", async () => {
+    // Pi renames its process: `ps` shows `pi`, and its environment cannot be read (2026-10-14).
+    const launcher = (args: string) => row(10, 1, 'zsh', `/bin/zsh -lic . '/d/launch/1.sh' harness-engine /work /n/bin/pi --session s ${args}`)
+    const probe = (rows: ProcessRow[]) => {
+      processRows.mockResolvedValue(rows)
+      return probeTerminalAgents([backendWith('tmux', 'tmux', [{ runtime: TMUX_RUNTIME, rootPid: 10, cwd: '/work' }])], ['tmux'], 999)
+        .then((result) => { expect(result.agents.map((agent) => agent.engine)).toEqual(['pi']); return result.agents[0] })
+    }
+    readProcessEnv.mockResolvedValue(null)
+    const onGrid = await probe([launcher('--model grid/m -e /c/grid-provider.ts'), row(30, 10, 'pi', 'pi       ')])
+    expect(onGrid.gridProcess).toEqual({ key: '', engine: 'pi', env: {}, args: '-e /c/grid-provider.ts --model grid/m' })
+    // Nothing naming a grid: an environment that could not be read may still hold one, so it stays unknown.
+    const unknown = await probe([launcher(''), row(30, 10, 'pi', 'pi       ')])
+    expect(unknown.gridProcess).toBeUndefined()
+    expect(unknown.grid).toBeUndefined()
+  })
+
   it('does not probe when the process table is unavailable', async () => {
     processRows.mockResolvedValue(null)
     const probe = await probeTerminalAgents(

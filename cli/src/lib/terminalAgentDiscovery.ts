@@ -6,7 +6,7 @@ import {
   type AgentCommandOwnershipSnapshot,
 } from './engineBin.js'
 import { probeGatewayRuntime } from './gatewayRuntime.js'
-import { gridAssignmentProcess, type GridAssignment, type GridAssignmentProcess } from './gridAssignmentWire.js'
+import { gridAssignmentEvidence, type GridAssignment, type GridAssignmentProcess } from './gridAssignmentWire.js'
 import { readProcessEnv } from './processEnv.js'
 import { probeProfileHome } from '../engines/discoveries.js'
 import { probeHermesHome } from '../engines/identities.js'
@@ -16,12 +16,13 @@ import {
   ambiguousAgentProcess,
   engineProcessMatchScore,
   enrichProcessRows,
+  launchArgs,
   processRows,
   processTreePids,
   resumeSessionId,
   type ProcessRow,
 } from './tmux.js'
-import { processIdentityKey, processIdentityOf, terminalInstanceId, terminalPlacementKey, terminalRouteKey } from './terminalRuntime.js'
+import { processIdentityKey, processIdentityOf, sameProcessIdentity, terminalInstanceId, terminalPlacementKey, terminalRouteKey } from './terminalRuntime.js'
 import type {
   ProcessIdentity,
   TerminalInventoryResult,
@@ -264,12 +265,12 @@ export async function probeTerminalAgents(
     const runtime = await probeGatewayRuntime(agent.processIdentity, agent.args)
     agent.gateway = runtime.kind
     // Only the marker read is core work. Models classifies it after reconciliation, without blocking binding.
-    const env = await readProcessEnv(agent.processIdentity)
-    if (env) {
-      const evidence = gridAssignmentProcess('', agent.engine, env, agent.args)
-      if (evidence) agent.gridProcess = evidence
-      else agent.grid = null
-    }
+    // Read from how it was launched, which for Pi is its launcher's command line (tmux.ts `launchArgs`).
+    const row = enrichedRows.find((candidate) => sameProcessIdentity(candidate, agent.processIdentity))
+    const evidence = gridAssignmentEvidence('', agent.engine, await readProcessEnv(agent.processIdentity),
+      row ? launchArgs(enrichedRows, row) : agent.args)
+    if (evidence) agent.gridProcess = evidence
+    else if (evidence === null) agent.grid = null
     // And, for Codex, the profile it runs under — a fact about the process the row cannot otherwise learn.
     agent.codexHome = await probeProfileHome(agent.processIdentity, agent.engine)
     // Hermes's declared profile is read eagerly from the same verified process environment.

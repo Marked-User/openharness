@@ -1,11 +1,10 @@
 /**
  * The private config directory an engine is given when its provider lives in a file.
  *
- * Pi is the case this exists for: it reads providers out of a directory, and `PI_CODING_AGENT_DIR`
- * moves that directory. Rather than edit `~/.pi/agent/models.json` — someone else's file, which
- * would outlive the agent and survive every uninstall — the daemon writes a directory it owns and
- * points the engine at that. The user's own configuration is never opened, and deleting the
- * directory undoes the whole thing.
+ * OpenCode's config file and Pi's provider extension are the usual cases. Rather than edit the
+ * engine's own config — someone else's file, which would outlive the agent and survive every
+ * uninstall — the daemon writes a directory it owns and points the engine at that. The user's own
+ * configuration is never opened, and deleting the directory undoes the whole thing.
  *
  * Nothing written here is secret. A provider block references the key through an environment
  * variable; the key itself lives in the process environment — and, so a relaunch can put it back

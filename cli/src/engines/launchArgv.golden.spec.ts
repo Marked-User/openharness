@@ -529,7 +529,7 @@ describe('every launch hands tmux what it did before Claude Code and Codex decla
             'dshLaunch acme/studio /work/studio opencode agent-0001',
           ],
           'pi · harness on a grid, as git, as a named agent': [
-            'writeGridConfigDir agent-0001 models.json,settings.json',
+            'writeGridConfigDir agent-0001 grid-provider.ts',
             'dshLaunch acme/studio /work/studio pi agent-0001',
           ],
         }

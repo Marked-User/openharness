@@ -7,7 +7,11 @@ import type { NativeLaunch } from '../../engines/nativeLaunch.js'
  *
  * Moved verbatim out of `runForeground` (the core boundary, step 10: docs/design/2026-10-03-harnessd.md).
  */
+import { join } from 'node:path'
+import { env } from '../../config/env.js'
 import { prepareResume, repairedItemsName } from '../../engines/launchPrep.js'
+import { bringPiSessionHome } from '../../engines/pi/gridSessionHome.js'
+import { gridConfigRoot } from '../../lib/gridConfigDir.js'
 import { dropPermissionFlagIfUnsupported } from '../../lib/engineLaunch.js'
 import { gridUnavailable, type GridLaunchAnswer, type GridLaunchRequest } from '../../lib/gridLaunchWire.js'
 import { buildLaunchOverrides, type LaunchOverrides, type LaunchOverridesDeps, type LaunchOverridesResult, type LaunchSource } from '../../lib/launchOverrides.js'
@@ -112,6 +116,13 @@ export function createLaunchHelpers({ authority, prepareApiTools, launchOverride
   }
 
   const prepareSessionResume = (session: RegisteredSession): void => {
+    if (session.engine === 'pi') {
+      // A Pi an older grid launch moved into the daemon's own folder resumes from its own home now.
+      const roots = [gridConfigRoot(), join(env.ADAPTER_DATA_DIR, 'grid-launch-config')]
+      const sessions = process.env.PI_CODING_AGENT_SESSION_DIR || join(process.env.PI_CODING_AGENT_DIR || join(env.PI_HOME, 'agent'), 'sessions')
+      const home = bringPiSessionHome(session.transcriptPath, roots, sessions)
+      if (home && home !== session.transcriptPath) console.log(`[resume] ${sid(session.agentId)} · pi's conversation brought home · ${home}`)
+    }
     const repair = prepareResume(session)
     if (repair.repairedItems) {
       // The rollout we tail was just shrunk in place. Move the tail to the repaired length now, before

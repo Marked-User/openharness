@@ -2,7 +2,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { processArgs, processRows } from './tmux.js'
+import { launchArgs, processArgs, processLaunchArgs, processRows, type ProcessRow } from './tmux.js'
 
 // The fake binaries below are /bin/sh scripts; their answers, not their speed, are what is tested
 // (testing/patientExecWithoutDeadline.ts).
@@ -41,8 +41,12 @@ printf '  123     1 claude          Mon Sep 21 10:00:00 2026 claude --resume\\n'
     const [row] = (await processRows())!
     expect(await processArgs(row)).toBe('claude --resume')
     expect(await processArgs({ ...row, startMarker: 'another start' })).toBe('')
+    // How it was launched is its own command line, when it still has one.
+    expect(await processLaunchArgs(row)).toBe('claude --resume')
+    expect(await processLaunchArgs({ ...row, startMarker: 'another start' })).toBe('')
     writeFileSync(join(dir, 'fail'), '')
     expect(await processArgs(row)).toBe('')
+    expect(await processLaunchArgs(row)).toBe('')
   })
 
   // The first reconcile pass after a boot attaches a few agents at once, and each validates its pane
@@ -64,5 +68,30 @@ printf '  123     1 claude          Mon Sep 21 10:00:00 2026 claude --resume\\n'
     rmSync(join(dir, 'fail'))
     expect((await processRows())?.length).toBe(1)
     expect(spawns()).toBe(2)
+  })
+})
+
+describe('launchArgs', () => {
+  const row = (pid: number, parentPid: number, args: string): ProcessRow =>
+    ({ pid, parentPid, args, executable: args.split(' ')[0], startMarker: 'start' })
+  const LAUNCHER = "/bin/zsh -lic . '/d/launch/1.sh' harness-engine /w /n/bin/pi --session s --model grid/m -e /c/grid-provider.ts"
+
+  it('is the engine\'s own command line whenever it still has one', () => {
+    const claude = row(2, 1, 'claude --resume x')
+    expect(launchArgs([row(1, 0, LAUNCHER), claude], claude)).toBe('claude --resume x')
+  })
+
+  it("reads a renamed Pi's launch from the launcher this daemon started it under, and nothing else", () => {
+    // Pi renames its process: `ps` shows `pi` and none of what it was launched with (2026-10-14).
+    const pi = row(2, 1, 'pi       ')
+    expect(launchArgs([row(1, 0, LAUNCHER), pi], pi)).toBe(LAUNCHER)
+    // Without a cwd the binary is the next word.
+    const bare = "/bin/zsh -lic . '/d/launch/1.sh' harness-engine /n/bin/pi --model grid/m"
+    expect(launchArgs([row(1, 0, bare), pi], pi)).toBe(bare)
+    // A parent that is not that launcher, launches another engine, or is not in the table says nothing.
+    expect(launchArgs([row(1, 0, '/bin/zsh -l'), pi], pi)).toBe('')
+    expect(launchArgs([row(1, 0, "/bin/zsh -lic . '/d/1.sh' harness-engine /w /n/bin/codex resume x"), pi], pi)).toBe('')
+    expect(launchArgs([row(3, 0, LAUNCHER), pi], pi)).toBe('')
+    expect(launchArgs([row(1, 0, LAUNCHER), row(2, 1, '')], row(2, 1, ''))).toBe('')
   })
 })

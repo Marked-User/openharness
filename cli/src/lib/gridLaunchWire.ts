@@ -8,10 +8,11 @@
  * docs/design/2026-10-08-launch-port.md): the per-engine contracts and their web-tools wiring never load in the
  * core. The declared lists here are held equal to what those contracts produce (lib/gridLaunch.spec.ts).
  */
+import { join } from 'node:path'
 import type { AgentEngine } from '../engines/types.js'
 
 /** The variable an engine is told to read the key from, where the engine supports that indirection. Codex names it
- *  in `env_key`; Pi's `models.json` writes it as a `$VAR` reference. */
+ *  in `env_key`; Pi's provider extension writes it as a `$VAR` reference. */
 export const GRID_KEY_VAR = 'GRID_API_KEY'
 /** The variable the web tools' MCP authorization header rides in (lib/gridWebMcp.ts). */
 export const GRID_MCP_AUTH_VAR = 'GRID_MCP_AUTHORIZATION'
@@ -264,7 +265,6 @@ export interface GridLaunchRecord {
 export interface GridLaunchMachine {
   /** Original native locations captured before a grid redirects configuration. */
   grokHome?: string
-  piSkillsDir?: string
   /**
    * Whether an administrator pinned Hermes settings in [HERMES_SYSTEM_MANAGED_DIR]. Hermes's web
    * tools ride a managed-scope overlay that REPLACES that directory rather than adding to it, so on
@@ -293,9 +293,9 @@ export interface GridEngineLaunch {
    */
   sessionModel?: string
   /**
-   * For an engine that reads its provider out of a config directory rather than an environment
-   * variable: files the daemon writes into a directory IT owns, and the variable that points the
-   * engine at that directory.
+   * For an engine that reads its provider out of a file rather than an environment variable: files
+   * the daemon writes into a directory IT owns, and how the engine is pointed at it — the variable
+   * [envVar] set to it, or the flag [arg] handed it after the other args. Exactly one of the two.
    *
    * This is not "editing the user's dotfiles" — the point of the indirection is that it never
    * touches them. The engine gets a private configuration for this agent, the user's own stays
@@ -303,14 +303,16 @@ export interface GridEngineLaunch {
    * contain the key; Pi's provider block references an environment variable instead.
    */
   configDir?: {
-    envVar: string
+    envVar?: string
+    /** Pi's `-e`: its extension file adds the provider without moving Pi's home. */
+    arg?: string
     files: GridConfigFile[]
     /**
-     * Point [envVar] at ONE of the written files rather than at the directory holding them.
+     * Point the engine at ONE of the written files rather than at the directory holding them.
      *
-     * Pi wants the directory (`PI_CODING_AGENT_DIR`); OpenCode's `OPENCODE_CONFIG` wants a config
-     * file. Same mechanism — a private directory this daemon owns — differing only in what the
-     * engine is handed, so it is a field rather than a second writer.
+     * OpenCode's `OPENCODE_CONFIG` wants a config file, Pi's `-e` an extension file, Grok's and
+     * Hermes's variables the directory. Same mechanism — a private directory this daemon owns —
+     * differing only in what the engine is handed, so it is a field rather than a second writer.
      */
     pointAt?: string
     /**
@@ -322,6 +324,13 @@ export interface GridEngineLaunch {
      */
     links?: GridConfigLink[]
   }
+}
+
+/** What a written config directory adds to a launch: [configDir]'s variable set to it, or its flag and path. */
+export function gridConfigHandOff(configDir: NonNullable<GridEngineLaunch['configDir']>, dir: string): { env: Record<string, string>; args: string[] } {
+  const path = configDir.pointAt ? join(dir, configDir.pointAt) : dir
+  if (configDir.arg) return { env: {}, args: [configDir.arg, path] }
+  return { env: configDir.envVar ? { [configDir.envVar]: path } : {}, args: [] }
 }
 
 /**
@@ -380,7 +389,7 @@ export const GRID_CONFLICTING_ENV_VARS: readonly string[] = [
  */
 export function gridConflictingEnvToClear(launch: Pick<GridEngineLaunch, 'env' | 'configDir'>): string[] {
   const provided = new Set(Object.keys(launch.env))
-  if (launch.configDir) provided.add(launch.configDir.envVar)
+  if (launch.configDir?.envVar) provided.add(launch.configDir.envVar)
   return GRID_CONFLICTING_ENV_VARS.filter((name) => !provided.has(name))
 }
 
@@ -467,7 +476,7 @@ export const GRID_ENV_VAR_NAMES: Readonly<Partial<Record<AgentEngine, readonly s
   claude: ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS', GRID_KEY_VAR],
   codex: [GRID_KEY_VAR, GRID_MCP_AUTH_VAR],
   opencode: [GRID_KEY_VAR, 'OPENCODE_CONFIG'],
-  pi: [GRID_KEY_VAR, 'PI_CODING_AGENT_DIR'],
+  pi: [GRID_KEY_VAR],
   hermes: ['OPENAI_BASE_URL', 'OPENAI_API_KEY', 'HERMES_INFERENCE_MODEL', GRID_KEY_VAR, HERMES_MANAGED_DIR_VAR],
   grok: ['GROK_MODELS_BASE_URL', 'XAI_API_KEY', GRID_KEY_VAR, GROK_HOME_VAR],
   copilot: ['COPILOT_PROVIDER_BASE_URL', 'COPILOT_PROVIDER_API_KEY', 'COPILOT_MODEL', GRID_KEY_VAR],

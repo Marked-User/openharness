@@ -120,6 +120,8 @@ describe('models in its own process, as the core reaches it', () => {
       const withFiles = { ...built, launch: { ...launch, configDir: files }, apiBase: RELAY }
       expect(await setup({ gridLaunch: withFiles }).port.gridLaunch(request)).toEqual(withFiles)
       expect(await setup({ gridLaunch: { ...built, launch: { ...launch, configDir: { envVar: 'PI', files: [] } } } }).port.gridLaunch(request)).toMatchObject({ ok: true })
+      const flag = { ...built, launch: { ...launch, configDir: { arg: '-e', files: [{ name: 'grid-provider.ts', content: '' }], pointAt: 'grid-provider.ts' } } }
+      expect(await setup({ gridLaunch: flag }).port.gridLaunch(request)).toEqual(flag)
       const refused = { ok: false, error: 'GRID_ENGINE_UNSUPPORTED', detail: 'no grid for amp', apiBase: RELAY }
       expect(await setup({ gridLaunch: refused }).port.gridLaunch(request)).toEqual(refused)
       expect(await setup({ gridLaunch: { ok: false, error: 'API_UNAVAILABLE', detail: 'gone' } }).port.gridLaunch(request)).toEqual({ ok: false, error: 'API_UNAVAILABLE', detail: 'gone' })
@@ -133,6 +135,9 @@ describe('models in its own process, as the core reaches it', () => {
         { ...built, launch: { ...launch, configDir: { ...files, files: [null] } } },
         { ...built, launch: { ...launch, configDir: { ...files, pointAt: 7 } } }, { ...built, launch: { ...launch, configDir: { ...files, links: 'x' } } },
         { ...built, launch: { ...launch, configDir: { ...files, links: [{ name: 'a' }] } } }, { ...built, launch: { ...launch, configDir: { ...files, links: [null] } } },
+        // Pointed at by a variable or a flag: neither, both, or a flag that is not text is no launch.
+        { ...built, launch: { ...launch, configDir: { files: [] } } }, { ...built, launch: { ...launch, configDir: { ...files, arg: '-e' } } },
+        { ...built, launch: { ...launch, configDir: { arg: 7, files: [] } } },
       ]
       for (const answer of unusable) await expect(setup({ gridLaunch: answer }).port.gridLaunch(request), JSON.stringify(answer)).rejects.toBeInstanceOf(ServiceUnavailableError)
       await expect(setup().port.gridLaunch(request)).rejects.toBeInstanceOf(ServiceUnavailableError)

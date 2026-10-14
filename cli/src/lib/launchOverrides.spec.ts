@@ -139,12 +139,23 @@ describe('buildLaunchOverrides — a relaunch comes back where the agent was', (
 
   it('writes a file-configured engine its config directory keyed on the agent, and points the env at it', async () => {
     const { d, calls } = deps()
+    const result = await buildLaunchOverrides(d, 'opencode', { gridLaunch: GRID }, 'agent-1')
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(calls).toEqual(['writeConfig:agent-1'])
+    expect(result.overrides.env.OPENCODE_CONFIG).toBe('/state/grid-engine-config/agent-1/opencode.json')
+    expect(result.overrides.clearEnv).not.toContain('OPENCODE_CONFIG')
+  })
+
+  it("hands Pi its provider extension as a flag, and leaves Pi's own home alone", async () => {
+    // A relaunch is a model switch too: moving Pi's home here reopened it without the conversation it resumes.
+    const { d, calls } = deps()
     const result = await buildLaunchOverrides(d, 'pi', { gridLaunch: GRID }, 'agent-1')
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(calls).toEqual(['writeConfig:agent-1'])
-    expect(result.overrides.env.PI_CODING_AGENT_DIR).toBe('/state/grid-engine-config/agent-1')
-    expect(result.overrides.clearEnv).not.toContain('PI_CODING_AGENT_DIR')
+    expect(result.overrides.extraArgs.slice(-2)).toEqual(['-e', '/state/grid-engine-config/agent-1/grid-provider.ts'])
+    expect(result.overrides.env).not.toHaveProperty('PI_CODING_AGENT_DIR')
   })
 
   it('names the service that could not be asked, so a restore holds the agent rather than failing it', async () => {

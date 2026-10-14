@@ -1,12 +1,12 @@
 /** Optional model metadata follows discovery; it never owns a binding or delays session control. */
 import type { ModelsPort } from '../api.js'
-import { gridAssignmentAnswersIn, gridAssignmentProcess, sameGridAssignment,
+import { gridAssignmentAnswersIn, gridAssignmentEvidence, sameGridAssignment,
   type GridAssignment, type GridAssignmentProcess } from '../../lib/gridAssignmentWire.js'
 import { readProcessEnv } from '../../lib/processEnv.js'
 import type { RegisteredSession, registry as Registry } from '../../lib/registry.js'
 import type { DiscoveredTerminalAgent } from '../../lib/terminalAgentDiscovery.js'
 import { sameProcessIdentity } from '../../lib/terminalRuntime.js'
-import { processArgs } from '../../lib/tmux.js'
+import { processLaunchArgs } from '../../lib/tmux.js'
 
 export interface GridAssignmentsDeps {
   models: () => Pick<ModelsPort, 'gridAssignments'>
@@ -82,11 +82,11 @@ export function createGridAssignments({ models, registry, revision, announce, wa
       const owner = ticket(session, 'refresh')
       if (!owner) return
       const identity = session.processIdentity
-      void Promise.all([readProcessEnv(identity), processArgs(identity)]).then(([env, args]) => {
-        if (!env) { owner.done(); return }
-        const process = gridAssignmentProcess(owner.key, session.engine, env, args)
+      void Promise.all([readProcessEnv(identity), processLaunchArgs(identity)]).then(([env, args]) => {
+        const process = gridAssignmentEvidence(owner.key, session.engine, env, args)
         if (process) ask([{ owner, process }])
-        else { owner.apply(null); owner.done() }
+        else if (process === null) { owner.apply(null); owner.done() }
+        else owner.done()
       }).catch(() => { owner.done() })
     },
   }

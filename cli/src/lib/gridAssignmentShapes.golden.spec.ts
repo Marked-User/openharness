@@ -24,7 +24,7 @@ it('keeps every assignment and saved-API instruction shape on both platforms', a
       Object.defineProperty(process, 'platform', { value: os })
       vi.resetModules()
       const { gridAssignmentShapes } = await import('../testing/gridAssignmentShapes.js')
-      const { buildGridEngineLaunch, gridCapableEngines } = await import('./gridLaunch.js')
+      const { buildGridEngineLaunch, gridCapableEngines, gridConfigHandOff } = await import('./gridLaunch.js')
       const dir = join(root, os)
       const storeDir = join(dir, 'api-connections')
       mkdirSync(storeDir, { recursive: true })
@@ -76,14 +76,17 @@ it('keeps every assignment and saved-API instruction shape on both platforms', a
           { hermesSystemManaged: false, opencodeMajor: 2 })
         if (!built.ok) { out[`${engine}/launch-roundtrip/${model}`] = built; continue }
         const env = { ...built.launch.env }
+        const args = [...built.launch.args]
         if (built.launch.configDir) {
           const configs = built.launch.configDir
           const path = join(dir, `config-${engine}-${model}`)
           mkdirSync(path)
           for (const file of configs.files) writeFileSync(join(path, file.name), file.content)
-          env[configs.envVar] = configs.pointAt ? join(path, configs.pointAt) : path
+          const handOff = gridConfigHandOff(configs, path)
+          Object.assign(env, handOff.env)
+          args.push(...handOff.args)
         }
-        await assignment(`${engine}/launch-roundtrip/${model}`, engine, env, built.launch.args.join(' '))
+        await assignment(`${engine}/launch-roundtrip/${model}`, engine, env, args.join(' '))
       }
       const connection = { id: 'saved', provider: 'custom', name: 'Saved', baseUrl: api, keyEnv: 'SAVED_API_KEY', authHeader: 'Authorization', authPrefix: 'Bearer', apiKey: 'fake-saved-key' }
       await assignment('saved/before-save', 'claude', { ANTHROPIC_BASE_URL: api, ANTHROPIC_MODEL: 'chosen' })

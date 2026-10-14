@@ -7,7 +7,7 @@ import { probeGatewayRuntime } from '../../lib/gatewayRuntime.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { AgentRestartCoordinator, bypassPermissionFor, restartAgent } from '../../lib/restartAgent.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
-import { clearPaneRemainOnExit, processArgs } from '../../lib/tmux.js'
+import { clearPaneRemainOnExit, processLaunchArgs } from '../../lib/tmux.js'
 import { workspaceMissing } from '../../lib/workspaceCheck.js'
 import { createAgentRestarter, type RestartDeps } from './restart.js'
 
@@ -25,7 +25,7 @@ vi.mock('../../lib/restartAgent.js', async (real) => ({
 }))
 vi.mock('../../lib/tmux.js', async (real) => ({
   ...await real<object>(), clearPaneRemainOnExit: vi.fn(async () => {}),
-  processArgs: vi.fn(async () => '/bin/claude --model opus -c model_provider=grid'),
+  processLaunchArgs: vi.fn(async () => '/bin/claude --model opus -c model_provider=grid'),
 }))
 vi.mock('../../lib/workspaceCheck.js', () => ({ workspaceMissing: vi.fn(() => null) }))
 

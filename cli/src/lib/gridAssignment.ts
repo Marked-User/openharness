@@ -29,7 +29,7 @@ import type { ProcessIdentity } from './registry.js'
 
 export type { GridAssignment } from './gridAssignmentWire.js'
 import { GRID_ENDPOINT_VARS as BASE_URL_VAR, GRID_MODEL_VARS as MODEL_VAR, GRID_CODEX_ENDPOINT as CODEX_BASE_URL,
-  GRID_ARGV_MODEL as ARGV_MODEL, GRID_PI_MODEL as PI_ARGV_MODEL, type GridAssignment, type GridAssignmentProcess,
+  GRID_ARGV_MODEL as ARGV_MODEL, GRID_PI_MODEL as PI_ARGV_MODEL, GRID_PI_EXTENSION as PI_EXTENSION, piProviderExtensionIn, type GridAssignment, type GridAssignmentProcess,
   type GridAssignmentAnswer } from './gridAssignmentWire.js'
 export { sameGridAssignment } from './gridAssignmentWire.js'
 
@@ -44,12 +44,12 @@ export { sameGridAssignment } from './gridAssignmentWire.js'
 const MODEL_IN_ARGV = new Set<AgentEngine>([...enginesDeclaring('modelInArgv'), 'grok'])
 
 /**
- * Pi's endpoint is in neither its environment nor its argv — it is in the `models.json` inside the
- * config directory `PI_CODING_AGENT_DIR` points at. So that is where it is read from, because the
- * alternative is to trust a note we wrote ourselves about what we did.
+ * Pi's endpoint is in neither its environment nor its argv — it is in the extension file `-e` hands
+ * it, or, for a Pi launched before that, the `models.json` inside the config directory
+ * `PI_CODING_AGENT_DIR` points at. So that is where it is read from, because the alternative is to
+ * trust a note we wrote ourselves about what we did.
  */
 const PI_CONFIG_DIR_VAR = 'PI_CODING_AGENT_DIR'
-/** `--model grid/<model>` — how Pi is told which provider and model to use. */
 
 
 /**
@@ -127,7 +127,8 @@ export function classifyGridAssignment(
 }
 
 /**
- * Pi's provider block, read out of the config directory its process was pointed at.
+ * Pi's provider block, read out of the extension (or, launched before it, the config directory) its process was
+ * pointed at.
  *
  * Exported so a spec can drive the real read against real files: the process half of the probe
  * cannot be faked (an environment is fixed at exec), and a round trip that re-implemented this
@@ -140,15 +141,23 @@ export async function readPiGridAssignment(
   processEnv: Record<string, string>,
   args: string,
 ): Promise<GridAssignment | null> {
-  const dir = processEnv[PI_CONFIG_DIR_VAR]?.trim()
-  if (!dir) return null
   const model = PI_ARGV_MODEL.exec(args)
   if (!model) return null
+  const extension = PI_EXTENSION.exec(args)?.[1]
+  const dir = processEnv[PI_CONFIG_DIR_VAR]?.trim()
   try {
-    const raw = JSON.parse(await readFile(join(dir, 'models.json'), 'utf8')) as {
-      providers?: Record<string, { baseUrl?: unknown }>
+    let baseUrl: unknown
+    if (extension) {
+      // The provider the extension registers, by the id `--model` names.
+      const registered = piProviderExtensionIn(await readFile(extension, 'utf8'))
+      if (registered?.id !== model[1]) return null
+      baseUrl = registered.provider.baseUrl
+    } else if (dir) {
+      const raw = JSON.parse(await readFile(join(dir, 'models.json'), 'utf8')) as {
+        providers?: Record<string, { baseUrl?: unknown }>
+      }
+      baseUrl = raw.providers?.[model[1]]?.baseUrl
     }
-    const baseUrl = raw.providers?.[model[1]]?.baseUrl
     if (typeof baseUrl !== 'string' || !isGridUrl(baseUrl)) return null
     return { baseUrl, model: model[2] }
   } catch {
