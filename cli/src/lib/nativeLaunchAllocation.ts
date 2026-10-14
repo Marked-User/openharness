@@ -15,17 +15,24 @@ const path = (value: unknown): value is string => typeof value === 'string' && i
 const writer = (value: unknown): value is NativeHookWriter => object(value) && exact(value, 'birth,boot,namespace,pid')
   && validNativeHookWriter(value as unknown as NativeHookWriter)
 
-export function parseNativeLaunchAllocation(value: unknown, engine: { boot: string; namespace?: string; pid: number }): NativeLaunchAllocation | null {
+/** The pre-rc gate owns a pane before there is an exec-shell incarnation. */
+export function parseNativeLaunchPlacement(value: unknown): NativeLaunchAllocation | null {
   if (!object(value) || !exact(value, 'endpoint,owner,pane,root,rootPid,token')
     || typeof value.pane !== 'string' || !/^%[0-9]{1,20}$/.test(value.pane)
     || typeof value.token !== 'string' || !/^[a-zA-Z0-9_-]{16,96}$/.test(value.token)
     || typeof value.owner !== 'string' || !/^[a-f0-9]{16}$/.test(value.owner)
-    || !writer(value.root) || value.root.pid !== value.rootPid || value.root.pid === engine.pid
+    || !writer(value.root) || value.root.pid !== value.rootPid
     || !object(value.endpoint) || !exact(value.endpoint, 'binary,server,socket')
     || !path(value.endpoint.binary) || !path(value.endpoint.socket) || !writer(value.endpoint.server)
-    || value.endpoint.server.pid === engine.pid || value.endpoint.server.pid === value.root.pid
-    || [value.root, value.endpoint.server].some(owner => owner.boot !== engine.boot || owner.namespace !== engine.namespace)) return null
+    || value.endpoint.server.pid === value.root.pid
+    || value.root.boot !== value.endpoint.server.boot || value.root.namespace !== value.endpoint.server.namespace) return null
   return Object.freeze({ pane: value.pane, rootPid: value.rootPid as number, token: value.token, owner: value.owner,
     root: Object.freeze({ ...value.root }), endpoint: Object.freeze({ binary: value.endpoint.binary,
       socket: value.endpoint.socket, server: Object.freeze({ ...value.endpoint.server }) }) })
+}
+
+export function parseNativeLaunchAllocation(value: unknown, engine: { boot: string; namespace?: string; pid: number }): NativeLaunchAllocation | null {
+  const allocation = parseNativeLaunchPlacement(value)
+  return allocation && allocation.root.pid !== engine.pid && allocation.endpoint.server.pid !== engine.pid
+    && allocation.root.boot === engine.boot && allocation.root.namespace === engine.namespace ? allocation : null
 }

@@ -85,7 +85,7 @@ export class StoppedAgentStore {
     const transfer = envelope.version === 2 ? envelope.nativeTransfer : undefined
     const returnRole = envelope.version === 3 ? envelope.nativeReturn : undefined
     const session = strictPersistedRow(envelope.session)
-    if (!session || session.agentId !== agentId || session.nativeArchive || session.nativeRetirement) throw Error('Invalid saved state')
+    if (!session || session.agentId !== agentId || session.nativeArchive || session.nativeRetirement || session.nativeCreation) throw Error('Invalid saved state')
     if (transfer) {
       const reserved = session.nativeControl?.rearm, link = transfer.link
       if (!reserved || reserved.source !== 'saved' || reserved.revoked || reserved.replacement || session.nativeArchive
@@ -380,6 +380,7 @@ export class StoppedAgentStore {
   }
 
   private saveUnlocked(session: RegisteredSession): void {
+    if (session.nativeCreation) throw Error('The pending native creation must be accounted for before archiving.')
     this.requireSavedOwner(session.agentId)
     if (!SAFE_ID.test(session.agentId)) throw new Error('Invalid stopped harness identity.')
     if (this.uncertain.has(session.agentId)) throw Error('Waiting for the original saved native control publication.')

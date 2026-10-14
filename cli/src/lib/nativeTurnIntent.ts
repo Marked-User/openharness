@@ -127,6 +127,7 @@ export function nativeTurnTarget(row: RegisteredSession): string {
     row.nativeRetirement.controlFingerprint, row.nativeRetirement.checkpoint, row.nativeRetirement.savedTarget])
   if (row.nativeRetirement?.pendingAbort) identity.push(['native-pending-abort', row.nativeRetirement.pendingAbort.priorRole,
     row.nativeRetirement.pendingAbort.pendingControl, row.nativeRetirement.pendingAbort.requestFingerprint])
+  if (row.nativeCreation) identity.push(['native-creation', creationFingerprint(row.nativeCreation)])
   if (row.nativeAllocation) identity.push(['native-allocation', creationFingerprint(row.nativeAllocation)])
   return createHash('sha256').update(JSON.stringify(identity)).digest('hex')
 }
@@ -153,7 +154,7 @@ export function nativeTurnAdmitted(intent: NativeTurnIntent | undefined, owner: 
 /** A proof supplied by a caller can confirm native facts, but cannot skip the
  * durable reservation or replace its original Cancel/launch identity. */
 export function nativeTurnTransition(row: RegisteredSession, next: NativeTurnIntent): boolean {
-  if (row.nativeRetirement) return false
+  if (row.nativeRetirement || row.nativeCreation && (next.rearm || next.cancel.processKey !== null)) return false
   const previous = row.nativeControl
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
   const source = (value: NativeTurnProcessReference | undefined) => value && [value.processKey, Object.hasOwn(value, 'namespace'), value.namespace]

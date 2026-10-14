@@ -37,4 +37,23 @@ These groups are the completion bar, not a requirement for one PR per group. Upd
 
 ## Estimate and accounting
 
-The working estimate given to the owner on October 9 is two to three more focused days, with moderate confidence; durable lifecycle intent and retargeting are the largest uncertainties. This is an estimate, not a claim that implementation or validation is complete. Track implementation, validation, independent review/CI waiting, merge and publication separately. The original request began October 8 at 23:26:41 UTC. Publication remains zero.
+The October 9 estimate of two to three more focused days was wrong. On October 14,
+independent closeout review found substantial integration still missing from draft
+#1172: installed Cursor generation requests have no connected controller; launch
+admission and public Cancel/Restart/Resume/Stop still need their production paths;
+integrated acceptance remains incomplete. Passing primitive tests do not establish
+a completion date. The original extractions and Codex crash-resume fix are landed.
+
+Scope is frozen. The next milestone is a passing installed-client path, followed
+by one fixed acceptance matrix: running/paused/restarted completion, duplicate and
+conflicting deliveries, Cancel and successor isolation, usable Restart/Resume/Stop,
+readiness with unavailable services, and runtime cost. Preserve existing validation
+evidence and add checks only for actual integration changes. Further engine
+migrations, generalized lifecycle features, richer task or recap features, and
+speculative hardening must not enlarge this PR. The remaining checklist is not
+silently declared complete or moved into #1172; any additional blocking claim must
+identify its concrete violation and reproducer.
+
+Track implementation, validation, independent review/CI waiting, merge and
+publication separately. The original request began October 8 at 23:26:41 UTC.
+Publication remains zero.

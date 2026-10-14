@@ -991,6 +991,42 @@ public activation remain required. Implementation/review ran about 23:33–23:54
 UTC October 13, with overlapping validation; merge, publication and external
 waiting remain zero.
 
+Pending first creation now retains the original request before a pane or engine
+exists. Schema 6 is inactive, unbound and visibly held; only this complete shape
+may have zero routes. The original claimed callback fills resolved launch choices
+once and associates the complete pane/server/root allocation. Generic discovery,
+hooks, metadata changes and archival cannot promote or discard it. Cancel retains
+the request and allocation, revokes further preparation and remains sticky after
+a cold read. This persistence boundary does not activate a launcher or controller.
+
+Independent review corrected late authority loss during directory sync, retained
+the actual publisher through confirmation, and made an uncertain reservation retry
+confirm its original timestamp and choices. The final readback checks the original
+authority and exact committed owner after all filesystem work. Review approved
+this persistence scope conditional on the now-completed causal checks; production
+integration remains excluded.
+
+The former admitted-row golden was recorded alone in `b75ddf090`. Unchanged
+playback and types passed in `20261013T235840.196487Z-13840`; the recording receipt
+was source-changed and is not passing validation. The first implementation gate
+`20261014T000550.980432Z-47028` failed zero-route normalization and a required pane
+type, while eleven existing complete files passed. The next focused run
+`20261014T001333.886950Z-84377` passed all 44 cases but failed one test callback type.
+After those corrections and the final readback cases, types and all 49 cases in
+the complete pending-creation file and three unchanged goldens pass
+(`20261014T002001.037178Z-15347`, 27.3/18.0 seconds). No golden changed.
+
+Healthy baselines, all thirteen new assertion faults, three affected earlier
+faults, and restored types pass in `20261014T002414.492592Z-40610` (42.6 seconds).
+That gate bundles the actual former Registry source closure from `b75ddf090`:
+mixed ordinary/pending tables are refused without changing bytes, for zero-route,
+associated and cancelled pending rows. The extracted placement parser retains
+the engine-scope check, including a coherent foreign pane/server pair.
+Implementation/review ran approximately 23:58 UTC October 13 through 00:28 UTC
+October 14, with overlapping validation. Merge, publication and external waiting
+remain zero. The next gate is installed-client integration, not another storage
+mechanism.
+
 Before activation, compose the implemented native marker cleanup with early
 Cancel: an exact durable cancel claim or on-disk known-not-dispatched result,
 retained absence of process/confirmation evidence, the original revoked saved R

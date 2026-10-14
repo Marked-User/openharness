@@ -51,3 +51,11 @@ it.each(['null', 'array', 'extra', 'pane', 'rootPid', 'token', 'owner', 'root-ex
 it('does not enrich a legacy witness without its original PID namespace', () => {
   expect(parseNativeLaunchAllocation(fixture(), { boot: engine.boot, pid: engine.pid })).toBeNull()
 })
+
+it('rejects a coherent foreign pane and server scope', () => {
+  for (const scope of [{ boot: engine.boot.replace('aaaa', 'bbbb') }, { namespace: 'linux:4:6' }]) {
+    const value = fixture()
+    Object.assign(value.root, scope); Object.assign(value.endpoint.server, scope)
+    expect(parseNativeLaunchAllocation(value, engine)).toBeNull()
+  }
+})

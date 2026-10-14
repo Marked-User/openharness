@@ -33,8 +33,8 @@ mutations = [
     ('generic registration downgrades first admission', registry, 'existing?.schemaVersion === 5 ? 5 : ', '',
      live, 'through observation, binding'),
     ('lost Cancel is mistaken for first admission', registry,
-     '(row.schemaVersion === 3 || row.schemaVersion === 4) !== (nativeControl !== undefined)',
-     '(row.schemaVersion === 3 || row.schemaVersion === 4) !== (nativeControl !== undefined)'
+     '(row.schemaVersion === 3 || row.schemaVersion === 4 || row.schemaVersion === 6 && nativeCreation?.revoked === true) !== (nativeControl !== undefined)',
+     '(row.schemaVersion === 3 || row.schemaVersion === 4 || row.schemaVersion === 6 && nativeCreation?.revoked === true) !== (nativeControl !== undefined)'
      ' && !(row.schemaVersion === 4 && nativeAllocation && nativeAllocationIsInitial(nativeAllocation))',
      live, 'never reinterprets a lost Cancel'),
     ('initial schema admits later history without Control', registry,
