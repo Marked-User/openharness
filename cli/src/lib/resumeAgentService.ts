@@ -18,13 +18,15 @@ import { createAndRegisterPane, type CreateAgentPaneDeps } from './createAgentPa
 import type { LaunchOverrides, LaunchOverridesResult } from './launchOverrides.js'
 import type { AgentRestartCoordinator } from './restartAgent.js'
 import type { TerminalBackend } from './terminalBackend.js'
+import { sameTerminalPlacement, tmuxRuntimeOf } from './terminalRuntime.js'
 import type { TmuxRuntimeRef } from './terminalTypes.js'
 import { harnessPermissionEnvironment } from './harnessDefaults.js'
 
 export interface ResumeAgentServiceDeps {
   registry: Pick<typeof liveRegistry, 'byAgent' | 'bySession' | 'resumePendingAgent' | 'setLaunch' | 'updateProcessIdentity'>
   stoppedAgents: StoppedAgentStore
-  tmuxBackend: (CreateAgentPaneDeps['tmuxBackend'] & Pick<TerminalBackend, 'releaseHold' | 'paneState' | 'rootProcess' | 'inventory'>) | null
+  tmuxBackend: (CreateAgentPaneDeps['tmuxBackend'] & Pick<TerminalBackend, 'releaseHold'>
+    & Pick<TerminalBackend<TmuxRuntimeRef>, 'paneState' | 'rootProcess' | 'inventory'>) | null
   restartJobs: AgentRestartCoordinator
   stopJobs: ReadonlyMap<string, Promise<void>>
   pinnedControls: { has(agentId: string): boolean }
@@ -76,9 +78,9 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
     // Registry observations may update the same object; pin the route being verified.
     const saved = { ...entry }
     const ownsRoute = () => current() && registry.byAgent(saved.agentId)?.tmuxPane === saved.tmuxPane
-    // A resume to confirm runs in a tmux pane: one with no tmux backend to ask is not confirmed here.
-    if (!tmuxBackend) return { ok: false as const, error: 'TMUX_UNAVAILABLE' }
-    const runtime: TmuxRuntimeRef = { backend: 'tmux', paneId: saved.tmuxPane }
+    // A resume to confirm runs in a tmux pane: one with no tmux backend to ask, or no tmux pane, is not confirmed here.
+    const runtime = tmuxRuntimeOf(saved)
+    if (!tmuxBackend || !runtime) return { ok: false as const, error: 'TMUX_UNAVAILABLE' }
     // A second look at an unconfirmed resume: the verdict is withdrawn before the check, or the
     // readiness probe would return it straight back. The desk sees the tile leave "Start failed".
     const unconfirmed = ownsRoute() ? registry.byAgent(saved.agentId) : undefined
@@ -157,16 +159,17 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
     saved: () => stoppedAgents.get(agentId),
     current,
     checkLive: async entry => {
-      if (!entry.tmuxPane) return { state: 'unknown', reason: 'Only tmux resume is supported.' }
+      const runtime = tmuxRuntimeOf(entry)
+      if (!runtime) return { state: 'unknown', reason: 'Only tmux resume is supported.' }
       if (!tmuxBackend) return { state: 'unknown', reason: 'Terminal inventory is unavailable.' }
       const inventory = await tmuxBackend.inventory()
       if (inventory.state !== 'available') return { state: 'unknown', reason: 'Terminal inventory is unavailable.' }
-      const paneAlive = inventory.roots.some(root => root.runtime.paneId === entry.tmuxPane)
+      const paneAlive = inventory.roots.some(root => sameTerminalPlacement(root.runtime, runtime))
       if (isTerminalEngine(entry.engine)) return paneAlive ? { state: 'alive' } : { state: 'gone', reason: 'Shell pane is gone.' }
       const process = await checkPidRuntime(entry)
       if (process.state !== 'gone') {
         if (!paneAlive || process.state === 'unknown') return { state: 'unknown', reason: 'The previous process is not available through its saved terminal.' }
-        return checkSessionRuntime(tmuxBackend, entry)
+        return checkSessionRuntime(tmuxBackend, entry, runtime)
       }
       if (!entry.processIdentity && paneAlive) return { state: 'unknown', reason: 'The engine has not been identified yet.' }
       return process
@@ -175,7 +178,8 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
       const inventory = await tmuxBackend?.inventory()
       if (inventory?.state !== 'available') throw new Error('Could not verify the previous terminal. Try again.')
       if (!current()) return
-      retainExitedSession(entry, inventory.roots.some(root => root.runtime.paneId === entry.tmuxPane))
+      const runtime = tmuxRuntimeOf(entry)
+      retainExitedSession(entry, !!runtime && inventory.roots.some(root => sameTerminalPlacement(root.runtime, runtime)))
     },
     waitForReady: saved => waitForResume(saved, current),
     canLaunch: async saved => {

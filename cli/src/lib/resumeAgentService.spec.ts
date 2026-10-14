@@ -447,15 +447,25 @@ describe('existing runtime and readiness verification', () => {
     if (engine === 'terminal') rewrite({ engine, sessionId: '', transcriptPath: '' })
     live({ engine, resumeOnly: undefined, launch: { state: 'ready' } }); vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' })
     expect(await start()).toMatchObject({ ok: true }); expect(create).not.toHaveBeenCalled()
-    if (engine === 'claude') expect(checkSessionRuntime).toHaveBeenCalledWith(deps.tmuxBackend, expect.objectContaining({ agentId: saved.agentId }))
+    if (engine === 'claude') expect(checkSessionRuntime).toHaveBeenCalledWith(deps.tmuxBackend, expect.objectContaining({ agentId: saved.agentId }), { backend: 'tmux', paneId: pane })
+  })
+  it('checks a mixed row through its tmux pane, not the ptyhost pane its `tmuxPane` projects', async () => {
+    const tmux = { backend: 'tmux' as const, paneId: '%9' }
+    live({ resumeOnly: undefined, launch: { state: 'ready' }, runtimes: [{ backend: 'ptyhost', instance: 'p1', paneId: pane }, tmux] })
+    vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }); inventory.mockResolvedValue(listed('%9'))
+    expect(await start()).toMatchObject({ ok: true }); expect(create).not.toHaveBeenCalled()
+    expect(checkSessionRuntime).toHaveBeenCalledExactlyOnceWith(deps.tmuxBackend, expect.objectContaining({ agentId: saved.agentId }), tmux)
   })
   it.each(['no route', 'no inventory', 'process unknown', 'process detached', 'unidentified engine', 'no tmux backend'] as const)('does not disturb %s', async reason => {
-    live({ resumeOnly: undefined, launch: { state: 'ready' }, ...(reason === 'no route' ? { tmuxPane: '' } : {}) })
+    // No tmux route: a ptyhost pane only, whose `tmuxPane` projection names the id tmux lists below.
+    live({ resumeOnly: undefined, launch: { state: 'ready' }, ...(reason === 'no route' ? { runtimes: [{ backend: 'ptyhost', instance: 'p1', paneId: pane }] } : {}) })
+    if (reason === 'no route') vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' })
     if (reason === 'no tmux backend') { deps.tmuxBackend = null; vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }) }
     if (reason === 'no inventory') inventory.mockResolvedValue({ state: 'unavailable', reason: 'fixture' })
     if (reason === 'process unknown') vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'unknown', reason: 'fixture' })
     if (reason === 'process detached') { vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }); inventory.mockResolvedValue(listed()) }
     expect(await start()).toMatchObject({ error: 'RESUME_UNCONFIRMED' }); expect(create).not.toHaveBeenCalled()
+    if (reason === 'no route') { expect(inventory).not.toHaveBeenCalled(); expect(checkSessionRuntime).not.toHaveBeenCalled() }
   })
   it.each([true, false])('retains a confirmed engine exit, surviving shell = %s', async alive => {
     live({ resumeOnly: undefined, processIdentity: identity, launch: { state: 'ready' } })

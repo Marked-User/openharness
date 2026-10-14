@@ -100,7 +100,7 @@ import { TerminalBackendCoordinator } from '../lib/terminalBackendCoordinator.js
 import type { TerminalBackend } from '../lib/terminalBackend.js'
 import type { TerminalRuntimeRef } from '../lib/terminalTypes.js'
 import { TerminalStreamManager } from '../lib/terminalStreamManager.js'
-import { ownedPanesOf, terminalRouteKey, terminalRuntimeLabel } from '../lib/terminalRuntime.js'
+import { ownedPanesOf, terminalRouteKey, terminalRuntimeLabel, tmuxRuntimeOf } from '../lib/terminalRuntime.js'
 import { probeTerminalAgents } from '../lib/terminalAgentDiscovery.js'
 import { RECONCILE_PASS_DEADLINE_MS, TerminalAgentReconciler } from '../lib/terminalAgentReconciler.js'
 import { Watcher } from '../watcher/watcher.js'
@@ -2401,7 +2401,11 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   externalResumes = createExternalResumes({
     registry, tmux: tmuxBackend, stopped: () => stoppedAgents.list(), cancelled: id => restoreCancelled(id),
     generation: () => searchGeneration,
-    waiting: row => tmuxBackend?.isHeld({ backend: 'tmux', paneId: row.tmuxPane }, row.externalResume!.token).then(value => value === true) ?? Promise.resolve(false),
+    waiting: row => {
+      const runtime = tmuxRuntimeOf(row)
+      if (!runtime || !tmuxBackend) return Promise.resolve(false)
+      return tmuxBackend.isHeld(runtime, row.externalResume!.token).then(value => value === true)
+    },
     inspect: request => ports.search?.inspect(request) ?? Promise.resolve(externalUnavailable()),
     preflight: createExternalPreflight({ blocksFolder: cwd => backend.purgeAgentService?.blocksFolder(cwd),
       native: prepareNativeLaunch, hookPort, hooksDisabled: env.DISABLE_HOOK_INSTALL, installOpencodePlugin: installOpencodePluginBeforeSpawn }),

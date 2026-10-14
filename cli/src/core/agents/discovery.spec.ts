@@ -249,7 +249,7 @@ describe('discovery', () => {
 
     it('holds a failed resume while its pane may still be about to launch the engine', async () => {
       const run = setup()
-      const failed = row({ resumeOnly: true, tmuxPane: '%0', launch: { state: 'failed' } } as Partial<RegisteredSession>)
+      const failed = row({ resumeOnly: true, tmuxPane: '%0', runtimes: [{ backend: 'tmux', paneId: '%0' }], launch: { state: 'failed' } } as Partial<RegisteredSession>)
       await run.handlers.onDormant(failed, 'x') // the pane is gone: the reconciler's to remove
       // tmux could not be asked, as when the daemon's event loop was held: no news either way.
       paneState.mockResolvedValueOnce('unknown')
@@ -266,9 +266,18 @@ describe('discovery', () => {
       expect(paneState).toHaveBeenCalledWith({ backend: 'tmux', paneId: '%0' })
     })
 
+    it('asks a failed resume\'s own backend about its pane, never tmux about a ptyhost pane\'s id', async () => {
+      const run = setup({ terminals: { backendFor: vi.fn(() => undefined) } })
+      const pty = { backend: 'ptyhost' as const, instance: 'p1', paneId: '%0' }
+      await run.handlers.onDormant(row({ resumeOnly: true, tmuxPane: '%0', runtimes: [pty], launch: { state: 'failed' } } as Partial<RegisteredSession>), 'x')
+      expect(run.deps.terminals.backendFor).toHaveBeenCalledExactlyOnceWith(pty)
+      expect(paneState).not.toHaveBeenCalled()
+      expect(run.deps.retainExitedSession).not.toHaveBeenCalled()
+    })
+
     it('holds a failed resume whose pane no configured backend can read', async () => {
       const run = setup({ terminals: { backendFor: vi.fn(() => undefined) } })
-      await run.handlers.onDormant(row({ resumeOnly: true, tmuxPane: '%0', launch: { state: 'failed' } } as Partial<RegisteredSession>), 'x')
+      await run.handlers.onDormant(row({ resumeOnly: true, tmuxPane: '%0', runtimes: [{ backend: 'tmux', paneId: '%0' }], launch: { state: 'failed' } } as Partial<RegisteredSession>), 'x')
       expect(run.deps.retainExitedSession).not.toHaveBeenCalled()
       expect(paneState).not.toHaveBeenCalled()
     })

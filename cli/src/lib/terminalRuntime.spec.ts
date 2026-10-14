@@ -10,6 +10,7 @@ import {
   terminalPlacementKey,
   terminalRouteKey,
   terminalRuntimeLabel,
+  tmuxRuntimeOf,
 } from './terminalRuntime.js'
 import type { TmuxRuntimeRef } from './terminalTypes.js'
 
@@ -40,6 +41,12 @@ describe('terminal runtime identity', () => {
     const ptyhost = { backend: 'ptyhost' as const, instance: 'p1', paneId: '%4' }
     expect(primaryRuntime({ runtimes: [ptyhost, tmux] })).toBe(ptyhost)
     expect(primaryRuntime({ runtimes: [tmux] })).toBe(tmux)
+  })
+
+  it('finds a session\'s tmux runtime wherever it sorts, and none on a ptyhost-only row', () => {
+    const ptyhost = { backend: 'ptyhost' as const, instance: 'p1', paneId: '%3' }
+    expect(tmuxRuntimeOf({ runtimes: [ptyhost, tmux] })).toBe(tmux)
+    expect(tmuxRuntimeOf({ runtimes: [ptyhost] })).toBeUndefined()
   })
 
   it('merges observed runtimes without duplicating a placement', () => {

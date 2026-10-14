@@ -29,13 +29,13 @@ vi.mock('../../lib/processTable.js', async (real) => ({
 }))
 vi.mock('../../lib/workspaceCheck.js', () => ({ workspaceMissing: vi.fn(() => null) }))
 
-const runtime = { backend: 'tmux', paneId: '%4' }
+const runtime = { backend: 'tmux' as const, paneId: '%4' }
 /** The pane's backend handing the pane back to its default disposal (`TerminalBackend.releaseHold`). */
 const releaseHold = vi.fn(async (..._args: unknown[]) => {})
 const routeKey = terminalRouteKey(runtime as never)
 const newProcess = { pid: 2, startMarker: 'new', executable: '/bin/claude' }
 const agent = (over: Partial<RegisteredSession> = {}): RegisteredSession => ({
-  agentId: 'a1', sessionId: 's1', engine: 'claude', cwd: '/work', tmuxPane: '%4', processIdentity: { pid: 1, startMarker: 'old' }, ...over,
+  agentId: 'a1', sessionId: 's1', engine: 'claude', cwd: '/work', tmuxPane: '%4', runtimes: [runtime], processIdentity: { pid: 1, startMarker: 'old' }, ...over,
 }) as unknown as RegisteredSession
 const terminal = (over: Partial<RegisteredSession> = {}) => agent({ engine: 'terminal', processIdentity: undefined, ...over } as Partial<RegisteredSession>)
 
@@ -156,8 +156,14 @@ describe('restarting an agent', () => {
     })
 
     it('for an agent with no tmux pane, or no tmux at all', async () => {
-      expect(await setup(agent({ tmuxPane: undefined })).restart('a1')).toEqual({ ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' })
+      expect(await setup(agent({ tmuxPane: undefined, runtimes: [] })).restart('a1')).toEqual({ ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' })
       expect(await setup(agent(), { tmuxBackend: null }).restart('a1')).toEqual({ ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' })
+    })
+
+    it('for an agent on a ptyhost pane only, though its `tmuxPane` names that pane\'s id', async () => {
+      const run = setup(agent({ runtimes: [{ backend: 'ptyhost', instance: 'p1', paneId: '%4' }] }))
+      expect(await run.restart('a1')).toEqual({ ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' })
+      expect(run.tmuxBackend.respawn).not.toHaveBeenCalled()
     })
 
     it('for an operation already overtaken, or an agent that is no longer the one asked about', async () => {
@@ -246,6 +252,14 @@ describe('restarting an agent', () => {
   })
 
   describe('a terminal', () => {
+    it('restarts in its tmux pane, not the pane `tmuxPane` projects from a ptyhost runtime sorted first', async () => {
+      const tmux5 = { backend: 'tmux' as const, paneId: '%5' }
+      const run = setup(terminal({ runtimes: [{ backend: 'ptyhost', instance: 'p1', paneId: '%4' }, tmux5] }))
+      expect(await run.restart('a1')).toMatchObject({ ok: true })
+      expect(run.tmuxBackend.respawn).toHaveBeenCalledExactlyOnceWith(tmux5, expect.anything())
+      expect(run.deps.agentReconciler.holdRoute).toHaveBeenCalledWith(terminalRouteKey(tmux5))
+    })
+
     it('restarts as a fresh shell in the same pane, opened like a new terminal tile', async () => {
       const run = setup(terminal())
       expect(await run.restart('a1')).toEqual({ ok: true, session: terminal(), resumed: false })

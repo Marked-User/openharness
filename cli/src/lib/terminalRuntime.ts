@@ -1,5 +1,5 @@
 import type { AgentEngine } from '../engines/types.js'
-import type { ProcessIdentity, TerminalBackendName, TerminalRuntimeRef } from './terminalTypes.js'
+import type { ProcessIdentity, TerminalBackendName, TerminalRuntimeRef, TmuxRuntimeRef } from './terminalTypes.js'
 
 const SEP = '\u0000'
 
@@ -42,9 +42,20 @@ export function terminalRuntimeLabel(runtime: TerminalRuntimeRef): string {
   return runtime.backend === 'tmux' ? `tmux:${runtime.paneId}` : `ptyhost:${runtime.instance}:${runtime.paneId}`
 }
 
-/** The runtime a session is reached through first. Rows keep at least one (registry.ts `strictPersistedRow`). */
+/**
+ * The runtime a session is reached through first. Rows keep at least one (registry.ts `strictPersistedRow`).
+ * First in sort order (`mergeTerminalRuntimes`), not the registry's `primaryRuntimeKey`.
+ */
 export function primaryRuntime(session: { readonly runtimes: readonly TerminalRuntimeRef[] }): TerminalRuntimeRef {
   return session.runtimes[0]
+}
+
+/**
+ * A session's tmux runtime, if it has one: what code that drives tmux itself addresses. Never `tmuxPane`,
+ * which is the primary runtime's pane on whatever backend (registry.ts `paneProjection`).
+ */
+export function tmuxRuntimeOf(session: { readonly runtimes: readonly TerminalRuntimeRef[] }): TmuxRuntimeRef | undefined {
+  return session.runtimes.find((runtime): runtime is TmuxRuntimeRef => runtime.backend === 'tmux')
 }
 
 /** Stable placement key. For tmux the pane id is both the route and the placement identity. */

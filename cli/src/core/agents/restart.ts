@@ -13,8 +13,7 @@ import { sid } from '../../lib/log.js'
 import type { registry, RegisteredSession } from '../../lib/registry.js'
 import { bypassPermissionFor, restartAgent } from '../../lib/restartAgent.js'
 import type { TerminalAgentReconciler } from '../../lib/terminalAgentReconciler.js'
-import { terminalRouteKey } from '../../lib/terminalRuntime.js'
-import type { TmuxRuntimeRef } from '../../lib/terminalTypes.js'
+import { terminalRouteKey, tmuxRuntimeOf } from '../../lib/terminalRuntime.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
 import type { HeldRestart } from './heldLaunches.js'
 import { workspaceMissing } from '../../lib/workspaceCheck.js'
@@ -105,7 +104,9 @@ export function createAgentRestarter({
     }
     const held = restartHeld(session.agentId)
     if (held) return held
-    if (!session.tmuxPane || !tmuxBackend) return { ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' }
+    // Restart respawns in place, which only tmux does: a row with no tmux pane cannot be restarted here.
+    const runtime = tmuxRuntimeOf(session)
+    if (!runtime || !tmuxBackend) return { ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' }
     const target = { ...session }
     const current = () => operationCurrent() && sameRestartTarget(target)
     const changed = { ok: false, error: 'AGENT_CHANGED', detail: 'The harness changed or stopped during restart.' } as const
@@ -114,9 +115,7 @@ export function createAgentRestarter({
     // (or respawned over) the old process by the time that `cd` fails. Ask first, over a live agent.
     const missing = workspaceMissing(session.cwd)
     if (missing) return missing
-    const pane = session.tmuxPane
     const engine = session.engine
-    const runtime: TmuxRuntimeRef = { backend: 'tmux', paneId: pane }
     const routeKey = terminalRouteKey(runtime)
     // Restarting a terminal is a fresh shell in the same pane — `respawn-pane -k` over whatever the
     // old one was doing. There is no engine to wait for and no session to resume, so none of the

@@ -19,6 +19,7 @@ import type { SessionInputController } from '../../lib/sessionInput.js'
 import type { StoppedAgentStore } from '../../lib/stoppedAgents.js'
 import type { DiscoveredTerminalAgent } from '../../lib/terminalAgentDiscovery.js'
 import type { TerminalBackendCoordinator } from '../../lib/terminalBackendCoordinator.js'
+import { primaryRuntime } from '../../lib/terminalRuntime.js'
 import { bypassPermissionActive, permissionModeFromArgv } from '../../lib/processTable.js'
 
 export interface DiscoveryDeps {
@@ -193,7 +194,7 @@ export function createDiscoveryHandlers({
     // Preserve the conversation's public identity and give the surviving shell its own row.
     // A starting install is not an exited engine; strict uncertain starts keep their reservation.
     if (agent.resumeOnly && agent.launch?.state === 'failed') {
-      const runtime = { backend: 'tmux' as const, paneId: agent.tmuxPane }
+      const runtime = primaryRuntime(agent)
       // No backend to ask is a pane nobody could read: it stays, like one tmux could not answer for.
       const pane = await terminals.backendFor(runtime)?.paneState(runtime) ?? 'unknown'
       // An unconfirmed install/startup can still be about to launch the engine. Do not
