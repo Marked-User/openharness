@@ -11,6 +11,11 @@
 //!
 //! `create` and `respawn` spawn under the table lock, so the new child's exit (handled under the
 //! same lock) always finds its entry.
+//!
+//! Stream subscribers (`stream.rs`) live in `streams`, beside the table: the dispatcher queues
+//! each output there without taking the table lock. A pane that leaves the table closes its
+//! streams (`exited`, or `killed` at `kill`); no thread holds the table lock while it takes the
+//! registry's.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,6 +30,15 @@ use serde_json::{Map, Value, json};
 
 use crate::pane::{Pane, PaneEvent, PaneSpec};
 use crate::protocol::Op;
+use crate::stream::{Registry, Subscriber};
+
+/// The longest grace a `kill` gives a child before it is killed outright.
+const MAX_GRACE: Duration = Duration::from_secs(60);
+
+/// A `kill`'s `graceMs`, held to `MAX_GRACE`.
+fn kill_grace(ms: u64) -> Duration {
+    Duration::from_millis(ms).min(MAX_GRACE)
+}
 
 /// A failed op: one of the protocol's error codes, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +105,8 @@ pub struct Panes {
     sink: Sender<(String, PaneEvent)>,
     /// The host's instance, for each child's `HARNESS_PANE`.
     instance: String,
+    /// Every pane's stream subscribers.
+    pub(crate) streams: Registry,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -139,14 +155,19 @@ impl Panes {
             history_limit,
             sink,
             instance: instance.into(),
+            streams: Registry::default(),
         };
         (panes, events)
     }
 
-    /// Apply one pane event to the table; what to tell the control connections, if anything.
+    /// Apply one pane event to the table and its streams; what to tell the control connections,
+    /// if anything.
     pub fn event(&self, id: &str, event: &PaneEvent) -> Option<Notice> {
         match event {
-            PaneEvent::Output { .. } => None,
+            PaneEvent::Output { seq, bytes } => {
+                self.streams.deliver(id, *seq, bytes);
+                None
+            }
             PaneEvent::Title(title) => Some(Notice::Title {
                 pane: id.to_owned(),
                 title: title.clone(),
@@ -164,6 +185,9 @@ impl Panes {
                         None => None,
                     }
                 };
+                if removed.is_some() {
+                    self.streams.close(id, "exited");
+                }
                 // Dropped outside the lock.
                 drop(removed);
                 Some(Notice::Exit {
@@ -181,7 +205,7 @@ impl Panes {
         env
     }
 
-    fn pane(&self, id: &str) -> Result<Arc<Pane>, OpError> {
+    pub(crate) fn pane(&self, id: &str) -> Result<Arc<Pane>, OpError> {
         lock(&self.table)
             .get(id)
             .map(|e| e.pane.clone())
@@ -189,13 +213,28 @@ impl Panes {
     }
 
     /// A pane whose process runs (input to a dead pane goes nowhere).
-    fn live_pane(&self, id: &str) -> Result<Arc<Pane>, OpError> {
+    pub(crate) fn live_pane(&self, id: &str) -> Result<Arc<Pane>, OpError> {
         let table = lock(&self.table);
         let entry = table.get(id).ok_or_else(|| OpError::no_pane(id))?;
         if entry.dead {
             return Err(OpError::new("bad_request", format!("pane {id} has exited")));
         }
         Ok(entry.pane.clone())
+    }
+
+    /// Add `sub` to `id`'s streams if the pane exists, calling `added` first (under the registry
+    /// lock, so nothing is delivered to `sub` before it). False if there is no such pane.
+    pub(crate) fn subscribe(&self, id: &str, sub: &Arc<Subscriber>, added: impl FnOnce()) -> bool {
+        let mut streams = self.streams.lock();
+        if !lock(&self.table).contains_key(id) {
+            return false;
+        }
+        added();
+        streams
+            .entry(id.to_owned())
+            .or_default()
+            .push(Arc::downgrade(sub));
+        true
     }
 
     fn write(&self, id: &str, bytes: &[u8]) -> Result<Reply, OpError> {
@@ -252,11 +291,12 @@ impl Panes {
                 let entry = lock(&self.table)
                     .remove(&pane)
                     .ok_or_else(|| OpError::no_pane(&pane))?;
+                self.streams.close(&pane, "killed");
                 // The reply follows the first signal; the grace, the escalation and the drop
                 // happen off the connection. The pane is dropped (which ends its reader) only
                 // once its exit is reported, so the `exit` notice is never lost.
                 let killing = entry.pane.start_kill();
-                let grace = Duration::from_millis(grace_ms);
+                let grace = kill_grace(grace_ms);
                 std::thread::Builder::new()
                     .name(format!("pty-kill {pane}"))
                     .spawn(move || {
@@ -403,6 +443,9 @@ impl Panes {
                         None
                     }
                 };
+                if removed.is_some() {
+                    self.streams.close(&pane, "exited");
+                }
                 drop(removed);
                 Ok(Reply::new())
             }
@@ -819,6 +862,23 @@ mod tests {
         // SIGKILL after the grace; the exit is still announced.
         assert_eq!(exit_notice(&notices, &pane), Some(128 + libc::SIGKILL));
         assert!(start.elapsed() >= Duration::from_millis(500));
+    }
+
+    #[test]
+    fn kill_holds_the_grace_to_a_minute() {
+        assert_eq!(kill_grace(500), Duration::from_millis(500));
+        assert_eq!(kill_grace(60_001), Duration::from_secs(60));
+        assert_eq!(kill_grace(u64::MAX), Duration::from_secs(60));
+        let (panes, notices) = table();
+        let pane = create(&panes, "echo ready; sleep 30", false);
+        until("ready", || {
+            capture(&panes, &pane).unwrap().contains("ready")
+        });
+        // A grace past what an `Instant` can hold does not end the kill thread before it reports.
+        panes
+            .handle(op(json!({"op": "kill", "pane": pane, "graceMs": u64::MAX})))
+            .unwrap();
+        assert_eq!(exit_notice(&notices, &pane), Some(128 + libc::SIGHUP));
     }
 
     #[test]

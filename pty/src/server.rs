@@ -2,12 +2,14 @@
 //!
 //! Threads:
 //! - the accept loop (`run`'s caller) starts one thread per connection;
-//! - the dispatcher takes every pane event, applies it to the table (`Panes::event`) and
-//!   broadcasts what it says to every control connection;
+//! - the dispatcher takes every pane event, applies it to the table and the streams
+//!   (`Panes::event`) and broadcasts what it says to every control connection;
 //! - a control connection has a reader thread, which answers its requests in order, and a
 //!   writer thread, which owns the write half. Both feed the writer one bounded queue: replies
 //!   wait for room, notices do not. A connection whose queue is full when a notice comes is
 //!   closed, so a slow client never holds up the dispatcher or other clients.
+//! - a stream connection (`stream.rs`) has the same pair of threads; the dispatcher queues the
+//!   pane's output for it, and drops it when it falls `stream::QUEUE_LIMIT` bytes behind.
 //!
 //! Locks: the client list (only for non-blocking sends), the pane table, and each pane's own.
 //! No thread holds one while it waits on a socket.
@@ -250,11 +252,11 @@ fn connection<C: Connection>(mut conn: C, ctx: &Ctx) -> io::Result<()> {
     };
     match ctx.check_hello(&line) {
         Err(reason) => refuse(&mut conn, "incompatible", &reason),
-        Ok(Role::Stream) => refuse(
-            &mut conn,
-            "unsupported",
-            "this host has no stream connections yet",
-        ),
+        Ok(Role::Stream) => {
+            write_line(&mut conn, &ctx.hello_ok())?;
+            conn.set_read_timeout(None)?;
+            crate::stream::serve(reader, conn, &ctx.panes)
+        }
         Ok(Role::Control) => {
             write_line(&mut conn, &ctx.hello_ok())?;
             conn.set_read_timeout(None)?;

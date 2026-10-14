@@ -84,6 +84,15 @@ pub struct PaneMeta {
     pub mouse_sgr: bool,
 }
 
+/// A pane's screen at one sequence number (`Pane::snapshot`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub seq: u64,
+    pub capture: String,
+    pub history: String,
+    pub meta: PaneMeta,
+}
+
 struct Size {
     cols: u16,
     rows: u16,
@@ -120,6 +129,24 @@ impl Timeout for NoSync {
     fn clear_timeout(&mut self) {}
     fn pending_timeout(&self) -> bool {
         false
+    }
+}
+
+fn meta(term: &Term<Listener>) -> PaneMeta {
+    let mode = *term.mode();
+    let point = term.grid().cursor.point;
+    PaneMeta {
+        cols: term.columns() as u16,
+        rows: term.screen_lines() as u16,
+        alternate_on: mode.contains(TermMode::ALT_SCREEN),
+        cursor_x: point.column.0 as u16,
+        cursor_y: point.line.0.max(0) as u16,
+        cursor_visible: mode.contains(TermMode::SHOW_CURSOR),
+        mouse_standard: mode.contains(TermMode::MOUSE_REPORT_CLICK),
+        mouse_button: mode.contains(TermMode::MOUSE_DRAG),
+        mouse_all: mode.contains(TermMode::MOUSE_MOTION),
+        mouse_utf8: mode.contains(TermMode::UTF8_MOUSE),
+        mouse_sgr: mode.contains(TermMode::SGR_MOUSE),
     }
 }
 
@@ -299,10 +326,27 @@ impl Pane {
         self.attachment().send(Msg::Input(bytes.to_vec()))
     }
 
-    pub fn resize(&self, cols: u16, rows: u16) {
+    /// Resize the grid, then tell the child. Returns the sequence number of the last output drawn
+    /// at the old size: every later output reaches the grid at the new one. (A resize does not
+    /// take a sequence number of its own.)
+    pub fn resize(&self, cols: u16, rows: u16) -> u64 {
         let (cols, rows) = (cols.max(1), rows.max(1));
-        lock(&self.screen).term.resize(Size { cols, rows });
+        let seq = {
+            let mut screen = lock(&self.screen);
+            screen.term.resize(Size { cols, rows });
+            screen.seq
+        };
         let _ = self.attachment().send(Msg::Resize(window_size(cols, rows)));
+        seq
+    }
+
+    /// The grid's size, as (cols, rows).
+    pub fn size(&self) -> (u16, u16) {
+        let screen = lock(&self.screen);
+        (
+            screen.term.columns() as u16,
+            screen.term.screen_lines() as u16,
+        )
     }
 
     /// Under one lock: the grid's capture and the sequence number of the last output it contains.
@@ -315,22 +359,33 @@ impl Pane {
     }
 
     pub fn meta(&self) -> PaneMeta {
+        meta(&lock(&self.screen).term)
+    }
+
+    /// Under one lock, for a stream keyframe: the visible screen, the last `history_lines` lines
+    /// of the history above it (none when 0), the metadata, and the sequence number of the last
+    /// output they contain. Both texts are what `tmux capture-pane -p -e -J` prints.
+    pub fn snapshot(&self, history_lines: u32) -> Snapshot {
         let screen = lock(&self.screen);
-        let term = &screen.term;
-        let mode = *term.mode();
-        let point = term.grid().cursor.point;
-        PaneMeta {
-            cols: term.columns() as u16,
-            rows: term.screen_lines() as u16,
-            alternate_on: mode.contains(TermMode::ALT_SCREEN),
-            cursor_x: point.column.0 as u16,
-            cursor_y: point.line.0.max(0) as u16,
-            cursor_visible: mode.contains(TermMode::SHOW_CURSOR),
-            mouse_standard: mode.contains(TermMode::MOUSE_REPORT_CLICK),
-            mouse_button: mode.contains(TermMode::MOUSE_DRAG),
-            mouse_all: mode.contains(TermMode::MOUSE_MOTION),
-            mouse_utf8: mode.contains(TermMode::UTF8_MOUSE),
-            mouse_sgr: mode.contains(TermMode::SGR_MOUSE),
+        let grid = screen.term.grid();
+        let depth = (history_lines as usize).min(grid.history_size()) as i32;
+        let history = if depth == 0 {
+            String::new()
+        } else {
+            let flags = harness_term::capture::Flags2 {
+                join: true,
+                sequences: true,
+                escape: false,
+                empty_cells: false,
+                trim: false,
+            };
+            harness_term::capture::history(grid, -depth, -1, flags)
+        };
+        Snapshot {
+            seq: screen.seq,
+            capture: harness_term::capture::capture_pane(grid, None, true),
+            history,
+            meta: meta(&screen.term),
         }
     }
 
