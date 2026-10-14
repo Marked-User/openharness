@@ -258,8 +258,9 @@ const fields = {
   // `harness start` and `harness login` install the `grid` CLI when the machine has none (see
   // lib/gridInstall.ts). Off for tests and for a machine whose grid is managed some other way.
   DISABLE_GRID_INSTALL: flag('false'),
-  // Terminal backends to watch. UNSET MEANS AUTO — every backend usable here, which is tmux. A value
-  // pins the set; a retired name still in someone's environment is dropped with a warning.
+  // Terminal backends to watch. UNSET MEANS AUTO — this platform's default (`defaultTerminalBackends`:
+  // ptyhost on Windows, tmux elsewhere). A value pins the set; a retired name still in someone's
+  // environment is dropped with a warning.
   TERMINAL_BACKENDS: (raw: string | undefined): ReturnType<typeof parseTerminalBackends> | undefined => {
     if (raw === undefined || raw === '') return undefined
     try { return parseTerminalBackends(raw) } catch (error) {

@@ -4,10 +4,9 @@ import type { TerminalsPort } from '../api.js'
 import { createAndRegisterPane, type CreateAgentPaneDeps } from '../../lib/createAgentPane.js'
 import type { RegisteredSession, registry } from '../../lib/registry.js'
 import type { TerminalBackend } from '../../lib/terminalBackend.js'
-import type { TmuxRuntimeRef } from '../../lib/terminalTypes.js'
 
 export interface TerminalOpenerDeps {
-  tmuxBackend: (CreateAgentPaneDeps['tmuxBackend'] & Pick<TerminalBackend<TmuxRuntimeRef>, 'releaseHold'>) | null
+  tmuxBackend: (CreateAgentPaneDeps['tmuxBackend'] & Pick<TerminalBackend, 'releaseHold'>) | null
   registry: CreateAgentPaneDeps['registry'] & Pick<typeof registry, 'setLaunch'>
   announceSession(session: RegisteredSession): void
   blocksFolder(cwd: string): boolean

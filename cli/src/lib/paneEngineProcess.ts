@@ -6,7 +6,7 @@ import type { AgentEngine } from '../engines/types.js'
 import { registry, type ProcessIdentity, type RegisteredSession } from './registry.js'
 import { enrichProcessRows, LSTART_MARKER_RE, processRows, processTreePids, selectEngineProcess } from './processTable.js'
 import type { TerminalBackend } from './terminalBackend.js'
-import { processIdentityOf, sameProcessIdentity, terminalRuntimeLabel } from './terminalRuntime.js'
+import { primaryRuntime, processIdentityOf, sameProcessIdentity, terminalRuntimeLabel } from './terminalRuntime.js'
 import type { TerminalRuntimeRef } from './terminalTypes.js'
 
 /** What the lookups below need of a backend: the pane's own root process. */
@@ -75,8 +75,7 @@ export type RuntimeCheck =
   | { state: 'unknown'; reason: string }
 
 export async function checkSessionRuntime(backend: PaneRootSource, session: RegisteredSession): Promise<RuntimeCheck> {
-  // The session's primary runtime. Until rows name one, the tmux runtime its `tmuxPane` projects.
-  const runtime = session.runtimes.find((candidate) => candidate.backend === 'tmux')!
+  const runtime = primaryRuntime(session)
   const found = await lookupPaneEngineProcess(backend, runtime, session.engine)
   if (!found.ok) return { state: found.unknown ? 'unknown' : 'gone', reason: found.reason }
   const live = found.identity

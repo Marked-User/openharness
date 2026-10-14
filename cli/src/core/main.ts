@@ -95,7 +95,7 @@ import { confirmHomes, sessionCodexHome } from '../lib/engineHomes.js'
 import { sessionStoreContracts } from '../engines/sessionStoreContracts.js'
 import { lookupPaneEngineProcess, resolvePaneEngineProcess } from '../lib/paneEngineProcess.js'
 import { argvTokens, processRows } from '../lib/processTable.js'
-import { ALL_TERMINAL_BACKENDS } from '../config/terminalConfig.js'
+import { defaultTerminalBackends } from '../config/terminalConfig.js'
 import { TerminalBackendCoordinator } from '../lib/terminalBackendCoordinator.js'
 import type { TerminalBackend } from '../lib/terminalBackend.js'
 import type { TerminalRuntimeRef } from '../lib/terminalTypes.js'
@@ -517,12 +517,12 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   await registry.transaction(() => {
     for (const session of registry.list()) registry.setActive(session.agentId, false)
   })
-  // Unset means AUTO: watch every backend usable on this machine, which is tmux and only tmux (see
+  // Unset means AUTO: watch this platform's default backend, ptyhost on Windows and tmux elsewhere (see
   // config/terminalConfig.ts). `parseTerminalBackends` drops a retired `herdr` still named in someone's
   // environment rather than refusing to boot on it.
   const backendsExplicit = env.TERMINAL_BACKENDS !== undefined
   const terminalConfig = {
-    backends: env.TERMINAL_BACKENDS ?? ALL_TERMINAL_BACKENDS,
+    backends: env.TERMINAL_BACKENDS ?? defaultTerminalBackends(process.platform),
   }
   // The desktop's pane colours, for tmux's `window-style` (lib/hostTheme.ts): the last ones the app
   // sent, or its stock dark palette until it says otherwise. Read through a closure so a change

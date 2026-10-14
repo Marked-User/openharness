@@ -24,7 +24,7 @@ import { harnessPermissionEnvironment } from './harnessDefaults.js'
 export interface ResumeAgentServiceDeps {
   registry: Pick<typeof liveRegistry, 'byAgent' | 'bySession' | 'resumePendingAgent' | 'setLaunch' | 'updateProcessIdentity'>
   stoppedAgents: StoppedAgentStore
-  tmuxBackend: (CreateAgentPaneDeps['tmuxBackend'] & Pick<TerminalBackend<TmuxRuntimeRef>, 'releaseHold' | 'paneState' | 'rootProcess' | 'inventory'>) | null
+  tmuxBackend: (CreateAgentPaneDeps['tmuxBackend'] & Pick<TerminalBackend, 'releaseHold' | 'paneState' | 'rootProcess' | 'inventory'>) | null
   restartJobs: AgentRestartCoordinator
   stopJobs: ReadonlyMap<string, Promise<void>>
   pinnedControls: { has(agentId: string): boolean }

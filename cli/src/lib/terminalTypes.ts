@@ -1,6 +1,6 @@
 import type { AgentEngine } from '../engines/types.js'
 
-export type TerminalBackendName = 'tmux'
+export type TerminalBackendName = 'tmux' | 'ptyhost'
 
 /** PID reuse-safe identity for the process that owns a Harness agent. */
 export interface ProcessIdentity {
@@ -22,10 +22,17 @@ export interface TmuxRuntimeRef {
   paneId: string
 }
 
-export type TerminalRuntimeRef = TmuxRuntimeRef
+export interface PtyRuntimeRef {
+  backend: 'ptyhost'
+  paneId: string
+  /** host instance, e.g. "p3" (protocol 3) */
+  instance: string
+}
+
+export type TerminalRuntimeRef = TmuxRuntimeRef | PtyRuntimeRef
 
 /** Untrusted route hints from hooks. */
-export type HookTerminalHint = { backend: 'tmux'; paneId: string }
+export type HookTerminalHint = { backend: 'tmux'; paneId: string } | { backend: 'ptyhost'; paneId: string; instance: string }
 
 export interface TerminalRootObservation {
   runtime: TerminalRuntimeRef

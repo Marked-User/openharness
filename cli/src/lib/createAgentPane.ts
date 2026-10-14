@@ -17,19 +17,19 @@ import type { GridLaunchRecord } from './gridLaunchWire.js'
 import type { ScmLaunchRecord } from '../scm/types.js'
 import type { ForkOrigin, RegisteredSession } from './registry.js'
 import type { TerminalBackend } from './terminalBackend.js'
-import type { TerminalCreateResult, TmuxRuntimeRef } from './terminalTypes.js'
+import type { TerminalCreateResult, TerminalRuntimeRef } from './terminalTypes.js'
 import { terminalRouteKey } from './terminalRuntime.js'
 import type { ExternalResumeIntent } from './externalResume.js'
 import type { StartedBy } from './agentAttribution.js'
 
 const DEFAULT_MAX_ATTEMPTS = 3
 
-export interface CreateAgentPaneDeps {
-  tmuxBackend: Pick<TerminalBackend<TmuxRuntimeRef>, 'create' | 'kill'>
+export interface CreateAgentPaneDeps<Ref extends TerminalRuntimeRef = TerminalRuntimeRef> {
+  tmuxBackend: Pick<TerminalBackend<Ref>, 'create' | 'kill'>
   registry: { openPendingAgent: (input: {
     nativeToken?: string
     engine: AgentEngine
-    runtimes: TmuxRuntimeRef[]
+    runtimes: TerminalRuntimeRef[]
     primaryRuntimeKey?: string
     cwd?: string | null
     grid?: { baseUrl: string; model: string | null } | null
@@ -93,11 +93,13 @@ export interface CreateAgentPaneDeps {
   maxAttempts?: number
 }
 
-export type CreateAgentPaneResult =
-  | { ok: true; spawned: TerminalCreateResult<TmuxRuntimeRef> & { state: 'succeeded' }; pending: RegisteredSession }
+export type CreateAgentPaneResult<Ref extends TerminalRuntimeRef = TerminalRuntimeRef> =
+  | { ok: true; spawned: TerminalCreateResult<Ref> & { state: 'succeeded' }; pending: RegisteredSession }
   | { ok: false; error: 'TMUX_UNAVAILABLE' | 'SPAWN_FAILED' | 'REGISTRATION_FAILED'; detail: string }
 
-export async function createAndRegisterPane(deps: CreateAgentPaneDeps): Promise<CreateAgentPaneResult> {
+export async function createAndRegisterPane<Ref extends TerminalRuntimeRef = TerminalRuntimeRef>(
+  deps: CreateAgentPaneDeps<Ref>,
+): Promise<CreateAgentPaneResult<Ref>> {
   const maxAttempts = deps.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const label = attempt === 1 ? deps.sessionLabel : `${deps.sessionLabel}-r${attempt}`

@@ -25,7 +25,7 @@ type ResolveHookAgent = NonNullable<HookServerHandlers['resolveHookAgent']>
 export interface EngineHookDeps {
   /** Only the core's short pane dispatch/commit, never service preparation or an engine watch. */
   panePending?: (agentId: string) => Promise<unknown> | undefined
-  /** Hints name tmux panes; without tmux there is nothing they can point at. */
+  /** A tmux hint names a tmux pane; without tmux there is nothing it can point at. */
   tmuxBackend: unknown
   agentReconciler: Pick<TerminalAgentReconciler, 'triggerHint' | 'trigger'>
   registry: Pick<typeof registry, 'byRuntimeEngine' | 'byAgent'>
@@ -122,7 +122,8 @@ export function createEngineHooks({ tmuxBackend, agentReconciler, registry, pane
     const arrival = processRows().then(rows => rows?.map(row => ({ ...row })) ?? null)
     const resolved: TerminalRuntimeRef[] = []
     for (const hint of runtimeHints ?? []) {
-      if (tmuxBackend) resolved.push({ backend: 'tmux', paneId: hint.paneId })
+      if (hint.backend === 'tmux') { if (tmuxBackend) resolved.push({ backend: 'tmux', paneId: hint.paneId }) }
+      else resolved.push({ backend: 'ptyhost', instance: hint.instance, paneId: hint.paneId })
     }
     // A pass that outran its deadline has not yet opened the agent a hook from a new engine belongs to.
     let overdue = false

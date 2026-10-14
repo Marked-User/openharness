@@ -637,7 +637,7 @@ describe('restoreAgents — which agents get a pane back', () => {
 
   it('skips rows with no tmux pane and failed launches, saying why', async () => {
     const h = harness([
-      row({ agentId: 'paneless', runtimes: [{ backend: 'unknown', sessionName: 's', paneId: 'p' } as unknown as TerminalRuntimeRef] }),
+      row({ agentId: 'paneless', runtimes: [{ backend: 'ptyhost', instance: 'p1', paneId: '%1' }] }),
       row({ agentId: 'broken', launch: { state: 'failed', error: 'START_TIMEOUT' } }),
     ])
     const summary = await restoreAgents(h.deps)

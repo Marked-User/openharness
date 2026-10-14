@@ -8,7 +8,6 @@ function assertKeyPart(value: string, field: string): string {
   return value
 }
 
-/** Stable route key. */
 /**
  * The panes [sessions] hold on [backend] (pane id → the row's engine), for that backend's `prepare`. Only
  * its own: pane ids are per backend (`%N` on tmux and on ptyhost alike), and tmux renames the legacy
@@ -25,17 +24,27 @@ export function ownedPanesOf(
   return owned
 }
 
+/** Stable route key. A ptyhost pane id is only unique within its host instance, so the instance is part of it. */
 export function terminalRouteKey(runtime: TerminalRuntimeRef): string {
-  return `tmux${SEP}${assertKeyPart(runtime.paneId, 'tmux pane id')}`
+  const pane = assertKeyPart(runtime.paneId, 'pane id')
+  return runtime.backend === 'tmux'
+    ? `tmux${SEP}${pane}`
+    : `ptyhost${SEP}${assertKeyPart(runtime.instance, 'pty host instance')}${SEP}${pane}`
 }
 
-export function terminalInstanceId(_runtime: TerminalRuntimeRef): string {
-  return 'tmux:default'
+/** The backend instance that holds [runtime]: `<backend>:<instance>`, as `TerminalBackend.instanceId`. */
+export function terminalInstanceId(runtime: TerminalRuntimeRef): string {
+  return runtime.backend === 'tmux' ? 'tmux:default' : `ptyhost:${runtime.instance}`
 }
 
 /** Human-readable locator label for status and logs. */
 export function terminalRuntimeLabel(runtime: TerminalRuntimeRef): string {
-  return `tmux:${runtime.paneId}`
+  return runtime.backend === 'tmux' ? `tmux:${runtime.paneId}` : `ptyhost:${runtime.instance}:${runtime.paneId}`
+}
+
+/** The runtime a session is reached through first. Rows keep at least one (registry.ts `strictPersistedRow`). */
+export function primaryRuntime(session: { readonly runtimes: readonly TerminalRuntimeRef[] }): TerminalRuntimeRef {
+  return session.runtimes[0]
 }
 
 /** Stable placement key. For tmux the pane id is both the route and the placement identity. */

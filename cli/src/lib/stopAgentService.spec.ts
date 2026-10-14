@@ -139,7 +139,7 @@ it('backs up final flushed history after graceful exit and before closing the pa
 it.each(['terminal', 'without tmux', 'failed process', 'failed tmux'] as const)('retains work when stopping %s', async mode => {
   stoppedAgents.beginResume(row.agentId)
   if (mode === 'terminal') Object.assign(row, { engine: 'terminal', sessionId: '', processIdentity: null })
-  if (mode === 'without tmux') { deps.tmuxBackend = null; row.runtimes = [{ backend: 'unknown', endpointId: 'fixture', paneId: '1' } as any] }
+  if (mode === 'without tmux') { deps.tmuxBackend = null; Object.assign(row, { runtimes: [{ backend: 'ptyhost', instance: 'p1', paneId: '%1' }], tmuxPane: '%1', primaryRuntimeKey: 'ptyhost\u0000p1\u0000%1' }) }
   if (mode === 'failed process') vi.mocked(terminateDeletedAgent).mockResolvedValue('failed')
   if (mode === 'failed tmux') vi.mocked(deps.tmuxBackend!.kill).mockResolvedValue({ state: 'unknown', dispatch: 'possibly_executed', reason: 'fixture' })
   const stopping = createStopAgentService(deps)(row.agentId)
@@ -191,7 +191,7 @@ it.each(['process', 'pane'] as const)('a rejected %s check retains history, rele
 it.each(['no backend', 'no tmux route'] as const)('cannot confirm stopping a shell with %s', async mode => {
   row.engine = 'terminal'
   if (mode === 'no backend') deps.tmuxBackend = null
-  else row.runtimes = [{ backend: 'unknown', endpointId: 'fixture', paneId: '1' } as any]
+  else row.runtimes = [{ backend: 'ptyhost', instance: 'p1', paneId: '%1' }]
   await expect(createStopAgentService(deps)(row.agentId)).rejects.toThrow('Could not confirm')
   expect(deps.forgetSession).not.toHaveBeenCalled()
 })
@@ -245,7 +245,7 @@ it('only signals through the validated process deleter and does not erase a newe
     await actions.checkRuntime(entry); actions.kill(77, 'SIGTERM'); await actions.sleep(1); actions.log('fixture stop')
     deps.stopJobs.set(row.agentId, Promise.resolve()); return 'terminated'
   })
-  row.runtimes.push({ backend: 'unknown', endpointId: 'fixture', paneId: '2' } as any)
+  row.runtimes.push({ backend: 'ptyhost', instance: 'p1', paneId: '%2' })
   await createStopAgentService(deps)(row.agentId)
   expect(signal).toHaveBeenCalledExactlyOnceWith(77, 'SIGTERM'); expect(deps.stopJobs.has(row.agentId)).toBe(true)
   expect(deps.tmuxBackend!.kill).toHaveBeenCalledExactlyOnceWith({ backend: 'tmux', paneId: '%44' }, expect.any(Function))

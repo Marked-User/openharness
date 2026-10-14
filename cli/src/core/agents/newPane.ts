@@ -40,7 +40,7 @@ export function createPaneWatcher({ registry, announceSession, triggerHint, capt
    * Watch a pane this daemon just opened until its engine process shows up (ready), dies (failed), or
    * ten minutes pass. Shared by create and fork: the two open panes the same way and wait the same way.
    */
-  const watchNewPane = async (engine: AgentEngine, pending: RegisteredSession, spawned: { runtime: TmuxRuntimeRef }, command: string[], installIfMissing: ReturnType<typeof engineInstallRecipe> | undefined, budgetMs = 10 * 60_000): Promise<void> => {
+  const watchNewPane = async (engine: AgentEngine, pending: RegisteredSession, spawned: { runtime: TerminalRuntimeRef }, command: string[], installIfMissing: ReturnType<typeof engineInstallRecipe> | undefined, budgetMs = 10 * 60_000): Promise<void> => {
     const startedAt = Date.now()
     let delayMs = 50
     const nativeToken = pending.launch?.state === 'starting' ? pending.launch.nativeToken : undefined
@@ -81,7 +81,8 @@ export function createPaneWatcher({ registry, announceSession, triggerHint, capt
           delayMs = Math.min(delayMs * 2, 750)
           continue
         }
-        const waiting = nativeToken && await waitingPane?.(spawned.runtime, nativeToken)
+        // Only a tmux pane holds a launch by token (`TmuxBackend.isHeld`).
+        const waiting = nativeToken && spawned.runtime.backend === 'tmux' && await waitingPane?.(spawned.runtime, nativeToken)
         if (!current()) return
         if (waiting === true) {
           const held = registry.setLaunch(pending.agentId, { state: 'held', service: 'native', nativeToken,
