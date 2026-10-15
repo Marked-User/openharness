@@ -20,6 +20,7 @@ def function(name):
 code = r'''
 #include "runtime.h"
 #include "../../cable_features.h"
+#include "../../elapsed.h"
 #include "gestures.h"
 #include "scroll.h"
 #include "selection.h"
@@ -66,6 +67,7 @@ static struct {
     unsigned bell_unread;
     uint32_t notice_ms;
     uint32_t pet_next_ms;
+    uint32_t timer_at;
     cable_swarm_t tabs[SWARMS_MAX];
     struct { char id[64], name[96], state[16]; bool local; } machines[2];
     char selected_tab[ID_MAX], pending_focus[ID_MAX], opening_notice[ID_MAX], title[80], message[256];
@@ -2008,6 +2010,20 @@ int main(int argc, char **argv) {
         s.touch_down = false;
         s.view = HOME;
     }
+    // THE WORKING TIMER: the elapsed text redraws when its displayed unit changes (elapsed.h) — each second
+    // under an hour, each minute under a day — and not before. 0 = unknown (no start stamp): no deadline.
+    {
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS);
+        s.agents[0].busy = true; strcpy(s.agents[0].tool, "Running firmware checks");
+        fake_ms = 1200; scene_take(); assert(!s.timer_at);                 // busy_ms = 0: unknown, nothing drawn
+        s.agents[0].busy_ms = 1000; fake_ms = 1000 + 7500; scene_take();   // 7.5 s in: "0:07" until 8.0 s
+        assert(s.timer_at == 1000 + 8000);
+        surface_tick(1000 + 7999); assert(s.timer_at == 1000 + 8000);   // not due: still waiting
+        changes = 0; surface_tick(1000 + 8000); assert(changes >= 1 && !s.timer_at);
+        s.agents[0].busy_ms = 1000; fake_ms = 1000 + 3600000 + 90000 + 400;   // 1 h 1 m 30.4 s: "1h 1m" until 1 h 2 m
+        scene_take(); assert(s.timer_at == 1000 + 3600000 + 120000);
+        s.agents[0].busy = false; scene_take(); assert(!s.timer_at);
+    }
     // THE WORKING SCENE (claude): a busy agent's face is the large cooking Clawd, which changes on its step
     // clock, so s.pet_next_ms is its next change and surface_tick redraws then and not before.
     {
@@ -2781,7 +2797,7 @@ with tempfile.TemporaryDirectory(prefix='harness-touch-ui-') as d:
     subprocess.run(['cc','-std=c11', '-D_POSIX_C_SOURCE=200809L','-Wall','-Wextra','-Werror','-O1','-g',
                     '-fsanitize='+os.environ.get('SANITIZERS','undefined,bounds'),
                     *extra_includes, '-I',str(native),str(out/'touch_ui.c'), *extra_sources, str(native/'gestures.c'),
-                    str(native/'form.c'),str(native/'visit.c'),str(native/'draft.c'), str(native/'scroll.c'),str(native/'selection.c'),str(native/'carry.c'),str(native/'tim.c'),str(native/'character_motion.c'),str(native/'character_layout.c'),str(native/'character.c'),str(native/'illustrated.c'),str(native/'tux.c'),str(native/'focus.c'),str(native/'lvgl_fonts.c'),str(native/'lvgl_icons.c'),str(native/'focus_marks.c'),str(native/'focus_faces.c'),str(native/'pets.c'),str(native/'../../pet_store.c'),str(native/'terminal.c'),
+                    str(native/'form.c'),str(native/'visit.c'),str(native/'draft.c'), str(native/'scroll.c'),str(native/'selection.c'),str(native/'carry.c'),str(native/'tim.c'),str(native/'character_motion.c'),str(native/'character_layout.c'),str(native/'character.c'),str(native/'illustrated.c'),str(native/'tux.c'),str(native/'focus.c'),str(native/'lvgl_fonts.c'),str(native/'lvgl_icons.c'),str(native/'focus_marks.c'),str(native/'focus_faces.c'),str(native/'pets.c'),str(native/'../../pet_store.c'),str(native/'../../elapsed.c'),str(native/'terminal.c'),
                     str(native/'fonts.c'),str(native/'octopus.c'),str(native/'ascii_clip.c'),str(native/'octopus_font.c'),str(native/'workspace.c'),str(native/'command_face.c'),'-o',str(out/'touch_ui'),'-lm'],check=True)
     args=[str(out/'touch_ui')]
     if os.environ.get('HABITAT_PREVIEW_DIR'):

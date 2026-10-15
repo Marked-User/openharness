@@ -601,7 +601,7 @@ static void focus_face(void)
         ht_character_face(&scene, &c, &f, 0xffff, "");
         only_inter(&scene);
         assert(scene.runs[7].y == 233 - ht_lv_inter_30.base.height / 2 && scene.runs[7].font == &ht_lv_inter_30.base &&
-               !strcmp(scene.runs[7].text, "Simmering\xe2\x80\xa6 34s"));   // the gerund for 30..35 s
+               !strcmp(scene.runs[7].text, "Simmering\xe2\x80\xa6 0:34"));   // the gerund for 30..35 s
         {
             int d = pet_gaps(&scene, &scene.runs[1]);
             assert(d >= -3 && d <= 3);
@@ -801,7 +801,7 @@ static void focus_face(void)
                     assert(mark->y == 233 + 4 - ws->h / 2 + ws->dy + bob);
                     assert(!scene.runs[7].text[0]);                 // the centred status is empty
                     const ht_run_t *lower = &scene.runs[10];
-                    assert(lower->arc == 2 && !strcmp(lower->text, "Working\xe2\x80\xa6 5s"));   // Inter has the real ellipsis
+                    assert(lower->arc == 2 && !strcmp(lower->text, "Working\xe2\x80\xa6 0:05"));   // Inter has the real ellipsis
                     assert(lower->fg == ht_rgb(0x00ff2f));
                     frame_at[state][step] = frame;
                 } else {
@@ -972,7 +972,7 @@ static void focus_face(void)
             assert(scene_frame(ws, scene.runs[1].sprite.cells, 1) == ws->loop[step]);
             assert(!scene.runs[7].text[0] && scene.runs[3].sprite.cells);   // the props (pan, food) in run 3
             assert(scene.runs[10].arc == 2 && scene.runs[10].fg == ht_rgb(0x00ff2f) &&
-                   !strcmp(scene.runs[10].text, "Coalescing\xe2\x80\xa6 34s") &&
+                   !strcmp(scene.runs[10].text, "Coalescing\xe2\x80\xa6 0:34") &&
                    scene.runs[10].font == &ht_lv_inter_med_26.base);
             bool fresh = true;
             for (int k = 0; k < distinct; k++) fresh &= frames_seen[k] != ws->loop[step];
@@ -1066,7 +1066,7 @@ static void focus_face(void)
         assert(scene.count == 11 && scene.runs[1].sprite.width == 56);
         assert(scene.runs[7].font == &ht_lv_inter_30.base && scene.runs[7].fg == ht_rgb(0x00ff2f) &&
                scene.runs[7].y == 233 - ht_lv_inter_30.base.height / 2 &&
-               !strcmp(scene.runs[7].text, "Coalescing\xe2\x80\xa6 34s"));
+               !strcmp(scene.runs[7].text, "Coalescing\xe2\x80\xa6 0:34"));
         assert(!scene.runs[10].text[0] && !scene.runs[10].arc);
 
         // Listening: Claude draws a scene frame, no bars; an engine without one draws its seven bars.
@@ -1216,7 +1216,7 @@ static void focus_face(void)
                         }
                         if (kind == 0) {        // status on the lower arc, nothing centred
                             assert(!cs_.runs[7].text[0] && cs_.runs[10].arc == 2 &&
-                                   !strcmp(cs_.runs[10].text, "Coalescing\xe2\x80\xa6 34s") && !cs_.runs[10].gained);
+                                   !strcmp(cs_.runs[10].text, "Coalescing\xe2\x80\xa6 0:34") && !cs_.runs[10].gained);
                             assert(!cs_.runs[4].text[0] && !cs_.runs[5].text[0] && !cs_.runs[6].text[0]);   // the other recap lines stay empty
                         }
                         if (kind == 1) {
@@ -1587,7 +1587,7 @@ static void focus_face(void)
             assert(scene.count == 11 && scene.runs[1].sprite.width == cp->working_scene->w);
             const ht_run_t *line = &scene.runs[7];
             assert(!line->arc && line->font == &ht_lv_inter_30.base && line->y == 334 &&
-                   line->fg == ht_rgb(0x00ff2f) && !strcmp(line->text, "Coalescing\xe2\x80\xa6 34s"));
+                   line->fg == ht_rgb(0x00ff2f) && !strcmp(line->text, "Coalescing\xe2\x80\xa6 0:34"));
             assert(line->x + line->w / 2 >= 232 && line->x + line->w / 2 <= 234);
             assert(!scene.runs[10].text[0] && !scene.runs[10].arc);
             for (int i = 0; i < scene.count; i++) assert(scene.runs[i].arc != 2);
@@ -1596,16 +1596,20 @@ static void focus_face(void)
         f.footer_action = false; f.activity = "Running firmware checks";
         ht_scene_clear(&scene, 0); ht_character_face(&scene, &c, &f, 0xffff, "");
         size_t n = strlen(scene.runs[10].text);
-        assert(scene.runs[10].arc == 2 && n >= 3 && !strcmp(scene.runs[10].text + n - 3, "34s") && ht_arc_measure(&ht_arc_inter_lower, scene.runs[10].text) <= HT_ARC_SPAN);
+        assert(scene.runs[10].arc == 2 && n >= 3 && !strcmp(scene.runs[10].text + n - 4, "0:34") && ht_arc_measure(&ht_arc_inter_lower, scene.runs[10].text) <= HT_ARC_SPAN);
         assert(strstr(scene.runs[10].text, "Running firmw") && !scene.runs[7].text[0]);
         f.elapsed = 65;
         ht_scene_clear(&scene, 0); ht_character_face(&scene, &c, &f, 0xffff, "");
         n = strlen(scene.runs[10].text);
-        assert(!strcmp(scene.runs[10].text + n - 6, "1m 05s") && ht_arc_measure(&ht_arc_inter_lower, scene.runs[10].text) <= HT_ARC_SPAN);
+        assert(!strcmp(scene.runs[10].text + n - 4, "1:05") && ht_arc_measure(&ht_arc_inter_lower, scene.runs[10].text) <= HT_ARC_SPAN);
+        f.elapsed = 86399;   // the widest string the format makes, "23h 59m": the verb gives way, the time stays whole
+        ht_scene_clear(&scene, 0); ht_character_face(&scene, &c, &f, 0xffff, "");
+        n = strlen(scene.runs[10].text);
+        assert(n >= 7 && !strcmp(scene.runs[10].text + n - 7, "23h 59m") && ht_arc_measure(&ht_arc_inter_lower, scene.runs[10].text) <= HT_ARC_SPAN);
         f.elapsed = 34; f.activity = "Reconciling the payment ledger migration plan"; f.footer_action = true;
         ht_scene_clear(&scene, 0); ht_character_face(&scene, &c, &f, 0xffff, "");
         n = strlen(scene.runs[7].text);
-        assert(!strcmp(scene.runs[7].text + n - 3, "34s") && scene.runs[7].w <= 384 && scene.runs[7].w > 300);
+        assert(!strcmp(scene.runs[7].text + n - 4, "0:34") && scene.runs[7].w <= 384 && scene.runs[7].w > 300);
         assert(scene.runs[7].x >= 41 && scene.runs[7].x + scene.runs[7].w <= 41 + 384);
     }
 

@@ -3,6 +3,7 @@
 #include "focus_faces.h"
 #include "theme.h"
 #include "../../pet_store.h"
+#include "../../elapsed.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -740,11 +741,10 @@ static void label_runs(ht_scene_t *s, const ht_lv_label_t *l, int runs, int x, i
     }
 }
 
-// "34s", then "1m 05s" — the old firmware's fmt_elapsed.
-static void elapsed_text(char *out, size_t cap, unsigned sec)
+// The shared elapsed format (main/elapsed.c): "0:34", "1:05", "1h 5m", "2d 3h". 0 = unknown, not drawn.
+static void elapsed_text(char *out, size_t cap, uint32_t sec)
 {
-    if (sec < 60) snprintf(out, cap, "%us", sec);
-    else snprintf(out, cap, "%um %02us", sec / 60, sec % 60);
+    fmt_elapsed(out, cap, sec);
 }
 
 /*
