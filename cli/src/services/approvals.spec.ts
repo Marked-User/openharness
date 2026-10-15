@@ -324,9 +324,7 @@ describe('F6 and F2 hooks', () => {
     expect((await ask(RG, 'Brakes step', null, yes, { available: ['phone'], isPaired: () => true })).channel).toBe('phone')
     expect(r.calls).toEqual([])
   })
-  it('verifier is accepted but not called yet (F2 open)', async () => {
-    let called = false
-    await ask(BK, 'Send an invoice', null, yes, { verifier: () => { called = true; return true } })
-    expect(called).toBe(false)
+  it('a verifier without a ledger fails closed', async () => {
+    await expect(ask(BK, 'Send an invoice', null, yes, { verifier: () => true })).rejects.toThrow(ApprovalDenied)
   })
 })
