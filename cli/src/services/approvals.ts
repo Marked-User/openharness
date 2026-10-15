@@ -477,7 +477,9 @@ export interface PairingStart {
   expiresAt: number
 }
 
-export type PairingOffer = { ok: true; check: string; expiresAt: number } | { ok: false; reason: string }
+export type PairingStatus = { state: 'pending' } | { state: 'paired' } | { state: 'refused'; reason: string } | { state: 'unknown' }
+
+export type PairingOffer = { ok: true; check: string; deviceNonce: string; expiresAt: number } | { ok: false; reason: string }
 
 type PendingPair = { phonePub: string; check: string; expiresAt: number }
 
@@ -495,6 +497,7 @@ export class PhonePairing {
   private readonly codes = new Map<string, { expiresAt: number; deviceNonce: string }>()
   private readonly pendingPairs = new Map<string, PendingPair>()
   private readonly phones = new Set<string>()
+  private readonly lastRefusal = new Map<string, string>()
   /** Ledger of every pairing, unpairing and refused attempt. */
   readonly log: PairingLogEntry[] = []
   onChange?: () => void
@@ -506,6 +509,7 @@ export class PhonePairing {
 
   private refuse(phoneId: string, reason: string): false {
     this.log.push({ at: this.now(), event: 'refused', phoneId, reason })
+    if (phoneId) this.lastRefusal.set(phoneId, reason)
     this.onChange?.()
     return false
   }
@@ -533,7 +537,8 @@ export class PhonePairing {
     const check = pairingCheck(code, phonePub, c.deviceNonce)
     this.pendingPairs.set(phoneId, { phonePub, check, expiresAt: c.expiresAt })
     this.onChange?.()
-    return { ok: true, check, expiresAt: c.expiresAt }
+    this.lastRefusal.delete(phoneId)
+    return { ok: true, check, deviceNonce: c.deviceNonce, expiresAt: c.expiresAt }
   }
 
   /** The check string the device should show for a pending phone, or null. */
@@ -549,6 +554,7 @@ export class PhonePairing {
     if (this.now() >= pend.expiresAt) return this.refuse(phoneId, 'expired')
     if (matched !== true) return this.refuse(phoneId, 'check_mismatch')
     this.phones.add(phoneId)
+    this.lastRefusal.delete(phoneId)
     this.log.push({ at: this.now(), event: 'pair', phoneId })
     this.onChange?.()
     return true
@@ -559,17 +565,28 @@ export class PhonePairing {
     this.onChange?.()
   }
 
+  /** paired > pending (not expired) > last refusal > unknown. */
+  pairingStatus(phoneId: string): PairingStatus {
+    if (this.phones.has(phoneId)) return { state: 'paired' }
+    const pend = this.pendingPairs.get(phoneId)
+    if (pend && this.now() < pend.expiresAt) return { state: 'pending' }
+    if (pend) return { state: 'refused', reason: 'expired' }
+    const reason = this.lastRefusal.get(phoneId)
+    return reason !== undefined ? { state: 'refused', reason } : { state: 'unknown' }
+  }
+
   isPaired(phoneId?: string): boolean {
     return phoneId === undefined ? this.phones.size > 0 : this.phones.has(phoneId)
   }
 
-  toJSON(): { phones: string[]; log: PairingLogEntry[] } {
-    return { phones: [...this.phones], log: this.log.map((e) => ({ ...e })) }
+  toJSON(): { phones: string[]; log: PairingLogEntry[]; refused: Record<string, string> } {
+    return { phones: [...this.phones], log: this.log.map((e) => ({ ...e })), refused: Object.fromEntries(this.lastRefusal) }
   }
 
   /** @internal */
-  restore(data: { phones: string[]; log?: PairingLogEntry[] }): void {
+  restore(data: { phones: string[]; log?: PairingLogEntry[]; refused?: Record<string, string> }): void {
     for (const p of data.phones) this.phones.add(p)
+    for (const [id, why] of Object.entries(data.refused ?? {})) this.lastRefusal.set(id, why)
     for (const e of data.log ?? []) this.log.push({ ...e })
   }
 }
@@ -622,6 +639,7 @@ function parseJournal(text: string) {
   const p = d.pairing
   if (!p || !Array.isArray(p.phones) || !p.phones.every((x: unknown) => typeof x === 'string')) throw new Error('bad pairing')
   if (p.log !== undefined && (!Array.isArray(p.log) || !p.log.every(isLog))) throw new Error('bad pairing log')
+  if (p.refused !== undefined && (!p.refused || typeof p.refused !== 'object' || Array.isArray(p.refused) || !Object.values(p.refused).every((x) => typeof x === 'string'))) throw new Error('bad pairing refused')
   return { window: w, ledger: l, pairing: p }
 }
 

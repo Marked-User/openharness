@@ -130,3 +130,71 @@ describe('F6 pairing check string', () => {
     expect(() => p.begin('touch', { shared: true })).toThrow(ApprovalDenied)
   })
 })
+
+describe('App follow-up: offer returns deviceNonce, pairingStatus', () => {
+  it('offer success returns the same deviceNonce so the phone computes the check alone', () => {
+    const p = new PhonePairing()
+    const s = p.begin('touch')
+    const o = p.offer('ph', 'pubA', s.code)
+    expect(o).toEqual({ ok: true, check: pairingCheck(s.code, 'pubA', s.deviceNonce), deviceNonce: s.deviceNonce, expiresAt: s.expiresAt })
+    if (o.ok) expect(pairingCheck(s.code, 'pubA', o.deviceNonce)).toBe(o.check)
+  })
+  it('status goes unknown -> pending -> paired, unpair returns to unknown', () => {
+    const p = new PhonePairing()
+    expect(p.pairingStatus('ph')).toEqual({ state: 'unknown' })
+    p.offer('ph', 'pub', p.begin('touch').code)
+    expect(p.pairingStatus('ph')).toEqual({ state: 'pending' })
+    p.confirm('ph', 'touch', true)
+    expect(p.pairingStatus('ph')).toEqual({ state: 'paired' })
+    p.unpair('ph')
+    expect(p.pairingStatus('ph')).toEqual({ state: 'unknown' })
+  })
+  it('keeps the last refusal reason; a new pending or pairing clears it', () => {
+    const p = new PhonePairing()
+    p.offer('ph', 'pub', '999999')
+    expect(p.pairingStatus('ph')).toEqual({ state: 'refused', reason: 'unknown_code' })
+    p.offer('ph', 'pub', p.begin('touch').code)
+    expect(p.pairingStatus('ph')).toEqual({ state: 'pending' })
+    p.confirm('ph', 'touch', false)
+    expect(p.pairingStatus('ph')).toEqual({ state: 'refused', reason: 'check_mismatch' })
+    p.offer('ph', 'pub', p.begin('touch').code)
+    p.confirm('ph', 'touch', true)
+    expect(p.pairingStatus('ph')).toEqual({ state: 'paired' })
+    p.offer('', 'pub', p.begin('touch').code)
+    expect(p.pairingStatus('')).toEqual({ state: 'unknown' })
+  })
+  it('a pending pair past expiry reads as refused: expired', () => {
+    const c = clock()
+    const p = new PhonePairing({ now: c.now, ttlMs: 10 })
+    p.offer('ph', 'pub', p.begin('touch').code)
+    c.advance(10)
+    expect(p.pairingStatus('ph')).toEqual({ state: 'refused', reason: 'expired' })
+  })
+  it('refusal reasons persist in the journal; bad ones fail closed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'st-'))
+    const f = join(dir, 'j.json')
+    const j = openJournal(f)
+    j.pairing.offer('ph', 'pub', '000001')
+    j.pairing.offer('ok', 'pub', j.pairing.begin('touch').code)
+    j.pairing.confirm('ok', 'touch', true)
+    const j2 = openJournal(f)
+    expect(j2.pairing.pairingStatus('ph')).toEqual({ state: 'refused', reason: 'unknown_code' })
+    expect(j2.pairing.pairingStatus('ok')).toEqual({ state: 'paired' })
+    const base = { v: 1, window: { lockedUntil: 0, entries: {} }, ledger: { open: [], spent: [] } }
+    for (const refused of [null, [], { a: 1 }]) {
+      writeFileSync(f, JSON.stringify({ ...base, pairing: { phones: [], refused } }))
+      expect(openJournal(f).recovered).toBe(true)
+    }
+  })
+})
+
+describe('prompt text still reaches the answer function', () => {
+  it('ASK and LOCKED_ASK prompts are generated and passed', async () => {
+    const prompts: string[] = []
+    await ask(BK, 'Send an invoice', null, (_c, p, r) => { prompts.push(p); return { id: r!.id, digest8: r!.digest8, approved: false } },
+      { ledger: new AskLedger(), kind, available: ['touch'] })
+    await ask({ permissions: { locked_ask: ['Brakes step'] } }, 'Brakes step', null, (_c, p) => { prompts.push(p); return false },
+      { ledger: new AskLedger(), kind })
+    expect(prompts).toEqual(['ASK: Send an invoice', 'LOCKED_ASK: Brakes step'])
+  })
+})
