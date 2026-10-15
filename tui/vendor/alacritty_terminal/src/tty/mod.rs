@@ -41,6 +41,11 @@ pub struct Options {
     /// - When `false`: Arguments will be passed raw without additional escaping.
     #[cfg(target_os = "windows")]
     pub escape_args: bool,
+
+    /// hn: a Job Object (a raw `HANDLE`) the child is put in before it runs its first
+    /// instruction, so everything it starts belongs to the job too. The caller owns the handle.
+    #[cfg(windows)]
+    pub job: Option<isize>,
 }
 
 /// Shell options.

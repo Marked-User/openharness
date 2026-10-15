@@ -17,6 +17,16 @@ Local changes are marked `hn` in the relevant source:
   and restore its spacer when the pane grows.
 - `alacritty_terminal/src/term/mod.rs`: handle both blink variants (tmux treats
   them alike), blink reset and overline attributes in the cursor template.
+- Windows only, for harness-pty's per-pane Job Object (`pty/src/job.rs`):
+  - `alacritty_terminal/src/tty/mod.rs`: `Options::job`, a raw Job Object
+    `HANDLE` (`#[cfg(windows)]`);
+  - `alacritty_terminal/src/tty/windows/conpty.rs`: with a job, the child is
+    created suspended, assigned to the job, then resumed, so nothing it starts
+    escapes the job; a child that cannot join is terminated and the spawn fails;
+  - `alacritty_terminal/src/tty/windows/mod.rs`: `Pty` drops its output pipe
+    before the pseudoconsole (upstream drops it after), so `ClosePseudoConsole`
+    never waits for a drain of output that nobody reads any more;
+  - `alacritty_terminal/Cargo.toml`: the `Win32_System_JobObjects` feature.
 
 Keeping these attributes in the native grid makes erase, scrolling, cursor save,
 alternate screens, history and reconnect use the existing terminal operations.

@@ -1,5 +1,7 @@
 pub mod cli;
 pub mod discovery;
+#[cfg(windows)]
+pub mod job;
 pub mod pane;
 pub mod pane_ids;
 pub mod panes;

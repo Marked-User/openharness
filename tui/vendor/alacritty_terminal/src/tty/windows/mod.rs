@@ -25,10 +25,12 @@ type ReadPipe = UnblockedReader<AnonRead>;
 type WritePipe = UnblockedWriter<AnonWrite>;
 
 pub struct Pty {
-    // XXX: Backend is required to be the first field, to ensure correct drop order. Dropping
-    // `conout` before `backend` will cause a deadlock (with Conpty).
-    backend: Backend,
+    // hn: `conout` is dropped first (upstream drops `backend` first). Closing the pseudoconsole
+    // (`backend`'s drop) may wait until its output is drained or the output pipe is broken;
+    // with `conout` dropped, its reader thread ends and closes the pipe, so the close never
+    // waits on a drain that nobody does.
     conout: ReadPipe,
+    backend: Backend,
     conin: WritePipe,
     child_watcher: ChildExitWatcher,
 }
@@ -230,6 +232,7 @@ mod test {
             drain_on_exit: true,
             env: Default::default(),
             escape_args: false,
+            job: None,
         };
         assert_eq!(cmdline(&options), "echo hello world");
 

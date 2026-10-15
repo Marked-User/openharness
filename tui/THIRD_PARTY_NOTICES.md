@@ -319,6 +319,12 @@ THE SOFTWARE.
 | zlib-rs | 0.6.8 | Zlib |
 | zmij | 1.0.23 | MIT |
 
+`alacritty_terminal` and `vte` are built from modified copies in `tui/vendor`, their changes marked
+`hn` in the source and listed in `tui/vendor/README.md`: terminal compatibility fixes and, on
+Windows only, a Job Object for the ConPTY child (`tty::Options::job`: the child is spawned
+suspended, put in the job, then resumed) and a `Pty` that closes its output pipe before the
+pseudoconsole, so the close never waits for a drain.
+
 ### Licence texts
 
 Each text below is followed by the crates it comes from. Where a crate offers a choice, its MIT

@@ -641,7 +641,19 @@ impl Panes {
                 entry.engine_exit = Some(status);
                 Ok(Reply::new())
             }
-            Op::JobPids { .. } | Op::Processes => Err(OpError::new(
+            // The processes in the pane's current (or last) child's job (Windows): what a
+            // process identity's pid is checked against.
+            #[cfg(windows)]
+            Op::JobPids { pane } => {
+                let pids = self
+                    .pane(&pane)?
+                    .job_pids()
+                    .map_err(|e| OpError::new("internal", format!("job pids: {e}")))?;
+                reply(json!({ "pids": pids }))
+            }
+            #[cfg(not(windows))]
+            Op::JobPids { .. } => Err(OpError::new("unsupported", "no job objects here")),
+            Op::Processes => Err(OpError::new(
                 "unsupported",
                 "not available on this platform yet",
             )),
@@ -1283,5 +1295,185 @@ mod tests {
     fn job_pids_and_processes_are_unsupported_here() {
         let (panes, _n) = table();
         assert_eq!(panes.handle(Op::Processes).unwrap_err().code, "unsupported");
+        let pane = create(&panes, "sleep 5", false);
+        assert_eq!(
+            panes
+                .handle(op(json!({"op": "jobPids", "pane": pane})))
+                .unwrap_err()
+                .code,
+            "unsupported"
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::sync::mpsc::Receiver;
+    use std::time::Instant;
+
+    fn table() -> (Arc<Panes>, Receiver<Notice>) {
+        let (panes, events) = Panes::new(1000, "p9");
+        let panes = Arc::new(panes);
+        let (tx, notices) = mpsc::channel();
+        let p = panes.clone();
+        std::thread::spawn(move || {
+            for (id, event) in events {
+                if let Some(n) = p.event(&id, &event) {
+                    let _ = tx.send(n);
+                }
+            }
+        });
+        (panes, notices)
+    }
+
+    fn op(json: Value) -> Op {
+        let mut v = json;
+        v["id"] = json!(1);
+        serde_json::from_value::<crate::protocol::Request>(v)
+            .unwrap()
+            .op
+    }
+
+    fn create(panes: &Panes, script: &str, hold: bool) -> String {
+        let r = panes
+            .handle(op(json!({"op": "create",
+                "command": ["powershell.exe", "-NoProfile", "-Command", script],
+                "cols": 80, "rows": 24, "owner": "o", "hold": hold})))
+            .unwrap();
+        r["pane"].as_str().unwrap().to_owned()
+    }
+
+    fn job_pids(panes: &Panes, pane: &str) -> Result<Vec<u64>, OpError> {
+        panes
+            .handle(op(json!({"op": "jobPids", "pane": pane})))
+            .map(|r| {
+                r["pids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_u64().unwrap())
+                    .collect()
+            })
+    }
+
+    fn root_pid(panes: &Panes) -> u64 {
+        panes.handle(Op::Inventory).unwrap()["panes"][0]["rootPid"]
+            .as_u64()
+            .unwrap()
+    }
+
+    fn capture(panes: &Panes, pane: &str) -> String {
+        panes
+            .handle(op(
+                json!({"op": "capture", "pane": pane, "ansi": false, "visible": true}),
+            ))
+            .unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn until(what: &str, mut f: impl FnMut() -> bool) {
+        let end = Instant::now() + Duration::from_secs(20);
+        while !f() {
+            assert!(Instant::now() < end, "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn exit_notice(notices: &Receiver<Notice>, pane: &str) -> Option<i32> {
+        loop {
+            match notices
+                .recv_timeout(Duration::from_secs(20))
+                .expect("no exit")
+            {
+                Notice::Exit { pane: p, status } if p == pane => return status,
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn job_pids_lists_the_panes_child_and_what_it_started() {
+        let (panes, _n) = table();
+        let pane = create(
+            &panes,
+            "Start-Process -NoNewWindow cmd.exe -ArgumentList '/c','ping -n 60 127.0.0.1 >nul'; 'ready'; Start-Sleep 60",
+            false,
+        );
+        let root = root_pid(&panes);
+        let mut pids = Vec::new();
+        until("the child and its descendants", || {
+            pids = job_pids(&panes, &pane).unwrap();
+            pids.len() >= 3 // powershell, cmd, ping
+        });
+        assert!(pids.contains(&root), "{pids:?} without {root}");
+        assert_eq!(job_pids(&panes, "%99").unwrap_err().code, "no_pane");
+        assert_eq!(panes.handle(Op::Processes).unwrap_err().code, "unsupported");
+        panes
+            .handle(op(json!({"op": "kill", "pane": pane, "graceMs": 300})))
+            .unwrap();
+    }
+
+    #[test]
+    fn kill_answers_at_once_ends_the_job_and_the_exit_still_arrives() {
+        let (panes, notices) = table();
+        let pane = create(
+            &panes,
+            "Start-Process -WindowStyle Hidden powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep 60'; 'ready'; Start-Sleep 60",
+            false,
+        );
+        until("ready", || capture(&panes, &pane).contains("ready"));
+        until("the descendant", || {
+            job_pids(&panes, &pane).unwrap().len() >= 2
+        });
+        let handle = panes.pane(&pane).unwrap();
+        let start = Instant::now();
+        panes
+            .handle(op(json!({"op": "kill", "pane": pane, "graceMs": 500})))
+            .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "kill waited out the grace"
+        );
+        assert_eq!(job_pids(&panes, &pane).unwrap_err().code, "no_pane");
+        exit_notice(&notices, &pane);
+        until("the job ended", || handle.job_pids().unwrap().is_empty());
+        assert!(start.elapsed() >= Duration::from_millis(450));
+    }
+
+    /// `respawn-pane -k`: the running child's job is ended, and the next child has its own.
+    #[test]
+    fn respawn_kills_a_running_child_and_its_job_first() {
+        for hold in [true, false] {
+            let (panes, notices) = table();
+            let pane = create(&panes, "'one'; Start-Sleep 60", hold);
+            until("one", || capture(&panes, &pane).contains("one"));
+            let old = job_pids(&panes, &pane).unwrap();
+            assert_eq!(old, vec![root_pid(&panes)]);
+            panes
+                .handle(op(json!({"op": "respawn", "pane": pane,
+                    "command": ["cmd.exe", "/c", "echo two& set /p x=& exit 6"]})))
+                .unwrap();
+            let new = job_pids(&panes, &pane).unwrap();
+            assert_eq!(new, vec![root_pid(&panes)], "hold {hold}");
+            assert_ne!(old, new);
+            until("two", || capture(&panes, &pane).contains("two"));
+            // A new pseudo console clears the screen it starts on: the old output is above it.
+            let history = panes
+                .handle(op(json!({"op": "capture", "pane": pane, "ansi": false,
+                    "visible": false, "historyLines": 100})))
+                .unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert!(history.contains("one"), "{history:?}");
+            // The old child's exit was absorbed: the first exit announced is the new child's.
+            panes
+                .handle(op(json!({"op": "key", "pane": pane, "key": "Enter"})))
+                .unwrap();
+            assert_eq!(exit_notice(&notices, &pane), Some(6), "hold {hold}");
+        }
     }
 }

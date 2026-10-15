@@ -34,8 +34,8 @@ const READ_CHUNK: usize = 64 * 1024;
 /// Bytes read per wakeup before going back to the poller, so input and control messages are not
 /// starved by a program that floods its output.
 const READ_PER_WAKEUP: usize = 1024 * 1024;
-/// How long a dropped pane's child gets after SIGHUP before SIGKILL.
-#[cfg(unix)]
+/// How long a dropped pane's child gets after SIGHUP (Windows: the pseudo console's close) before
+/// it is killed outright (SIGKILL, or the job terminated).
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 /// How long a kill that escalated waits for the reader to report the exit.
 const EXIT_REPORT: Duration = Duration::from_secs(1);
@@ -247,9 +247,10 @@ impl Life {
 enum Msg {
     Input(Vec<u8>),
     Resize(WindowSize),
-    /// The pane was dropped: stop without reporting an exit.
+    /// The pane was dropped: stop without reporting an exit (and end the child).
     Shutdown,
-    /// Windows `kill`: close the pseudo console, then report the child's exit.
+    /// Windows `kill`: close the pseudo console, then report the child's exit. `Killing::finish`
+    /// ends the job after the grace.
     #[cfg(windows)]
     Hangup,
 }
@@ -265,8 +266,9 @@ struct Attachment {
     generation: u64,
     /// The child's terminal device (`/dev/pts/3`, `/dev/ttys004`); empty where there is none.
     tty: String,
+    /// Windows: the child's own Job Object, which everything it starts belongs to too.
     #[cfg(windows)]
-    process: Arc<std::os::windows::io::OwnedHandle>,
+    job: Arc<crate::job::Job>,
 }
 
 impl Attachment {
@@ -530,7 +532,6 @@ impl Pane {
     }
 
     /// Windows: close the pseudo console (the console's processes get CTRL_CLOSE_EVENT).
-    /// Task 16 replaces this with a Job.
     #[cfg(windows)]
     pub fn start_kill(&self) -> Option<Killing> {
         let attachment = self.attachment();
@@ -550,6 +551,12 @@ impl Pane {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// The processes in the current (or last) child's job: the child and what it started.
+    #[cfg(windows)]
+    pub fn job_pids(&self) -> io::Result<Vec<u32>> {
+        self.attachment().job.pids()
     }
 }
 
@@ -595,20 +602,16 @@ impl Killing {
         }
     }
 
-    /// Windows: after `grace`, terminate the child if it is still running.
+    /// Windows: after `grace`, terminate the child's job if anything in it still runs, so no
+    /// descendant (one outside the console, which the close does not reach) outlives the pane.
+    /// Returns once the job is empty and the child's exit reported, at most after `grace` (plus
+    /// `EXIT_REPORT`).
     #[cfg(windows)]
     pub fn finish(self, grace: Duration) {
-        use std::os::windows::io::AsRawHandle;
-        let attachment = self.attachment;
-        if !attachment.life.wait(grace) {
-            unsafe {
-                windows_sys::Win32::System::Threading::TerminateProcess(
-                    attachment.process.as_raw_handle() as _,
-                    1,
-                )
-            };
-            attachment.life.wait(EXIT_REPORT);
-        }
+        self.attachment.job.end(grace);
+        // Until the reader has seen the exit: a pane dropped before that ends its reader without
+        // reporting one.
+        self.attachment.life.wait(EXIT_REPORT);
     }
 }
 
@@ -650,6 +653,9 @@ fn attach(
             .chain(args.iter().cloned())
             .collect::<Vec<_>>(),
     );
+    // The child's own job, so a respawned child never shares one with the child it replaced.
+    #[cfg(windows)]
+    let job = Arc::new(crate::job::Job::new()?);
     let options = Options {
         shell: Some(Shell::new(program.clone(), args.to_vec())),
         working_directory: spec.cwd.clone(),
@@ -658,6 +664,8 @@ fn attach(
         // `command` is an argv: quote each argument by the C runtime's rules.
         #[cfg(windows)]
         escape_args: true,
+        #[cfg(windows)]
+        job: Some(job.handle()),
     };
 
     let mut pty = tty::new(&options, window_size(cols, rows), 0)?;
@@ -673,9 +681,7 @@ fn attach(
     #[cfg(windows)]
     let pid = pty.child_watcher().pid().map(|p| p.get());
     #[cfg(windows)]
-    let process = Arc::new(duplicate_process_handle(
-        pty.child_watcher().raw_handle() as _
-    )?);
+    let process = duplicate_process_handle(pty.child_watcher().raw_handle() as _)?;
 
     let poller = Arc::new(Poller::new()?);
     let interest = PollEvent::readable(READ_WRITE_TOKEN);
@@ -702,7 +708,9 @@ fn attach(
         interest,
         eof: false,
         #[cfg(windows)]
-        process: process.clone(),
+        process,
+        #[cfg(windows)]
+        job: job.clone(),
     };
     std::thread::Builder::new()
         .name(format!("pty-reader {id}"))
@@ -715,7 +723,7 @@ fn attach(
         generation,
         tty,
         #[cfg(windows)]
-        process,
+        job,
     })
 }
 
@@ -789,8 +797,11 @@ struct Reader {
     interest: PollEvent,
     /// Unix: the tty hung up (all of the child's side closed); it is no longer polled.
     eof: bool,
+    /// Windows: the child's process, to wait for its exit once the pty (and its watcher) is gone.
     #[cfg(windows)]
-    process: Arc<std::os::windows::io::OwnedHandle>,
+    process: std::os::windows::io::OwnedHandle,
+    #[cfg(windows)]
+    job: Arc<crate::job::Job>,
 }
 
 impl Reader {
@@ -799,6 +810,10 @@ impl Reader {
         #[cfg(unix)]
         if let End::Shutdown = end {
             self.end_child();
+        }
+        #[cfg(windows)]
+        if let End::Shutdown = end {
+            self.end_job();
         }
         if !(cfg!(unix) && self.eof) {
             let _ = self.pty.deregister(&self.poller);
@@ -815,7 +830,9 @@ impl Reader {
         } = self;
         // Unix: SIGHUP to the child, then reap it (alacritty's `Pty::drop`; after `end_child` on
         // a shutdown, so the reap cannot block).
-        // Windows: ClosePseudoConsole; the console's processes get CTRL_CLOSE_EVENT.
+        // Windows: ClosePseudoConsole; the console's processes get CTRL_CLOSE_EVENT. The close
+        // waits for them to go (the job's end makes sure they do), and never for a drain of the
+        // console's output: the vendored `Pty` drops its output pipe first (tui/vendor/README.md).
         drop(pty);
         let status = match end {
             End::Exited | End::Shutdown => return,
@@ -970,6 +987,21 @@ impl Reader {
             if !exited {
                 self.wait_child(SHUTDOWN_GRACE);
             }
+        }
+    }
+
+    /// The pane was dropped while its child runs: the pseudo console's close (in `run`) sends the
+    /// console's processes CTRL_CLOSE_EVENT; whatever is left in the job after `SHUTDOWN_GRACE`,
+    /// a descendant outside the console included, is terminated. On a thread of its own, as the
+    /// close blocks this one until the console's processes are gone.
+    #[cfg(windows)]
+    fn end_job(&self) {
+        let job = self.job.clone();
+        let ender = std::thread::Builder::new()
+            .name(format!("pty-end {}", self.id))
+            .spawn(move || job.end(SHUTDOWN_GRACE));
+        if ender.is_err() {
+            let _ = self.job.terminate(1);
         }
     }
 
@@ -1733,5 +1765,329 @@ mod tests {
             conversation.joined
         );
         assert!(!conversation.last_continues);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+    use std::time::{Duration, Instant};
+
+    fn spec(command: &[&str]) -> PaneSpec {
+        PaneSpec {
+            command: command.iter().map(|s| s.to_string()).collect(),
+            cwd: None,
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    fn powershell(script: &str) -> PaneSpec {
+        spec(&["powershell.exe", "-NoProfile", "-Command", script])
+    }
+
+    /// Wait until the visible screen contains `needle`; the screen then.
+    fn wait_text(pane: &Pane, rx: &Receiver<(String, PaneEvent)>, needle: &str) -> String {
+        let end = Instant::now() + Duration::from_secs(20);
+        loop {
+            let (text, _) = pane.capture(None, false);
+            if text.contains(needle) {
+                return text;
+            }
+            assert!(Instant::now() < end, "no {needle:?} in {text:?}");
+            let _ = rx.recv_timeout(Duration::from_millis(100));
+        }
+    }
+
+    fn exit_of(rx: &Receiver<(String, PaneEvent)>) -> (u64, Option<i32>) {
+        let end = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < end, "no exit");
+            if let Ok((_, PaneEvent::Exited { generation, status })) =
+                rx.recv_timeout(Duration::from_millis(100))
+            {
+                return (generation, status);
+            }
+        }
+    }
+
+    fn until(what: &str, timeout: Duration, mut f: impl FnMut() -> bool) {
+        let end = Instant::now() + timeout;
+        while !f() {
+            assert!(Instant::now() < end, "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Whether process `pid` still runs.
+    fn alive(pid: u32) -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+        unsafe {
+            let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+            CloseHandle(h);
+            running
+        }
+    }
+
+    /// A child that starts a process with a console of its own (CTRL_CLOSE_EVENT of the pane's
+    /// console does not reach it, but it is in the pane's job), then prints `ready`.
+    const DETACHED: &str = "Start-Process -WindowStyle Hidden powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep 60'; 'ready'; Start-Sleep 60";
+
+    /// The job's pids other than the child's, once there is one.
+    fn descendants(pane: &Pane) -> Vec<u32> {
+        let root = pane.root_pid().unwrap();
+        let mut found = Vec::new();
+        until("a descendant in the job", Duration::from_secs(20), || {
+            found = pane
+                .job_pids()
+                .unwrap()
+                .into_iter()
+                .filter(|&p| p != root)
+                .collect();
+            !found.is_empty()
+        });
+        found
+    }
+
+    #[test]
+    fn output_reaches_the_grid_and_the_exit_status_is_reported() {
+        let (tx, rx) = channel();
+        let pane = Pane::spawn(
+            "%1".into(),
+            spec(&["cmd.exe", "/c", "echo hello& exit 3"]),
+            1000,
+            tx,
+        )
+        .unwrap();
+        assert_eq!(exit_of(&rx), (1, Some(3)));
+        wait_text(&pane, &rx, "hello");
+        assert_eq!(pane.root_pid(), None);
+        assert!(pane.last_pid().is_some());
+        assert_eq!(pane.tty(), "");
+    }
+
+    #[test]
+    fn write_reaches_the_child() {
+        let (tx, rx) = channel();
+        let pane = Pane::spawn(
+            "%2".into(),
+            powershell("$x = Read-Host 'prompt'; \"got:$x\"; Start-Sleep 30"),
+            1000,
+            tx,
+        )
+        .unwrap();
+        wait_text(&pane, &rx, "prompt");
+        pane.write(b"abc\r").unwrap();
+        wait_text(&pane, &rx, "got:abc");
+        pane.kill(Duration::from_secs(2));
+    }
+
+    #[test]
+    fn kill_closes_the_console_and_returns_once_the_job_is_empty() {
+        let (tx, rx) = channel();
+        let pane =
+            Pane::spawn("%3".into(), powershell("'ready'; Start-Sleep 60"), 1000, tx).unwrap();
+        wait_text(&pane, &rx, "ready");
+        let root = pane.root_pid().unwrap();
+        assert_eq!(pane.job_pids().unwrap(), vec![root]);
+        let start = Instant::now();
+        // CTRL_CLOSE_EVENT ends it well inside the grace.
+        pane.kill(Duration::from_secs(10));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(pane.job_pids().unwrap(), Vec::<u32>::new());
+        assert_eq!(pane.root_pid(), None);
+        until("the child exited", Duration::from_secs(5), || !alive(root));
+        assert_eq!(exit_of(&rx).0, 1);
+    }
+
+    #[test]
+    fn kill_terminates_a_descendant_outside_the_console_after_the_grace() {
+        let (tx, rx) = channel();
+        let pane = Pane::spawn("%4".into(), powershell(DETACHED), 1000, tx).unwrap();
+        wait_text(&pane, &rx, "ready");
+        let kids = descendants(&pane);
+        let start = Instant::now();
+        pane.kill(Duration::from_millis(500));
+        assert!(
+            start.elapsed() >= Duration::from_millis(450),
+            "returned before the job was empty: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(pane.job_pids().unwrap(), Vec::<u32>::new());
+        // A process leaves the job as it exits, a moment before its handle is signalled.
+        until("the descendants exited", Duration::from_secs(5), || {
+            kids.iter().all(|&kid| !alive(kid))
+        });
+        assert_eq!(exit_of(&rx).0, 1);
+    }
+
+    #[test]
+    fn dropping_a_pane_ends_its_job_and_its_reader() {
+        let (tx, rx) = channel();
+        let pane = Pane::spawn("%5".into(), powershell(DETACHED), 1000, tx).unwrap();
+        wait_text(&pane, &rx, "ready");
+        let mut pids = descendants(&pane);
+        pids.push(pane.root_pid().unwrap());
+        let start = Instant::now();
+        drop(pane);
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "drop blocked the caller"
+        );
+        // The reader thread holds the sink's only other sender: it is gone once the thread ends.
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Ok((_, PaneEvent::Exited { .. })) => panic!("a dropped pane reported an exit"),
+                _ => assert!(Instant::now() < end, "reader thread still running"),
+            }
+        }
+        until(
+            "the job ended",
+            SHUTDOWN_GRACE + Duration::from_secs(5),
+            || pids.iter().all(|&p| !alive(p)),
+        );
+    }
+
+    #[test]
+    fn a_respawned_child_gets_a_job_of_its_own() {
+        let (tx, rx) = channel();
+        let pane = Pane::spawn("%6".into(), powershell(DETACHED), 1000, tx).unwrap();
+        wait_text(&pane, &rx, "ready");
+        let first = descendants(&pane);
+        pane.kill(Duration::from_millis(300));
+        assert_eq!(exit_of(&rx).0, 1);
+        assert_eq!(
+            pane.respawn(spec(&[
+                "cmd.exe",
+                "/c",
+                "echo second& ping -n 60 127.0.0.1 >nul"
+            ]))
+            .unwrap(),
+            2
+        );
+        wait_text(&pane, &rx, "second");
+        let root = pane.root_pid().unwrap();
+        let mut pids = Vec::new();
+        until("ping in the new job", Duration::from_secs(10), || {
+            pids = pane.job_pids().unwrap();
+            pids.len() >= 2
+        });
+        assert!(pids.contains(&root), "{pids:?} without {root}");
+        assert!(
+            first.iter().all(|p| !pids.contains(p)),
+            "{pids:?} has {first:?}"
+        );
+        pane.kill(Duration::from_millis(300));
+        assert_eq!(pane.job_pids().unwrap(), Vec::<u32>::new());
+    }
+
+    /// The pseudo console's close cannot wait on a drain of its output: a child flooding it is
+    /// killed, or dropped, in bounded time.
+    #[test]
+    fn kill_and_drop_do_not_wait_on_a_flooding_child() {
+        let flood = "while ($true) { [Console]::Out.Write('x' * 4096) }";
+        let (tx, rx) = channel();
+        let pane = Pane::spawn("%7".into(), powershell(flood), 1000, tx).unwrap();
+        wait_text(&pane, &rx, "xxxx");
+        let start = Instant::now();
+        pane.kill(Duration::from_millis(500));
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(pane.job_pids().unwrap(), Vec::<u32>::new());
+        exit_of(&rx);
+
+        let (tx, rx) = channel();
+        let pane = Pane::spawn("%8".into(), powershell(flood), 1000, tx).unwrap();
+        wait_text(&pane, &rx, "xxxx");
+        let root = pane.root_pid().unwrap();
+        drop(pane);
+        let end = Instant::now() + Duration::from_secs(15);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                _ => assert!(Instant::now() < end, "reader thread still running"),
+            }
+        }
+        until("the flooding child ended", Duration::from_secs(5), || {
+            !alive(root)
+        });
+    }
+
+    /// The child exits while a descendant on its console floods it: nothing reads the console's
+    /// output any more, yet closing the console (after the exit is reported) does not wait for a
+    /// drain, and the descendant gets CTRL_CLOSE_EVENT.
+    #[test]
+    fn the_close_after_an_exit_does_not_wait_on_a_flooding_descendant() {
+        let script = "Start-Process -NoNewWindow powershell.exe -ArgumentList '-NoProfile','-Command','while ($true) { [Console]::Out.Write(''z'' * 4096) }'; Start-Sleep 2; exit 4";
+        let (tx, rx) = channel();
+        let pane = Pane::spawn("%10".into(), powershell(script), 1000, tx).unwrap();
+        let kids = descendants(&pane);
+        assert_eq!(exit_of(&rx), (1, Some(4)));
+        drop(pane);
+        let end = Instant::now() + Duration::from_secs(20);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                _ => assert!(Instant::now() < end, "the console's close is stuck"),
+            }
+        }
+        until("the descendant ended", Duration::from_secs(10), || {
+            kids.iter().all(|&kid| !alive(kid))
+        });
+    }
+
+    /// The reader stalls (here: the screen lock held) while a child floods the console, so the
+    /// output pipes fill up; the kill that follows still ends in bounded time.
+    #[test]
+    fn a_kill_after_the_output_backed_up_does_not_deadlock() {
+        let flood = "while ($true) { [Console]::Out.Write('y' * 4096) }";
+        let (tx, rx) = channel();
+        let pane = Arc::new(Pane::spawn("%9".into(), powershell(flood), 1000, tx).unwrap());
+        wait_text(&pane, &rx, "yyyy");
+        let killer = {
+            let screen = lock(&pane.screen);
+            let pane = pane.clone();
+            let killer = std::thread::spawn(move || {
+                let start = Instant::now();
+                pane.kill(Duration::from_millis(500));
+                start.elapsed()
+            });
+            std::thread::sleep(Duration::from_secs(3));
+            drop(screen);
+            killer
+        };
+        let end = Instant::now() + Duration::from_secs(20);
+        while !killer.is_finished() {
+            assert!(Instant::now() < end, "kill deadlocked");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        killer.join().unwrap();
+        // The reader ends too (it holds the sink's only other sender).
+        drop(pane);
+        let end = Instant::now() + Duration::from_secs(20);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                _ => assert!(Instant::now() < end, "reader thread deadlocked"),
+            }
+        }
     }
 }

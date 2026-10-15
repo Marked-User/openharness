@@ -19,6 +19,10 @@ use windows_sys::Win32::System::Threading::{
     InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION,
     STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute,
 };
+// hn: the child's Job Object (`Options::job`).
+use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+use windows_sys::Win32::System::Threading::{CREATE_SUSPENDED, ResumeThread, TerminateProcess};
 
 use crate::event::{OnResize, WindowSize};
 use crate::tty::Options;
@@ -214,6 +218,12 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
         None => ptr::null_mut(),
     };
 
+    // hn: a child for a Job Object starts suspended, so it is in the job before it can start
+    // anything.
+    if config.job.is_some() {
+        creation_flags |= CREATE_SUSPENDED;
+    }
+
     let mut proc_info: PROCESS_INFORMATION = unsafe { mem::zeroed() };
     unsafe {
         success = CreateProcessW(
@@ -231,6 +241,27 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
 
         if !success {
             return Err(Error::last_os_error());
+        }
+    }
+
+    // hn: put the suspended child in the job, then let it run. A child that cannot join the job
+    // never runs: it is terminated, and the pseudoconsole closed (after its output pipe, so the
+    // close cannot wait for a drain).
+    if let Some(job) = config.job {
+        unsafe {
+            if AssignProcessToJobObject(job as HANDLE, proc_info.hProcess) == 0
+                || ResumeThread(proc_info.hThread) == u32::MAX
+            {
+                let err = Error::last_os_error();
+                TerminateProcess(proc_info.hProcess, 1);
+                CloseHandle(proc_info.hThread);
+                CloseHandle(proc_info.hProcess);
+                drop(conout);
+                drop(conin);
+                (api.close)(pty_handle);
+                return Err(err);
+            }
+            CloseHandle(proc_info.hThread);
         }
     }
 
