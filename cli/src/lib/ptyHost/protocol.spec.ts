@@ -141,7 +141,7 @@ const OP_FIELDS: OpFields = {
   setTitle: { pane: 'string', title: 'string' },
   holdOpen: { pane: 'string' },
   releaseHold: { pane: 'string' },
-  respawn: { pane: 'string', command: 'string[]', cwd: 'string', env: 'env', expectedHeldToken: 'string' },
+  respawn: { pane: 'string', command: 'string[]', cwd: 'string', env: 'env', expectedHeldToken: 'string', clearEnv: 'string[]' },
   jobPids: { pane: 'string' },
   processes: {},
   setEngineExit: { pane: 'string', status: 'number' },

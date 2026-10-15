@@ -147,6 +147,10 @@ pub enum Op {
         env: HashMap<String, String>,
         #[serde(rename = "expectedHeldToken")]
         expected_held_token: Option<String>,
+        /// Names taken out of the pane's create-time environment before this child, and for every
+        /// later one: tmux's `set-environment -u` on the pane's session ahead of `respawn-pane`.
+        #[serde(rename = "clearEnv", default)]
+        clear_env: Vec<String>,
     },
     JobPids { pane: String },
     Processes,

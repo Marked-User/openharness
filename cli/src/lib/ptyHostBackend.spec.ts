@@ -381,6 +381,16 @@ describe('PtyHostBackend hold and respawn', () => {
     ])
   })
 
+  it('respawn sends the names to clear from the pane\'s create-time environment, and none when there are none', async () => {
+    const { backend, calls } = await ready()
+    await backend.respawn(PANE, { command: ['claude'], clearEnv: ['ANTHROPIC_BASE_URL'] })
+    await backend.respawn(PANE, { command: ['claude'], clearEnv: [] })
+    expect(calls).toEqual([
+      { op: 'respawn', pane: '%1', command: ['claude'], clearEnv: ['ANTHROPIC_BASE_URL'] },
+      { op: 'respawn', pane: '%1', command: ['claude'] },
+    ])
+  })
+
   it('a respawn clears the exit its pane had', async () => {
     const { backend, emit } = await ready({ create: { state: 'ok', value: { pane: '%1' } } })
     await backend.create({ command: ['sh'] })

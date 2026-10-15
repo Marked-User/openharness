@@ -9,6 +9,7 @@ import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { env } from '../../config/env.js'
+import { scrubTerminalContext } from '../terminalEnvironment.js'
 import { PtyHostClient, type PtyHostDiscovery } from './client.js'
 import { PTY_PROTOCOL } from './protocol.js'
 
@@ -170,7 +171,11 @@ async function spawnAndWait(home: string, binary: string | null, waitMs: number)
   try {
     // Detached so the host outlives this daemon: panes must survive a daemon restart, as tmux's
     // do. On Windows the host also breaks away from the daemon's job by re-executing itself.
-    const child = spawn(binary, ['serve', '--home', home], { detached: true, windowsHide: true, stdio: 'ignore' })
+    // Without the daemon's own tmux identity (`TMUX`, `TMUX_PANE`), which a daemon started from a tmux pane has:
+    // every pane the host spawns inherits its environment, and would read as that tmux pane's to a hook or a shell.
+    const child = spawn(binary, ['serve', '--home', home], {
+      detached: true, windowsHide: true, stdio: 'ignore', env: scrubTerminalContext({ ...process.env }),
+    })
     child.once('error', err => { failed ??= `could not start ${binary}: ${err.message}` })
     child.once('exit', (code, signal) => {
       // 0 is a host that found another one already serving this home.

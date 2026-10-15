@@ -679,12 +679,12 @@ describe('the roster note and the directory', () => {
     t.service.stop()
   })
 
-  it('a pty host pane id names its harness only when no tmux pane has it and exactly one row does', async () => {
+  it('a bare `%N` names a tmux pane only; a pty host pane is named by its own `<instance>:%N`', async () => {
     const tabs = [{ id: 'app', name: 'app', panes: [{ machineId: 'm1', agentId: 'a' }, { machineId: 'm1', agentId: 'b' }] }]
-    const one = setup({ tabs, agents: [ptySession('a', '%5'), session('b', '%6')] })
-    expect((await one.ask({ action: 'send', pane: '%5', to: 'b', text: 'hi' })).recipients).toEqual([{ name: 'b', state: 'queued' }])
-    const two = setup({ tabs, agents: [ptySession('a', '%5'), { ...ptySession('b', '%5'), runtimes: [{ backend: 'ptyhost', instance: 'p2', paneId: '%5' }] } as unknown as RegisteredSession] })
-    expect((await two.ask({ action: 'send', pane: '%5', to: 'b', text: 'hi' })).error).toBe('NOT_A_HARNESS')
+    const t = setup({ tabs, agents: [ptySession('a', '%5'), session('b', '%6')] })
+    expect((await t.ask({ action: 'send', pane: '%5', to: 'b', text: 'hi' })).error).toBe('NOT_A_HARNESS')
+    expect((await t.ask({ action: 'send', pane: 'p1:%5', to: 'b', text: 'hi' })).recipients).toEqual([{ name: 'b', state: 'queued' }])
+    expect((await t.ask({ action: 'send', pane: 'p2:%5', to: 'b', text: 'hi' })).error).toBe('NOT_A_HARNESS')
   })
 
   it('keeps the notes it put in the store, withdraws a gone harness\'s, and sweeps old files nothing waits on', async () => {

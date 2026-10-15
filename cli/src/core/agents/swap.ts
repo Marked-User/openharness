@@ -48,7 +48,10 @@ export function createPaneSwap({ byAgent, prepareSessionResume, keepAbandonedCon
     session: RegisteredSession,
     /** The row's own pane and the backend it is on (`restartTargetOf`): a swap runs where the row is. */
     { backend, runtime }: RestartTarget,
-    launch: { native?: import('../../engines/nativeLaunch.js').NativeLaunch; env?: Record<string, string>; extraArgs?: readonly string[]; clearEnv?: readonly string[] } = {},
+    launch: { native?: import('../../engines/nativeLaunch.js').NativeLaunch; env?: Record<string, string>; extraArgs?: readonly string[]; clearEnv?: readonly string[]
+      /** Names the respawn takes out of what the pane was created with, on a backend with no `clearEnv()` of its own
+       *  (the pty host): a retarget home's grid variables. */
+      clearPaneEnv?: readonly string[] } = {},
     /** The mode this swap may actually ask for — the row's own, unless the engine on disk has since
      *  stopped taking its flag and the caller dropped it (`dropPermissionFlagIfUnsupported`). */
     permissionMode: string | null = session.permissionMode ?? null,
@@ -79,6 +82,7 @@ export function createPaneSwap({ byAgent, prepareSessionResume, keepAbandonedCon
         ...(current ? { current } : {}),
         cwd: homedir(),
         ...(launch.env ? { env: launch.env } : {}),
+        ...(launch.clearPaneEnv?.length ? { clearEnv: launch.clearPaneEnv } : {}),
       })
       return result.state === 'succeeded'
         ? { ok: true }

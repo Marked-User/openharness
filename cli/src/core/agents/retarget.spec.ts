@@ -480,7 +480,7 @@ describe('retargeting an agent', () => {
       expect(vi.mocked(validateLaunchOverrides).mock.lastCall?.[2]).toMatchObject({ subscriptionModel: null })
     })
 
-    it('on a ptyhost pane: swapped through that pane\'s own backend, with nothing to clear on the way home', async () => {
+    it('on a ptyhost pane: swapped through that pane\'s own backend, the grid\'s names cleared by the respawn on the way home', async () => {
       const pty = { backend: 'ptyhost' as const, instance: 'p1', paneId: '%3' }
       const ptyBackend = { name: 'ptyhost', holdOpen: vi.fn(), respawn: vi.fn(), releaseHold: vi.fn(async () => {}) }
       const row = agent({ runtimes: [pty], grid: { baseUrl: 'x' }, subscriptionModel: 'opus' } as Partial<RegisteredSession>)
@@ -490,7 +490,8 @@ describe('retargeting an agent', () => {
       })
       expect(await run.retarget({ agentId: 'a1', grid: null })).toEqual({ ok: true })
       expect(run.deps.terminals.backendFor).toHaveBeenCalledWith(pty)
-      expect(run.deps.paneSwapDeps).toHaveBeenCalledWith(row, { backend: ptyBackend, runtime: pty }, {}, null, expect.any(Function))
+      // No session env to clear first: the grid's names go with the respawn, out of the pane's create-time env.
+      expect(run.deps.paneSwapDeps).toHaveBeenCalledWith(row, { backend: ptyBackend, runtime: pty }, { clearPaneEnv: ['ANTHROPIC_BASE_URL'] }, null, expect.any(Function))
       expect(run.deps.agentReconciler.holdRoute).toHaveBeenCalledWith(terminalRouteKey(pty), null)
       expect(ptyBackend.releaseHold).toHaveBeenCalledWith(pty, expect.any(Function))
       expect(run.tmux.clearEnv).not.toHaveBeenCalled()

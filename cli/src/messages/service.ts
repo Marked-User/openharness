@@ -88,7 +88,8 @@ export const SETTING_FRESH_MS = 2_000
 /** What `harness send` says while this computer has Agent Messages off: where the person turns them on again. */
 export const MESSAGES_OFF_TEXT = 'Agent Messages are off. The person turns on "Agents in the same tab can message each other" in Settings ▸ Experimental, or runs `harness settings agent-messages on`.'
 
-const PANE = /^%\d{1,9}$/
+/** `harness send`'s pane: `$TMUX_PANE` (`%N`, a tmux pane only) or a pty host pane's `<instance>:%N` (`$HARNESS_PANE`). */
+const PANE = /^(?:p\d{1,4}:)?%\d{1,9}$/
 /** The most messages `harness send` alone gives an agent at once, unread ones first. */
 const UNREAD_MAX = 20
 /** Whether `wanted` is the whole of a name the engine cut short: Codex titles its terminal with the folder cut to fit
@@ -396,7 +397,7 @@ export function startAgentMessages(core: CoreApi, options: MessagesOptions = {})
   async function send(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     const pane = typeof payload.pane === 'string' ? payload.pane : ''
     if (!PANE.test(pane)) throw new MessageError('NOT_A_HARNESS', 'Run harness send from a harness pane.')
-    // The pane `harness send` names is `$TMUX_PANE`: a tmux pane first (`sessionForPaneId`).
+    // A bare `%N` is `$TMUX_PANE`, a tmux pane only (`sessionForPaneId`).
     const session = sessionForPaneId(live(), pane)
     if (!session) throw new MessageError('NOT_A_HARNESS', 'This pane is not a harness Harness knows. Run harness send from an agent\'s pane.')
     // Off is the person's word, answered before the tabs are read: a backend that cannot be reached is not the reason.

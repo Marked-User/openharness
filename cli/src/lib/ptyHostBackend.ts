@@ -446,6 +446,8 @@ export class PtyHostBackend implements TerminalBackend<PtyRuntimeRef> {
       ...(request.cwd ? { cwd: request.cwd } : {}),
       ...(request.env && Object.keys(request.env).length ? { env: request.env } : {}),
       ...(request.expectedHeldToken ? { expectedHeldToken: request.expectedHeldToken } : {}),
+      // The host keeps each pane's create env, as tmux keeps its session's: a respawn inherits it, less these.
+      ...(request.clearEnv?.length ? { clearEnv: [...request.clearEnv] } : {}),
     })
     if (result.state === 'ok') {
       // The host absorbs the replaced process's exit; the pane runs again.

@@ -58,17 +58,18 @@ export function tmuxRuntimeOf(session: { readonly runtimes: readonly TerminalRun
   return session.runtimes.find((runtime): runtime is TmuxRuntimeRef => runtime.backend === 'tmux')
 }
 
+/** A pty host pane as its shell names itself: `HARNESS_PANE`, `<instance>:%N`. */
+const PTY_HOST_PANE = /^(p\d{1,4}):(%\d{1,9})$/
+
 /**
- * The row a shell's own word about its pane names: `%N` from `$TMUX_PANE` (`harness remote`, `harness send`), so a
- * tmux pane first. Only when no tmux runtime has that id is it read as a pty host pane id, and then only when
- * exactly one row has it: pane ids are per backend, and two hosts' `%N` are two panes. Never the bare `tmuxPane`,
- * which is a ptyhost pane's id on a ptyhost row.
+ * The row a shell's own word about its pane names (`harness remote`, `harness send`). A bare `%N` is `$TMUX_PANE`,
+ * so a tmux pane and nothing else: a pty host's `%N` is another pane, which only its own `<instance>:%N`
+ * (`$HARNESS_PANE`) names. Never the bare `tmuxPane`, which is a ptyhost pane's id on a ptyhost row.
  */
 export function sessionForPaneId<S extends { readonly runtimes: readonly TerminalRuntimeRef[] }>(sessions: readonly S[], pane: string): S | undefined {
-  const tmux = sessions.find((session) => session.runtimes.some((runtime) => runtime.backend === 'tmux' && runtime.paneId === pane))
-  if (tmux) return tmux
-  const pty = sessions.filter((session) => session.runtimes.some((runtime) => runtime.backend === 'ptyhost' && runtime.paneId === pane))
-  return pty.length === 1 ? pty[0] : undefined
+  const pty = PTY_HOST_PANE.exec(pane)
+  if (pty) return sessions.find((session) => session.runtimes.some((runtime) => runtime.backend === 'ptyhost' && runtime.instance === pty[1] && runtime.paneId === pty[2]))
+  return sessions.find((session) => session.runtimes.some((runtime) => runtime.backend === 'tmux' && runtime.paneId === pane))
 }
 
 /** Stable placement key. For tmux the pane id is both the route and the placement identity. */

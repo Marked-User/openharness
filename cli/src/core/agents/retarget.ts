@@ -261,7 +261,8 @@ export function createAgentRetargeter({
           }
         }
       }
-      // A backend whose respawn inherits nothing it is not given (the pty host) has nothing to clear.
+      // A backend with no `clearEnv()` (the pty host keeps the pane's create env as tmux keeps its session's) clears
+      // the same names in the respawn itself: `clearPaneEnv` below.
       if (!grid && backend.clearEnv) {
         const cleared = await backend.clearEnv(pane, gridEnvVarNames(session.engine), dispatchCurrent)
         if (!dispatchCurrent()) return preparationChanged()
@@ -277,7 +278,8 @@ export function createAgentRetargeter({
       const outcome = await restartAgent(
         { engine: session.engine, sessionId: session.sessionId, ...(session.resumeOnly ? { resumeOnly: true as const } : {}) },
         retargetPermission.bypassPermission === true,
-        { ...paneSwapDeps(session, place, built.overrides, retargetPermission.permissionMode ?? null, dispatchCurrent), isCurrent: dispatchCurrent },
+        { ...paneSwapDeps(session, place, !grid && !backend.clearEnv ? { ...built.overrides, clearPaneEnv: gridEnvVarNames(session.engine) } : built.overrides,
+          retargetPermission.permissionMode ?? null, dispatchCurrent), isCurrent: dispatchCurrent },
       )
       replacementStarted = outcome.ok
       if (!current()) return changed()

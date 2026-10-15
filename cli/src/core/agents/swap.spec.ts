@@ -118,12 +118,13 @@ describe('the pane-process swap', () => {
     const pty = { backend: 'ptyhost' as const, instance: 'p1', paneId: '%3' }
     const ptyBackend = { holdOpen: vi.fn(async () => ({ state: 'succeeded' })), respawn: vi.fn(async () => ({ state: 'succeeded' })) }
     const current = () => true
-    const swapDeps = swap.paneSwapDeps(session(), { backend: ptyBackend as never, runtime: pty }, { env: { GRID_KEY: 'k' } }, null, current)
+    const swapDeps = swap.paneSwapDeps(session(), { backend: ptyBackend as never, runtime: pty }, { env: { GRID_KEY: 'k' }, clearPaneEnv: ['ANTHROPIC_BASE_URL'] }, null, current)
     expect(swapDeps.respawnRefusal).toBeUndefined()
     expect(await swapDeps.holdOpen()).toEqual({ ok: true })
     expect(ptyBackend.holdOpen).toHaveBeenCalledWith(pty, current)
     expect(await swapDeps.respawn(['claude'])).toEqual({ ok: true })
-    expect(ptyBackend.respawn).toHaveBeenCalledWith(pty, { command: ['claude'], current, cwd: homedir(), env: { GRID_KEY: 'k' } })
+    // The grid's names leave what the pane was created with (tmux clears its session env instead).
+    expect(ptyBackend.respawn).toHaveBeenCalledWith(pty, { command: ['claude'], current, cwd: homedir(), env: { GRID_KEY: 'k' }, clearEnv: ['ANTHROPIC_BASE_URL'] })
     vi.useFakeTimers()
     vi.mocked(resolvePaneEngineProcess).mockResolvedValue({ pid: 9, startMarker: 'm' } as never)
     const waiting = swapDeps.waitForProcess()

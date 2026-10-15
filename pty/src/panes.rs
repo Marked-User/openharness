@@ -114,6 +114,10 @@ struct PaneEntry {
     pane: Arc<Pane>,
     owner: String,
     label: Option<String>,
+    /// The environment the pane was created with: tmux's session environment, which every
+    /// `respawn-pane` inherits. A respawn adds its own on top for that child only, and takes out
+    /// only the names it clears.
+    env: HashMap<String, String>,
     /// The argv of the current (or last) child.
     command: Vec<String>,
     /// That argv joined by single spaces: tmux's `#{pane_start_command}`, which `respawn`'s
@@ -309,6 +313,7 @@ impl Panes {
         cwd: Option<String>,
         env: HashMap<String, String>,
         expected_held_token: Option<String>,
+        clear_env: Vec<String>,
     ) -> Result<Reply, OpError> {
         let held = |entry: &PaneEntry| match &expected_held_token {
             Some(expected) if !held_by(&entry.start_command, expected) => Err(OpError::new(
@@ -347,7 +352,6 @@ impl Panes {
             }
             handle.wait_exit(EXIT_REPORT);
         }
-        let env = self.child_env(&pane, env);
         let mut table = lock(&self.table);
         // Killed meanwhile: `kill` took the entry, and its exit is announced.
         let entry = table
@@ -367,6 +371,14 @@ impl Panes {
             }
             held(entry)?;
         }
+        // As tmux builds a respawned child's: the session's (the create env, less what this asks
+        // cleared, which stays cleared), then the request's own, which wins.
+        for name in &clear_env {
+            entry.env.remove(name);
+        }
+        let mut child = entry.env.clone();
+        child.extend(env);
+        let env = self.child_env(&pane, child);
         let generation = match handle.respawn(spec(command.clone(), cwd, env, 0, 0)) {
             Ok(generation) => generation,
             Err(e) => {
@@ -421,7 +433,13 @@ impl Panes {
                 let mut table = lock(&self.table);
                 let pane = Pane::spawn(
                     id.clone(),
-                    spec(command.clone(), cwd, self.child_env(&id, env), cols, rows),
+                    spec(
+                        command.clone(),
+                        cwd,
+                        self.child_env(&id, env.clone()),
+                        cols,
+                        rows,
+                    ),
                     self.history_limit,
                     self.sink.clone(),
                 )
@@ -433,6 +451,7 @@ impl Panes {
                         pane: Arc::new(pane),
                         owner,
                         label,
+                        env,
                         start_command: command.join(" "),
                         command,
                         hold,
@@ -612,7 +631,8 @@ impl Panes {
                 cwd,
                 env,
                 expected_held_token,
-            } => self.respawn(pane, command, cwd, env, expected_held_token),
+                clear_env,
+            } => self.respawn(pane, command, cwd, env, expected_held_token, clear_env),
             Op::SetEngineExit { pane, status } => {
                 let mut table = lock(&self.table);
                 let entry = table
@@ -877,6 +897,62 @@ mod tests {
         assert_eq!(st["startCommand"], "/bin/sh -c echo two; sleep 30");
         until("two", || capture(&panes, &pane).unwrap().contains("two"));
         assert!(capture(&panes, &pane).unwrap().contains("one"));
+        panes
+            .handle(op(json!({"op": "kill", "pane": pane, "graceMs": 200})))
+            .unwrap();
+    }
+
+    /// tmux's session environment: a respawned child keeps what the pane was created with, less
+    /// the names a respawn cleared (for good), with the respawn's own on top for that child only.
+    #[test]
+    fn respawn_keeps_the_create_env_less_what_it_clears() {
+        let (panes, _notices) = table();
+        let script = "echo \"A=${A-unset} B=${B-unset} C=${C-unset} P=$HARNESS_PANE\"; sleep 30";
+        let r = panes
+            .handle(op(
+                json!({"op": "create", "command": ["/bin/sh", "-c", script],
+                "env": {"A": "create-a", "B": "create-b"},
+                "cols": 80, "rows": 10, "owner": "o", "hold": true}),
+            ))
+            .unwrap();
+        let pane = r["pane"].as_str().unwrap().to_owned();
+        let line = |text: &str| format!("A={text} P=p9:{pane}");
+        until("create env", || {
+            capture(&panes, &pane)
+                .unwrap()
+                .contains(&line("create-a B=create-b C=unset"))
+        });
+        // Kept, with the request's own on top: B overridden, C added.
+        panes
+            .handle(op(
+                json!({"op": "respawn", "pane": pane, "command": ["/bin/sh", "-c", script],
+                "env": {"B": "request-b", "C": "request-c"}}),
+            ))
+            .unwrap();
+        until("kept", || {
+            capture(&panes, &pane)
+                .unwrap()
+                .contains(&line("create-a B=request-b C=request-c"))
+        });
+        // The request's env was that child's alone; A cleared, and cleared for every later child.
+        panes
+            .handle(op(
+                json!({"op": "respawn", "pane": pane, "command": ["/bin/sh", "-c", script],
+                "clearEnv": ["A"]}),
+            ))
+            .unwrap();
+        until("cleared", || {
+            capture(&panes, &pane)
+                .unwrap()
+                .contains(&line("unset B=create-b C=unset"))
+        });
+        panes
+            .handle(op(json!({"op": "respawn", "pane": pane, "command": ["/bin/sh", "-c", &format!("echo again; {script}")]})))
+            .unwrap();
+        until("still cleared", || {
+            let text = capture(&panes, &pane).unwrap();
+            text.contains("again") && text.matches(&line("unset B=create-b C=unset")).count() == 2
+        });
         panes
             .handle(op(json!({"op": "kill", "pane": pane, "graceMs": 200})))
             .unwrap();

@@ -82,6 +82,24 @@ const screen = async (backend: PtyHostBackend, runtime: PtyRuntimeRef): Promise<
     })
   }, CASE_TIMEOUT_MS)
 
+  it('a restart keeps the environment the pane was created with, as tmux\'s session env; a retarget home clears its names', async () => {
+    await withHost(async (backend) => {
+      // What a default OpenCode harness is created with (core/agents/create.ts `freshHarnessEnvironment`), which a
+      // restart's own launch env does not carry.
+      const created = await backend.create({ command: ['/bin/sh'], env: { OPENCODE_CONFIG_CONTENT: 'fixture-config', ANTHROPIC_BASE_URL: 'http://grid' } })
+      if (created.state !== 'succeeded') throw new Error(`create failed: ${JSON.stringify(created)}`)
+      const pane = created.runtime
+      const show = 'echo "cfg=${OPENCODE_CONFIG_CONTENT-unset} url=${ANTHROPIC_BASE_URL-unset} key=${GRID_KEY-unset}"; exec /bin/sh'
+      expect(await backend.respawn(pane, { command: ['/bin/sh', '-c', show], env: { GRID_KEY: 'k' } })).toMatchObject({ state: 'succeeded' })
+      expect(await until(() => screen(backend, pane), (text) => text.includes('cfg=fixture-config url=http://grid key=k')))
+        .toContain('cfg=fixture-config url=http://grid key=k')
+      expect(await backend.respawn(pane, { command: ['/bin/sh', '-c', show], clearEnv: ['ANTHROPIC_BASE_URL'] })).toMatchObject({ state: 'succeeded' })
+      expect(await until(() => screen(backend, pane), (text) => text.includes('cfg=fixture-config url=unset key=unset')))
+        .toContain('cfg=fixture-config url=unset key=unset')
+      expect((await backend.kill(pane)).state).toBe('succeeded')
+    })
+  }, CASE_TIMEOUT_MS)
+
   it('a held shell under a token is replaced only by a respawn naming it, and closed only by its own token', async () => {
     await withHost(async (backend) => {
       const token = '0b5f9d38-3c1e-4c55-9f1a-1d2e3f4a5b6c'

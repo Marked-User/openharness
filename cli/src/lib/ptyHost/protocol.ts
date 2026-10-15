@@ -157,7 +157,7 @@ export type PtyOp =
   | { op: 'setTitle'; pane: string; title: string }
   | { op: 'holdOpen'; pane: string }
   | { op: 'releaseHold'; pane: string }
-  | { op: 'respawn'; pane: string; command: string[]; cwd?: string; env?: Record<string, string>; expectedHeldToken?: string }
+  | { op: 'respawn'; pane: string; command: string[]; cwd?: string; env?: Record<string, string>; expectedHeldToken?: string; clearEnv?: string[] }
   | { op: 'jobPids'; pane: string }
   | { op: 'processes' }
   | { op: 'setEngineExit'; pane: string; status: number }

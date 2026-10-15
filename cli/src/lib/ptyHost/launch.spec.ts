@@ -106,6 +106,8 @@ const home = process.argv[process.argv.indexOf('--home') + 1]
 const run = path.join(home, 'run')
 fs.mkdirSync(run, { recursive: true })
 fs.appendFileSync(path.join(home, 'spawns'), process.pid + '\\n')
+// What the host was started with, for the spawn-environment test.
+fs.writeFileSync(path.join(home, 'env.json'), JSON.stringify({ TMUX: process.env.TMUX ?? null, TMUX_PANE: process.env.TMUX_PANE ?? null, KEPT: process.env.PTY_LAUNCH_KEPT ?? null }))
 if (${JSON.stringify(mode)} === 'fail') process.exit(4)
 if (${JSON.stringify(mode)} === 'quiet') process.exit(0)
 const endpoint = path.join(run, 'h.sock')
@@ -173,6 +175,18 @@ describe.skipIf(process.platform === 'win32')('ensurePtyHost', () => {
     expect(second).not.toBe(first)
     expect(await second.call({ op: 'inventory' })).toEqual({ state: 'ok', value: { panes: [] } })
     expect(spawnCount(dir)).toBe(1)
+  })
+
+  it('starts the host without the daemon\'s tmux identity: its panes are not inside the daemon\'s tmux pane', async () => {
+    vi.stubEnv('TMUX', '/tmp/tmux-501/default,1,0')
+    vi.stubEnv('TMUX_PANE', '%42')
+    vi.stubEnv('PTY_LAUNCH_KEPT', 'yes')
+    try {
+      const dir = home()
+      await clientOf(await ensurePtyHost(dir, { binary: fakeBinary('serve') }))
+      expect(JSON.parse(readFileSync(path.join(dir, 'env.json'), 'utf8'))).toEqual({ TMUX: null, TMUX_PANE: null, KEPT: 'yes' })
+      expect(process.env.TMUX_PANE).toBe('%42')
+    } finally { vi.unstubAllEnvs() }
   })
 
   it('starts a host when there is no discovery file, and waits for it', async () => {

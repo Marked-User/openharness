@@ -117,7 +117,12 @@ export interface TerminalCreateRequest extends TerminalDispatchControl {
 export interface TerminalRespawnRequest extends TerminalDispatchControl {
   cwd?: string
   command: string[]
+  /** This child's own variables, on top of what the pane was created with (tmux's session environment, the pty
+   *  host's stored create env), which a respawn inherits. */
   env?: Record<string, string>
+  /** Names taken out of what the pane was created with, for this child and every later one. The pty host does it
+   *  in the respawn; a backend with `clearEnv()` (tmux) is cleared through that instead, before the respawn. */
+  clearEnv?: readonly string[]
 }
 
 export type TerminalCreateResult<Ref extends TerminalRuntimeRef = TerminalRuntimeRef> =

@@ -33,10 +33,12 @@ fn assert_every_field_read(op: &Op, v: &Value) {
         Op::Capture { history_lines, .. } => {
             assert_eq!(history_lines.map(u64::from), v["historyLines"].as_u64())
         }
-        Op::Respawn { cwd, env: e, expected_held_token, .. } => {
+        Op::Respawn { cwd, env: e, expected_held_token, clear_env, .. } => {
             assert_eq!(cwd.clone(), str_of(&v["cwd"]));
             assert_eq!(*e, env(&v["env"]));
             assert_eq!(expected_held_token.clone(), str_of(&v["expectedHeldToken"]));
+            let cleared: Vec<String> = serde_json::from_value(v["clearEnv"].clone()).unwrap();
+            assert_eq!(*clear_env, cleared);
         }
         _ => {}
     }
