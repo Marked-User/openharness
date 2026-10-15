@@ -237,6 +237,10 @@ The native desktop target uses the CLI for cloud access and SSO tokens:
   `LocalCliDiscovery`, which runs `harness start` when needed). The CLI terminates E2EE for relayed
   machines; the app carries no crypto. Close code `4404`/`NO_PEER_LINK` means the machine needs
   `harness link import` — surfaced as `MachineState.needsLink` and polled via `_linkRetryTimers`.
+  Native link retries wait 5, 10, 20, then 30 seconds between probes, and never close an active
+  connection or password-link handshake. Explicit Connect is immediate; repeated clicks join it.
+  The initial unlinked refusal is measured once; later automatic probes are suppressed until the
+  machine is linked. This changes neither the browser's retry policy nor the daemon.
   A viewer build settles its own `NO_PEER_LINK`/`E2E_DENIED` first (`_settleTrust`): it joins the
   device log if it is not in it (`ViewerDeviceLog.ensureRegistered`), reads it and dials again,
   showing the machine as connecting; only a refusal that outlasts two rounds (~15s), or a frozen

@@ -61,6 +61,11 @@ Weekly bins cover completed weeks from installations that report again, so non-r
 
 Native Desktop observes main-frame/first-frame viewer loading, updater apply acknowledgements and
 the next observed version, explicit versus automatic connections, and resume-to-observed-work.
+Known-unlinked native Desktop retry probes do not start additional automatic connection
+observations: the initial refusal remains one outcome, and an explicit Connect is measured
+separately. Older releases counted every probe in the health totals. A drop across this
+measurement change is not evidence that fewer people encountered linking trouble; these
+counters do not count affected people. Retry suppression adds no identifiers or stored history.
 The startup bucket measures launch to the first consented observation of a connected workspace,
 including preference/sign-in delay. One in 60 rendered frames supplies a coarse duration bucket;
 it cannot reliably detect an idle freeze. Error hooks pass only framework/async categories.

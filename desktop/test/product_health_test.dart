@@ -122,6 +122,36 @@ void main() {
     expect(reports.first['context'], usage.context!.toJson());
   });
 
+  test('known unlinked probes preserve the first outcome without counting each retry', () async {
+    await usage.flush();
+    final connections = ProductConnections(usage);
+    addTearDown(connections.dispose);
+    connections.status('PRIVATE_MACHINE', connecting: true, connected: false);
+    connections.refused('PRIVATE_MACHINE', ProductHealthMeasure.connectErrorUnlinked);
+    connections.status('PRIVATE_MACHINE', connecting: true, connected: false, suppressStart: true);
+    connections.status('PRIVATE_MACHINE', connecting: false, connected: false);
+    for (var retry = 0; retry < 10; retry++) {
+      connections.status('PRIVATE_MACHINE', connecting: true, connected: false, suppressStart: true);
+      connections.refused('PRIVATE_MACHINE', ProductHealthMeasure.connectErrorUnlinked);
+      connections.status('PRIVATE_MACHINE', connecting: false, connected: false,
+          failure: ProductHealthMeasure.connectErrorUnlinked);
+    }
+    final manual = connections.manual('PRIVATE_MACHINE');
+    connections.status('PRIVATE_MACHINE', connecting: true, connected: false, suppressStart: true);
+    connections.status('PRIVATE_MACHINE', connecting: false, connected: true);
+    manual(ProductOutcome.ok);
+    // A later ordinary connection remains measurable.
+    connections.status('PRIVATE_MACHINE', connecting: true, connected: false);
+    connections.status('PRIVATE_MACHINE', connecting: false, connected: true);
+    await usage.flush();
+    expect(totals()['ui_desktop_connect_auto_started'], 2);
+    expect(totals()['ui_desktop_connect_auto_failed'], 1);
+    expect(totals()['health_desktop_connect_error_unlinked'], 1);
+    expect(totals()['ui_desktop_connect_auto_ok'], 1);
+    expect(totals()['ui_desktop_connect_user_ok'], 1);
+    expect(jsonEncode(reports), isNot(contains('PRIVATE')));
+  });
+
   test('opt-out and account changes fence delayed callbacks, counters, and retries', () async {
     await usage.flush();
     final old = usage.begin(ProductFlow.viewerLoad);

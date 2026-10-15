@@ -972,8 +972,10 @@ class AppNotifier extends ChangeNotifier {
   final Map<String, Timer> _slowReloadTimers = {};
   // Periodic retry for a machine the relay reported NO_PEER_LINK for — a `harness link connect` run
   // in a terminal (or another app instance) has no way to notify this one, so this is what makes the
-  // app pick up a fresh link within a few seconds instead of only on the next manual click/restart.
+  // app pick up a fresh link instead of only on the next manual click/restart.
+  // Native retries back off and never replace a connection still being established.
   final Map<String, Timer> _linkRetryTimers = {};
+  final Map<String, Future<bool>> _trustedConnections = {};
   // Safety-net reconciliation for a connected machine's agent list, on top of the push events
   // (agent_synced/agent_created/agent_renamed/agent_deleted) that normally keep it live — catches the
   // rare case a push event was dropped. Runs silently: see _syncAgentsIfChanged.
@@ -6926,6 +6928,10 @@ class AppNotifier extends ChangeNotifier {
     final settling =
         nextStatus == ConnectionStatus.disconnected &&
         _trustSettling.contains(machineId);
+    final retryingLink =
+        machine.needsLink &&
+        (nextStatus == ConnectionStatus.connecting ||
+            nextStatus == ConnectionStatus.reconnecting);
     productConnections.status(
       machineId,
       connecting:
@@ -6933,21 +6939,18 @@ class AppNotifier extends ChangeNotifier {
           nextStatus == ConnectionStatus.connecting ||
           nextStatus == ConnectionStatus.reconnecting,
       connected: nextStatus == ConnectionStatus.connected,
+      suppressStart: viewer == null && retryingLink,
       failure: machine.needsLink
           ? ProductHealthMeasure.connectErrorUnlinked
           : machine.nodeOnline == false
           ? ProductHealthMeasure.connectErrorOffline
           : null,
     );
-    // An unlinked machine is redialled every 5 s by the link retry and refused at once each time
+    // An unlinked machine used to be redialled every 5 s and refused at once each time
     // (4404 NO_PEER_LINK): measured per dial, one such machine read as ~720 failed connects an hour,
     // and prod's first day showed 1,197 of 1,233 remote connects "failed", nearly all under a second.
     // The dial that found it unlinked is already open and still ends as one failure; the retry's
     // dials are not new attempts. A dial after linking (needsLink cleared first) is measured again.
-    final retryingLink =
-        machine.needsLink &&
-        (nextStatus == ConnectionStatus.connecting ||
-            nextStatus == ConnectionStatus.reconnecting);
     if (!retryingLink) {
       _measureConnection(
         machineId,
@@ -7579,7 +7582,8 @@ class AppNotifier extends ChangeNotifier {
     _offlineRetryTimers.remove(machineId)?.cancel();
   }
 
-  /// Dials [machineId] now instead of at the link retry's next tick. A machine
+  /// Dials [machineId] now instead of at the link retry's next tick. Native
+  /// callers join an already-running Connect for the same machine. A machine
   /// that trusts this device through the account's device key log answers with
   /// no password at all. True once it is connected; false when it still wants
   /// this device linked (a CLI from before the log, or a log that does not name
@@ -7587,16 +7591,42 @@ class AppNotifier extends ChangeNotifier {
   Future<bool> connectTrusted(
     String machineId, {
     Duration timeout = const Duration(seconds: 12),
-  }) async {
+  }) {
     final state = machineStates[machineId];
-    if (state == null || state.machine.isShared) return false;
+    if (_disposed || state == null || state.machine.isShared) {
+      return Future.value(false);
+    }
+    // Native Connect may be reached from more than one surface. Join its dial
+    // instead of closing the socket another click is already waiting on.
+    if (viewer == null) {
+      final pending = _trustedConnections[machineId];
+      if (pending != null) return pending;
+    }
+    late final Future<bool> work;
+    work = _connectTrusted(machineId, state, timeout).whenComplete(() {
+      if (identical(_trustedConnections[machineId], work)) {
+        _trustedConnections.remove(machineId);
+      }
+    });
+    if (viewer == null) _trustedConnections[machineId] = work;
+    return work;
+  }
+
+  Future<bool> _connectTrusted(
+    String machineId,
+    MachineState state,
+    Duration timeout,
+  ) async {
+    final revision = _authRevision;
+    bool current() =>
+        _authWorkCurrent(revision) && identical(machineStates[machineId], state);
     final finishConnection = productConnections.manual(machineId);
     final done = Completer<bool>();
     var dialed = false;
     void settle() {
       final now = machineStates[machineId];
       if (done.isCompleted) return;
-      if (now == null) return done.complete(false);
+      if (!current() || now == null) return done.complete(false);
       final status = now.connectionStatus;
       if (status == ConnectionStatus.connected && !now.needsLink) {
         return done.complete(true);
@@ -7615,10 +7645,11 @@ class AppNotifier extends ChangeNotifier {
     });
     try {
       await _pool?.closeMachine(machineId);
-      if (machineStates[machineId] case final current?)
-        _connectMachine(current);
+      if (!current()) return false;
+      _connectMachine(state);
       settle();
       final connected = await done.future;
+      if (!current()) return false;
       if (!connected) {
         productConnections.refused(
           machineId,
@@ -7638,6 +7669,10 @@ class AppNotifier extends ChangeNotifier {
 
   void _startLinkRetry(String machineId) {
     if (_linkRetryTimers.containsKey(machineId)) return;
+    if (viewer == null) {
+      _scheduleNativeLinkRetry(machineId, offlineRetryInterval);
+      return;
+    }
     _linkRetryTimers[machineId] = Timer.periodic(offlineRetryInterval, (_) {
       final state = machineStates[machineId];
       if (state == null || !state.needsLink) {
@@ -7649,6 +7684,49 @@ class AppNotifier extends ChangeNotifier {
     });
   }
 
+  void _scheduleNativeLinkRetry(String machineId, Duration delay) {
+    final state = machineStates[machineId];
+    if (state == null || !state.needsLink || _disposed) return;
+    final revision = _authRevision;
+    late final Timer timer;
+    bool current() =>
+        _authWorkCurrent(revision) &&
+        identical(_linkRetryTimers[machineId], timer) &&
+        identical(machineStates[machineId], state) &&
+        state.needsLink;
+    bool busy() =>
+        _trustedConnections.containsKey(machineId) ||
+        pendingMachineLink(machineId) != null ||
+        state.connectionStatus == ConnectionStatus.connecting ||
+        state.connectionStatus == ConnectionStatus.reconnecting ||
+        state.connectionStatus == ConnectionStatus.connected;
+    timer = Timer(delay, () async {
+      try {
+        if (!current() || busy()) return;
+        // Await removal before redialling; a slow handshake belongs to the
+        // existing transport, which has its own timeout/reconnect policy.
+        await _pool?.closeMachine(machineId);
+        if (!current() || busy()) return;
+        _connectMachine(state);
+      } catch (_) {
+        // A failed close cannot stop recovery; the next bounded retry owns it.
+      } finally {
+        if (current()) {
+          final next = delay * 2;
+          _scheduleNativeLinkRetry(
+            machineId,
+            next > const Duration(seconds: 30)
+                ? const Duration(seconds: 30)
+                : next,
+          );
+        } else if (identical(_linkRetryTimers[machineId], timer)) {
+          _stopLinkRetry(machineId);
+        }
+      }
+    });
+    _linkRetryTimers[machineId] = timer;
+  }
+
   void _stopLinkRetry(String machineId) {
     _linkRetryTimers.remove(machineId)?.cancel();
   }
@@ -7658,6 +7736,7 @@ class AppNotifier extends ChangeNotifier {
       timer.cancel();
     }
     _linkRetryTimers.clear();
+    _trustedConnections.clear();
   }
 
   void _stopAllOfflineRetries() {

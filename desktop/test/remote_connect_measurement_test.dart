@@ -11,6 +11,14 @@ class _Recorder extends ProductMeasurement {
   _Recorder() : super(surface: 'desktop', automatic: false, sendSetup: (_) async => {});
 
   final ended = <String>[];
+  final healthCounts = <ProductHealthMeasure>[];
+
+  @override
+  bool get healthEnabled => true;
+  @override
+  bool get sharing => true;
+  @override
+  void health(ProductHealthMeasure measure) => healthCounts.add(measure);
 
   @override
   void Function(ProductOutcome) begin(ProductFlow flow) =>
@@ -68,6 +76,7 @@ void main() {
     app
       ..status = AppStatus.authenticated
       ..currentUser = const CurrentUserProfile(id: 'u1', email: 'u1@example.test');
+    app.notifyListeners();
   });
 
   tearDown(() => app.dispose());
@@ -77,7 +86,7 @@ void main() {
     // WsConn reports the refusal before the close (WsConn._onDone).
     app.localFailureForTest(mid, 4404, 'NO_PEER_LINK');
     app.connectionStatusForTest(mid, ConnectionStatus.disconnected);
-    expect(usage.ended, ['remoteConnect:failed']);
+    expect(usage.ended, ['connectAuto:failed', 'remoteConnect:failed']);
 
     // Three link-retry ticks: closeMachine, then a dial refused again.
     for (var tick = 0; tick < 3; tick++) {
@@ -86,13 +95,14 @@ void main() {
       app.localFailureForTest(mid, 4404, 'NO_PEER_LINK');
       app.connectionStatusForTest(mid, ConnectionStatus.disconnected);
     }
-    expect(usage.ended, ['remoteConnect:failed']);
+    expect(usage.ended, ['connectAuto:failed', 'remoteConnect:failed']);
+    expect(usage.healthCounts.where((m) => m == ProductHealthMeasure.connectErrorUnlinked), hasLength(1));
 
     // Linked: the next dial is measured again, and succeeds.
     app.stateOf(mid)!.needsLink = false;
     app.connectionStatusForTest(mid, ConnectionStatus.connecting);
     app.connectionStatusForTest(mid, ConnectionStatus.connected);
-    expect(usage.ended, ['remoteConnect:failed', 'remoteConnect:ok']);
+    expect(usage.ended, ['connectAuto:failed', 'remoteConnect:failed', 'connectAuto:ok', 'remoteConnect:ok']);
   });
 
   test('an ordinary offline machine still counts each dial that ends', () {
@@ -102,6 +112,7 @@ void main() {
     app.connectionStatusForTest(mid, ConnectionStatus.disconnected);
     app.connectionStatusForTest(mid, ConnectionStatus.connecting);
     app.connectionStatusForTest(mid, ConnectionStatus.connected);
-    expect(usage.ended, ['remoteConnect:failed', 'remoteConnect:ok']);
+    expect(usage.ended.where((event) => event.startsWith('remoteConnect:')),
+        ['remoteConnect:failed', 'remoteConnect:ok']);
   });
 }
