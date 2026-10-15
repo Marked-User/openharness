@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   ApprovalDenied, ApprovalWindow, DEFAULT_ASK_CHANNEL, KNOWN_CHANNELS, TIER_RANK, VOICE_MONEY_LIMIT_MINOR,
-  applyOverride, ask, askChannelFor, classifyTool, resolve, resolveTool, voiceAllowed,
+  applyOverride, ask as askProd, askChannelFor, classifyTool, resolve, resolveTool, voiceAllowed,
   type ApprovalProfile, type ApprovalTemplate, type AskChannel, type Tier,
 } from './approvals.js'
 
@@ -11,6 +11,7 @@ type Golden = {
   cases: { t: string; a: string; w: boolean; p: ApprovalProfile | null; tier: Tier }[]
   asks: { t: string; a: string; w: boolean; p: ApprovalProfile | null; c: string[] | null; m: number | null; approved?: boolean; channel?: string | null; raises?: boolean }[]
 }
+const ask: typeof askProd = (t, a, p, f, o = {}) => askProd(t, a, p, f, { reference: true, ...o })
 const golden = JSON.parse(readFileSync(new URL('./approvals.golden.json', import.meta.url), 'utf8')) as Golden
 
 const BK: ApprovalTemplate = { permissions: { auto: ['Read the ledger'], ask: ['Send an invoice'], never: ['Move money out'] } }

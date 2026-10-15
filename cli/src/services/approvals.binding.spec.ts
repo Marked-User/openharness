@@ -4,11 +4,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  ApprovalDenied, ApprovalWindow, AskLedger, CHALLENGE_WORDS, actionDigest8, ask, drawChallenge,
+  ApprovalDenied, ApprovalWindow, AskLedger, CHALLENGE_WORDS, actionDigest8, ask as askProd, drawChallenge,
   PhonePairing, openJournal, transcriptMatches,
   type AskAnswer, type AskChannel, type AskRequest, type ApprovalTemplate,
 } from './approvals.js'
 
+/** Production defaults for these tests: manifest present (tool unknown, so write) and a window. */
+const ask: typeof askProd = (t, a, p, f, o = {}) => askProd(t, a, p, f, { kind: { manifest: [], tool: a }, window: new ApprovalWindow(), agentId: 'agent', ...o })
 const BK: ApprovalTemplate = { permissions: { auto: ['Read the ledger'], ask: ['Send an invoice'], never: ['Move money out'] } }
 const RG: ApprovalTemplate = { permissions: { locked_ask: ['Brakes step'] } }
 
@@ -16,7 +18,7 @@ function clock(t = 1_000_000) {
   return { now: () => t, advance: (ms: number) => { t += ms } }
 }
 function good(req: AskRequest, extra: Partial<AskAnswer> = {}): AskAnswer {
-  return { id: req.id, digest8: req.digest8, approved: true, transcript: req.challenge ? `yes ${req.challenge}` : undefined, ...extra }
+  return { id: req.id, digest8: req.digest8, approved: true, transcript: req.challenge ? `yes ${req.challenge}` : undefined, from: { phoneId: 'phone-1' }, ...extra }
 }
 
 describe('F2 digest8', () => {
@@ -94,7 +96,7 @@ describe('F2 AskLedger', () => {
     expect(l.settle({ ...good(r1), digest8: '00000000' })).toEqual({ ok: false, reason: 'digest_mismatch' })
     expect(l.settle(good(r1))).toEqual({ ok: false, reason: 'replayed' })
     const r2 = l.open({ action: 'a', tier: 'ask', channel: 'touch' })
-    c.advance(1000)
+    c.advance(999)
     expect(l.settle(good(r2))).toEqual({ ok: true })
     const r3 = l.open({ action: 'a', tier: 'ask', channel: 'touch' })
     c.advance(1001)
@@ -148,9 +150,9 @@ describe('F2 ask with a ledger', () => {
     const l = new AskLedger()
     const seen: [AskChannel, string, AskRequest][] = []
     const r = await ask(BK, 'Send an invoice', null, (ch, p, req) => { seen.push([ch, p, req!]); return good(req!) }, { mic: MIC, ledger: l })
-    expect(r).toEqual({ approved: true, channel: 'voice', tier: 'ask', reason: undefined })
+    expect(r).toMatchObject({ approved: true, channel: 'voice', tier: 'ask', reason: undefined })
     const [, prompt, req] = seen[0]!
-    expect(prompt).toBe(`ASK: Send an invoice. Say "${req.challenge}" to approve.`)
+    expect(prompt).toBe(`ASK: Send an invoice (running total today: 1 actions, $0.00). Say "${req.challenge}" to approve.`)
     expect(req.digest8).toBe(actionDigest8('Send an invoice', {}))
   })
   it('touch Ask needs no challenge', async () => {
@@ -160,7 +162,7 @@ describe('F2 ask with a ledger', () => {
   })
   it('bare true is not accepted when bound', async () => {
     const r = await ask(BK, 'Send an invoice', null, () => true, { mic: MIC, ledger: new AskLedger() })
-    expect(r).toEqual({ approved: false, channel: 'voice', tier: 'ask', reason: 'malformed' })
+    expect(r).toMatchObject({ approved: false, channel: 'voice', tier: 'ask', reason: 'malformed' })
   })
   it('replay of a previous answer against a new Ask is rejected', async () => {
     const l = new AskLedger()
@@ -175,7 +177,7 @@ describe('F2 ask with a ledger', () => {
     const l = new AskLedger({ now: c.now, ttlMs: 100 })
     const w = new ApprovalWindow({ now: c.now })
     const r = await ask(BK, 'Send an invoice', null, (_c, _p, req) => { c.advance(101); return good(req!) }, { mic: MIC, ledger: l, window: w, agentId: 'a', amountMinor: 100 })
-    expect(r).toEqual({ approved: false, channel: 'voice', tier: 'ask', reason: 'expired' })
+    expect(r).toMatchObject({ approved: false, channel: 'voice', tier: 'ask', reason: 'expired' })
     expect(w.totals('a').count).toBe(0)
   })
   it('a verifier without a ledger fails closed', async () => {
@@ -258,17 +260,17 @@ describe('F8: a send Ask shows the recipient and first line', () => {
     const message = '\n  Hi Dana, your invoice is attached.  \nSecond line'
     await ask(BK, 'Send an invoice', null, (_c, p, req) => { prompt = p; digest = req!.digest8; return good(req!) },
       { ledger: new AskLedger(), isSend: true, send: { recipient: 'dana@example.com', message }, amountMinor: 1250 })
-    expect(prompt).toBe('ASK: Send an invoice to dana@example.com: "Hi Dana, your invoice is attached." $12.50')
+    expect(prompt).toBe('ASK: Send an invoice to dana@example.com: "Hi Dana, your invoice is attached." $12.50 (running total today: 1 actions, $12.50)')
     const other = await new Promise<string>((res) => { void ask(BK, 'Send an invoice', null, (_c, _p, req) => { res(req!.digest8); return good(req!) },
       { ledger: new AskLedger(), isSend: true, send: { recipient: 'eve@example.com', message }, amountMinor: 1250 }) })
     expect(other).not.toBe(digest)
   })
   it('long first lines are cut, empty messages show empty quotes', async () => {
     const seen: string[] = []
-    await ask(BK, 'Send an invoice', null, (_c, p) => { seen.push(p); return true }, { send: { recipient: 'r', message: 'x'.repeat(100) } })
-    await ask(BK, 'Send an invoice', null, (_c, p) => { seen.push(p); return true }, { send: { recipient: 'r', message: '' } })
-    expect(seen[0]).toBe(`ASK: Send an invoice to r: "${'x'.repeat(79)}…"`)
-    expect(seen[1]).toBe('ASK: Send an invoice to r: ""')
+    await ask(BK, 'Send an invoice', null, (_c, p) => { seen.push(p); return true }, { reference: true, send: { recipient: 'r', message: 'x'.repeat(100) } })
+    await ask(BK, 'Send an invoice', null, (_c, p) => { seen.push(p); return true }, { reference: true, send: { recipient: 'r', message: '' } })
+    expect(seen[0]).toBe(`ASK: Send an invoice to r: "${'x'.repeat(79)}…" (running total today: 1 actions, $0.00)`)
+    expect(seen[1]).toBe('ASK: Send an invoice to r: "" (running total today: 1 actions, $0.00)')
   })
   it('a send Ask without recipient or message is refused before prompting', async () => {
     const calls: unknown[] = []
@@ -317,7 +319,7 @@ describe('F5 + F2 journal survives restart', () => {
     c.advance(11)
     expect(j.ledger.pending()).toBe(0)
     expect(j.ledger.settle(good(r2))).toEqual({ ok: false, reason: 'replayed' })
-    c.advance(30)
+    c.advance(24 * 3600 * 1000)
     expect(j.ledger.settle(good(r))).toEqual({ ok: false, reason: 'unknown_id' })
     j.save()
     const saved = JSON.parse(readFileSync(join(dir, 'age.json'), 'utf8'))
@@ -339,6 +341,9 @@ describe('F5 + F2 journal survives restart', () => {
       JSON.stringify({ ...base, ledger: null }),
       JSON.stringify({ ...base, pairing: { phones: [1] } }),
       JSON.stringify({ ...base, pairing: null }),
+      JSON.stringify({ ...base, pairing: { phones: [], log: 'x' } }),
+      JSON.stringify({ ...base, pairing: { phones: [], log: [{ at: 1, event: 'hack', phoneId: 'p' }] } }),
+      JSON.stringify({ ...base, pairing: { phones: [], log: [null] } }),
     ]
     for (const body of bodies) {
       const p = join(dir, 'bad.json')
@@ -352,7 +357,7 @@ describe('F5 + F2 journal survives restart', () => {
       expect(j.window.wouldExceed('anyone').voiceAllowed).toBe(true)
     }
     const ok = join(dir, 'ok.json')
-    writeFileSync(ok, JSON.stringify({ ...base, ledger: { open: [{ id: 'x', digest8: '0011aabb', expiresAt: 1, channel: 'voice', tier: 'ask', challenge: 'maple river' }], spent: [] } }))
+    writeFileSync(ok, JSON.stringify({ ...base, ledger: { open: [{ id: 'x', digest8: '0011aabb', openedAt: 0, expiresAt: 1, channel: 'voice', tier: 'ask', challenge: 'maple river', amountMinor: 5 }], spent: [] } }))
     expect(openJournal(ok).recovered).toBe(false)
   })
 })

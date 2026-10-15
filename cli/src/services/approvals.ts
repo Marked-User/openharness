@@ -7,11 +7,14 @@
  * Pure policy only. Wiring into the core (CoreApi, ports, bridge tools/call hold and release, ledger)
  * is a separate reviewed change (SCOPE P1).
  *
- * Bound mode (opts.ledger) adds F2 (id + digest8, single use, expiry, 2-word spoken challenge,
+ * Production is the default: ask() requires a ledger (F2), a tool manifest (F4) and, for money or
+ * send Asks, an approval window (F5). That mode adds F2 (id + digest8, single use, expiry, 2-word spoken challenge,
  * AnswerVerifier), the required MicGuard for voice, F6 minimum (PhonePairing: touch on device plus a
  * single-use code) and F8 (send Asks name recipient and first line). openJournal persists F5 totals,
  * pending Asks and pairings. Hooks for Volt: MicGuard implementation, AskAnswer.signature (D5 b) via
- * AnswerVerifier. Legacy unbound mode keeps exact parity with the reference and is not for production.
+ * AnswerVerifier. `reference: true` keeps exact parity with eng/reference and is never for production.
+ * Expiry: money Asks 1 h, others 24 h. Shared-account machines (#1358) never answer or pair. Phone MCP
+ * Accept/Decline (#1340) goes through answerMcpElicitation. Sync order (F11) is syncOrder.ts.
  */
 
 import { createHash, randomInt, randomUUID } from 'node:crypto'
@@ -267,22 +270,52 @@ export function transcriptMatches(challenge: string, transcript: string | undefi
   return false
 }
 
-/** SCOPE 3.5 AskRequest. */
+/** DECISIONS 2026-10-15: an Ask with an amount expires 1 h after it opens, any other Ask after 24 h. */
+export const MONEY_ASK_EXPIRY_MS = 60 * 60 * 1000
+export const OTHER_ASK_EXPIRY_MS = 24 * 60 * 60 * 1000
+
+export function askExpiryMs(amountMinor?: number | null): number {
+  return amountMinor != null ? MONEY_ASK_EXPIRY_MS : OTHER_ASK_EXPIRY_MS
+}
+
+/** Reference `ask_expired`: expired once now - opened >= expiry. */
+export function askExpired(openedAt: number, now: number, amountMinor?: number | null): boolean {
+  return now - openedAt >= askExpiryMs(amountMinor)
+}
+
+/** SCOPE 3.5 AskRequest. Field names match the cable `ask.request` frame. */
 export interface AskRequest {
+  /** Random UUID chosen by the daemon. */
   id: string
+  /** First 8 hex of sha256 over the exact action and its details. */
   digest8: string
+  /** Epoch ms when the Ask opened. */
+  openedAt: number
+  /** Epoch ms; an answer at or after this is rejected. openedAt + 1 h with an amount, else + 24 h. */
   expiresAt: number
   channel: AskChannel
   tier: Tier
+  /** Amount in minor units (cents), integer; present means this is a money Ask. */
+  amountMinor?: number
   /** Daemon-drawn 2-word spoken challenge, voice Asks only. */
   challenge?: string
+}
+
+/** Where an answer came from (gateway trust). Shared-account machines (#1358) never answer. */
+export interface AnswerOrigin {
+  /** Paired phone id, required when channel is phone. */
+  phoneId?: string
+  /** True when the answering machine or phone is trusted only through machine sharing. */
+  shared?: boolean
 }
 
 export interface AskAnswer {
   id: string
   digest8: string
+  /** Only literal true approves. */
   approved: boolean
   transcript?: string
+  from?: AnswerOrigin
   /** D5 (b) hook for Volt: signature over (id, digest, counter). Checked by an AnswerVerifier, not here. */
   signature?: string
 }
@@ -290,31 +323,37 @@ export interface AskAnswer {
 /** Extra check after the built-in ones, e.g. D5 (b) signed answers (Volt). Must return literal true. */
 export type AnswerVerifier = (req: AskRequest, ans: AskAnswer) => boolean
 
-export type SettleReason = 'malformed' | 'unknown_id' | 'replayed' | 'expired' | 'digest_mismatch' | 'challenge_mismatch' | 'verifier_rejected'
+export type SettleReason =
+  | 'malformed' | 'unknown_id' | 'replayed' | 'expired' | 'digest_mismatch' | 'challenge_mismatch'
+  | 'verifier_rejected' | 'shared_machine' | 'unpaired_phone'
 export type SettleResult = { ok: true } | { ok: false; reason: SettleReason }
 
 /** Open Asks and spent ids. Every answer is settled at most once; a bad answer also spends the request. */
 export class AskLedger {
   private readonly now: () => number
-  private readonly ttlMs: number
+  private readonly ttlMs?: number
   private readonly verifier?: AnswerVerifier
   private readonly open_ = new Map<string, AskRequest>()
   private readonly spent = new Map<string, number>()
   onChange?: () => void
 
+  /** `ttlMs` overrides the decided expiry; tests only. */
   constructor(opts: { now?: () => number; ttlMs?: number; verifier?: AnswerVerifier } = {}) {
     this.now = opts.now ?? Date.now
-    this.ttlMs = opts.ttlMs ?? 60_000
+    this.ttlMs = opts.ttlMs
     this.verifier = opts.verifier
   }
 
   open(o: { action: string; tier: Tier; channel: AskChannel; amountMinor?: number; details?: Record<string, unknown> }): AskRequest {
+    const openedAt = this.now()
     const req: AskRequest = {
       id: randomUUID(),
       digest8: actionDigest8(o.action, { ...o.details, amountMinor: o.amountMinor }),
-      expiresAt: this.now() + this.ttlMs,
+      openedAt,
+      expiresAt: openedAt + (this.ttlMs ?? askExpiryMs(o.amountMinor)),
       channel: o.channel,
       tier: o.tier,
+      ...(o.amountMinor !== undefined ? { amountMinor: o.amountMinor } : {}),
       ...(o.channel === 'voice' ? { challenge: drawChallenge() } : {}),
     }
     this.open_.set(req.id, req)
@@ -324,9 +363,9 @@ export class AskLedger {
 
   private prune(): void {
     const t = this.now()
-    for (const [id, r] of this.open_) if (r.expiresAt < t) { this.open_.delete(id); this.spent.set(id, r.expiresAt) }
-    // Spent ids are kept a further ttl so a late replay reads as replayed, then dropped.
-    for (const [id, at] of this.spent) if (at + this.ttlMs < t) this.spent.delete(id)
+    for (const [id, r] of this.open_) if (t >= r.expiresAt) { this.open_.delete(id); this.spent.set(id, r.expiresAt) }
+    // Spent ids are kept until a further day past expiry so a late replay reads as replayed.
+    for (const [id, at] of this.spent) if (at + OTHER_ASK_EXPIRY_MS < t) this.spent.delete(id)
   }
 
   pending(): number {
@@ -334,13 +373,14 @@ export class AskLedger {
     return this.open_.size
   }
 
-  settle(ans: AskAnswer): SettleResult {
-    const r = this.check(ans)
+  /** `isPaired` is consulted for phone answers; `extra` runs after the ledger's own verifier. */
+  settle(ans: AskAnswer, ctx: { isPaired?: (phoneId: string) => boolean; extra?: AnswerVerifier } = {}): SettleResult {
+    const r = this.check(ans, ctx)
     this.onChange?.()
     return r
   }
 
-  private check(ans: AskAnswer): SettleResult {
+  private check(ans: AskAnswer, ctx: { isPaired?: (phoneId: string) => boolean; extra?: AnswerVerifier }): SettleResult {
     if (!ans || typeof ans !== 'object' || typeof ans.id !== 'string' || typeof ans.digest8 !== 'string') return { ok: false, reason: 'malformed' }
     const req = this.open_.get(ans.id)
     if (!req) {
@@ -349,13 +389,19 @@ export class AskLedger {
     }
     this.open_.delete(ans.id)
     this.spent.set(ans.id, req.expiresAt)
-    if (this.now() > req.expiresAt) return { ok: false, reason: 'expired' }
+    if (this.now() >= req.expiresAt) return { ok: false, reason: 'expired' }
     if (ans.digest8 !== req.digest8) return { ok: false, reason: 'digest_mismatch' }
+    if (ans.from?.shared === true) return { ok: false, reason: 'shared_machine' }
+    if (req.channel === 'phone') {
+      const id = ans.from?.phoneId
+      if (typeof id !== 'string' || !ctx.isPaired || !ctx.isPaired(id)) return { ok: false, reason: 'unpaired_phone' }
+    }
     if (req.challenge && ans.approved === true && !transcriptMatches(req.challenge, ans.transcript)) return { ok: false, reason: 'challenge_mismatch' }
-    if (this.verifier) {
-      let v = false
-      try { v = this.verifier(req, ans) === true } catch { v = false }
-      if (!v) return { ok: false, reason: 'verifier_rejected' }
+    for (const v of [this.verifier, ctx.extra]) {
+      if (!v) continue
+      let ok = false
+      try { ok = v(req, ans) === true } catch { ok = false }
+      if (!ok) return { ok: false, reason: 'verifier_rejected' }
     }
     return { ok: true }
   }
@@ -381,12 +427,20 @@ export interface MicGuard {
 
 // ---- F6 minimum: phone pairs only by touch on the device plus a single-use code ----
 
+export interface PairingLogEntry {
+  at: number
+  event: 'pair' | 'unpair' | 'refused'
+  phoneId: string
+  reason?: string
+}
 
 export class PhonePairing {
   private readonly now: () => number
   private readonly ttlMs: number
   private readonly codes = new Map<string, number>()
   private readonly phones = new Set<string>()
+  /** Ledger of every pairing, unpairing and refused attempt. */
+  readonly log: PairingLogEntry[] = []
   onChange?: () => void
 
   constructor(opts: { now?: () => number; ttlMs?: number } = {}) {
@@ -395,10 +449,11 @@ export class PhonePairing {
   }
 
   /**
-   * Start pairing. Pairing is itself locked_ask: it needs a touch on the device, never voice or phone.
-   * Returns a 6-digit single-use code shown on the device screen.
+   * Start pairing. Pairing is itself locked_ask: it needs a touch on the device, never voice or phone,
+   * and never from a machine trusted only through sharing (#1358). Returns a 6-digit single-use code.
    */
-  begin(confirmedBy: AskChannel): { code: string; expiresAt: number } {
+  begin(confirmedBy: AskChannel, origin: { shared?: boolean } = {}): { code: string; expiresAt: number } {
+    if (origin.shared === true) throw new ApprovalDenied('a shared machine cannot start pairing')
     if (confirmedBy !== 'touch') throw new ApprovalDenied('phone pairing needs a touch on the device')
     const code = String(randomInt(1_000_000)).padStart(6, '0')
     const expiresAt = this.now() + this.ttlMs
@@ -407,20 +462,27 @@ export class PhonePairing {
     return { code, expiresAt }
   }
 
-  /** Redeem a code for a phone. Single use; expired or unknown codes fail. */
-  complete(phoneId: string, code: string): boolean {
+  /** Redeem a code for a phone. Single use; expired or unknown codes, and shared phones, fail. */
+  complete(phoneId: string, code: string, origin: { shared?: boolean } = {}): boolean {
     const exp = this.codes.get(code)
-    if (exp === undefined) return false
+    const refuse = (reason: string) => {
+      this.log.push({ at: this.now(), event: 'refused', phoneId, reason })
+      this.onChange?.()
+      return false
+    }
+    if (exp === undefined) return refuse('unknown_code')
     this.codes.delete(code)
-    this.onChange?.()
-    if (this.now() > exp || !phoneId) return false
+    if (origin.shared === true) return refuse('shared_machine')
+    if (this.now() >= exp) return refuse('expired')
+    if (!phoneId) return refuse('no_phone_id')
     this.phones.add(phoneId)
+    this.log.push({ at: this.now(), event: 'pair', phoneId })
     this.onChange?.()
     return true
   }
 
   unpair(phoneId: string): void {
-    this.phones.delete(phoneId)
+    if (this.phones.delete(phoneId)) this.log.push({ at: this.now(), event: 'unpair', phoneId })
     this.onChange?.()
   }
 
@@ -428,13 +490,14 @@ export class PhonePairing {
     return phoneId === undefined ? this.phones.size > 0 : this.phones.has(phoneId)
   }
 
-  toJSON(): { phones: string[] } {
-    return { phones: [...this.phones] }
+  toJSON(): { phones: string[]; log: PairingLogEntry[] } {
+    return { phones: [...this.phones], log: this.log.map((e) => ({ ...e })) }
   }
 
   /** @internal */
-  restore(data: { phones: string[] }): void {
+  restore(data: { phones: string[]; log?: PairingLogEntry[] }): void {
     for (const p of data.phones) this.phones.add(p)
+    for (const e of data.log ?? []) this.log.push({ ...e })
   }
 }
 
@@ -462,7 +525,14 @@ function isEntry(e: unknown): e is WindowEntry {
 
 function isRequest(r: unknown): r is AskRequest {
   const x = r as AskRequest
-  return !!x && typeof x.id === 'string' && /^[0-9a-f]{8}$/.test(x.digest8) && Number.isFinite(x.expiresAt) && KNOWN_CHANNELS.has(x.channel) && x.tier in TIER_RANK && (x.challenge === undefined || typeof x.challenge === 'string')
+  return !!x && typeof x.id === 'string' && /^[0-9a-f]{8}$/.test(x.digest8) && Number.isFinite(x.expiresAt) && Number.isFinite(x.openedAt)
+    && KNOWN_CHANNELS.has(x.channel) && x.tier in TIER_RANK && (x.challenge === undefined || typeof x.challenge === 'string')
+    && (x.amountMinor === undefined || (Number.isInteger(x.amountMinor) && x.amountMinor >= 0))
+}
+
+function isLog(e: unknown): boolean {
+  const x = e as PairingLogEntry
+  return !!x && Number.isFinite(x.at) && ['pair', 'unpair', 'refused'].includes(x.event) && typeof x.phoneId === 'string'
 }
 
 function parseJournal(text: string) {
@@ -476,6 +546,7 @@ function parseJournal(text: string) {
   if (!l.spent.every((s: unknown) => Array.isArray(s) && typeof s[0] === 'string' && Number.isFinite(s[1]))) throw new Error('bad spent')
   const p = d.pairing
   if (!p || !Array.isArray(p.phones) || !p.phones.every((x: unknown) => typeof x === 'string')) throw new Error('bad pairing')
+  if (p.log !== undefined && (!Array.isArray(p.log) || !p.log.every(isLog))) throw new Error('bad pairing log')
   return { window: w, ledger: l, pairing: p }
 }
 
@@ -529,35 +600,45 @@ export function openJournal(
 
 // ---- ask ----
 
-/** Bound mode (ledger set) answers with an AskAnswer; legacy mode answers with literal true. */
+/** Production answers with an AskAnswer; reference mode answers with literal true. */
 export type AnswerFn = (channel: AskChannel, prompt: string, req?: AskRequest) => unknown
 
 export interface AskOptions {
+  /**
+   * Reference mode: no ledger, bare-boolean answers, caller-declared isWrite. Only for parity with
+   * eng/reference; never in production. Without it the production rules below are enforced.
+   */
+  reference?: boolean
   available?: readonly string[] | null
-  /** Caller hint only. A manifest-derived kind always wins toward write (F4). */
+  /** Caller hint; can only tighten (true makes a read a write). */
   isWrite?: boolean
+  /** F4, required in production: the bridge's tool manifest and the tool being called. */
   kind?: { manifest: readonly ToolManifestEntry[] | null | undefined; tool: string }
+  /** Amount in minor units (cents). Present means a money Ask (1 h expiry, $50 voice cap). */
   amountMinor?: number
   count?: number
+  /** F5, required in production for money and send Asks. */
   window?: ApprovalWindow
   agentId?: string
   isPaired?: PairingGuard
-  /** F2: bind answers to an AskRequest. Production must set this. */
+  /** F2, required in production. */
   ledger?: AskLedger
-  /** F2 extra check; only valid with a ledger (pass it to the AskLedger). */
+  /** F2 extra check, called by the ledger after its own checks. Needs a ledger. */
   verifier?: AnswerVerifier
-  /** F2: required for voice in bound mode (Volt). */
+  /** F2: required for voice in production (Volt). */
   mic?: MicGuard
-  /** F6: in bound mode the phone answers only when a phone is paired here. */
+  /** F6: in production the phone answers only when that phone is paired here. */
   pairing?: PhonePairing
   /** F8: this Ask releases a send. Requires `send`. */
   isSend?: boolean
   send?: SendDetails
   /** Extra fields bound into the digest. */
   details?: Record<string, unknown>
+  /** The agent's own approval mode. 'auto' never loosens a template's Ask or locked_ask. */
+  agentMode?: 'auto' | 'ask' | string
 }
 
-export type AskOutcome = AskResult & { reason?: SettleReason }
+export type AskOutcome = AskResult & { reason?: SettleReason; request?: AskRequest }
 
 /** Run the Ask for an action. Never rejects before any prompt; Auto needs none; no channel fails closed. */
 export async function ask(
@@ -567,14 +648,27 @@ export async function ask(
   answerFn: AnswerFn,
   opts: AskOptions = {},
 ): Promise<AskOutcome> {
+  const prod = opts.reference !== true
   if (opts.window && !opts.agentId) throw new ApprovalDenied('approval window needs an agentId')
   if (opts.verifier && !opts.ledger) throw new ApprovalDenied('an answer verifier needs a ledger')
   if (opts.isSend && !(opts.send && typeof opts.send.recipient === 'string' && opts.send.recipient.trim() && typeof opts.send.message === 'string')) {
     throw new ApprovalDenied('a send Ask needs the recipient and the message')
   }
-  let isWrite = opts.isWrite ?? true
-  if (opts.kind && classifyTool(opts.kind.manifest, opts.kind.tool) === 'write') isWrite = true
-  else if (opts.kind) isWrite = opts.isWrite ?? false
+  if (prod) {
+    if (!opts.ledger) throw new ApprovalDenied('production Asks need a ledger (F2)')
+    if (!opts.kind) throw new ApprovalDenied('production Asks need the tool manifest (F4)')
+    const money = opts.amountMinor !== undefined || opts.isSend === true || opts.send !== undefined
+    if (money && !(opts.window && opts.agentId)) throw new ApprovalDenied('money and send Asks need an approval window (F5)')
+  }
+  let isWrite: boolean
+  if (prod) {
+    isWrite = classifyTool(opts.kind!.manifest, opts.kind!.tool) === 'write' || opts.isWrite === true
+  } else {
+    isWrite = opts.isWrite ?? true
+    if (opts.kind && classifyTool(opts.kind.manifest, opts.kind.tool) === 'write') isWrite = true
+    else if (opts.kind) isWrite = opts.isWrite ?? false
+  }
+  // agentMode is deliberately not an input to resolve(): Auto never loosens a template rule.
   const tier = resolve(template, action, profile, isWrite)
   if (tier === 'never') throw new ApprovalDenied(`never item: ${action}`)
   if (tier === 'auto') return { approved: true, channel: null, tier }
@@ -605,8 +699,10 @@ export async function ask(
 
   let approved: boolean
   let reason: SettleReason | undefined
+  let request: AskRequest | undefined
   if (bound) {
     const req = bound.open({ action, tier, channel, amountMinor: opts.amountMinor, details })
+    request = req
     if (req.challenge) prompt += `. Say "${req.challenge}" to approve.`
     const voice = channel === 'voice'
     if (voice) opts.mic!.speaking(true)
@@ -616,12 +712,47 @@ export async function ask(
     } finally {
       if (voice) opts.mic!.speaking(false)
     }
-    const s = bound.settle(ans as AskAnswer)
+    const pairing = opts.pairing
+    const s = bound.settle(ans as AskAnswer, { isPaired: pairing ? (id) => pairing.isPaired(id) : undefined, extra: opts.verifier })
     approved = s.ok && (ans as AskAnswer).approved === true
     reason = s.ok ? undefined : s.reason
   } else {
     approved = (await answerFn(channel, prompt)) === true
   }
   if (approved && opts.window && opts.agentId) opts.window.record(opts.agentId, { amountMinor: opts.amountMinor, count: opts.count })
-  return bound ? { approved, channel, tier, reason } : { approved, channel, tier }
+  return bound ? { approved, channel, tier, reason, request } : { approved, channel, tier }
+}
+
+// ---- Upstream #1340: phone Accept/Decline on MCP elicitations goes through the Ask gate ----
+
+export interface McpElicitation {
+  /** MCP server (connector) name. */
+  server: string
+  /** The elicitation's message as shown to the person. */
+  message: string
+  /** Tool that raised it, looked up in the manifest. Unknown means write. */
+  tool?: string
+}
+
+/**
+ * An MCP Accept is an approval: it never goes straight from the phone to the server. The daemon runs
+ * it as an Ask (action `MCP <server>: <message>`, unlisted write so Ask) and only an approved, bound
+ * answer becomes 'accept'. Anything else, including a gate error, is 'decline'.
+ */
+export async function answerMcpElicitation(
+  template: ApprovalTemplate,
+  el: McpElicitation,
+  profile: ApprovalProfile | null | undefined,
+  answerFn: AnswerFn,
+  opts: Omit<AskOptions, 'reference' | 'kind' | 'isWrite'> & { manifest: readonly ToolManifestEntry[] | null | undefined },
+): Promise<{ action: 'accept' | 'decline'; outcome?: AskOutcome; error?: string }> {
+  const { manifest, ...rest } = opts
+  try {
+    const outcome = await ask(template, `MCP ${el.server}: ${el.message}`, profile, answerFn, {
+      ...rest, kind: { manifest, tool: el.tool ?? '' }, isWrite: true,
+    })
+    return { action: outcome.approved && outcome.tier !== 'auto' ? 'accept' : 'decline', outcome }
+  } catch (e) {
+    return { action: 'decline', error: (e as Error).message }
+  }
 }
