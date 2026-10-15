@@ -100,10 +100,11 @@ pub struct Conpty {
 
 impl Drop for Conpty {
     fn drop(&mut self) {
-        // XXX: This will block until the conout pipe is drained. Will cause a deadlock if the
-        // conout pipe has already been dropped by this point.
+        // hn: this may block until the conout pipe is drained or broken. `Pty` drops its
+        // `conout` first (the deliberate field order in windows/mod.rs), which breaks the pipe,
+        // so the close never waits for a drain.
         //
-        // See PR #3084 and https://docs.microsoft.com/en-us/windows/console/closepseudoconsole.
+        // See https://docs.microsoft.com/en-us/windows/console/closepseudoconsole.
         unsafe { (self.api.close)(self.handle) }
     }
 }

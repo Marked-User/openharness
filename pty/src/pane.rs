@@ -247,7 +247,8 @@ impl Life {
 enum Msg {
     Input(Vec<u8>),
     Resize(WindowSize),
-    /// The pane was dropped: stop without reporting an exit (and end the child).
+    /// The pane was dropped: stop without reporting an exit (Unix: and end the child; Windows:
+    /// the pane's drop ends the job).
     Shutdown,
     /// Windows `kill`: close the pseudo console, then report the child's exit. `Killing::finish`
     /// ends the job after the grace.
@@ -337,6 +338,10 @@ impl Pane {
         if spec.cwd.is_none() {
             spec.cwd = lock(&self.spawn_cwd).as_ref().map(PathBuf::from);
         }
+        // Windows: what the last child left running in its job (outside the console, which its
+        // close no longer reaches) goes with it; the new child gets a job of its own.
+        #[cfg(windows)]
+        attachment.job.end_now();
         let generation = attachment.generation + 1;
         attachment.generation = generation;
         *attachment = attach(
@@ -531,11 +536,14 @@ impl Pane {
         Some(Killing { attachment, group })
     }
 
-    /// Windows: close the pseudo console (the console's processes get CTRL_CLOSE_EVENT).
+    /// Windows: close the pseudo console (the console's processes get CTRL_CLOSE_EVENT). Once the
+    /// child has exited (its console is closed), what it left running in its job is terminated
+    /// at once, and `None`: its exit is already reported. A job has no pid to be reused.
     #[cfg(windows)]
     pub fn start_kill(&self) -> Option<Killing> {
         let attachment = self.attachment();
         if attachment.life.has_exited() {
+            attachment.job.end_now();
             return None;
         }
         let _ = attachment.send(Msg::Hangup);
@@ -562,7 +570,25 @@ impl Pane {
 
 impl Drop for Pane {
     fn drop(&mut self) {
-        let _ = self.attachment().send(Msg::Shutdown);
+        let attachment = self.attachment();
+        let _ = attachment.send(Msg::Shutdown);
+        // Windows: the reader's close sends the console's processes CTRL_CLOSE_EVENT; whatever is
+        // left in the job after `SHUTDOWN_GRACE` (a descendant outside the console included) is
+        // terminated, at once when the child had already exited. Off the caller's thread, and
+        // not on the reader's, which the close blocks until the console's processes are gone.
+        #[cfg(windows)]
+        {
+            let job = attachment.job.clone();
+            if attachment.life.has_exited() {
+                job.end_now();
+            } else if std::thread::Builder::new()
+                .name(format!("pty-end {}", self.id))
+                .spawn(move || job.end(SHUTDOWN_GRACE))
+                .is_err()
+            {
+                attachment.job.end_now();
+            }
+        }
     }
 }
 
@@ -709,8 +735,6 @@ fn attach(
         eof: false,
         #[cfg(windows)]
         process,
-        #[cfg(windows)]
-        job: job.clone(),
     };
     std::thread::Builder::new()
         .name(format!("pty-reader {id}"))
@@ -800,8 +824,6 @@ struct Reader {
     /// Windows: the child's process, to wait for its exit once the pty (and its watcher) is gone.
     #[cfg(windows)]
     process: std::os::windows::io::OwnedHandle,
-    #[cfg(windows)]
-    job: Arc<crate::job::Job>,
 }
 
 impl Reader {
@@ -810,10 +832,6 @@ impl Reader {
         #[cfg(unix)]
         if let End::Shutdown = end {
             self.end_child();
-        }
-        #[cfg(windows)]
-        if let End::Shutdown = end {
-            self.end_job();
         }
         if !(cfg!(unix) && self.eof) {
             let _ = self.pty.deregister(&self.poller);
@@ -831,7 +849,8 @@ impl Reader {
         // Unix: SIGHUP to the child, then reap it (alacritty's `Pty::drop`; after `end_child` on
         // a shutdown, so the reap cannot block).
         // Windows: ClosePseudoConsole; the console's processes get CTRL_CLOSE_EVENT. The close
-        // waits for them to go (the job's end makes sure they do), and never for a drain of the
+        // waits for them to go (the job's end, `Killing::finish` or the pane's drop, makes sure
+        // they do), and never for a drain of the
         // console's output: the vendored `Pty` drops its output pipe first (tui/vendor/README.md).
         drop(pty);
         let status = match end {
@@ -987,21 +1006,6 @@ impl Reader {
             if !exited {
                 self.wait_child(SHUTDOWN_GRACE);
             }
-        }
-    }
-
-    /// The pane was dropped while its child runs: the pseudo console's close (in `run`) sends the
-    /// console's processes CTRL_CLOSE_EVENT; whatever is left in the job after `SHUTDOWN_GRACE`,
-    /// a descendant outside the console included, is terminated. On a thread of its own, as the
-    /// close blocks this one until the console's processes are gone.
-    #[cfg(windows)]
-    fn end_job(&self) {
-        let job = self.job.clone();
-        let ender = std::thread::Builder::new()
-            .name(format!("pty-end {}", self.id))
-            .spawn(move || job.end(SHUTDOWN_GRACE));
-        if ender.is_err() {
-            let _ = self.job.terminate(1);
         }
     }
 

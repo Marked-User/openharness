@@ -1443,6 +1443,84 @@ mod windows_tests {
         assert!(start.elapsed() >= Duration::from_millis(450));
     }
 
+    /// Whether process `pid` still runs.
+    fn alive(pid: u64) -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+        unsafe {
+            let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid as u32);
+            if h.is_null() {
+                return false;
+            }
+            let running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+            CloseHandle(h);
+            running
+        }
+    }
+
+    /// A held pane whose child exited, leaving a descendant with a console of its own running in
+    /// its job; the pids left in the job.
+    fn dead_pane_with_a_leftover(panes: &Panes, notices: &Receiver<Notice>) -> (String, Vec<u64>) {
+        let pane = create(
+            panes,
+            "Start-Process -WindowStyle Hidden powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep 60'; 'ready'; Start-Sleep 2; exit 5",
+            true,
+        );
+        let root = root_pid(panes);
+        let mut kids = Vec::new();
+        until("the descendant", || {
+            kids = job_pids(panes, &pane).unwrap();
+            kids.retain(|&p| p != root);
+            !kids.is_empty()
+        });
+        assert_eq!(exit_notice(notices, &pane), Some(5));
+        // The console's close did not reach it: it is still in the job.
+        for &kid in &kids {
+            assert!(alive(kid), "{kid} ended with the child");
+        }
+        (pane, kids)
+    }
+
+    /// The job is the whole tree: killing, dropping (`releaseHold`) or respawning a dead pane
+    /// ends what its last child left running, with no second exit notice.
+    #[test]
+    fn a_dead_panes_leftovers_end_with_kill_drop_and_respawn() {
+        for how in ["kill", "releaseHold", "respawn"] {
+            let (panes, notices) = table();
+            let (pane, kids) = dead_pane_with_a_leftover(&panes, &notices);
+            let request = match how {
+                "respawn" => json!({"op": "respawn", "pane": pane,
+                    "command": ["cmd.exe", "/c", "echo next& ping -n 60 127.0.0.1 >nul"]}),
+                op => json!({"op": op, "pane": pane}),
+            };
+            panes.handle(op(request)).unwrap();
+            until(&format!("the leftovers ended on {how}"), || {
+                kids.iter().all(|&kid| !alive(kid))
+            });
+            if how == "respawn" {
+                let pids = job_pids(&panes, &pane).unwrap();
+                assert!(kids.iter().all(|k| !pids.contains(k)), "{pids:?}");
+                until("next", || capture(&panes, &pane).contains("next"));
+                panes
+                    .handle(op(json!({"op": "kill", "pane": pane, "graceMs": 300})))
+                    .unwrap();
+                exit_notice(&notices, &pane);
+            } else {
+                assert_eq!(job_pids(&panes, &pane).unwrap_err().code, "no_pane");
+            }
+            // No second exit notice for the child that had already exited.
+            std::thread::sleep(Duration::from_millis(500));
+            assert!(
+                notices
+                    .try_iter()
+                    .all(|n| !matches!(n, Notice::Exit { .. })),
+                "{how}: another exit notice"
+            );
+        }
+    }
+
     /// `respawn-pane -k`: the running child's job is ended, and the next child has its own.
     #[test]
     fn respawn_kills_a_running_child_and_its_job_first() {

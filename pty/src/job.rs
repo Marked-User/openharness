@@ -82,6 +82,13 @@ impl Job {
         Ok(())
     }
 
+    /// Terminate whatever is in the job now (exit code 1); a failure is logged.
+    pub fn end_now(&self) {
+        if let Err(err) = self.terminate(1) {
+            log::error!("job: terminate failed: {err}");
+        }
+    }
+
     /// Wait up to `grace` for the job to empty, then terminate whatever is left (exit code 1).
     pub fn end(&self, grace: Duration) {
         let deadline = Instant::now().checked_add(grace);
@@ -91,7 +98,7 @@ impl Job {
             }
             let left = deadline.map_or(POLL, |d| d.saturating_duration_since(Instant::now()));
             if left.is_zero() {
-                let _ = self.terminate(1);
+                self.end_now();
                 return;
             }
             std::thread::sleep(left.min(POLL));
