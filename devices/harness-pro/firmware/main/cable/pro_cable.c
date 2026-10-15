@@ -160,8 +160,7 @@ static bool msg_settings(cJSON **root)
                            cJSON_AddBoolToObject(o, "quiet", false) && cJSON_AddBoolToObject(o, "straightTitle", false) &&
                            cJSON_AddBoolToObject(o, "focusFace", false) && cJSON_AddBoolToObject(o, "scrollReversed", false) &&
                            cJSON_AddBoolToObject(o, "round", false) &&
-                           cJSON_AddBoolToObject(o, "screenTurned", config_load_turn(pro_turn_build_default())) &&
-                           cJSON_AddStringToObject(o, "uiSkin", config_load_skin(0) == 1 ? "console" : "classic"));
+                           cJSON_AddBoolToObject(o, "screenTurned", config_load_turn(pro_turn_build_default())));
 }
 
 // Absent means unchanged. The whole set is checked before any of it is applied.
@@ -183,13 +182,6 @@ static void handle_settings_set(const cJSON *p)
     const cJSON *lang = cJSON_GetObjectItemCaseSensitive(p, "voiceLang");
     const cJSON *turned = cJSON_GetObjectItemCaseSensitive(p, "screenTurned");
     if (turned && !cJSON_IsBool(turned)) error = "Screen turn is not valid.";
-    const cJSON *skin = cJSON_GetObjectItemCaseSensitive(p, "uiSkin");
-    int skin_id = -1;
-    if (skin) {
-        if (cJSON_IsString(skin) && skin->valuestring && !strcmp(skin->valuestring, "classic")) skin_id = 0;
-        else if (cJSON_IsString(skin) && skin->valuestring && !strcmp(skin->valuestring, "console")) skin_id = 1;
-        else error = "Interface is not valid.";
-    }
     if (cJSON_IsString(lang) && (!lang->valuestring || !lang->valuestring[0] || strlen(lang->valuestring) >= CFG_VLANG_MAX))
         error = "Language code is not valid.";
     if (!error) {
@@ -203,10 +195,6 @@ static void handle_settings_set(const cJSON *p)
         if (cJSON_IsString(lang) && !config_save_voicelang(lang->valuestring)) error = "Could not save.";
         if (cJSON_IsBool(turned)) {
             if (config_save_turn(cJSON_IsTrue(turned))) pro_app_request_turn(cJSON_IsTrue(turned));
-            else error = "Could not save.";
-        }
-        if (skin_id >= 0) {
-            if (config_save_skin(skin_id)) pro_app_request_skin(skin_id);
             else error = "Could not save.";
         }
     }

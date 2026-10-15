@@ -14,14 +14,29 @@ bool pod_pet_has(const char *engine, pod_scene_t scene);
 unsigned pod_pet_runs(const char *engine, pod_scene_t scene);
 // The scene centred in the side x side square at (x, y) on the glass, every run inside it. SEND plays once from
 // started_ms and holds its last step.
+// zoom8 is 8 (1x, the box as given) or 16 (2x). At 16 the box is the 2 * side square with the same centre as the
+// 1x one, i.e. (x - side / 2, y - side / 2, 2 * side); the scene is placed and sized at 2x inside it (its runs are
+// the same ones, every run inside that square). If the scene would not fit the 2x square at exactly 2x (a
+// scene larger than side), it is drawn at the largest zoom <= 8 that fits that square. Any other zoom8 draws at 8.
 void pod_pet_draw(ht_scene_t *s, int x, int y, int side, const char *engine, pod_scene_t scene,
-                  uint32_t clock_ms, uint32_t started_ms);
+                  uint32_t clock_ms, uint32_t started_ms, unsigned zoom8);
+// Pets' draw, which pod_pet_draw is: steps shorter than the 66 ms beat last one beat (every step is drawn in turn instead of some being skipped
+// when the screen redraws on the beat), and pod_pet_next_beat_ms is its pod_pet_next_step_ms. Below, the same on a
+// ground that is ONE colour under the scene's main frame (everything drawn before it stays clear of it): a frame zoomed below 1x is then resampled
+// once and kept (pod_cell_flat), the pixels unchanged. For the Notices faces and the recap's pet.
+void pod_pet_draw_flat(ht_scene_t *s, int x, int y, int side, const char *engine, pod_scene_t scene,
+                       uint32_t clock_ms, uint32_t started_ms, uint32_t ground_rgb, unsigned zoom8);
+uint32_t pod_pet_next_beat_ms(const char *engine, pod_scene_t scene, uint32_t clock_ms, uint32_t started_ms);
 // The same on a ground of ground_rgb (0xRRGGBB): the listening waves fade toward it instead of white.
 void pod_pet_draw_on(ht_scene_t *s, int x, int y, int side, const char *engine, pod_scene_t scene,
-                     uint32_t clock_ms, uint32_t started_ms, uint32_t ground_rgb);
+                     uint32_t clock_ms, uint32_t started_ms, uint32_t ground_rgb, unsigned zoom8);
+// The height in px of the ink block pod_pet_draw centres in its square (the scene's extent, or the small pet's ink), at the zoom it picks
+// for this side and zoom8; 0 for an engine with no pet. The block's bottom (the pet's feet) is then at the square's centre + this / 2.
+// How many times a scene's extent has been measured (a test hook): each (scene, level) the player asks for is measured once.
+unsigned pod_pet_extent_scans(void);
+int pod_pet_ink_h(const char *engine, pod_scene_t scene, int side, unsigned zoom8);
 #define POD_PET_STEP_MS 33   // 1000 / 30: the frame rate of anything drawn in code from the clock
-#define POD_CS_ANIM_MS 66    // Console: the equaliser, the spinner and the working mark (about 15 fps; a new height every 66 ms)
-#define POD_CS_WAVE_MS 100   // Console: the voice wave (square bars)
+#define POD_PH_ANIM_MS 66    // Pets: the equaliser, the spinner and the working mark (about 15 fps; a new height every 66 ms)
 // Milliseconds (>= 1) from clock_ms until what pod_pet_draw draws next changes, from the same step clock it draws by.
 // POD_PET_STEP_MS when the scene moves every frame (bars or waves from the clock) or the engine has no pet.
 uint32_t pod_pet_next_step_ms(const char *engine, pod_scene_t scene, uint32_t clock_ms, uint32_t started_ms);

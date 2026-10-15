@@ -114,6 +114,7 @@ static void change(void)
 static void settle(pod_out_t o)
 {
     if (o.fx != POD_FX_NONE && s_fxn < FX_MAX) s_fxq[s_fxn++] = o;
+    (void)pod_ui_start(&s_pod, ms());   // Pets: after the first swarms of a link, enter tab 0 (device-local: no agent.open to the desktop)
     if (pod_ui_take_changed(&s_pod)) change();
 }
 
@@ -761,13 +762,10 @@ void pro_app_button_press(void)
         return;
     }
     pro_app_lock();
+    pod_ui_navigated(&s_pod);
     pod_out_t out = {0};
     if (pod_ui_talking(&s_pod)) out = pod_nav_act(&s_pod.nav, &s_pod.model, POD_A_TABS, 0, ms());
-    if (s_pod.nav.skin == POD_SKIN_CONSOLE) {   // Console: back one level, nothing at the root
-        if (s_pod.nav.depth > 1) out = pod_nav_act(&s_pod.nav, &s_pod.model, POD_A_BACK, 0, ms());
-    } else {
-        while (s_pod.nav.depth > 1) (void)pod_nav_act(&s_pod.nav, &s_pod.model, POD_A_BACK, 0, ms());
-    }
+    if (s_pod.nav.depth > 1) out = pod_nav_act(&s_pod.nav, &s_pod.model, POD_A_BACK, 0, ms());   // back one level, nothing at the root
     change();
     settle(out);
     leave();
@@ -838,7 +836,7 @@ bool pro_app_take_scene(ht_scene_t *scene)
     if (s_dirty) {   // R9; the hits stay in s_pod.frame for the touch task
         s_dirty = false;
         ht_scene_clear(scene, ht_rgb(HT_THEME_CANVAS));
-        s_pod.frame.mic_level = (int)pro_rec_level();   // the Console voice wave
+        s_pod.frame.mic_level = (int)pro_rec_level();   // the Pets voice wave
         pod_ui_render(&s_pod, scene, ms());
         fresh = true;
     }
@@ -881,7 +879,6 @@ static void render_task(void *arg)
         ESP_ERROR_CHECK(esp_task_wdt_reset());
         pro_app_tick();
         pro_app_apply_turn();
-        pro_app_apply_skin();
         const bool fresh = pro_app_take_scene(&s_scene[front ^ 1]);
         uint32_t wake_ms = pro_app_next_wake_ms();
         const int64_t wake_at = esp_timer_get_time() + (int64_t)wake_ms * 1000;
@@ -896,11 +893,14 @@ static void render_task(void *arg)
         if (on && (fresh || force)) {
             if (!fresh) s_scene[front ^ 1] = s_scene[front];
             const int64_t started = esp_timer_get_time();
-            const uint32_t raster_us = pro_frame_present(painted && !force ? &s_scene[front] : NULL, &s_scene[front ^ 1]);
+            uint32_t pushed_px = 0;
+            const uint32_t raster_us = pro_frame_present(painted && !force ? &s_scene[front] : NULL, &s_scene[front ^ 1], &pushed_px);
             const uint32_t frame_us = (uint32_t)(esp_timer_get_time() - started);
-            if (raster_us > raster_max_us) raster_max_us = raster_us;
-            if (frame_us > frame_max_us) frame_max_us = frame_us;
-            frames++;
+            if (pushed_px) {   // a scene identical to the last one paints nothing: it is no frame, and its few microseconds of damage compare must not
+                if (raster_us > raster_max_us) raster_max_us = raster_us;   // dilute the heartbeat's frame count or hide the slowest real frame
+                if (frame_us > frame_max_us) frame_max_us = frame_us;
+                frames++;
+            }
             front ^= 1;
             painted = true;
             atomic_store(&s_painted, true);
@@ -943,34 +943,6 @@ bool pro_app_apply_turn(void)
     pro_app_unlock();
     pro_turn_set(want != 0);
     atomic_store(&s_force_frame, true);   // every pixel moved: the next awake frame paints the whole glass (as a wake does)
-    if (held) atomic_store(&s_turn_swallow, true);
-    pro_app_touch_cancel();
-    return true;
-}
-
-static atomic_int s_skin_req = -1;   // -1: nothing asked, else the wanted pod_skin_t
-
-void pro_app_request_skin(int skin)
-{
-    atomic_store(&s_skin_req, skin == POD_SKIN_CONSOLE ? POD_SKIN_CONSOLE : POD_SKIN_CLASSIC);
-    if (s_renderer) xTaskNotifyGive(s_renderer);
-}
-
-bool pro_app_apply_skin(void)
-{
-    const int want = atomic_exchange(&s_skin_req, -1);
-    if (want < 0) return false;
-    pro_app_lock();
-    const bool same = (int)s_pod.nav.skin == want;
-    const bool held = s_pod.down;         // a contact began on the old skin's screen
-    pro_app_unlock();
-    if (same) return false;
-    if (pro_voice_open()) pro_voice_end(false);   // no lock held: it may notify pro_app and send on the cable
-    pro_app_lock();
-    settle(pod_ui_set_skin(&s_pod, (pod_skin_t)want));
-    change();
-    pro_app_unlock();
-    atomic_store(&s_force_frame, true);   // the whole glass is repainted
     if (held) atomic_store(&s_turn_swallow, true);
     pro_app_touch_cancel();
     return true;
@@ -1112,7 +1084,6 @@ void pro_app_test_reset(void)
     atomic_store(&s_asleep, false);
     atomic_store(&s_force_frame, false);
     atomic_store(&s_turn_req, -1);
-    atomic_store(&s_skin_req, -1);
     atomic_store(&s_updating, false);
     s_updated[0] = 0;
 }

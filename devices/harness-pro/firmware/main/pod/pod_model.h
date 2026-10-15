@@ -41,7 +41,6 @@ typedef struct {
     char steps[POD_STEPS_MAX][POD_STEP_BYTES];   // this turn's tools and previous activity sentences, newest first (cut on a codepoint)
     uint16_t step_at_s[POD_STEPS_MAX];   // seconds into the turn each step arrived (steps[] order); 0xFFFF = unknown (no turn start seen)
     uint8_t step_count;
-    uint8_t fresh_steps;                 // the newest steps[] that came after the last question (Classic draws only these: it never showed older ones)
     int16_t step_total;                  // steps pushed this turn (not cut by the list's cap or by done), -1 when no turn.started was seen
     bool turn_started;                   // a turn.started began the current turn (step times are measured from since_ms)
     bool failed;                         // the last turn ended in turn.error; the next turn.started clears it (state stays IDLE)
@@ -188,5 +187,7 @@ bool pod_model_unread_seen(pod_model_t *, const char *agent, const char *token);
 // Read here: the same, and an entry that had a token is queued in reads[] for notif.read.
 bool pod_model_unread_read(pod_model_t *, const char *agent);
 const pod_unread_t *pod_model_unread_find(const pod_model_t *, const char *agent);
+// How many notices Pets lists (the Notices screen and Home's Notices card): the asking agents, then the unread entries of agents that are not asking.
+int pod_notice_count(const pod_model_t *);
 // Take the queued notif.read frames (at most max); returns the count.
 int pod_model_take_reads(pod_model_t *, pod_read_out_t out[], int max);

@@ -212,25 +212,6 @@ class _DeviceSettingsPanelState extends State<DeviceSettingsPanel> {
           ),
           const SizedBox(height: 10),
         ],
-        if (device.status.isPro && settings.uiSkin != null) ...[
-          SettingRow(
-            title: 'Interface',
-            detail: 'Classic shows the carousel; Console shows a compact view of agent activity.',
-            control: SegmentedButton<String>(
-              key: ValueKey('devices-ui-skin-${device.key}'),
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: 'classic', label: Text('Classic')),
-                ButtonSegment(value: 'console', label: Text('Console')),
-              ],
-              selected: {settings.uiSkin ?? 'classic'},
-              onSelectionChanged: enabled
-                  ? (selection) => change({'uiSkin': selection.first})
-                  : null,
-            ),
-          ),
-          const SizedBox(height: 10),
-        ],
         SettingRow(
           title: 'Voice language',
           detail: 'The language you speak to this device.',

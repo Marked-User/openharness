@@ -12,7 +12,7 @@
 
 void pro_frame_init(void) {}   // the strip buffers belong to the panel (pro_display_init)
 
-uint32_t pro_frame_present(const ht_scene_t *prev, const ht_scene_t *next)
+uint32_t pro_frame_present(const ht_scene_t *prev, const ht_scene_t *next, uint32_t *pushed_px)
 {
     ht_damage_t damage;
     ht_damage(prev, next, &damage);
@@ -40,5 +40,6 @@ uint32_t pro_frame_present(const ht_scene_t *prev, const ht_scene_t *next)
         }
     }
     if (pending) pro_panel_wait();
+    if (pushed_px) *pushed_px = damage.pixels;
     return raster_us;
 }

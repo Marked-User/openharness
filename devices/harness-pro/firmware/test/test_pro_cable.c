@@ -166,10 +166,6 @@ static int turn_requests = -1;   // -1: none, else the last flag asked for
 bool config_load_turn(bool fallback) { (void)fallback; return cfg_turn; }
 bool config_save_turn(bool t) { if (!turn_saves_ok) return false; cfg_turn = t; return true; }
 void pro_app_request_turn(bool t) { turn_requests = t; }
-static int cfg_skin, skin_requests = -1;   // skin_requests: -1 none, else the last skin asked for
-int config_load_skin(int fallback) { (void)fallback; return cfg_skin; }
-bool config_save_skin(int s) { cfg_skin = s; return true; }
-void pro_app_request_skin(int s) { skin_requests = s; }
 
 // ---- fw_update recorders: this test is about ROUTING, so fw_update.c is not linked (its own test covers the logic) ----
 static bool voice_is_open;
@@ -798,26 +794,20 @@ static void test_turn_stats(void)
     CHECK(nev == 0);
 }
 
-// uiSkin: carried by settings.state, saved, and the switch requested; an unknown value is refused, state unchanged.
-static void test_ui_skin(void)
+// uiSkin: Pets is the only interface. settings.state no longer reports it, and a host that still sends one (an older daemon) is
+// ignored: the set is accepted, nothing else changes.
+static void test_ui_skin_ignored(void)
 {
     welcome();
     reset();
     feed("{\"t\":\"settings.set\",\"muted\":true}");
-    CHECK(strstr(sent[0], "\"uiSkin\":\"classic\"") && skin_requests == -1);
-    reset();
-    feed("{\"t\":\"settings.set\",\"uiSkin\":\"console\"}");
-    CHECK(nsent == 1 && strstr(sent[0], "\"ok\":true") && strstr(sent[0], "\"uiSkin\":\"console\"") && cfg_skin == 1 && skin_requests == 1);
-    skin_requests = -1;
-    const char *bad[] = { "\"neon\"", "1", "true", "null" };
-    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+    CHECK(nsent == 1 && strstr(sent[0], "\"ok\":true") && !strstr(sent[0], "uiSkin"));
+    const char *skins[] = { "\"classic\"", "\"console\"", "\"neon\"", "1", "null" };
+    for (unsigned i = 0; i < sizeof skins / sizeof skins[0]; i++) {
         reset();
-        feedf("{\"t\":\"settings.set\",\"uiSkin\":%s}", bad[i]);
-        CHECK(nsent == 1 && strstr(sent[0], "\"ok\":false") && strstr(sent[0], "\"uiSkin\":\"console\"") && cfg_skin == 1 && skin_requests == -1);
+        feedf("{\"t\":\"settings.set\",\"uiSkin\":%s}", skins[i]);
+        CHECK(nsent == 1 && strstr(sent[0], "\"ok\":true") && !strstr(sent[0], "uiSkin") && !strstr(sent[0], "error"));
     }
-    reset();
-    feed("{\"t\":\"settings.set\",\"uiSkin\":\"classic\"}");
-    CHECK(strstr(sent[0], "\"ok\":true") && strstr(sent[0], "\"uiSkin\":\"classic\"") && cfg_skin == 0 && skin_requests == 0);
 }
 
 // summary flags: only a plain live summary is news; quiet, silent and restore still deliver the recap.
@@ -1015,7 +1005,7 @@ int main(void)
     pro_cable_test_small_stack();
     test_settings();
     test_turn_stats();
-    test_ui_skin();
+    test_ui_skin_ignored();
     test_notifications();
     fw_offer_routes();
     fw_frame_routes();

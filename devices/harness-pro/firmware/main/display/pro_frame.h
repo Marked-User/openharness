@@ -11,5 +11,6 @@
 void pro_frame_init(void);
 
 // Paint `next`. With a `prev` scene only the rows that differ are pushed; with NULL, the whole glass is. Returns
-// the microseconds spent in the rasteriser. Call from the one render task.
-uint32_t pro_frame_present(const ht_scene_t *prev, const ht_scene_t *next);
+// the microseconds spent in the rasteriser. `pushed_px`, when not NULL, receives the pixels sent to the panel: 0 when `next` differs from `prev`
+// nowhere, i.e. nothing was painted (the caller does not count that as a frame). Call from the one render task.
+uint32_t pro_frame_present(const ht_scene_t *prev, const ht_scene_t *next, uint32_t *pushed_px);

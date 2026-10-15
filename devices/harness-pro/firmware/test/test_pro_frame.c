@@ -70,7 +70,10 @@ static void replay(const ht_scene_t *prev, const ht_scene_t *next, int expect_ov
     in_flight_buf = -1; overlaps = submits = 0;
     ht_damage_t damage;
     ht_damage(prev, next, &damage);
-    (void)pro_frame_present(prev, next);
+    uint32_t pushed = 0xdeadbeef;
+    (void)pro_frame_present(prev, next, &pushed);
+    CHECK(pushed == damage.pixels);   // the heartbeat counts a frame only when something was pushed: identical scenes push 0
+    if (prev && !memcmp(prev, next, sizeof *prev)) CHECK(pushed == 0);
     CHECK(in_flight_buf < 0);   // the last DMA was waited for before returning
     ht_raster(next, (ht_rect_t){0, 0, N, N}, full);
     for (int y = 0; y < N; y++)
