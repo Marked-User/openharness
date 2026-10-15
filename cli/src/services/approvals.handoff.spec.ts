@@ -6,6 +6,12 @@ import {
   type AskAnswer, type AskRequest, type ApprovalTemplate, type AskOptions,
 } from './approvals.js'
 
+/** Pair through the full F6 flow: device touch, phone offers code + key, device touch confirms the match. */
+function complete(p: PhonePairing, id: string, code: string, origin?: { shared?: boolean }): boolean {
+  const o = p.offer(id, `pub-${id}`, code, origin)
+  return o.ok && p.confirm(id, 'touch', true)
+}
+
 const BK: ApprovalTemplate = { permissions: { auto: ['Read the ledger'], ask: ['Send an invoice'], never: ['Move money out'] } }
 const RG: ApprovalTemplate = { permissions: { locked_ask: ['Brakes step'] } }
 const MIN = 60_000
@@ -161,15 +167,15 @@ describe('F6 and #1358 shared machines', () => {
     const p = new PhonePairing()
     expect(() => p.begin('touch', { shared: true })).toThrow(ApprovalDenied)
     const { code } = p.begin('touch')
-    expect(p.complete('p9', code, { shared: true })).toBe(false)
+    expect(complete(p, 'p9', code, { shared: true })).toBe(false)
     expect(p.isPaired()).toBe(false)
     expect(p.log.map((e) => [e.event, e.reason])).toEqual([['refused', 'shared_machine']])
   })
   it('each pairing and unpairing writes a ledger entry', () => {
     const c = clock()
     const p = new PhonePairing({ now: c.now })
-    p.complete('p1', p.begin('touch').code)
-    expect(p.complete('p1', 'bad')).toBe(false)
+    complete(p, 'p1', p.begin('touch').code)
+    expect(complete(p, 'p1', 'bad')).toBe(false)
     p.unpair('p1')
     p.unpair('p1')
     expect(p.log.map((e) => [e.event, e.phoneId, e.reason])).toEqual([
@@ -178,7 +184,7 @@ describe('F6 and #1358 shared machines', () => {
   })
   it('a phone that is not the paired one cannot answer', async () => {
     const pairing = new PhonePairing()
-    pairing.complete('p1', pairing.begin('touch').code)
+    complete(pairing, 'p1', pairing.begin('touch').code)
     const o = prod({ pairing, available: ['phone'] })
     expect(await ask(RG, 'Brakes step', null, (_c, _p, req) => good(req!, { from: { phoneId: 'p2' } }), o)).toMatchObject({ approved: false, reason: 'unpaired_phone' })
     expect(await ask(RG, 'Brakes step', null, (_c, _p, req) => good(req!, { from: {} }), o)).toMatchObject({ approved: false, reason: 'unpaired_phone' })
@@ -193,7 +199,7 @@ describe('F6 and #1358 shared machines', () => {
 
 describe('#1340: phone MCP Accept/Decline goes through the Ask gate', () => {
   const pairing = new PhonePairing()
-  pairing.complete('p1', pairing.begin('touch').code)
+  complete(pairing, 'p1', pairing.begin('touch').code)
   const base = { ledger: new AskLedger(), pairing, manifest: [{ name: 'calendar.read', readOnly: true }], available: ['phone'] }
   const el = { server: 'calendar', message: 'Allow access to your work calendar?', tool: 'calendar.read' }
   it('an approved bound answer accepts and the prompt names the server and message', async () => {

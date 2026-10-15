@@ -17,7 +17,7 @@
  * Accept/Decline (#1340) goes through answerMcpElicitation. Sync order (F11) is syncOrder.ts.
  */
 
-import { createHash, randomInt, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
@@ -297,6 +297,18 @@ export interface AskRequest {
   tier: Tier
   /** Amount in minor units (cents), integer; present means this is a money Ask. */
   amountMinor?: number
+  /** ISO 4217, 'USD' for now. Present exactly when amountMinor is. Bound into digest8. */
+  currency?: 'USD'
+  /** Display only (not in digest8). */
+  agentId?: string
+  /** Display only. */
+  templateId?: string
+  /** The action as listed in the template. Display; the action is also in digest8. */
+  action: string
+  /** Send Asks: recipient. Display; bound into digest8 via the send details. */
+  recipient?: string
+  /** Send Asks: first non-empty line of the message, trimmed, at most 80 chars. Display only. */
+  firstLine?: string
   /** Daemon-drawn 2-word spoken challenge, voice Asks only. */
   challenge?: string
 }
@@ -344,11 +356,21 @@ export class AskLedger {
     this.verifier = opts.verifier
   }
 
-  open(o: { action: string; tier: Tier; channel: AskChannel; amountMinor?: number; details?: Record<string, unknown> }): AskRequest {
+  open(o: {
+    action: string; tier: Tier; channel: AskChannel; amountMinor?: number; details?: Record<string, unknown>
+    agentId?: string; templateId?: string; recipient?: string; firstLine?: string
+  }): AskRequest {
     const openedAt = this.now()
+    const currency = o.amountMinor !== undefined ? ('USD' as const) : undefined
     const req: AskRequest = {
       id: randomUUID(),
-      digest8: actionDigest8(o.action, { ...o.details, amountMinor: o.amountMinor }),
+      digest8: actionDigest8(o.action, { ...o.details, amountMinor: o.amountMinor, currency }),
+      action: o.action,
+      ...(o.agentId !== undefined ? { agentId: o.agentId } : {}),
+      ...(o.templateId !== undefined ? { templateId: o.templateId } : {}),
+      ...(o.recipient !== undefined ? { recipient: o.recipient } : {}),
+      ...(o.firstLine !== undefined ? { firstLine: o.firstLine } : {}),
+      ...(currency ? { currency } : {}),
       openedAt,
       expiresAt: openedAt + (this.ttlMs ?? askExpiryMs(o.amountMinor)),
       channel: o.channel,
@@ -434,10 +456,44 @@ export interface PairingLogEntry {
   reason?: string
 }
 
+export const PAIRING_CHECK_VERSION = 'ildra-pair-v1'
+
+/**
+ * F6 short check string shown on both the device and the phone. 6 decimal digits:
+ * sha256(`ildra-pair-v1|<code>|<phonePub>|<deviceNonce>`), first 4 bytes as a big-endian uint32,
+ * mod 1,000,000, zero-padded. Both sides compute it from the same transcript; a man in the middle that
+ * swaps the phone key or the nonce changes it.
+ */
+export function pairingCheck(code: string, phonePub: string, deviceNonce: string): string {
+  const h = createHash('sha256').update(`${PAIRING_CHECK_VERSION}|${code}|${phonePub}|${deviceNonce}`).digest()
+  return String(h.readUInt32BE(0) % 1_000_000).padStart(6, '0')
+}
+
+export interface PairingStart {
+  /** 6-digit single-use code shown on the device, typed on the phone. */
+  code: string
+  /** 32 hex chars (16 random bytes), sent to the phone with the pairing session. */
+  deviceNonce: string
+  expiresAt: number
+}
+
+export type PairingOffer = { ok: true; check: string; expiresAt: number } | { ok: false; reason: string }
+
+type PendingPair = { phonePub: string; check: string; expiresAt: number }
+
+/**
+ * Phone pairing (F6). Three steps, all on the device's terms:
+ * 1. begin('touch') on the device: code + deviceNonce. Never by voice, phone or a shared machine.
+ * 2. offer(phoneId, phonePub, code) when the phone submits the code: spends the code, returns the
+ *    6-digit check string the device shows (the phone computes the same with pairingCheck).
+ * 3. confirm(phoneId, 'touch', matched) on the device: the user taps that both strings match.
+ *    Only then is the phone paired. A mismatch, any channel but touch, or expiry refuses it.
+ */
 export class PhonePairing {
   private readonly now: () => number
   private readonly ttlMs: number
-  private readonly codes = new Map<string, number>()
+  private readonly codes = new Map<string, { expiresAt: number; deviceNonce: string }>()
+  private readonly pendingPairs = new Map<string, PendingPair>()
   private readonly phones = new Set<string>()
   /** Ledger of every pairing, unpairing and refused attempt. */
   readonly log: PairingLogEntry[] = []
@@ -448,33 +504,50 @@ export class PhonePairing {
     this.ttlMs = opts.ttlMs ?? 5 * 60_000
   }
 
-  /**
-   * Start pairing. Pairing is itself locked_ask: it needs a touch on the device, never voice or phone,
-   * and never from a machine trusted only through sharing (#1358). Returns a 6-digit single-use code.
-   */
-  begin(confirmedBy: AskChannel, origin: { shared?: boolean } = {}): { code: string; expiresAt: number } {
+  private refuse(phoneId: string, reason: string): false {
+    this.log.push({ at: this.now(), event: 'refused', phoneId, reason })
+    this.onChange?.()
+    return false
+  }
+
+  begin(confirmedBy: AskChannel, origin: { shared?: boolean } = {}): PairingStart {
     if (origin.shared === true) throw new ApprovalDenied('a shared machine cannot start pairing')
     if (confirmedBy !== 'touch') throw new ApprovalDenied('phone pairing needs a touch on the device')
     const code = String(randomInt(1_000_000)).padStart(6, '0')
+    const deviceNonce = randomBytes(16).toString('hex')
     const expiresAt = this.now() + this.ttlMs
-    this.codes.set(code, expiresAt)
+    this.codes.set(code, { expiresAt, deviceNonce })
     this.onChange?.()
-    return { code, expiresAt }
+    return { code, deviceNonce, expiresAt }
   }
 
-  /** Redeem a code for a phone. Single use; expired or unknown codes, and shared phones, fail. */
-  complete(phoneId: string, code: string, origin: { shared?: boolean } = {}): boolean {
-    const exp = this.codes.get(code)
-    const refuse = (reason: string) => {
-      this.log.push({ at: this.now(), event: 'refused', phoneId, reason })
-      this.onChange?.()
-      return false
-    }
-    if (exp === undefined) return refuse('unknown_code')
+  offer(phoneId: string, phonePub: string, code: string, origin: { shared?: boolean } = {}): PairingOffer {
+    const c = this.codes.get(code)
+    const no = (reason: string): PairingOffer => { this.refuse(phoneId, reason); return { ok: false, reason } }
+    if (!c) return no('unknown_code')
     this.codes.delete(code)
-    if (origin.shared === true) return refuse('shared_machine')
-    if (this.now() >= exp) return refuse('expired')
-    if (!phoneId) return refuse('no_phone_id')
+    if (origin.shared === true) return no('shared_machine')
+    if (this.now() >= c.expiresAt) return no('expired')
+    if (!phoneId) return no('no_phone_id')
+    if (!phonePub) return no('no_phone_pub')
+    const check = pairingCheck(code, phonePub, c.deviceNonce)
+    this.pendingPairs.set(phoneId, { phonePub, check, expiresAt: c.expiresAt })
+    this.onChange?.()
+    return { ok: true, check, expiresAt: c.expiresAt }
+  }
+
+  /** The check string the device should show for a pending phone, or null. */
+  pendingCheck(phoneId: string): string | null {
+    return this.pendingPairs.get(phoneId)?.check ?? null
+  }
+
+  confirm(phoneId: string, confirmedBy: AskChannel, matched: boolean): boolean {
+    const pend = this.pendingPairs.get(phoneId)
+    if (!pend) return this.refuse(phoneId, 'no_pending')
+    if (confirmedBy !== 'touch') return this.refuse(phoneId, 'not_touch')
+    this.pendingPairs.delete(phoneId)
+    if (this.now() >= pend.expiresAt) return this.refuse(phoneId, 'expired')
+    if (matched !== true) return this.refuse(phoneId, 'check_mismatch')
     this.phones.add(phoneId)
     this.log.push({ at: this.now(), event: 'pair', phoneId })
     this.onChange?.()
@@ -528,6 +601,8 @@ function isRequest(r: unknown): r is AskRequest {
   return !!x && typeof x.id === 'string' && /^[0-9a-f]{8}$/.test(x.digest8) && Number.isFinite(x.expiresAt) && Number.isFinite(x.openedAt)
     && KNOWN_CHANNELS.has(x.channel) && x.tier in TIER_RANK && (x.challenge === undefined || typeof x.challenge === 'string')
     && (x.amountMinor === undefined || (Number.isInteger(x.amountMinor) && x.amountMinor >= 0))
+    && typeof x.action === 'string' && (x.currency === undefined ? x.amountMinor === undefined : x.currency === 'USD' && x.amountMinor !== undefined)
+    && ['agentId', 'templateId', 'recipient', 'firstLine'].every((k) => (x as unknown as Record<string, unknown>)[k] === undefined || typeof (x as unknown as Record<string, unknown>)[k] === 'string')
 }
 
 function isLog(e: unknown): boolean {
@@ -634,6 +709,8 @@ export interface AskOptions {
   send?: SendDetails
   /** Extra fields bound into the digest. */
   details?: Record<string, unknown>
+  /** Display only: the template the agent runs. */
+  templateId?: string
   /** The agent's own approval mode. 'auto' never loosens a template's Ask or locked_ask. */
   agentMode?: 'auto' | 'ask' | string
 }
@@ -701,7 +778,10 @@ export async function ask(
   let reason: SettleReason | undefined
   let request: AskRequest | undefined
   if (bound) {
-    const req = bound.open({ action, tier, channel, amountMinor: opts.amountMinor, details })
+    const req = bound.open({
+      action, tier, channel, amountMinor: opts.amountMinor, details, agentId: opts.agentId, templateId: opts.templateId,
+      ...(send ? { recipient: send.recipient, firstLine: firstLine(send.message) } : {}),
+    })
     request = req
     if (req.challenge) prompt += `. Say "${req.challenge}" to approve.`
     const voice = channel === 'voice'

@@ -11,6 +11,12 @@ import {
 
 /** Production defaults for these tests: manifest present (tool unknown, so write) and a window. */
 const ask: typeof askProd = (t, a, p, f, o = {}) => askProd(t, a, p, f, { kind: { manifest: [], tool: a }, window: new ApprovalWindow(), agentId: 'agent', ...o })
+/** Pair through the full F6 flow: device touch, phone offers code + key, device touch confirms the match. */
+function complete(p: PhonePairing, id: string, code: string, origin?: { shared?: boolean }): boolean {
+  const o = p.offer(id, `pub-${id}`, code, origin)
+  return o.ok && p.confirm(id, 'touch', true)
+}
+
 const BK: ApprovalTemplate = { permissions: { auto: ['Read the ledger'], ask: ['Send an invoice'], never: ['Move money out'] } }
 const RG: ApprovalTemplate = { permissions: { locked_ask: ['Brakes step'] } }
 
@@ -73,7 +79,7 @@ describe('F2 AskLedger', () => {
     const l = new AskLedger({ now: c.now, ttlMs: 1000 })
     const v = l.open({ action: 'Send an invoice', tier: 'ask', channel: 'voice', amountMinor: 100 })
     expect(v.id).toMatch(/^[0-9a-f-]{36}$/)
-    expect(v.digest8).toBe(actionDigest8('Send an invoice', { amountMinor: 100 }))
+    expect(v.digest8).toBe(actionDigest8('Send an invoice', { amountMinor: 100, currency: 'USD' }))
     expect(v.expiresAt).toBe(1_001_000)
     expect(v.challenge?.split(' ')).toHaveLength(2)
     const t = l.open({ action: 'Send an invoice', tier: 'ask', channel: 'touch' })
@@ -186,7 +192,7 @@ describe('F2 ask with a ledger', () => {
   it('passes details into the digest', async () => {
     let d = ''
     await ask(BK, 'Send an invoice', null, (_c, _p, req) => { d = req!.digest8; return good(req!) }, { mic: MIC, ledger: new AskLedger(), amountMinor: 700, details: { recipient: 'x' } })
-    expect(d).toBe(actionDigest8('Send an invoice', { amountMinor: 700, recipient: 'x' }))
+    expect(d).toBe(actionDigest8('Send an invoice', { amountMinor: 700, currency: 'USD', recipient: 'x' }))
   })
   it('calls the Volt mic guard around a voice prompt (hook only)', async () => {
     const events: string[] = []
@@ -228,14 +234,14 @@ describe('F6 minimum: phone pairing', () => {
     const p = new PhonePairing({ now: c.now, ttlMs: 100 })
     const { code, expiresAt } = p.begin('touch')
     expect(expiresAt).toBe(1_000_100)
-    expect(p.complete('', code)).toBe(false)
+    expect(complete(p, '', code)).toBe(false)
     const second = p.begin('touch').code
-    expect(p.complete('phone-1', second)).toBe(true)
-    expect(p.complete('phone-2', second)).toBe(false)
-    expect(p.complete('phone-2', 'nope')).toBe(false)
+    expect(complete(p, 'phone-1', second)).toBe(true)
+    expect(complete(p, 'phone-2', second)).toBe(false)
+    expect(complete(p, 'phone-2', 'nope')).toBe(false)
     const late = p.begin('touch').code
     c.advance(101)
-    expect(p.complete('phone-3', late)).toBe(false)
+    expect(complete(p, 'phone-3', late)).toBe(false)
     expect(p.isPaired('phone-1')).toBe(true)
     expect(p.isPaired('phone-3')).toBe(false)
     expect(p.isPaired()).toBe(true)
@@ -247,7 +253,7 @@ describe('F6 minimum: phone pairing', () => {
     const opts = { ledger: new AskLedger(), pairing, available: ['phone'] }
     expect((await ask(RG, 'Brakes step', null, (_c, _p, req) => good(req!), opts)).channel).toBeNull()
     expect((await ask(RG, 'Brakes step', null, (_c, _p, req) => good(req!), { ledger: new AskLedger(), available: ['phone'] })).channel).toBeNull()
-    pairing.complete('phone-1', pairing.begin('touch').code)
+    complete(pairing, 'phone-1', pairing.begin('touch').code)
     expect(await ask(RG, 'Brakes step', null, (_c, _p, req) => good(req!), opts)).toMatchObject({ approved: true, channel: 'phone' })
     expect((await ask(RG, 'Brakes step', null, (_c, _p, req) => good(req!), { ...opts, isPaired: () => false })).channel).toBeNull()
   })
@@ -294,7 +300,7 @@ describe('F5 + F2 journal survives restart', () => {
     const pending = j.ledger.open({ action: 'a', tier: 'ask', channel: 'voice' })
     const spentReq = j.ledger.open({ action: 'a', tier: 'ask', channel: 'touch' })
     j.ledger.settle(good(spentReq))
-    j.pairing.complete('phone-1', j.pairing.begin('touch').code)
+    complete(j.pairing, 'phone-1', j.pairing.begin('touch').code)
 
     const j2 = openJournal(p, { now: c.now })
     expect(j2.window.totals('a')).toEqual({ count: 1, amountMinor: 4500 })
@@ -357,7 +363,7 @@ describe('F5 + F2 journal survives restart', () => {
       expect(j.window.wouldExceed('anyone').voiceAllowed).toBe(true)
     }
     const ok = join(dir, 'ok.json')
-    writeFileSync(ok, JSON.stringify({ ...base, ledger: { open: [{ id: 'x', digest8: '0011aabb', openedAt: 0, expiresAt: 1, channel: 'voice', tier: 'ask', challenge: 'maple river', amountMinor: 5 }], spent: [] } }))
+    writeFileSync(ok, JSON.stringify({ ...base, ledger: { open: [{ id: 'x', digest8: '0011aabb', openedAt: 0, expiresAt: 1, channel: 'voice', tier: 'ask', challenge: 'maple river', amountMinor: 5, currency: 'USD', action: 'a', agentId: 'g' }], spent: [] } }))
     expect(openJournal(ok).recovered).toBe(false)
   })
 })
