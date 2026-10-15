@@ -19,15 +19,19 @@ void main() {
       final refused = Completer<void>();
       final handshake = Completer<void>();
       final timers = <Timer>[];
+      var stopped = false;
       server.listen((request) async {
         final ws = await WebSocketTransformer.upgrade(request);
         clients.add(ws);
+        var refusedSocket = false;
         ws.listen((data) {
+          if (stopped || refusedSocket) return;
           final frame = jsonDecode(data as String) as Map<String, dynamic>;
           final payload = frame['payload'] as Map? ?? {};
           if (frame['type'] == 'machine_select') {
             selections.add(payload['machineId'] as String);
             if (selections.length == 1) {
+              refusedSocket = true;
               unawaited(ws.close(4404, 'NO_PEER_LINK'));
             } else {
               if (!handshake.isCompleted) handshake.complete();
@@ -35,7 +39,7 @@ void main() {
               // remote computer could finish establishing its trusted link.
               timers.add(
                 Timer(const Duration(seconds: 6), () {
-                  if (ws.readyState == WebSocket.open) {
+                  if (!stopped && ws.readyState == WebSocket.open) {
                     ws.add(
                       jsonEncode({
                         'type': 'connected',
@@ -109,6 +113,7 @@ void main() {
       app.machines.add(machine);
       app.machineStates['remote'] = MachineState(machine)..nodeOnline = true;
       addTearDown(() async {
+        stopped = true;
         for (final timer in timers) {
           timer.cancel();
         }
