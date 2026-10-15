@@ -133,14 +133,17 @@ describe('Shield F5: restart mid-window', () => {
     const f = join(dir(), 'j.json'); openJournal(f)
     expect(statSync(f).mode & 0o777).toBe(0o600)
   })
-  it('KNOWN GAP: deleting the journal resets the window (no fail-closed on missing file)', () => {
+  it('FIXED (was KNOWN GAP): deleting the journal after install fails closed', () => {
     const c = clock(); const f = join(dir(), 'j.json')
     const j1 = openJournal(f, { now: c.now })
     j1.window.record('a', { amountMinor: 5000 })
     unlinkSync(f)
     const j2 = openJournal(f, { now: c.now })
-    // Documents current behavior so a fix flips this assertion.
-    expect(j2.window.wouldExceed('a', { amountMinor: 100 }).voiceAllowed).toBe(true)
+    expect(j2.recovered).toBe(true)
+    expect(j2.window.wouldExceed('a', { amountMinor: 100 }).voiceAllowed).toBe(false)
+    expect(j2.window.wouldExceed('fresh-agent').voiceAllowed).toBe(false)
+    c.advance(24 * 3600 * 1000)
+    expect(j2.window.wouldExceed('fresh-agent').voiceAllowed).toBe(true)
   })
   it('a pre-existing loose-mode journal is replaced with 0600 on open', () => {
     const f = join(dir(), 'j.json'); openJournal(f)
@@ -178,14 +181,20 @@ describe('Shield F6: pairing', () => {
     const r = await ask(T, 'Send an email', null, answerWith(() => ({ from: { phoneId: 'evil' } })), { ...KIND('x'), ledger: new AskLedger({ now: c.now }), pairing, available: ['phone'] })
     expect(r.approved).toBe(false); expect(r.reason).toBe('unpaired_phone')
   })
-  it('KNOWN GAP: wrong-code guesses are not rate limited', () => {
+  it('FIXED (was KNOWN GAP): 5 wrong codes burn every open code until a new device touch', () => {
     const p = new PhonePairing()
     const { code } = p.begin('touch')
-    let refused = 0
-    for (let i = 0; i < 500; i++) { const g = String(i).padStart(6, '0'); if (g !== code && !p.offer('evil', 'pubE', g).ok) refused++ }
-    // The real code still works after 500 bad guesses: no lockout.
-    expect(p.offer('p1', 'pub1', code).ok).toBe(true)
-    expect(refused).toBeGreaterThan(490)
+    const other = p.begin('touch').code
+    const wrong = ['000000', '111111', '222222', '333333', '444444', '555555'].filter((g) => g !== code && g !== other).slice(0, 5)
+    for (const g of wrong.slice(0, 4)) expect(p.offer('evil', 'pubE', g)).toEqual({ ok: false, reason: 'unknown_code' })
+    expect(p.offer('evil', 'pubE', wrong[4]!)).toEqual({ ok: false, reason: 'locked_out' })
+    expect(p.lockedOut).toBe(true)
+    expect(p.offer('p1', 'pub1', code)).toEqual({ ok: false, reason: 'locked_out' })
+    expect(p.offer('p1', 'pub1', other)).toEqual({ ok: false, reason: 'locked_out' })
+    const fresh = p.begin('touch')
+    expect(p.lockedOut).toBe(false)
+    expect(p.offer('p1', 'pub1', code)).toEqual({ ok: false, reason: 'unknown_code' })
+    expect(p.offer('p1', 'pub1', fresh.code).ok).toBe(true)
   })
 })
 
@@ -207,16 +216,22 @@ describe('Shield F8: send Ask content', () => {
     await ask(T, 'Send an email', null, fn, { ...o(), send: { recipient: 'a@x.com', message: 'Hello Eve' } })
     expect(new Set(seen.map((s) => s.digest8)).size).toBe(3)
   })
-  it('KNOWN GAP: an empty or whitespace-only message is accepted and shows an empty first line', async () => {
-    let prompt = ''
-    const r = await ask(T, 'Send an email', null, (_c, p, q) => { prompt = p; return { id: q!.id, digest8: q!.digest8, approved: true } }, { ...o(), send: { recipient: 'a@x.com', message: '   \n ' } })
-    expect(r.approved).toBe(true)
-    expect(prompt).toContain('""')
+  it('FIXED (was KNOWN GAP): an empty or whitespace-only message is refused before any prompt', async () => {
+    let called = 0
+    for (const message of ['', '   \n ', '\n\t\n']) {
+      await expect(ask(T, 'Send an email', null, () => { called++; return true }, { ...o(), send: { recipient: 'a@x.com', message } })).rejects.toThrow(/first line/)
+    }
+    expect(called).toBe(0)
   })
-  it('KNOWN GAP: a send passed without isSend still runs, and without send details no recipient is shown', async () => {
+  it('FIXED (was KNOWN GAP): the manifest marks the send; without isSend or send details it is refused', async () => {
+    let called = 0
+    const kind = { manifest: [{ name: 'gmail.send', send: true }], tool: 'gmail.send' }
+    await expect(ask(T, 'Send an email', null, () => { called++; return true }, { kind, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch'] })).rejects.toThrow(ApprovalDenied)
+    await expect(ask(T, 'Send an email', null, () => { called++; return true }, { kind, ledger: new AskLedger(), available: ['touch'], isSend: false, send: { recipient: 'a@x.com', message: 'hi' } })).rejects.toThrow(/window/)
+    expect(called).toBe(0)
     let prompt = ''
-    const r = await ask(T, 'Send an email', null, (_c, p, q) => { prompt = p; return { id: q!.id, digest8: q!.digest8, approved: true } }, { ...KIND('gmail.send'), ledger: new AskLedger(), available: ['touch'] })
-    expect(r.approved).toBe(true)
-    expect(prompt).toBe('ASK: Send an email')
+    await ask(T, 'Send an email', null, (_c, p, q) => { prompt = p; return { id: q!.id, digest8: q!.digest8, approved: true } },
+      { kind, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch'], isSend: false, send: { recipient: 'a@x.com', message: 'hi' } })
+    expect(prompt).toContain('to a@x.com: "hi"')
   })
 })

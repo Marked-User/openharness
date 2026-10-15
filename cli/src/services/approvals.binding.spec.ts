@@ -271,12 +271,12 @@ describe('F8: a send Ask shows the recipient and first line', () => {
       { ledger: new AskLedger(), isSend: true, send: { recipient: 'eve@example.com', message }, amountMinor: 1250 }) })
     expect(other).not.toBe(digest)
   })
-  it('long first lines are cut, empty messages show empty quotes', async () => {
+  it('long first lines are cut, empty messages are refused', async () => {
     const seen: string[] = []
     await ask(BK, 'Send an invoice', null, (_c, p) => { seen.push(p); return true }, { reference: true, send: { recipient: 'r', message: 'x'.repeat(100) } })
-    await ask(BK, 'Send an invoice', null, (_c, p) => { seen.push(p); return true }, { reference: true, send: { recipient: 'r', message: '' } })
+    await expect(ask(BK, 'Send an invoice', null, (_c, p) => { seen.push(p); return true }, { reference: true, send: { recipient: 'r', message: '' } })).rejects.toThrow(/first line/)
     expect(seen[0]).toBe(`ASK: Send an invoice to r: "${'x'.repeat(79)}…" (running total today: 1 actions, $0.00)`)
-    expect(seen[1]).toBe('ASK: Send an invoice to r: "" (running total today: 1 actions, $0.00)')
+    expect(seen).toHaveLength(1)
   })
   it('a send Ask without recipient or message is refused before prompting', async () => {
     const calls: unknown[] = []

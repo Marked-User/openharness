@@ -21,6 +21,13 @@ import 'question_pane.dart';
 /// (openharness#1272). A press that cannot see its caret arrive within
 /// [timeout] gives up having sent only the arrow; the dialog stays open and a
 /// second tap finds the caret already there.
+/// Marker the daemon puts on an Ildra Ask shown in a pane (cli/src/services/approvals.ts
+/// `ILDRA_ASK_MARKER`). Such a dialog is answered through the daemon's Ask ledger, never by keys
+/// (Shield F13): a press on it sends nothing.
+const ildraAskMarker = '[Ildra Ask ';
+
+bool isIldraAskQuestion(String question) => question.contains(ildraAskMarker);
+
 class ElicitationPress {
   ElicitationPress({
     required this.read,
@@ -62,6 +69,7 @@ class ElicitationPress {
     if (busy) return false;
     final view = read();
     if (view == null ||
+        isIldraAskQuestion(view.question) ||
         view.kind != QuestionPaneKind.elicitation ||
         view.focused == null ||
         !view.rows.any((row) => row.number == target)) {

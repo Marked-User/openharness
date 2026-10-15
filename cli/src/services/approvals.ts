@@ -120,6 +120,13 @@ export interface ToolManifestEntry {
   name: string
   readOnly?: unknown
   annotations?: { readOnlyHint?: unknown } | null
+  /** F8: the tool sends a message to someone. Only literal true counts. */
+  send?: unknown
+}
+
+/** F8: a send is decided by the manifest (or tightened by the caller), never loosened by the caller. */
+export function isSendTool(manifest: readonly ToolManifestEntry[] | null | undefined, toolName: string): boolean {
+  return manifest?.find((e) => e.name === toolName)?.send === true
 }
 
 /** A tool is a read only when the manifest lists it as read-only. Unknown tools are writes. */
@@ -317,8 +324,28 @@ export interface AskRequest {
 export interface AnswerOrigin {
   /** Paired phone id, required when channel is phone. */
   phoneId?: string
-  /** True when the answering machine or phone is trusted only through machine sharing. */
+  /** The answering machine's public key, looked up against the gateway's shared trust (F12). */
+  machinePub?: string
+  /**
+   * Untrusted claim. Never used to clear an answer: true still rejects; false is ignored. Whether the
+   * origin is shared comes from the gateway (SharedOriginLookup, fed by sharedMachines.ts trustedKeys).
+   */
   shared?: boolean
+}
+
+/** F12: true when the gateway trusts this origin only through machine sharing (#1358). */
+export type SharedOriginLookup = (origin: AnswerOrigin) => boolean
+
+/** Build a lookup from the gateway's shared peers (sharedMachines.ts `trustedKeys`, sharedTrust pins/keys). */
+export function sharedOriginFromPeers(peers: readonly { pub: string; machineId?: string }[]): SharedOriginLookup {
+  const pubs = new Set(peers.map((p) => p.pub))
+  return (o) => typeof o.machinePub === 'string' && pubs.has(o.machinePub)
+}
+
+function originShared(origin: AnswerOrigin | undefined, lookup?: SharedOriginLookup): boolean {
+  if (origin?.shared === true) return true
+  if (!lookup) return false
+  try { return lookup(origin ?? {}) !== false } catch { return true }
 }
 
 export interface AskAnswer {
@@ -396,13 +423,13 @@ export class AskLedger {
   }
 
   /** `isPaired` is consulted for phone answers; `extra` runs after the ledger's own verifier. */
-  settle(ans: AskAnswer, ctx: { isPaired?: (phoneId: string) => boolean; extra?: AnswerVerifier } = {}): SettleResult {
+  settle(ans: AskAnswer, ctx: { isPaired?: (phoneId: string) => boolean; extra?: AnswerVerifier; isShared?: SharedOriginLookup } = {}): SettleResult {
     const r = this.check(ans, ctx)
     this.onChange?.()
     return r
   }
 
-  private check(ans: AskAnswer, ctx: { isPaired?: (phoneId: string) => boolean; extra?: AnswerVerifier }): SettleResult {
+  private check(ans: AskAnswer, ctx: { isPaired?: (phoneId: string) => boolean; extra?: AnswerVerifier; isShared?: SharedOriginLookup }): SettleResult {
     if (!ans || typeof ans !== 'object' || typeof ans.id !== 'string' || typeof ans.digest8 !== 'string') return { ok: false, reason: 'malformed' }
     const req = this.open_.get(ans.id)
     if (!req) {
@@ -413,7 +440,7 @@ export class AskLedger {
     this.spent.set(ans.id, req.expiresAt)
     if (this.now() >= req.expiresAt) return { ok: false, reason: 'expired' }
     if (ans.digest8 !== req.digest8) return { ok: false, reason: 'digest_mismatch' }
-    if (ans.from?.shared === true) return { ok: false, reason: 'shared_machine' }
+    if (originShared(ans.from, ctx.isShared)) return { ok: false, reason: 'shared_machine' }
     if (req.channel === 'phone') {
       const id = ans.from?.phoneId
       if (typeof id !== 'string' || !ctx.isPaired || !ctx.isPaired(id)) return { ok: false, reason: 'unpaired_phone' }
@@ -502,9 +529,20 @@ export class PhonePairing {
   readonly log: PairingLogEntry[] = []
   onChange?: () => void
 
-  constructor(opts: { now?: () => number; ttlMs?: number } = {}) {
+  /** F6: wrong codes allowed before every open code is burned and a new device touch is needed. */
+  static readonly MAX_WRONG_CODES = 5
+  private wrongCodes = 0
+  private readonly isShared?: SharedOriginLookup
+
+  constructor(opts: { now?: () => number; ttlMs?: number; isShared?: SharedOriginLookup } = {}) {
     this.now = opts.now ?? Date.now
     this.ttlMs = opts.ttlMs ?? 5 * 60_000
+    this.isShared = opts.isShared
+  }
+
+  /** True after too many wrong codes, until the next begin('touch'). */
+  get lockedOut(): boolean {
+    return this.wrongCodes >= PhonePairing.MAX_WRONG_CODES
   }
 
   private refuse(phoneId: string, reason: string): false {
@@ -514,9 +552,10 @@ export class PhonePairing {
     return false
   }
 
-  begin(confirmedBy: AskChannel, origin: { shared?: boolean } = {}): PairingStart {
-    if (origin.shared === true) throw new ApprovalDenied('a shared machine cannot start pairing')
+  begin(confirmedBy: AskChannel, origin: AnswerOrigin = {}): PairingStart {
+    if (originShared(origin, this.isShared)) throw new ApprovalDenied('a shared machine cannot start pairing')
     if (confirmedBy !== 'touch') throw new ApprovalDenied('phone pairing needs a touch on the device')
+    this.wrongCodes = 0
     const code = String(randomInt(1_000_000)).padStart(6, '0')
     const deviceNonce = randomBytes(16).toString('hex')
     const expiresAt = this.now() + this.ttlMs
@@ -525,12 +564,20 @@ export class PhonePairing {
     return { code, deviceNonce, expiresAt }
   }
 
-  offer(phoneId: string, phonePub: string, code: string, origin: { shared?: boolean } = {}): PairingOffer {
-    const c = this.codes.get(code)
+  offer(phoneId: string, phonePub: string, code: string, origin: AnswerOrigin = {}): PairingOffer {
     const no = (reason: string): PairingOffer => { this.refuse(phoneId, reason); return { ok: false, reason } }
-    if (!c) return no('unknown_code')
+    if (this.lockedOut) return no('locked_out')
+    const c = this.codes.get(code)
+    if (!c) {
+      this.wrongCodes++
+      if (this.lockedOut) {
+        this.codes.clear()
+        return no('locked_out')
+      }
+      return no('unknown_code')
+    }
     this.codes.delete(code)
-    if (origin.shared === true) return no('shared_machine')
+    if (originShared(origin, this.isShared)) return no('shared_machine')
     if (this.now() >= c.expiresAt) return no('expired')
     if (!phoneId) return no('no_phone_id')
     if (!phonePub) return no('no_phone_pub')
@@ -659,14 +706,23 @@ export interface ApprovalJournal {
  */
 export function openJournal(
   path: string,
-  opts: { now?: () => number; windowMs?: number; ttlMs?: number; verifier?: AnswerVerifier; voiceMoneyLimitMinor?: number; bulkCount?: number } = {},
+  opts: {
+    now?: () => number; windowMs?: number; ttlMs?: number; verifier?: AnswerVerifier; voiceMoneyLimitMinor?: number; bulkCount?: number
+    /** F5: install marker, written once. Marker present and journal missing fails closed. Keep it outside the journal's folder in production. */
+    markerPath?: string
+  } = {},
 ): ApprovalJournal {
   const now = opts.now ?? Date.now
   const window = new ApprovalWindow({ now, windowMs: opts.windowMs, voiceMoneyLimitMinor: opts.voiceMoneyLimitMinor, bulkCount: opts.bulkCount })
   const ledger = new AskLedger({ now, ttlMs: opts.ttlMs, verifier: opts.verifier })
   const pairing = new PhonePairing({ now })
   let recovered = false
-  if (existsSync(path)) {
+  const marker = opts.markerPath ?? `${path}.installed`
+  if (!existsSync(path) && existsSync(marker)) {
+    // The journal was deleted after install: totals cannot be trusted.
+    recovered = true
+    window.lockedUntil = now() + window.windowMs
+  } else if (existsSync(path)) {
     try {
       const d = parseJournal(readFileSync(path, 'utf8'))
       window.restore(d.window)
@@ -688,6 +744,10 @@ export function openJournal(
   ledger.onChange = save
   pairing.onChange = save
   save()
+  if (!existsSync(marker)) {
+    mkdirSync(dirname(marker), { recursive: true })
+    writeFileSync(marker, `${now()}\n`, { mode: 0o600 })
+  }
   return { window, ledger, pairing, recovered, save }
 }
 
@@ -727,6 +787,8 @@ export interface AskOptions {
   send?: SendDetails
   /** Extra fields bound into the digest. */
   details?: Record<string, unknown>
+  /** F12: gateway lookup for shared-account origins (sharedOriginFromPeers). */
+  isShared?: SharedOriginLookup
   /** Display only: the template the agent runs. */
   templateId?: string
   /** The agent's own approval mode. 'auto' never loosens a template's Ask or locked_ask. */
@@ -746,13 +808,16 @@ export async function ask(
   const prod = opts.reference !== true
   if (opts.window && !opts.agentId) throw new ApprovalDenied('approval window needs an agentId')
   if (opts.verifier && !opts.ledger) throw new ApprovalDenied('an answer verifier needs a ledger')
-  if (opts.isSend && !(opts.send && typeof opts.send.recipient === 'string' && opts.send.recipient.trim() && typeof opts.send.message === 'string')) {
+  const sendTool = opts.kind ? isSendTool(opts.kind.manifest, opts.kind.tool) : false
+  const isSend = opts.isSend === true || sendTool || opts.send !== undefined
+  if (isSend && !(opts.send && typeof opts.send.recipient === 'string' && opts.send.recipient.trim() && typeof opts.send.message === 'string')) {
     throw new ApprovalDenied('a send Ask needs the recipient and the message')
   }
+  if (isSend && firstLine(opts.send!.message) === '') throw new ApprovalDenied('a send Ask needs a non-empty first line')
   if (prod) {
     if (!opts.ledger) throw new ApprovalDenied('production Asks need a ledger (F2)')
     if (!opts.kind) throw new ApprovalDenied('production Asks need the tool manifest (F4)')
-    const money = opts.amountMinor !== undefined || opts.isSend === true || opts.send !== undefined
+    const money = opts.amountMinor !== undefined || isSend
     if (money && !(opts.window && opts.agentId)) throw new ApprovalDenied('money and send Asks need an approval window (F5)')
   }
   let isWrite: boolean
@@ -811,7 +876,7 @@ export async function ask(
       if (voice) opts.mic!.speaking(false)
     }
     const pairing = opts.pairing
-    const s = bound.settle(ans as AskAnswer, { isPaired: pairing ? (id) => pairing.isPaired(id) : undefined, extra: opts.verifier })
+    const s = bound.settle(ans as AskAnswer, { isPaired: pairing ? (id) => pairing.isPaired(id) : undefined, extra: opts.verifier, isShared: opts.isShared })
     approved = s.ok && (ans as AskAnswer).approved === true
     reason = s.ok ? undefined : s.reason
   } else {
@@ -853,4 +918,61 @@ export async function answerMcpElicitation(
   } catch (e) {
     return { action: 'decline', error: (e as Error).message }
   }
+}
+
+// ---- F13: upstream's phone elicitation handler cannot answer Ildra Ask panes directly ----
+
+/** Prefix the daemon puts on an Ildra Ask shown in an agent pane, so every viewer can recognize it. */
+export const ILDRA_ASK_MARKER = '[Ildra Ask '
+
+export function ildraAskTitle(req: Pick<AskRequest, 'digest8'>, prompt: string): string {
+  return `${ILDRA_ASK_MARKER}${req.digest8}] ${prompt}`
+}
+
+export function isIldraAskQuestion(question: string | null | undefined): boolean {
+  return typeof question === 'string' && question.includes(ILDRA_ASK_MARKER)
+}
+
+/**
+ * Which panes have an Ildra Ask open. While one is open, keystrokes from any remote viewer (phone,
+ * web) to that pane are blocked: the Ask is answered only through the ledger (bound answer), never
+ * by a key press on the pane's dialog. Local keyboard input on the device's own pane passes.
+ */
+export class AskPaneGuard {
+  private readonly open_ = new Map<string, string>()
+
+  open(paneId: string, requestId: string): void {
+    this.open_.set(paneId, requestId)
+  }
+
+  close(paneId: string): void {
+    this.open_.delete(paneId)
+  }
+
+  requestFor(paneId: string): string | null {
+    return this.open_.get(paneId) ?? null
+  }
+
+  filterInput(paneId: string, from: 'local' | 'remote'): 'pass' | 'block' {
+    return from === 'remote' && this.open_.has(paneId) ? 'block' : 'pass'
+  }
+}
+
+/**
+ * Replacement for upstream #1340's direct press. The phone asks the daemon; the daemon runs the
+ * Accept as an Ask (answerMcpElicitation) and returns which button to press: '1' Accept only on an
+ * approved bound answer, '2' Decline otherwise. An Ildra Ask pane is never pressed (key null): it is
+ * answered through the ledger.
+ */
+export async function phoneElicitationPress(
+  template: ApprovalTemplate,
+  el: McpElicitation & { paneId: string },
+  profile: ApprovalProfile | null | undefined,
+  answerFn: AnswerFn,
+  opts: Parameters<typeof answerMcpElicitation>[4] & { guard: AskPaneGuard },
+): Promise<{ key: '1' | '2' | null; reason?: string }> {
+  const { guard, ...rest } = opts
+  if (guard.requestFor(el.paneId) !== null || isIldraAskQuestion(el.message)) return { key: null, reason: 'ildra_ask_pane' }
+  const r = await answerMcpElicitation(template, el, profile, answerFn, rest)
+  return r.action === 'accept' ? { key: '1' } : { key: '2', reason: r.error ?? r.outcome?.reason }
 }
