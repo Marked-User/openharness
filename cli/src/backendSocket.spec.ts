@@ -4137,4 +4137,28 @@ describe('opening the app', () => {
     socket.registerLocalClient('local:again', sink)
     expect(opened).toEqual(['desktop', 'tui', 'desktop'])
   })
+
+  it('counts hn\'s own observations from hn alone, as fixed counters', async () => {
+    const socket = new BackendSocket('fixture')
+    const counted: string[] = []
+    socket.useGateway({ holdRequests: () => {}, serveThisComputerOnly: () => {}, localClients: () => {}, windowOpened: () => {},
+      usageCounter: (metric: string) => { counted.push(metric) } } as never)
+    const sink = { sendFrame: () => true, sendBinary: () => true }
+    socket.registerLocalClient('local:tui', sink, { surface: 'tui' })
+    socket.registerLocalClient('local:app', sink)
+    socket.registerLocalClient('local:tool', sink, { tool: true })
+    const flow = { flow: 'remote_connect', outcome: 'failed', durationMs: 12_000 }
+    for (const id of ['local:app', 'local:tool', 'web-1', 'local:gone']) socket.observeProduct(id, flow)
+    expect(counted).toEqual([])
+    socket.observeProduct('local:tui', { flow: 'remote_connect' })
+    socket.observeProduct('local:tui', flow)
+    socket.observeProduct('local:tui', { measure: 'funnel_workspace_ready' })
+    socket.observeProduct('local:tui', { measure: 'PRIVATE_CANARY' })
+    socket.observeProduct('local:tui', { ...flow, agentId: 'PRIVATE_CANARY' })
+    expect(counted).toEqual(['ui_tui_remote_connect_started', 'ui_tui_remote_connect_failed', 'ui_tui_remote_connect_10s_to_1m',
+      'health_tui_funnel_workspace_ready'])
+    await socket.unregisterLocalClient('local:tui')
+    socket.observeProduct('local:tui', flow)
+    expect(counted).toHaveLength(4)
+  })
 })

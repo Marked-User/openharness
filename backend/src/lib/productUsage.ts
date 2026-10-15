@@ -8,8 +8,10 @@ import { prisma } from './prisma.js'
 import { PRODUCT_USAGE_DAYS, type ProductUsageChoice, type ProductUsageReport } from '../types/productUsage.js'
 import { ACTIVITY_DAYS, type ActivitySurface } from '../types/productUsageActivity.js'
 import { incrementUsageTotals, type UsageIncrement } from './productUsageWrite.js'
+import { createUsageAdmission } from './productUsageAdmission.js'
 
 const DAY = 86_400_000
+const writeUsage = createUsageAdmission()
 type Db = Pick<Prisma.TransactionClient, 'productUsagePreference' | 'analyticsMachineState'>
 
 /** A pre-existing off choice wins over the new default. Never cache an enabled answer. */
@@ -67,33 +69,35 @@ async function ingestCounters(report: SetupUsageReport & { revision?: number; co
   // October's delivery audit found aggregate write conflicts. Retry the entire transaction,
   // including permission, without extending a slow request or waiting a full client interval.
   // At most four attempts; only fast conflicts may start another within the first second.
-  const started = performance.now()
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await prisma.$transaction(async tx => {
-        if (userId) {
-          const choice = await productUsageChoice(userId, tx)
-          if (!choice.enabled || choice.revision !== report.revision) return { accepted: false, reason: 'CHOICE_CHANGED', ...choice }
-        }
-        // Receipt and increments commit together; a lost HTTP response can be retried with the same id.
-        await tx.productUsageReceipt.create({ data: {
-          id: report.id, expiresAt: new Date(Date.parse(report.day) + (PRODUCT_USAGE_DAYS + 1) * DAY),
-        } })
-        await incrementUsageTotals(tx, increments)
-        return { accepted: true }
-      })
-    } catch (error) {
-      // A competing first writer of a daily total is not a duplicate unless its receipt committed.
-      const code = (error as { code?: string } | null)?.code
-      if (code === 'P2002'
-          && await prisma.productUsageReceipt.findUnique({ where: { id: report.id }, select: { id: true } })) return { accepted: true }
-      const pause = 25 * 2 ** attempt + Math.floor(Math.random() * 50)
-      if ((code !== 'P2034' && code !== 'P2002') || attempt >= 3
-          || performance.now() - started + pause >= 1000) throw error
-      await delay(pause)
-      if (performance.now() - started >= 1000) throw error
+  return writeUsage(async () => {
+    const started = performance.now()
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await prisma.$transaction(async tx => {
+          if (userId) {
+            const choice = await productUsageChoice(userId, tx)
+            if (!choice.enabled || choice.revision !== report.revision) return { accepted: false, reason: 'CHOICE_CHANGED', ...choice }
+          }
+          // Receipt and increments commit together; a lost HTTP response can be retried with the same id.
+          await tx.productUsageReceipt.create({ data: {
+            id: report.id, expiresAt: new Date(Date.parse(report.day) + (PRODUCT_USAGE_DAYS + 1) * DAY),
+          } })
+          await incrementUsageTotals(tx, increments)
+          return { accepted: true }
+        })
+      } catch (error) {
+        // A competing first writer of a daily total is not a duplicate unless its receipt committed.
+        const code = (error as { code?: string } | null)?.code
+        if (code === 'P2002'
+            && await prisma.productUsageReceipt.findUnique({ where: { id: report.id }, select: { id: true } })) return { accepted: true }
+        const pause = 25 * 2 ** attempt + Math.floor(Math.random() * 50)
+        if ((code !== 'P2034' && code !== 'P2002') || attempt >= 3
+            || performance.now() - started + pause >= 1000) throw error
+        await delay(pause)
+        if (performance.now() - started >= 1000) throw error
+      }
     }
-  }
+  })
 }
 
 export type RelayUsageMetric = 'relay_desktop_opens' | 'relay_tui_opens' | 'relay_mobile_opens' | 'relay_web_opens'

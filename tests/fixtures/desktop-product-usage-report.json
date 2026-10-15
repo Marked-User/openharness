@@ -17,6 +17,7 @@
     "health_desktop_first_response_under_1m": 1,
     "health_desktop_frame_under_16ms": 1000,
     "health_desktop_feedback_outcome_shown": 1,
-    "health_desktop_report_failed": 1
+    "health_desktop_report_failed": 1,
+    "health_desktop_report_failure_write_conflict": 1
   }
 }

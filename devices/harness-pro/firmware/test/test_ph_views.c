@@ -31,27 +31,6 @@ static int dot_runs(void) { int n = 0; for (int i = 0; i < S.count; i++) n += S.
 static bool centred_run(const ht_run_t *r) { return r && r->x + r->w / 2 >= 360 - 2 && r->x + r->w / 2 <= 360 + 2; }
 
 int main(void) {
-    const char *crumbs[] = {"Overview", "Backend"};
-    fresh();
-    ph_bar(&F, crumbs, 2);
-    CHECK(hits_of(POD_A_BACK) == 1);
-    const ht_run_t *ov = text_run("Overview");
-    CHECK(ov);
-    for (int i = 0; i < F.hit_count; i++)
-        if (F.hits[i].action == POD_A_BACK) {
-            CHECK(F.hits[i].arg == 1);
-            CHECK(F.hits[i].x <= ov->x && F.hits[i].x + F.hits[i].w >= ov->x + ov->w);
-        }
-    const ht_run_t *cur = text_run("Backend");
-    CHECK(cur);
-    for (int i = 0; i < F.hit_count; i++) CHECK(!(F.hits[i].x < cur->x && F.hits[i].x + F.hits[i].w > cur->x + cur->w && F.hits[i].action == POD_A_BACK));
-    CHECK(hits_of(POD_A_INBOX) == 0 && S.runs[0].fg == ht_rgb(PH_GROUND));   // no chips: the bar is the Update screen's breadcrumbs
-    {   // a long crumb is cut at the right margin
-        const char *longc[] = {"Overview", "marketing-site-redesign-with-long-name-that-goes-on-and-on-and-on"};
-        fresh();
-        ph_bar(&F, longc, 2);
-        for (int i = 0; i < S.count; i++) CHECK(S.runs[i].pro_kind != K_TEXT || S.runs[i].x + S.runs[i].w <= POD_W - 24 + 2);
-    }
     {   // Home's equaliser: four 8 px bars 5 px apart, anchored at the bottom of a 36 px box, 40..100 % tall, moving with the clock
         int hmin = 99, hmax = 0;
         for (uint32_t t = 0; t < 1800; t += 30) {
@@ -133,7 +112,7 @@ int main(void) {
                 icons += r->pro_kind == K_IMAGE;
                 dots11 += r->pro_kind == K_RECT_AA && r->pro_height == 11 && r->y >= 660;
             }
-            CHECK(cards == 1 && grads == 1 + 1 + (t < 6));   // the neighbours peek when they exist (tab 0's is the Notices card)
+            CHECK(cards == 1 && grads == 1 + (t > 0) + (t < 6));   // the tab neighbours peek when they exist (tab 0's left one is the Notices letter, no gradient)
             CHECK(dots11 == 0 && dot_runs() == 0);                  // no page dots
             CHECK(hits_of(POD_A_ENTER_TAB) == 1 && F.hit_count == 1);
             const pod_hit_t *h = nth_hit(POD_A_ENTER_TAB, 0);
@@ -233,7 +212,7 @@ int main(void) {
         // no tabs at all: with a notice (x8 asks) the Notices card alone, else the "Harness" wordmark
         pod_model_swarms(&M, sw, lists, counts, 0, "", NULL, 0);
         N.stack[0].scroll = 0; fresh(); ph_view_home(&F, &N, &M, now);
-        CHECK(text_run("Notices") && text_run("1") && text_run("new") && hits_of(POD_A_INBOX) == 1 && F.hit_count == 1 && pod_tabs_pages_of(&N, &M) == 1);
+        CHECK(text_run("Notices") && text_run("1") && text_run("Tap to read") && hits_of(POD_A_INBOX) == 1 && F.hit_count == 1 && pod_tabs_pages_of(&N, &M) == 1);
         pod_model_question_close(&M, "x8");
         fresh(); ph_view_home(&F, &N, &M, now);
         {   // the first screen: "Harness" as seven letter runs in Inter Bold 84 (the only text), centred on x 360 within 2 px, baseline 373,
@@ -284,7 +263,9 @@ int main(void) {
         }
     }
 
-    // ---- Home's Notices card (the owner's mockup, option B): first before every tab, count, up to three rows, one POD_A_INBOX hit ----
+    // ---- Home's Notices card (the owner's mockup harness-pro-notices-card.html, option A "a letter"): first before every tab, a light paper card with two
+    // sheets behind, an envelope, "Notices" and the count in a round badge, up to three rows (the agent's name over the text) ruled apart, a foot line,
+    // one POD_A_INBOX hit ----
     {
         static pod_model_t M;
         static pod_nav_t N;
@@ -315,29 +296,36 @@ int main(void) {
         CHECK(pod_notice_count(&M) == 1 && pod_tabs_pages_of(&N, &M) == 3);
         N.stack[0].scroll = -1; fresh(); ph_view_home(&F, &N, &M, now);
         {
-            int cards = 0, grads = 0, logos = 0;
+            int paper = 0, mid = 0, back = 0, grads = 0, logos = 0, badge = 0;
             for (int i = 0; i < S.count; i++) {
                 const ht_run_t *r = &S.runs[i];
-                if (r->pro_kind == POD_GRAD && r->w == 540) {
-                    uint16_t g[2]; memcpy(g, r->text, sizeof g);
-                    CHECK(r->x == 90 && r->y == 56 && r->pro_height == 560 && r->radius == 48 && g[0] == ht_rgb(PH_NOTICE1) && g[1] == ht_rgb(PH_NOTICE2));
-                    cards++;
+                if (r->pro_kind == K_RECT_AA && r->w == 540 && r->pro_height == 560 && r->radius == 48 && r->fg == ht_rgb(PH_LETTER)) { paper++; CHECK(r->x == 90 && r->y == 56); }
+                // a sheet 12 (24) px down-right: three rounded 96 px corners and two straight slivers, all inside its own box
+                if ((r->pro_kind == K_RECT_AA || r->pro_kind == K_RECT) && r->fg == ht_rgb(PH_LETTER_MID)) {
+                    mid++; CHECK(r->x >= 90 + 12 && r->y >= 56 + 12 && r->x + r->w <= 90 + 540 + 12 && r->y + r->pro_height <= 56 + 560 + 12);
                 }
+                if ((r->pro_kind == K_RECT_AA || r->pro_kind == K_RECT) && r->fg == ht_rgb(PH_LETTER_BACK)) {
+                    back++; CHECK(r->x >= 90 + 24 && r->y >= 56 + 24 && r->x + r->w <= 90 + 540 + 24 && r->y + r->pro_height <= 56 + 560 + 24);
+                }
+                if (r->pro_kind == K_RECT_AA && r->fg == ht_rgb(PH_LETTER_BADGE)) { badge++; CHECK(r->w == 76 && r->pro_height == 76 && r->x + r->w == 90 + 540 - 44); }
                 grads += r->pro_kind == POD_GRAD;
                 logos += r->pro_kind == K_IMAGE && r->w == 44;
             }
-            CHECK(cards == 1 && grads == 2 && logos == 1);   // the card and tab 0 peeking on the right
-            const ht_run_t *nm = text_run("Notices"), *num = text_run("1"), *lab = text_run("new"), *row = text_run("Fixed the cable resync.");
-            CHECK(nm && nm->pro_font == &ph_sb_48 && nm->x == 134 && nm->fg == ht_rgb(PH_CARD_INK));
-            CHECK(num && num->pro_font == &ph_num_230 && num->x == 128 && num->y == 56 + 61 && lab && lab->pro_font == &ph_sb_26 && lab->x == 128 + ht_pro_width(&ph_num_230, "1") + 16);
-            CHECK(row && row->pro_font == &ph_rg_24 && row->x == 90 + 44 + 44 + 18 && row->y > 56 + 345 && row->y < 56 + 345 + 44);
+            CHECK(paper == 1 && mid == 5 && back == 5 && badge == 1 && grads == 1 && logos == 1);   // the letter, its two sheets, the badge; tab 0 peeking on the right
+            const ht_run_t *nm = text_run("Notices"), *num = text_run("1"), *who = text_run("claude-one"), *row = text_run("Fixed the cable resync."), *foot = text_run("Tap to read");
+            CHECK(nm && nm->pro_font == &ph_sb_48 && nm->x == 90 + 44 + 46 + 16 && nm->fg == ht_rgb(PH_LETTER_INK));
+            CHECK(num && num->pro_font == &ph_sb_48 && num->fg == ht_rgb(0xFFFFFF) && !text_run("new"));
+            CHECK(who && who->pro_font == &ph_sb_22 && who->fg == ht_rgb(PH_LETTER_WHO) && who->x == 90 + 44 + 44 + 18);
+            CHECK(row && row->pro_font == &ph_rg_24 && row->fg == ht_rgb(PH_LETTER_INK) && row->x == 90 + 44 + 44 + 18 && row->y > who->y && row->y < 56 + 140 + 112);
+            CHECK(foot && foot->fg == ht_rgb(PH_LETTER_MORE));
             CHECK(hits_of(POD_A_INBOX) == 1 && F.hit_count == 1 && !hits_of(POD_A_ENTER_TAB));
             const pod_hit_t *h = nth_hit(POD_A_INBOX, 0);
             CHECK(h->x == 90 && h->y == 56 && h->w == 540 && h->h == 560);
             CHECK(!ph_home_moves(&N, &M) && pod_view_next_ms(&N, &M, now) == 1000);   // nothing on the card moves
             CHECK(ph_runs(&F) <= HT_RUNS && dot_runs() == 0);
         }
-        // five notices: the asking agent first, then the newest entries; three rows, 66 px apart, the logos 44 px (an engine with none: the >_ outline), long text cut
+        // five notices: the asking agent first, then the newest entries; three rows 112 px apart, two rules, the logos 44 px (an engine with none: the >_
+        // outline), long text cut, "+2 more"
         pod_model_question(&M, "q", "Run the migration on the dev database now, or wait?");
         pod_model_unread_add(&M, "x", "codex-one", "Added the retry queue.", 12, now - 4000);
         pod_model_unread_add(&M, "g", "mystery", "Bumped the SDK and regenerated the client. Nothing else changed in this run.", 41, now - 3000);
@@ -345,21 +333,21 @@ int main(void) {
         CHECK(pod_notice_count(&M) == 5 && pod_tabs_pages_of(&N, &M) == 3);
         N.stack[0].scroll = -1; fresh(); ph_view_home(&F, &N, &M, now);
         {
-            CHECK(text_run("5") && text_run("new"));
-            int rows = 0, logos = 0, outlines = 0;
+            CHECK(text_run("5") && text_run("+2 more \xc2\xb7 tap to read") && text_run("asker"));
+            int rows = 0, logos = 0, outlines = 0, rules = 0;
             int ys[3] = {0, 0, 0};
             for (int i = 0; i < S.count; i++) {
                 const ht_run_t *r = &S.runs[i];
                 if (r->pro_kind == K_TEXT && r->pro_font == &ph_rg_24 && r->x == 90 + 44 + 44 + 18) { CHECK(rows < 3); ys[rows++] = r->y; }
                 logos += r->pro_kind == K_IMAGE && r->w == 44;
                 outlines += r->pro_kind == K_RECT_STROKE && r->w == 44 && r->pro_height == 44;
+                rules += r->pro_kind == K_RECT && r->pro_height == 2 && r->fg == ht_rgb(PH_LETTER_RULE);
                 if (r->pro_kind == K_TEXT && r->pro_font == &ph_rg_24) CHECK(r->x + r->w <= 90 + 540 - 44 + 2);   // inside the card
             }
-            CHECK(rows == 3 && ys[1] - ys[0] == 66 && ys[2] - ys[1] == 66 && logos + outlines == 3);
+            CHECK(rows == 3 && ys[1] - ys[0] == 112 && ys[2] - ys[1] == 112 && logos + outlines == 3 && rules == 2);
             const ht_run_t *first = text_prefix("Run the migration");   // the asking agent's question leads
             CHECK(first && first->y == ys[0]);
             CHECK(!text_run("Added the retry queue.") || text_run("Added the retry queue.")->y > ys[0]);
-            // the newest entry's text, then the cut: "Bumped the SDK ..." does not fit one 390 px line
             const ht_run_t *cut = text_prefix("Bumped the SDK");
             CHECK(cut == NULL || ht_pro_width(&ph_rg_24, cut->text) > 0);   // drawn (the run clips with an ellipsis), or fell below the third row
             CHECK(ph_runs(&F) <= HT_RUNS);
@@ -372,8 +360,11 @@ int main(void) {
                 if (S.runs[i].pro_kind == POD_GRAD) {
                     uint16_t g[2]; memcpy(g, S.runs[i].text, sizeof g);
                     if (S.runs[i].w == 540) full++;
-                    else if (S.runs[i].x < 0) { left++; CHECK(g[0] != ht_rgb(PH_NOTICE1) && g[0] != ht_rgb(PH_HOME_BG)); }   // faded 45 % toward the ground
+                    else if (S.runs[i].x < 0) left++;
                     else right++;
+                } else if (S.runs[i].pro_kind == K_RECT_AA && S.runs[i].x < 0 && S.runs[i].w == 464) {   // the letter peeking, faded 45 % toward the ground
+                    left++;
+                    CHECK(S.runs[i].fg != ht_rgb(PH_LETTER) && S.runs[i].fg != ht_rgb(PH_HOME_BG));
                 }
             CHECK(full == 1 && left == 1 && right == 1 && !text_run("Notices") && text_run("Alpha") && text_run("Bravo"));   // the left card's name is off the glass
             CHECK(hits_of(POD_A_ENTER_TAB) == 1 && !hits_of(POD_A_INBOX) && nth_hit(POD_A_ENTER_TAB, 0)->arg == 0);
@@ -635,10 +626,10 @@ int main(void) {
                     fresh();
                     if (v) ph_view_agent(&F, &RN, &R, r0); else ph_view_recap(&F, &RN, &R, r0);
                     { char band[900]; BAND(band, 40, 560); CHECK(strstr(band, "Done! The checkout test is fixed.") && strstr(band, "I also tidied the fixtures.")); }
-                    CHECK(F.scene->background == ht_rgb(0x0E1B2C) && text_run("backend"));   // the navy ground, the agent's name beside the pet, no stats line, no title on top
+                    CHECK(F.scene->background == ht_rgb(PH_ROOM_BG) && text_run("backend"));   // the room's warm ground, the agent's name beside the pet, no stats line, no title on top
                     { int top = 0; for (int i = 0; i < S.count; i++) top += S.runs[i].pro_kind == K_TEXT && S.runs[i].y < 40; CHECK(top == 0); }
                     CHECK(!text_run("tap to hear how") && !text_run("z z z") && F.hit_count == 0);
-                    { int bad = 0, blue = 0; for (int i = 0; i < S.count; i++) { bad += S.runs[i].pro_kind == K_RECT_AA && S.runs[i].fg == ht_rgb(0xF3D9DA); blue += S.runs[i].pro_kind == K_RECT_AA && S.runs[i].fg == ht_rgb(0xCFE6FB); } CHECK(bad == 0 && blue >= 1); }
+                    { int bad = 0, blue = 0; for (int i = 0; i < S.count; i++) { bad += S.runs[i].pro_kind == K_RECT_AA && S.runs[i].fg == ht_rgb(0xF3D9DA); blue += S.runs[i].pro_kind == K_RECT_AA && S.runs[i].fg == ht_rgb(PH_LETTER); } CHECK(bad == 0 && blue >= 1); }
                     CHECK(!text_prefix("Cooking"));   // no status line
                     CHECK(ph_runs(&F) <= HT_RUNS);
                     if (!v) printf("runs recap %d\n", ph_runs(&F));
@@ -657,7 +648,7 @@ int main(void) {
                     int rows = 0;
                     const ht_run_t *last = NULL;
                     for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ph_rg_36) { rows++; last = &S.runs[i]; }
-                    CHECK(rows >= 5 && last && last->w <= 532 + 2 && last->fg == ht_rgb(0x7F93AA) && !strcmp(last->text + strlen(last->text) - 3, "\xe2\x80\xa6"));
+                    CHECK(rows >= 5 && last && last->w <= 532 + 2 && last->fg == ht_rgb(PH_LETTER_MORE) && !strcmp(last->text + strlen(last->text) - 3, "\xe2\x80\xa6"));
                     CHECK(text_prefix("Sentence 1 ") && !text_prefix("Sentence 40") && ph_runs(&F) <= HT_RUNS);
                     printf("runs recap-long %d\n", ph_runs(&F));
                 }
@@ -718,7 +709,7 @@ int main(void) {
                     for (int i = 0; i < S.count; i++) {
                         const ht_run_t *r = &S.runs[i];
                         if (r->pro_kind == K_TEXT && r->pro_font == &ph_rg_36) rows++;
-                        if (r->pro_kind == K_RECT_AA && r->fg == ht_rgb(0xCFE6FB)) { bx = r->x; by = r->y; bw = r->w; bh = r->pro_height; }
+                        if (r->pro_kind == K_RECT_AA && r->fg == ht_rgb(PH_LETTER)) { bx = r->x; by = r->y; bw = r->w; bh = r->pro_height; }
                     }
                     CHECK(bx == 60 && bw == 600 && bh == 56 + rows * 46 && rows >= 1 && rows <= 8);
                     if (c == 0) CHECK(rows == 1);
@@ -729,13 +720,13 @@ int main(void) {
                     const int gh = bh + 18 + 122, top = by, bottom = 720 - (by + gh);
                     CHECK(top >= 40 && bottom >= 40 && top - bottom <= 2 && bottom - top <= 2);
                     const ht_run_t *nm = text_run("backend");
-                    CHECK(nm && nm->x == 160 && nm->fg == ht_rgb(0xF2F7FC));
+                    CHECK(nm && nm->x == 160 && nm->fg == ht_rgb(PH_ROOM_INK));
                     CHECK(nm->y > by + bh + 18 && nm->y < by + gh);
                     CHECK(!text_prefix("\xe2\x9c\x93") && !text_prefix("\xc3\x97") && F.hit_count == 0 && ph_runs(&F) <= HT_RUNS);
                     const ht_run_t *last = NULL;
                     for (int i = 0; i < S.count; i++) if (S.runs[i].pro_kind == K_TEXT && S.runs[i].pro_font == &ph_rg_36) last = &S.runs[i];
-                    if (c == 2) CHECK(last && last->fg == ht_rgb(0x7F93AA) && !strcmp(last->text + strlen(last->text) - 3, "\xe2\x80\xa6"));
-                    else CHECK(last && last->fg == ht_rgb(0x26313D));
+                    if (c == 2) CHECK(last && last->fg == ht_rgb(PH_LETTER_MORE) && !strcmp(last->text + strlen(last->text) - 3, "\xe2\x80\xa6"));
+                    else CHECK(last && last->fg == ht_rgb(PH_LETTER_INK));
                 }
                 pod_model_recap(&R, "b", "Done! The checkout test is fixed. I also tidied the fixtures.", false);
             }
@@ -894,8 +885,8 @@ int main(void) {
             const ht_run_t *rq = text_prefix("Delete 14 old files?"), *rd = text_prefix("Fixed the checkout test."), *rf = text_prefix("Picked the blue hero");
             CHECK(rq && rd && rf && rq->y < rd->y && rd->y < rf->y);   // notices_order
             CHECK(rq->pro_font == &ph_sb_32 && rq->x == 216);
-            CHECK(text_run("Notices") && text_run("Notices")->x == 60 && text_run("Notices")->y == 40 && text_run("Notices")->fg == ht_rgb(0xF2F7FC) && !centred_run(text_run("Notices")));
-            CHECK(text_run("3 new") && text_run("3 new")->fg == ht_rgb(0x7F93AA) && text_run("3 new")->x > text_run("Notices")->x + text_run("Notices")->w);   // N = the rows on the list
+            CHECK(text_run("Notices") && text_run("Notices")->x == 60 && text_run("Notices")->y == 40 && text_run("Notices")->fg == ht_rgb(PH_ROOM_INK) && !centred_run(text_run("Notices")));
+            CHECK(text_run("3 new") && text_run("3 new")->fg == ht_rgb(PH_ROOM_MUTED) && text_run("3 new")->x > text_run("Notices")->x + text_run("Notices")->w);   // N = the rows on the list
             CHECK(dot_runs() == 0 && text_run("asks") && text_run("2m") && text_run("5m"));
             CHECK(hits_of(POD_A_OPEN_NOTIF) == 2 && hits_of(POD_A_FOLLOW) == 1 && F.hit_count == 3);
             const pod_hit_t *h0 = &F.hits[0], *h1 = &F.hits[1], *h2 = &F.hits[2];
@@ -904,12 +895,12 @@ int main(void) {
             CHECK(h0->y < h1->y && h1->y < h2->y && h1->y - h0->y == 170 && h0->y <= 120);
             int speech = 0, faces = 0, tails = 0;
             for (int i = 0; i < S.count; i++) {
-                speech += S.runs[i].pro_kind == K_RECT_AA && S.runs[i].fg == ht_rgb(0xCFE6FB) && S.runs[i].w == 470;
-                faces += S.runs[i].pro_kind == K_RECT_AA && S.runs[i].fg == ht_rgb(0x16273B) && S.runs[i].w == 110;
-                tails += S.runs[i].pro_kind != K_RECT_AA && S.runs[i].pro_kind != K_TEXT && S.runs[i].fg == ht_rgb(0xCFE6FB);
+                speech += S.runs[i].pro_kind == K_RECT_AA && S.runs[i].fg == ht_rgb(PH_LETTER) && S.runs[i].w == 470;
+                faces += S.runs[i].pro_kind == K_RECT_AA && S.runs[i].fg == ht_rgb(PH_RAISED) && S.runs[i].w == 110;
+                tails += S.runs[i].pro_kind != K_RECT_AA && S.runs[i].pro_kind != K_TEXT && S.runs[i].fg == ht_rgb(PH_LETTER);
             }
             CHECK(speech == 3 && faces == 3 && tails >= 3);   // a bubble, an avatar box and a tail each
-            CHECK(rq->y >= 120 && S.background == ht_rgb(0x0E1B2C));
+            CHECK(rq->y >= 120 && S.background == ht_rgb(PH_ROOM_BG));
             CHECK(!text_run("NEEDS YOU") && !text_run("FINISHED") && !text_run("FAILED"));
             pod_nav_act(&N, &M, h0->action, h0->arg, now);   // an asking agent opens by FOLLOW
             CHECK(N.stack[N.depth - 1].view == POD_V_AGENT && !strcmp(N.stack[N.depth - 1].agent, "q"));
@@ -1028,17 +1019,27 @@ int main(void) {
             CHECK(ph_runs(&F) <= HT_RUNS);
         }
 
-        // Update
+        // Update (option B, "Harness ring"): navy ground, "Harness", a ring with the percent, the target version and one status line; no hits
         fresh();
         ph_view_ota(&F, "0.1.1", "0.1.2", 62, false);
-        CHECK(text_run("0.1.1") && text_run("0.1.2") && text_run("\xe2\x86\x92") && text_run("62%") && text_run("Update") && text_run("System"));
-        CHECK(ph_runs(&F) <= 184);
-        CHECK(S.runs[0].pro_kind == K_RECT && S.runs[0].fg == ht_rgb(0x221F1D));   // ota uses the new ground
-        CHECK(text_run("0.1.2") && text_run("0.1.2")->fg == ht_rgb(0xEFE7DE) && text_run("62%")->fg == ht_rgb(0xEFE7DE));
+        CHECK(S.runs[0].pro_kind == K_RECT && S.runs[0].fg == ht_rgb(0x0E1B2C) && F.hit_count == 0);
+        CHECK(text_run("Harness") && text_run("62") && text_run("62")->pro_font == &ph_bd_84 && text_run("%") && text_run("%")->x > text_run("62")->x);
+        CHECK(text_run("Updating to 0.1.2") && text_prefix("Writing the new firmware") && !text_run("0.1.1"));
+        int arcs = 0;
+        for (int i = 0; i < S.count; i++) arcs += S.runs[i].pro_kind == POD_ARC;
+        CHECK(arcs == 2 && ph_runs(&F) <= 24);   // the track and the done part
         printf("runs ota %d\n", ph_runs(&F));
         fresh();
-        ph_view_ota(&F, "0.1.1", "0.1.2", 100, true);
-        CHECK(text_run("restart into 0.1.2") && ph_runs(&F) <= 184);
+        ph_view_ota(&F, "0.1.1", "0.1.2", 0, false);
+        arcs = 0;
+        for (int i = 0; i < S.count; i++) arcs += S.runs[i].pro_kind == POD_ARC;
+        CHECK(arcs == 1 && text_run("0"));   // nothing done yet: the track alone
+        fresh();
+        ph_view_ota(&F, "0.1.1", "0.1.2", 100, false);
+        CHECK(text_run("100") && text_prefix("Checking the new firmware"));
+        fresh();
+        ph_view_ota(&F, "0.1.1", "0.1.2", 40, true);
+        CHECK(text_run("100") && text_run("Restarting into 0.1.2") && text_run("Almost there"));
     }
     // Bubbles
     {   // malformed UTF-8 from the host (a lead byte, then a run of continuation bytes, past the cache's bypass length) stays in its rows

@@ -45,7 +45,8 @@ abstract final class OnboardingCopy {
   /// phone"): this phone needs an account before it can approve one.
   static const signInFirst = 'Sign in first, then approve your computer.';
 
-  /// ② The headline over the address.
+  /// ② The headline over the address — and, under the camera, the first step's title, over the
+  /// same address (`set_up_computer.dart`'s [computerSteps]).
   static const goToHeadline = 'On your computer, go to';
 
   /// ② The address, as written on the button that sends it: short enough to type off the phone.
@@ -61,7 +62,7 @@ abstract final class OnboardingCopy {
 
   /// ② The first step under the link: installing Harness — the link above it is the download, so
   /// the step need not say so (`set_up_computer.dart`'s [goToSteps]; the second is signing in with
-  /// this account).
+  /// this account). Under the camera, the note under the first step's address.
   static const installStep = 'Install Harness';
 
   /// ② Right under the account the steps name, at home: the question, and the way out after it.

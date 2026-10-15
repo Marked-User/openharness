@@ -15,7 +15,7 @@
 #include "pro_canvas.h"
 
 #define C(rgb) ht_rgb(rgb)
-enum { BG = 0x0E1B2C, BX = 60, BW = 600, RAD = 34, PAD_X = 34, PAD_Y = 28, TEXT_W = BW - 2 * PAD_X, PITCH = 46, ROWS_VIS = 8, ROWS_MAX = 12,
+enum { BG = PH_ROOM_BG, BX = 60, BW = 600, RAD = 34, PAD_X = 34, PAD_Y = 28, TEXT_W = BW - 2 * PAD_X, PITCH = 46, ROWS_VIS = 8, ROWS_MAX = 12,
        TAIL_CX = BX + 48 + 18, TAIL_OVER = 20, TAIL_HALF = 24, TAIL_DROP = 23,   // the diamond's half-diagonal 25.5, 2 px inside the edge
        ROW_GAP = 18,                        // bubble bottom to the who row: the 16 px the tail's box pokes + 2
        ROW_H = 122, PET_X = 16, PET_SIDE = 150, PET_UP = 10, NAME_X = 160, NAME_MAX_X = 660, MARGIN_MIN = 40 };
@@ -119,7 +119,7 @@ void ph_view_recap(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, uin
     if (!a) return;
     const pod_unread_t *u = pod_model_unread_find(m, a->id);
     const bool failed = a->failed || (u && u->kind == POD_UNREAD_FAILED);
-    const unsigned fill = failed ? 0xF3D9DA : 0xCFE6FB, ink = failed ? 0x9B5A5F : 0x26313D, fade = failed ? 0xC9A0A4 : 0x7F93AA;
+    const unsigned fill = failed ? 0xF3D9DA : PH_LETTER, ink = failed ? 0x9B5A5F : PH_LETTER_INK, fade = failed ? 0xC9A0A4 : PH_LETTER_MORE;   // the Notices letter's paper
 
     story_text(s_new, sizeof s_new, a, u);
     if (s_rows < 0 || strcmp(s_new, s_text)) {   // wrap only when the text changed
@@ -165,5 +165,5 @@ void ph_view_recap(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, uin
             name[n] = 0;
         }
     }
-    ph_text(s, NAME_X, pet_y + PET_SIDE / 2, max_w + 2, &ph_sb_34, 0xF2F7FC, name);   // the name centred on the pet
+    ph_text(s, NAME_X, pet_y + PET_SIDE / 2, max_w + 2, &ph_sb_34, PH_ROOM_INK, name);   // the name centred on the pet
 }

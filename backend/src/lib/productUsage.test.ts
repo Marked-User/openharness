@@ -70,6 +70,21 @@ describe('preference', () => {
 })
 
 describe('aggregate ingestion', () => {
+  it('rechecks permission after waiting for another report without caching an enabled choice', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    db.$transaction.mockImplementationOnce(async fn => { await gate; return fn(db) })
+    const first = ingestProductUsage('first-account', report, now)
+    const queued = ingestProductUsage('opted-out-while-queued', { ...report, id: 'another-receipt' }, now)
+    await Promise.resolve()
+    expect(db.$transaction).toHaveBeenCalledOnce()
+    db.productUsagePreference.findUnique.mockResolvedValueOnce({ enabled: true, revision: 0 })
+      .mockResolvedValueOnce({ enabled: false, revision: 1 })
+    release()
+    expect(await first).toEqual({ accepted: true })
+    expect(await queued).toMatchObject({ accepted: false, reason: 'CHOICE_CHANGED' })
+    expect(db.productUsageReceipt.create).toHaveBeenCalledOnce()
+  })
   it('stores only totals and an unlinked receipt, in one transaction', async () => {
     expect(await ingestProductUsage('private-account', report, now)).toEqual({ accepted: true })
     expect(db.$transaction).toHaveBeenCalledOnce()

@@ -103,6 +103,12 @@ class PhoneSearchResultsState extends State<PhoneSearchResults> {
     }
   }
 
+  /// The desk tab the list is narrowed to as drawn — the chip lit — or null on All, and off the
+  /// plain list, where no chips are drawn. Where New Harness puts what it makes: a harness made
+  /// with a tab picked joins THAT tab, not the tab of the harness Find was opened over
+  /// (`NewAgentPage.deskTabId`).
+  String? get deskTabId => _tab(_tabs(widget.controller))?.id;
+
   /// The row whose agent is being brought back, if any — see [_open].
   ///
   /// One at a time: the resume is a round trip to the machine, and a list that

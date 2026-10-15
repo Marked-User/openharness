@@ -95,9 +95,6 @@ void pro_app_machines(const cable_machine_t *rows, int count, const char *select
 // ---- settings ----
 // Put a brightness (0..255, what config_store keeps) on the panel. The caller stores it.
 void pro_app_set_brightness(uint8_t level);
-// Turn the screen 180 degrees (or back). Asks only: the render task switches between frames, redrawing the whole glass.
-// The caller stores it.
-void pro_app_request_turn(bool turned);
 
 // ---- firmware update (pro_cable -> pro_app) ----
 // The offer's "busy" decision and the updating flag in one step, atomic with respect to a voice start: false when a voice

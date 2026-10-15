@@ -3,6 +3,7 @@ import type { ProductUsageMetric } from '../lib/productUsageContract.js'
 import type { PreparedHandoff, HandoffPermit, HandoffOutcome } from '../lib/handoffAuthority.js'
 import type { AgentTokenUsage, AgentUsageTarget } from '../lib/agentUsageWire.js'
 import type { CloudHarness } from '../lib/cloudAgents.js'
+import type { SharedTrustPeer } from '../lib/sharedMachinesPort.js'
 import type { GridAssignmentProcess, GridAssignmentAnswer } from '../lib/gridAssignmentWire.js'
 /**
  * The boundary the services stand on (docs/design/2026-10-03-harnessd.md, "The core boundary"):
@@ -523,6 +524,12 @@ export const WINDOW_NAMES_REQUESTS = ['window_name'] as const
 export const HANDOFF_REQUESTS = ['agent_handoff_prepare'] as const
 /** Connected services for every local agent, and their MCP bridge, in the edge host (services/connectors.ts). */
 export const CONNECTORS_REQUESTS = ['connectors'] as const
+/** Sharing this machine with other accounts, and adding machines shared with this one, in the edge host
+ *  (services/sharedMachines.ts). */
+export const SHARED_MACHINES_REQUESTS = ['shared_machines'] as const
+/** A Harness OS computer managed from the owner's phone: whether it runs Harness OS, its update, and its Wi-Fi,
+ *  in the edge host (services/osDevice.ts). */
+export const OS_DEVICE_REQUESTS = ['os_device'] as const
 /**
  * Models (services/models.ts).
  *
@@ -1387,7 +1394,12 @@ export interface GatewayOps {
   observerKey: ObserverKey
   /** The account's connected services sealed for its machines (`core.account.connectorVault`). */
   connectorVault: ConnectorVault
+  /** Machines shared across accounts, made to hold exactly what the shared-machines service says
+   *  (gateway/sharedTrust.ts): the ones shared with this account pinned, the machines of the accounts this
+   *  one is shared with trusted; a part left out stays as it is. Answers how many of each it holds. */
+  sharedTrust(desired: { pins?: SharedTrustPeer[]; keys?: SharedTrustPeer[] }): Promise<{ pins: number; keys: number }>
 }
+
 
 /** A window on this computer working on another of the owner's machines, through the relay: what the
  *  local socket asks of the gateway for it (lib/remoteRelay.ts `RemoteRelayPool`, or its link). */

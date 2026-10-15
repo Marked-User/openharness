@@ -7,12 +7,49 @@ import 'package:harness_mobile/state/app_state.dart';
 import 'package:harness_mobile/widgets/rename_agent_dialog.dart'
     show showMachineRenameDialog;
 
+import 'change_wifi_page.dart';
 import 'link_page.dart';
 import 'phone_navigation.dart';
 import 'phone_sheet.dart';
 import 'phone_status.dart';
 import 'remove_machine.dart';
+import 'tty.dart';
 import 'unlink_machine.dart';
+
+/// The Wi-Fi a Harness OS computer is on, as it last said.
+String? _ssidOf(AppNotifier notifier, String machineId) {
+  final wifi = notifier.osStatus[machineId]?['wifi'];
+  return wifi is Map ? wifi['ssid'] as String? : null;
+}
+
+/// Update ▸ a Harness OS computer updates itself (`harness update`, the same as Super+u there). It
+/// restarts its daemon on the way, so it reads offline for a moment and comes back on the new version.
+Future<void> updateComputer(
+  BuildContext context,
+  AppNotifier notifier,
+  String machineId,
+) async {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final name =
+      notifier.stateOf(machineId)?.machine.displayName ?? 'The computer';
+  final reply = await notifier.osDevice(machineId, {'action': 'update'});
+  final String said;
+  if (reply['started'] == true) {
+    said =
+        '$name is updating. It restarts by itself and comes back in a minute or two.';
+    notifier.osStatus.remove(machineId);
+    // Asked again once it is back on the new version.
+    Timer(
+      const Duration(minutes: 2),
+      () => unawaited(notifier.refreshOsStatus(machineId, force: true)),
+    );
+  } else if (reply['error'] == 'BUSY') {
+    said = '$name is already updating.';
+  } else {
+    said = 'Could not start the update. Try again.';
+  }
+  messenger?.showSnackBar(SnackBar(content: Text(said)));
+}
 
 /// The sheet of what can be done TO a computer — Settings ▸ Computers.
 ///
@@ -93,15 +130,34 @@ void openMachineActions(
             onTap: () => unawaited(notifier.reloadMachineData(machineId)),
           ),
         rename,
-        PhoneSheetAction(
-          icon: LucideIcons.keyRound300,
-          label: 'Re-enter password…',
-          onTap: () => Navigator.of(context).push(
-            phoneRoute(
-              (_) => LinkPage(notifier: notifier, machineId: machineId),
+        // A Harness OS computer, often one with no screen: its update and its Wi-Fi, from here.
+        if (notifier.runsHarnessOs(machineId)) ...[
+          PhoneSheetAction(
+            icon: LucideIcons.download300,
+            label: 'Update',
+            // The dot: a new version is waiting.
+            value: notifier.updateAvailable(machineId)
+                ? '● new version'
+                : 'up to date',
+            valueColor: notifier.updateAvailable(machineId)
+                ? Tty.of(context).green
+                : null,
+            enabled: notifier.updateAvailable(machineId),
+            onTap: () =>
+                unawaited(updateComputer(context, notifier, machineId)),
+          ),
+          PhoneSheetAction(
+            icon: LucideIcons.wifi300,
+            label: 'Change Wi-Fi…',
+            value: _ssidOf(notifier, machineId),
+            chevron: true,
+            onTap: () => Navigator.of(context).push(
+              phoneRoute(
+                (_) => ChangeWifiPage(notifier: notifier, machineId: machineId),
+              ),
             ),
           ),
-        ),
+        ],
       ];
       destructive = [
         // No confirmation, the same as before: this sheet is the step between the tap and the
@@ -115,6 +171,11 @@ void openMachineActions(
         ),
         remove,
       ];
+  }
+  // Asked as the sheet opens; the rows above come from the last answer, and a new one rebuilds them
+  // the next time.
+  if (status == PhoneMachineStatus.ready) {
+    unawaited(notifier.refreshOsStatus(machineId));
   }
   showPhoneSheet(
     context,

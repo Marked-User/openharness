@@ -26,7 +26,6 @@
 #include "sys/last_words.h"
 #include "board/board.h"
 #include "sys/config_store.h"
-#include "display/pro_turn.h"
 #include "sys/fw_update.h"
 
 static int checks;
@@ -161,11 +160,6 @@ bool config_save_muted(bool m) { cfg_muted = m; return true; }
 void config_load_voicelang(char *o, size_t n) { snprintf(o, n, "%s", cfg_lang); }
 bool config_save_voicelang(const char *l) { snprintf(cfg_lang, sizeof cfg_lang, "%s", l); return true; }
 void pro_app_set_brightness(uint8_t level) { panel_level = level; }
-static bool cfg_turn, turn_saves_ok = true;
-static int turn_requests = -1;   // -1: none, else the last flag asked for
-bool config_load_turn(bool fallback) { (void)fallback; return cfg_turn; }
-bool config_save_turn(bool t) { if (!turn_saves_ok) return false; cfg_turn = t; return true; }
-void pro_app_request_turn(bool t) { turn_requests = t; }
 
 // ---- fw_update recorders: this test is about ROUTING, so fw_update.c is not linked (its own test covers the logic) ----
 static bool voice_is_open;
@@ -729,30 +723,10 @@ static void test_settings(void)
     reset();
     feed("{\"t\":\"settings.set\",\"muted\":true,\"quiet\":false,\"round\":false,\"character\":0}");
     CHECK(strstr(sent[0], "\"ok\":true") && cfg_muted);
-    // screenTurned: carried by settings.state (and hello), saved, and the switch requested; not a bool is refused
-    reset();
-    feed("{\"t\":\"settings.set\",\"muted\":true}");
-    CHECK(strstr(sent[0], "\"screenTurned\":false") && turn_requests == -1);   // read back; untouched when absent
+    // screenTurned is gone: never reported, and an old app's settings.set carrying it is ignored without an error
     reset();
     feed("{\"t\":\"settings.set\",\"screenTurned\":true}");
-    CHECK(nsent == 1 && strstr(sent[0], "\"ok\":true") && strstr(sent[0], "\"screenTurned\":true") && cfg_turn && turn_requests == 1);
-    reset();
-    turn_requests = -1;
-    feed("{\"t\":\"settings.set\",\"screenTurned\":\"yes\"}");
-    CHECK(nsent == 1 && strstr(sent[0], "\"ok\":false") && strstr(sent[0], "\"error\"") && strstr(sent[0], "\"screenTurned\":true"));
-    CHECK(cfg_turn && turn_requests == -1);
-    reset();
-    feed("{\"t\":\"settings.set\",\"screenTurned\":1}");
-    CHECK(strstr(sent[0], "\"ok\":false") && turn_requests == -1);
-    turn_saves_ok = false;
-    reset();
-    turn_requests = -1;
-    feed("{\"t\":\"settings.set\",\"screenTurned\":false}");
-    CHECK(strstr(sent[0], "\"ok\":false") && cfg_turn && turn_requests == -1);   // not saved: not switched either
-    turn_saves_ok = true;
-    reset();
-    feed("{\"t\":\"settings.set\",\"screenTurned\":false}");
-    CHECK(strstr(sent[0], "\"ok\":true") && strstr(sent[0], "\"screenTurned\":false") && !cfg_turn && turn_requests == 0);
+    CHECK(nsent == 1 && strstr(sent[0], "\"ok\":true") && !strstr(sent[0], "screenTurned"));
 }
 
 // turn.stats: whole numbers 0..1000000 only; an absent field is -1 (unknown); a bad one refuses the whole message.

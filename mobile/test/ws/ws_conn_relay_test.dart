@@ -625,4 +625,40 @@ void main() {
       },
     );
   });
+
+  // Read before the app takes a machine's terminals down for a redial (a socket gone quiet, a
+  // return from the background): when it is false, `forceReconnect` would do nothing, and the
+  // terminals would wait on "Connection lost" for a socket that never comes.
+  group('whether a redial would dial', () {
+    test('a relay connection, up, can be dialled again', () async {
+      final (conn, _) = await connected();
+
+      expect(conn.canForceReconnect, isTrue);
+    });
+
+    test('and is: a forced redial opens a fresh socket', () async {
+      final (conn, _) = await connected();
+      final next = relay.nextLink();
+
+      await conn.forceReconnect();
+
+      await next.timeout(const Duration(seconds: 3));
+      await conn.waitUntilReady(timeout: const Duration(seconds: 3));
+      expect(conn.canForceReconnect, isTrue);
+    });
+
+    test('one closed on purpose cannot', () async {
+      final (conn, _) = await connected();
+
+      await conn.close();
+
+      expect(conn.canForceReconnect, isFalse);
+    });
+
+    test('one with no relay codecs cannot — its forced redial is a no-op', () {
+      final conn = newConn(noCodecs: true);
+
+      expect(conn.canForceReconnect, isFalse);
+    });
+  });
 }

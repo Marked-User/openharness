@@ -539,7 +539,7 @@ with tempfile.TemporaryDirectory(prefix="harness-pro-voice-") as directory:
     source = directory / "pro_voice_test.c"
     source.write_text(code)
     modules = sorted(POD.glob("*.c")) + sorted(POD.glob("*/*.c")) + [APP / "pod_glue.c", APP / "pro_app.c", APP / "pro_touch.c", AUDIO / "pro_voice.c", DISP / "scroll.c",
-                                         DISP / "pro_canvas.c", DISP / "terminal.c", DISP / "pro_turn.c", fonts]
+                                         DISP / "pro_canvas.c", DISP / "terminal.c", fonts]
     # The voice state machine runs on the touch, render and cable_link tasks (6 KB stack): no frame past 1 KB.
     subprocess.run([cc, "-std=c11", "-D_DEFAULT_SOURCE", "-Wall", "-Wextra", "-Werror", "-Wframe-larger-than=1024", "-O1", "-DHT_FACE_PX=720",
                     "-DPRO_VOICE_TEST_HOOK", *include, "-c", str(AUDIO / "pro_voice.c"), "-o", os.devnull], check=True)

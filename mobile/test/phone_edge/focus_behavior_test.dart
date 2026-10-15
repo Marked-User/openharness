@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,6 +17,7 @@ import 'package:harness_mobile/phone/voice_mic_button.dart';
 import 'package:harness_mobile/phone/voice_mic_face.dart';
 import 'package:harness_mobile/state/app_state.dart';
 import 'package:harness_mobile/state/pending_question.dart';
+import 'package:harness_mobile/terminal/terminal_binary.dart';
 import 'package:harness_mobile/terminal/terminal_font_store.dart';
 import 'package:harness_mobile/terminal/terminal_session.dart';
 import 'package:xterm/xterm.dart';
@@ -386,6 +389,47 @@ void main() {
       await focus.close();
     });
 
+    // Offered whenever the agent works — the one row wanted most when something must stop — and on
+    // a terminal the computer took its Esc used to be dropped without a word.
+    testWidgets('Interrupt on a terminal the computer took takes it back, '
+        'then sends esc', (tester) async {
+      final focus = await openMenu(tester, working: true);
+      await focus.takenByComputer();
+      await frames(tester);
+      final before = focus.opens;
+
+      await tester.tap(find.text('Interrupt'));
+      await frames(tester);
+      expect(focus.opens, greaterThan(before));
+      expect(focus.typed, isNot(contains('\x1b')));
+      // Nothing seemed to happen: the sheet opened again, Interrupt pressed again in the wait.
+      await tester.tap(find.byKey(const ValueKey('terminal-title')));
+      await frames(tester);
+      await tester.tap(find.text('Interrupt'));
+      await frames(tester);
+
+      await focus.answerOpen();
+      await tester.pump(const Duration(milliseconds: 250));
+      await frames(tester);
+      expect(focus.session.acceptsInput, isTrue);
+      // One Esc: a second, on Claude Code's empty prompt, opens its rewind.
+      expect(focus.typed.where((key) => key == '\x1b'), hasLength(1));
+      await focus.close();
+    });
+
+    testWidgets('Interrupt pressed twice on a terminal the phone holds sends '
+        'esc twice, as before', (tester) async {
+      final focus = await openMenu(tester, working: true);
+      await tester.tap(find.text('Interrupt'));
+      await frames(tester);
+      await tester.tap(find.byKey(const ValueKey('terminal-title')));
+      await frames(tester);
+      await tester.tap(find.text('Interrupt'));
+      await frames(tester);
+      expect(focus.typed.where((key) => key == '\x1b'), hasLength(2));
+      await focus.close();
+    });
+
     testWidgets('Restart that the machine refuses says why', (tester) async {
       final focus = await openMenu(tester);
       await tester.tap(find.text('Restart'));
@@ -451,6 +495,69 @@ void main() {
       await focus.tapRow("don't ask again");
       await frames(tester);
       expect(focus.typed, contains('2'));
+      await focus.close();
+    });
+
+    // The answers stay drawn on a terminal the computer took, and a tap there used to buzz and
+    // press a digit the session then dropped. A tapped answer is a claim, as a spoken one is.
+    testWidgets('an answer tapped on a terminal the computer took takes it '
+        'back, then presses it, once', (tester) async {
+      final focus = await asked(tester);
+      await focus.takenByComputer();
+      await frames(tester);
+      expect(focus.session.acceptsInput, isFalse);
+      final before = focus.opens;
+
+      await focus.tapRow("don't ask again");
+      await frames(tester);
+      // Asked for again, and nothing pressed into a terminal that would drop it.
+      expect(focus.opens, greaterThan(before));
+      expect(focus.typed, isNot(contains('2')));
+      // A second tap while it comes back adds no second answer.
+      await focus.tapRow("don't ask again");
+      await frames(tester);
+
+      // Still asking: the screen it comes back with is the same question.
+      await focus.answerOpen(screen: permissionDialog);
+      await tester.pump(const Duration(milliseconds: 250));
+      await frames(tester);
+      expect(focus.session.acceptsInput, isTrue);
+      expect(focus.typed.where((key) => key == '2'), hasLength(1));
+      await focus.close();
+    });
+
+    testWidgets('a terminal that does not come back: the tapped answer says it '
+        'was not sent', (tester) async {
+      final focus = await asked(tester);
+      await focus.takenByComputer();
+      await frames(tester);
+
+      await focus.tapRow("don't ask again");
+      await frames(tester);
+      // No answer to the open: the take gives up after six seconds, and says so.
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.text('✗ not sent'), findsOneWidget);
+      expect(focus.typed, isNot(contains('2')));
+      await focus.close();
+    });
+
+    testWidgets('a question answered on the computer while the phone takes '
+        'the terminal back: nothing is pressed', (tester) async {
+      final focus = await asked(tester);
+      await focus.takenByComputer();
+      await frames(tester);
+
+      await focus.tapRow("don't ask again");
+      await frames(tester);
+      // Answered there meanwhile: the screen the terminal comes back with is the agent's prompt.
+      // The watcher still holds the dialog for one more read, so only the screen itself can say.
+      await focus.answerOpen(screen: '\x1b[2J\x1b[Hprompt> ');
+      await tester.pump(const Duration(milliseconds: 250));
+      await frames(tester);
+      expect(focus.session.acceptsInput, isTrue);
+      // A digit now would have been typed into the agent's prompt.
+      expect(focus.typed, isNot(contains('2')));
       await focus.close();
     });
 
@@ -946,6 +1053,205 @@ void main() {
     });
   });
 
+  // Back from a network switch or a redial, the terminal being read stays on screen under a light
+  // blur and a spinner — never the attaching skeleton, which made it vanish and come back. The
+  // skeleton is for a terminal with nothing on it yet (owner, 2026-10-15).
+  group('brought back', () {
+    Finder reconnecting() =>
+        find.bySemanticsLabel('Reconnecting to the harness');
+    Finder attaching() => find.bySemanticsLabel('Attaching to the harness');
+
+    /// The terminal's socket dropping as the app sees it go: the machine dialling again, and the
+    /// terminal on screen marked lost and waiting to be reopened.
+    void socketDropped(_Focus focus) {
+      final machine = focus.app.stateOf('m')!;
+      machine.connectionStatus = ConnectionStatus.reconnecting;
+      machine.pendingOfflineAgentId = 'a';
+      focus.session.transportLost('Connection lost. Reconnecting…');
+    }
+
+    testWidgets('lost with its socket: the screen stays under a blur and a '
+        'spinner until the new screen lands', (tester) async {
+      final focus = await _Focus.open(tester);
+      socketDropped(focus);
+      await tester.pump();
+      // A beat first: a quick return leaves the screen exactly as it was.
+      expect(reconnecting(), findsNothing);
+
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(reconnecting(), findsOneWidget);
+      expect(attaching(), findsNothing);
+      final overlay = find.byKey(const ValueKey('terminal-reconnecting'));
+      expect(
+        find.descendant(of: overlay, matching: find.byType(BackdropFilter)),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: overlay,
+          matching: find.byType(CircularProgressIndicator),
+        ),
+        findsOneWidget,
+      );
+      // The screen is still the one that was read.
+      expect(focus.session.hasScreen, isTrue);
+
+      // Socket back, terminal reopened, the new screen lands: the spinner goes.
+      focus.app.stateOf('m')!
+        ..connectionStatus = ConnectionStatus.connected
+        ..pendingOfflineAgentId = null;
+      await focus.session.reopen();
+      await focus.answerOpen(screen: 'what is now');
+      await frames(tester);
+      expect(reconnecting(), findsNothing);
+      expect(attaching(), findsNothing);
+      await focus.close();
+    });
+
+    testWidgets('no gap between the socket coming back and the reopen: the '
+        'spinner stays, and does not start its beat over', (tester) async {
+      final focus = await _Focus.open(tester);
+      socketDropped(focus);
+      // One frame to put the overlay up, then its beat.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(reconnecting(), findsOneWidget);
+
+      // The socket is back while the terminal waits its turn (the app re-reads the list first).
+      focus.app.stateOf('m')!.connectionStatus = ConnectionStatus.connected;
+      focus.app.notifyListeners();
+      await tester.pump();
+      expect(reconnecting(), findsOneWidget);
+
+      // Its turn: reopened, the old screen still on show under the same spinner.
+      focus.app.stateOf('m')!.pendingOfflineAgentId = null;
+      await focus.session.reopen();
+      await tester.pump();
+      expect(reconnecting(), findsOneWidget);
+      expect(attaching(), findsNothing);
+
+      await focus.answerOpen(screen: 'what is now');
+      await frames(tester);
+      expect(reconnecting(), findsNothing);
+      await focus.close();
+    });
+
+    testWidgets('a quick reopen leaves the screen as it was: no spinner, no '
+        'skeleton', (tester) async {
+      final focus = await _Focus.open(tester);
+
+      await focus.session.reopen(force: true);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(focus.session.showsEarlierScreen, isTrue);
+      expect(reconnecting(), findsNothing);
+      expect(attaching(), findsNothing);
+
+      await focus.answerOpen(screen: 'what is now');
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(reconnecting(), findsNothing);
+      expect(attaching(), findsNothing);
+      await focus.close();
+    });
+
+    testWidgets('lost and not waiting to be reopened: the screen, plainly, for '
+        'a tap to reopen', (tester) async {
+      final focus = await _Focus.open(tester);
+      // The socket is up and nothing is queued to reopen this terminal.
+      focus.session.transportLost('Connection lost. Reconnecting…');
+      await frames(tester);
+
+      expect(reconnecting(), findsNothing);
+      expect(attaching(), findsNothing);
+      await focus.close();
+    });
+
+    testWidgets('a terminal with nothing on it yet still waits behind the '
+        'skeleton', (tester) async {
+      setPhone(tester, largePhone);
+      final app = edgeApp();
+      await tester.pumpWidget(
+        phoneApp(
+          TerminalPage(
+            notifier: app,
+            machineId: 'm',
+            agentId: 'a',
+            voice: edgeVoice().voice,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(attaching(), findsOneWidget);
+      expect(reconnecting(), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 3));
+      app.dispose();
+      await tester.pump(const Duration(seconds: 30));
+    });
+
+    testWidgets('its machine away: says why, and no spinner promises anything', (
+      tester,
+    ) async {
+      setPhone(tester, largePhone);
+      final app = edgeApp(online: false);
+      final session = await liveTerminal(app, 'a');
+      await tester.pumpWidget(
+        phoneApp(
+          TerminalPage(
+            notifier: app,
+            machineId: 'm',
+            agentId: 'a',
+            voice: edgeVoice().voice,
+          ),
+        ),
+      );
+      await session.reopen(force: true);
+      // One frame to rebuild on the reopen, then longer than the spinner's beat.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(reconnecting(), findsNothing);
+      expect(find.textContaining('is offline'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 3));
+      app.dispose();
+      await tester.pump(const Duration(seconds: 30));
+    });
+
+    testWidgets('with animations off, the spinner stands still', (tester) async {
+      setPhone(tester, largePhone);
+      final app = edgeApp();
+      final session = await liveTerminal(app, 'a');
+      await tester.pumpWidget(
+        phoneApp(
+          MediaQuery(
+            data: const MediaQueryData(disableAnimations: true),
+            child: TerminalPage(
+              notifier: app,
+              machineId: 'm',
+              agentId: 'a',
+              voice: edgeVoice().voice,
+            ),
+          ),
+        ),
+      );
+      await session.reopen(force: true);
+      // One frame to rebuild on the reopen, then longer than the spinner's beat.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(reconnecting(), findsOneWidget);
+      final spinner = tester.widget<CircularProgressIndicator>(
+        find.byType(CircularProgressIndicator),
+      );
+      expect(spinner.value, isNotNull, reason: 'a still ring, not a spinning one');
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 3));
+      app.dispose();
+      await tester.pump(const Duration(seconds: 30));
+    });
+  });
+
   group('more of what a thumb does', () {
     testWidgets('a restart the machine refuses says why', (tester) async {
       final focus = await _Focus.open(
@@ -1204,11 +1510,7 @@ class _Focus {
     final sent = <(String, Map<String, dynamic>)>[];
     final session = await liveTerminal(app, 'a', sent: sent);
     final typed = <String>[];
-    final forward = session.terminal.onOutput;
-    session.terminal.onOutput = (data) {
-      typed.add(data);
-      forward?.call(data);
-    };
+    _record(session.terminal, typed);
     final voice = edgeVoice();
     final opened = <(String, String)>[];
     final pushed = <Route<dynamic>>[];
@@ -1258,6 +1560,49 @@ class _Focus {
   /// How many times the terminal was asked to open — by the machine's socket or by the session.
   int get opens =>
       conn.opens + sent.where((frame) => frame.$1 == 'terminal_open').length;
+
+  /// The computer taking the terminal: the daemon closes this phone's stream as taken over.
+  Future<void> takenByComputer() => session.handleFrame('terminal_closed', {
+    'streamId': session.streamId,
+    'code': 'TERMINAL_TAKEN_OVER',
+    'reason': 'another client connected',
+    'takenBy': {'machineId': 'm', 'label': 'MacBook'},
+  });
+
+  /// The daemon answering the session's latest open: a new stream, and its first screen — [screen],
+  /// the terminal as it stands on the computer now — after which the session holds the terminal.
+  Future<void> answerOpen({String screen = 'prompt> '}) async {
+    final open = sent.lastWhere((frame) => frame.$1 == 'terminal_open').$2;
+    final streamId = 'stream-${session.agentId}-again';
+    await session.handleFrame('terminal_ready', {
+      'requestId': open['requestId'],
+      'agentId': session.agentId,
+      'protocolVersion': TerminalSession.protocolVersion,
+      'streamId': streamId,
+    });
+    await session.handleBinary(
+      TerminalBinaryFrame(
+        kind: TerminalBinaryKind.keyframe,
+        streamId: streamId,
+        seq: 0,
+        bytes: Uint8List.fromList(utf8.encode(screen)),
+        compressed: false,
+        cols: session.terminal.viewWidth,
+        rows: session.terminal.viewHeight,
+      ),
+    );
+    // A keyframe swaps in a fresh terminal: what is typed into it is recorded too.
+    _record(session.terminal, typed);
+  }
+
+  /// Records into [typed] everything typed into [terminal], and passes it on.
+  static void _record(Terminal terminal, List<String> typed) {
+    final forward = terminal.onOutput;
+    terminal.onOutput = (data) {
+      typed.add(data);
+      forward?.call(data);
+    };
+  }
 
   /// A screenful of output, so the terminal fills the page rather than sitting anchored at its
   /// foot — where a tap on its middle would land on nothing.

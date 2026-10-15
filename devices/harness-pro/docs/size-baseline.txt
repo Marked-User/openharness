@@ -1,5 +1,5 @@
 Baseline 2026-10-11, before the lightweight pass
-Build: idf.py -B build -DPROJECT_VER=0.0.99-pod -DPOD_PANEL_TURN=180 build; python -m esp_idf_size build/harness_pro.map
+Build: idf.py -B build -DPROJECT_VER=0.0.99-pod build; python -m esp_idf_size build/harness_pro.map
 
 Total image size: 3093612 bytes (.bin may be padded larger)
 Used Flash size: 2997844 bytes (.text 575584, .rodata 2421744)
@@ -34,4 +34,4 @@ AFTER (same machine, same method; ground as the scene background, corner_cover e
 (ht_pro_rect_aa_stroke), Talk wave bars square):
   tabs 160, recent 154, tabp:3 92, agent:fw 171, agent:cli 207, recap:desk 285, agent:fw:banner 230, talk:fw 259, talk:fw:send 277, inbox 126
 Animation steps: equaliser, spinner and working mark 66 ms (was 33), Talk wave 100 ms (was 66), toast stays 33 ms.
-Image: harness_pro.bin 0x2e3b30 bytes (63% of the app partition free), -DPROJECT_VER=0.0.99-pod -DPOD_PANEL_TURN=180.
+Image: harness_pro.bin 0x2e3b30 bytes (63% of the app partition free), -DPROJECT_VER=0.0.99-pod.

@@ -9,6 +9,10 @@
     <!-- Lets libwebrtc notice a wifi↔cellular change and restart ICE rather than
          wait out the disconnect grace. Not a runtime permission. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Joining a new device's setup hotspot (Settings ▸ Add a device): a WifiNetworkSpecifier
+         request, which Android confirms with its own sheet. Neither is a runtime permission. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- Taking a picture to send to an agent. Picking an EXISTING picture needs
          no permission at all: image_picker goes through ACTION_GET_CONTENT / the
          photo picker, which hands back one item the user chose rather than

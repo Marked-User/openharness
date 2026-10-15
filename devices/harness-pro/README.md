@@ -10,13 +10,11 @@ Needs ESP-IDF 5.5.4 (installed at `~/esp/esp-idf-5.5.4`) and Python with Pillow 
 ```sh
 . ~/esp/esp-idf-5.5.4/export.sh
 cd devices/harness-pro/firmware
-idf.py -B build -DPROJECT_VER=0.0.99-pod -DPOD_PANEL_TURN=180 build
+idf.py -B build -DPROJECT_VER=0.0.99-pod build
 ```
 
 - `PROJECT_VER=0.0.99-pod` keeps a dev build from being overwritten by the daemon's OTA update.
-- `POD_PANEL_TURN=180` sets the **default** turn (picture and touch together) for a unit that has never been set.
-  Each unit keeps its own choice in NVS: the app's "Rotate screen 180°" switch (`settings.set {"screenTurned"}`)
-  turns it at run time, no rebuild. Release images use 180.
+- Every panel is mounted turned 180 degrees, so the picture and touch are always turned; there is no setting.
 
 ## Flash
 

@@ -1,6 +1,6 @@
 // Dev tool (not run by run.sh): renders one Pets screen of a fixed demo model to a 720 x 720 PPM.
 // Usage: pod_render [--spec out.json] <screen> <out.ppm> [now_ms]      pod_render.py builds it and converts the PPMs to PNG.
-//   screens: tabs[:<tab>[+<more tabs>] | :mock | :9 | :seven | :single | :long | :notices | :linkdown | :banner] (Home), chrome (the Update screen's bar),
+//   screens: tabs[:<tab>[+<more tabs>] | :mock | :9 | :seven | :single | :long | :notices | :linkdown | :banner] (Home),
 //   agent:<id>, recap:<id>, talk:<id> (ids: fw ota be cli web desk docs vault site cur notes2 kilo; suffixes :long :offline :unread :viet ...),
 //   talk:listen|send, inbox[:viet|:quiet|:failed], ota:<pct>|ota:restart (the update screen), notice:updated|notice:failed (the Home screen with that pill),
 //   <room>:toast[@<ms after it showed>] (the notice toast), and ":bell" / ":banner" on a screen (unread entries; banner adds the toast). The demo is the
@@ -365,7 +365,6 @@ int main(int argc, char **argv)
             notice_bad = !strcmp(suffix, "failed");
             notice_text = notice_bad ? "Update failed \xc2\xb7 trying again later" : "Updated to 0.1.3";
         }
-    } else if (!strncmp(screen, "chrome", 6)) {
     } else if (!strncmp(screen, "ota:", 4)) {
         ota_pct = !strcmp(screen + 4, "restart") ? -2 : atoi(screen + 4);
     } else if (!strncmp(screen, "notice:", 7)) {   // the Tabs screen with the glue's pill: notice:updated | notice:failed
@@ -383,10 +382,6 @@ int main(int argc, char **argv)
     F.mic_level = strstr(screen, "quiet") ? 0 : 3;
     if (ota_pct != -1) {
         ph_view_ota(&F, "0.1.1", "0.1.2", ota_pct < 0 ? 100 : ota_pct, ota_pct == -2);
-    } else if (!strncmp(screen, "chrome", 6)) {   // the chrome: the Update screen's breadcrumb bar
-        ht_pro_rect(&S, 0, 0, POD_W, POD_W, 0, ht_rgb(PH_GROUND));
-        const char *const crumbs[] = {"Desktop", "landing"};
-        ph_bar(&F, crumbs, 2);
     } else {
         pod_render(&F, &N, &M, now);
     }

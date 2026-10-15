@@ -368,9 +368,13 @@ class TtyField extends StatefulWidget {
     this.autofocus = false,
     this.keyboardType,
     this.autofillHints,
+    this.obscure = false,
   });
 
   final TextInputType? keyboardType;
+
+  /// A password: one line, its characters hidden.
+  final bool obscure;
   final Iterable<String>? autofillHints;
 
   final TextEditingController controller;
@@ -440,8 +444,11 @@ class _TtyFieldState extends State<TtyField> {
         textInputAction: widget.action,
         // The keyboard's own composing, left on: Vietnamese Telex on iOS rides on
         // autocorrection. See `ComposingKeyboard`.
-        autocorrect: ComposingKeyboard.autocorrect,
-        enableSuggestions: ComposingKeyboard.enableSuggestions,
+        autocorrect: !widget.obscure && ComposingKeyboard.autocorrect,
+        enableSuggestions:
+            !widget.obscure && ComposingKeyboard.enableSuggestions,
+        // A password: dots, the platform showing the character just typed for a moment.
+        obscureText: widget.obscure,
         smartDashesType: SmartDashesType.disabled,
         smartQuotesType: SmartQuotesType.disabled,
         textCapitalization: multi

@@ -56,6 +56,17 @@ it('keeps feedback denominators and setup coverage separate from daemon particip
   expect(r.flows.find(f => f.channel === 'setup' && f.surface === 'desktop' && f.flow === 'sign_in')).toMatchObject({ started: 5, unmatchedStarts: 3 })
   expect(r.flows.find(f => f.channel === 'ui' && f.flow === 'update_stage')?.started).toBeNull()
 })
+it('shows hn\'s app flows beside the other apps, with no signed-out setup row for it', () => {
+  // hn counts a start when the flow begins and its outcome when it ends, as the Desktop does: one still
+  // open (or ended under another account) is an unmatched start.
+  const r = dailyProductReview([
+    row('2026-10-12', 'ui_tui_workspace_connect_started', 4), row('2026-10-12', 'ui_tui_workspace_connect_ok', 3),
+    row('2026-10-12', 'ui_tui_workspace_connect_under_1s', 3),
+  ], new Date('2026-10-13'))
+  expect(r.flows.find(f => f.channel === 'ui' && f.surface === 'tui' && f.flow === 'workspace_connect'))
+    .toMatchObject({ started: 4, unmatchedStarts: 1, outcomes: { ok: 3, failed: 0 }, durationBuckets: { under_1s: 3, over_1m: 0 } })
+  expect(r.flows.some(f => f.channel === 'setup' && f.surface === 'tui')).toBe(false)
+})
 it('uses complete calendar months rather than adding daily installations into MAU', () => {
   const r = dailyProductReview([
     row('2026-08-12', 'monthly_working_installations', 10), row('2026-09-12', 'monthly_working_installations', 8),
@@ -93,4 +104,20 @@ it('reads Store and model-list reach only from the requests a person opened', ()
     installationDays: 4, firstMeasuredInstallations: 3, repeatInstallationDays: 1 })
   expect(r.features.find(f => f.action === 'model_list')).toMatchObject({ userRequests: 0, installationDays: null })
   expect(r.features.find(f => f.action === 'history')).toMatchObject({ userRequests: null, installationDays: null })
+})
+
+it("splits the phone onboarding's long waits past a minute and shows what happened on the way", () => {
+  const r = dailyProductReview([
+    row('2026-10-12', 'ui_phone_computer_wait_started', 4), row('2026-10-12', 'ui_phone_computer_wait_ok', 2),
+    row('2026-10-12', 'ui_phone_computer_wait_over_1m', 2), row('2026-10-12', 'ui_phone_computer_wait_15m_to_1h', 2),
+    row('2026-10-12', 'ui_phone_computer_wait_resumed', 1), row('2026-10-12', 'ui_phone_computer_wait_not_you', 1),
+    row('2026-10-12', 'ui_phone_session_open_blocked_password', 1),
+  ], new Date('2026-10-13'))
+  const wait = r.flows.find(f => f.channel === 'ui' && f.surface === 'phone' && f.flow === 'computer_wait')
+  expect(wait).toMatchObject({ started: 4, unmatchedStarts: 2,
+    over1mBuckets: { '1m_to_5m': 0, '15m_to_1h': 2 }, marks: { resumed: 1, not_you: 1, link_shared: 0 } })
+  expect(r.flows.find(f => f.channel === 'ui' && f.surface === 'phone' && f.flow === 'session_open'))
+    .toMatchObject({ marks: { blocked_password: 1, blocked_offline: 0 } })
+  expect(r.flows.find(f => f.channel === 'ui' && f.surface === 'phone' && f.flow === 'session_open')).not.toHaveProperty('over1mBuckets')
+  expect(r.flows.find(f => f.channel === 'ui' && f.surface === 'desktop' && f.flow === 'computer_wait')).not.toHaveProperty('marks')
 })

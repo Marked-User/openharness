@@ -18,6 +18,9 @@ export const PRODUCT_USAGE_FEATURE_MEASURES = ['installation_days', 'first_insta
  * clients released before the split still send the plain names for every automatic read. */
 export const PRODUCT_USAGE_USER_OPENED_ACTIONS = ['store_list', 'model_list'] as const satisfies typeof PRODUCT_USAGE_AUTOMATIC_ACTIONS
 export const PRODUCT_USAGE_SURFACES = ['desktop', 'phone', 'web'] as const
+/** hn counts its flows through its own daemon (`product_observe`), signed in only: it has the UI
+ * names but no signed-out setup channel, so it is not one of the setup surfaces above. */
+export const PRODUCT_USAGE_UI_SURFACES = [...PRODUCT_USAGE_SURFACES, 'tui'] as const
 /** Flows that can finish before an account exists, so a signed-out report may carry them. The
  * sign_in_<method> flows split the phone's welcome screen by the button used; sign_in stays the total. */
 export const PRODUCT_USAGE_SETUP_FLOWS = ['setup', 'setup_harness', 'setup_tmux', 'setup_clipboard', 'sign_in',
@@ -25,12 +28,28 @@ export const PRODUCT_USAGE_SETUP_FLOWS = ['setup', 'setup_harness', 'setup_tmux'
 /** Phone onboarding after sign-in: waiting for a computer, opening its session, the first message
  * sent there and the notification prompt that follows. Counts and duration buckets only. */
 export const PRODUCT_USAGE_ONBOARDING_FLOWS = ['computer_wait', 'session_open', 'first_message', 'notify_permission'] as const
+/** Onboarding steps that can take hours (setting the computer up, the first message): the flow
+ * buckets stop at over_1m, so these also split that bucket. */
+export const PRODUCT_USAGE_LONG_FLOWS = ['computer_wait', 'first_message'] as const
+export const PRODUCT_USAGE_LONG_MEASURES = ['1m_to_5m', '5m_to_15m', '15m_to_1h', 'over_1h'] as const
+/** What happened on the way through a phone onboarding step, at most once per step per sign-in.
+ * `resumed`: the step started in an app run that did not sign in (reopened mid-step), so it is not a
+ * new person; the rest are the step's own ways out or walls. The sign_in marks are counted with a
+ * sign-in that went through: `retried`, an attempt before it in this app run failed or was
+ * cancelled; `switched`, it used another button than the first one tried. */
+export const PRODUCT_USAGE_ONBOARDING_MARKS = ['ui_phone_sign_in_retried', 'ui_phone_sign_in_switched',
+  'ui_phone_computer_wait_resumed', 'ui_phone_computer_wait_not_you',
+  'ui_phone_computer_wait_link_shared', 'ui_phone_session_open_resumed', 'ui_phone_session_open_blocked_password',
+  'ui_phone_session_open_blocked_offline', 'ui_phone_first_message_resumed'] as const
+export const PRODUCT_USAGE_ONBOARDING_METRICS = [...PRODUCT_USAGE_ONBOARDING_MARKS,
+  ...PRODUCT_USAGE_LONG_FLOWS.flatMap(flow => PRODUCT_USAGE_LONG_MEASURES.map(measure => `ui_phone_${flow}_${measure}` as const)),
+] as const
 export const PRODUCT_USAGE_FLOWS = [...PRODUCT_USAGE_SETUP_FLOWS,
   'workspace_connect', 'computer_link', 'remote_connect', 'viewer_open', 'update_check', 'update_stage',
   ...HEALTH_FLOWS, ...PRODUCT_USAGE_ONBOARDING_FLOWS] as const
 export const PRODUCT_USAGE_FLOW_MEASURES = ['started', 'ok', 'failed', 'cancelled', 'unknown',
   'under_1s', '1s_to_10s', '10s_to_1m', 'over_1m'] as const
-export const PRODUCT_USAGE_UI_METRICS = PRODUCT_USAGE_SURFACES.flatMap(surface =>
+export const PRODUCT_USAGE_UI_METRICS = PRODUCT_USAGE_UI_SURFACES.flatMap(surface =>
   PRODUCT_USAGE_FLOWS.flatMap(flow => PRODUCT_USAGE_FLOW_MEASURES.map(measure => `ui_${surface}_${flow}_${measure}` as const)))
 // A signed-out report is explicitly enabled on this app. It cannot carry account/work metrics.
 export const PRODUCT_USAGE_SETUP_METRICS = [...PRODUCT_USAGE_SURFACES.flatMap(surface =>
@@ -66,6 +85,7 @@ export const PRODUCT_USAGE_METRICS = [
   ...PRODUCT_USAGE_USER_OPENED_ACTIONS.flatMap(action => (['requests', ...PRODUCT_USAGE_FEATURE_MEASURES] as const)
     .map(measure => `${action}_user_${measure}` as const)),
   ...PRODUCT_USAGE_UI_METRICS,
+  ...PRODUCT_USAGE_ONBOARDING_METRICS,
 ] as const
 export type ProductUsageMetric = typeof PRODUCT_USAGE_METRICS[number]
 export interface ProductUsageReport {

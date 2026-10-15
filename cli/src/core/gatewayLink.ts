@@ -334,6 +334,12 @@ export function createGatewayLink(deps: GatewayLinkDeps) {
         return typeof answer.plaintext === 'string' ? { plaintext: answer.plaintext, complete: answer.complete === true } : null
       },
     },
+    // Machines shared across accounts, pinned and trusted by the gateway (gateway/sharedTrust.ts).
+    sharedTrust: async (desired) => {
+      const answer = await deps.call(GATEWAY_CALLS.sharedTrust, { ...desired }, LANE_WAIT_MS)
+      if (typeof answer.pins === 'number' && typeof answer.keys === 'number') return { pins: answer.pins, keys: answer.keys }
+      throw new Error(typeof answer.error === 'string' && !answer.error.startsWith('SERVICE_') ? answer.error : 'the gateway is not running')
+    },
   }
 
   /** A window's session through the gateway: to another of the owner's machines, or to a harness shared

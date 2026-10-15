@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_mobile/auth/auth_session.dart';
 import 'package:harness_mobile/auth/sign_in_provider.dart';
@@ -10,6 +11,7 @@ import 'package:harness_mobile/phone/welcome/onboarding_picture.dart';
 import 'package:harness_mobile/phone/welcome/phone_welcome.dart';
 import 'package:harness_mobile/phone/welcome/scan_to_connect.dart';
 import 'package:harness_mobile/phone/welcome/set_up_computer.dart';
+import 'package:harness_mobile/phone/welcome/your_computer.dart';
 import 'package:harness_mobile/phone/welcome/sign_in_provider_button.dart';
 import 'package:harness_mobile/state/app_state.dart';
 
@@ -335,7 +337,7 @@ void main() {
     // ②'s address, signed in, then Add Phone — in that order.
     expect(find.text('How to get the QR code'), findsOneWidget);
     final steps = [
-      find.text('Go to autonomous.ai/go'),
+      find.text(OnboardingCopy.goToHeadline),
       find.text('Sign in'),
       find.text('Click "Add Phone"'),
     ];
@@ -348,10 +350,40 @@ void main() {
         lessThan(tester.getTopLeft(steps[i]).dy),
       );
     }
+    // The first step is ②'s words (owner, 2026-10-15): "On your computer, go to", the address,
+    // then "Install Harness" — all above the sign-in. The address is words in the step, not ②'s
+    // green button, which outweighed the camera.
+    final address = find.byKey(const ValueKey('go-address'));
+    final install = find.text(OnboardingCopy.installStep);
+    expect(address, findsOneWidget);
+    expect(install, findsOneWidget);
     expect(
-      find.text('Download and install on your computer'),
+      tester.widget<GoAddressButton>(find.byType(GoAddressButton)).inline,
+      isTrue,
+    );
+    expect(
+      find.descendant(
+        of: address,
+        matching: find.text(OnboardingCopy.goAddress),
+      ),
       findsOneWidget,
     );
+    expect(
+      tester.getBottomLeft(steps[0]).dy,
+      lessThanOrEqualTo(tester.getTopLeft(address).dy),
+    );
+    expect(
+      tester.getBottomLeft(address).dy,
+      lessThanOrEqualTo(tester.getTopLeft(install).dy),
+    );
+    expect(
+      tester.getBottomLeft(install).dy,
+      lessThanOrEqualTo(tester.getTopLeft(steps[1]).dy),
+    );
+    // Indented with the step's words, not out at the ring.
+    expect(tester.getTopLeft(address).dx, tester.getTopLeft(steps[0]).dx);
+    expect(find.text('Go to autonomous.ai/go'), findsNothing);
+    expect(find.text('Download and install on your computer'), findsNothing);
     expect(find.text(kAddPhoneWhere), findsOneWidget);
     // Signed out, there is no account for the sign-in to name.
     expect(find.textContaining('Use '), findsNothing);
@@ -362,10 +394,80 @@ void main() {
     expect(email, findsOneWidget);
   });
 
+  testWidgets(
+    'QR code: the address under the camera\'s first step sends the link',
+    (tester) async {
+      final shared = <String?>[];
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      const share = MethodChannel('dev.fluttercommunity.plus/share');
+      messenger.setMockMethodCallHandler(share, (call) async {
+        shared.add((call.arguments as Map)['uri'] as String?);
+        return 'dev.fluttercommunity.plus/share/dismissed';
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(share, null));
+
+      await pump(tester);
+      await tester.tap(scan);
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('go-address')));
+      await tester.pump();
+      expect(shared, [OnboardingCopy.goUrl]);
+    },
+  );
+
+  test('the camera\'s first step is ②\'s headline and install step', () {
+    final first = computerSteps(null).first;
+    expect(first.title, OnboardingCopy.goToHeadline);
+    expect(first.note, OnboardingCopy.installStep);
+    expect(first.note, goToSteps(null).first.title);
+  });
+
+  testWidgets('StepsTimeline: the link stands under the first title, over its note', (
+    tester,
+  ) async {
+    const steps = <ComputerStep>[
+      (title: 'First', note: 'First note'),
+      (title: 'Second', note: 'Second note'),
+    ];
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: StepsTimeline(
+            steps: steps,
+            link: SizedBox(key: ValueKey('link'), height: 40),
+          ),
+        ),
+      ),
+    );
+    final link = find.byKey(const ValueKey('link'));
+    expect(link, findsOneWidget);
+    expect(
+      tester.getBottomLeft(find.text('First')).dy,
+      lessThanOrEqualTo(tester.getTopLeft(link).dy),
+    );
+    expect(
+      tester.getBottomLeft(link).dy,
+      lessThanOrEqualTo(tester.getTopLeft(find.text('First note')).dy),
+    );
+    expect(
+      tester.getTopLeft(find.text('Second')).dy,
+      greaterThan(tester.getBottomLeft(find.text('First note')).dy),
+    );
+
+    // With none, nothing stands between a title and its note.
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(body: StepsTimeline(steps: steps)),
+      ),
+    );
+    expect(link, findsNothing);
+  });
+
   test('the camera\'s sign-in step names the account, when there is one', () {
     final signedIn = computerSteps('ada@example.com');
     expect(signedIn.map((s) => s.title), [
-      'Go to autonomous.ai/go',
+      OnboardingCopy.goToHeadline,
       'Sign in',
       'Click "Add Phone"',
     ]);

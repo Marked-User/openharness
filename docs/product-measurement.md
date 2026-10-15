@@ -18,6 +18,7 @@ automatically proven improvement. Changes still need review, tests and a deliber
 
 | Which features get tried and used again? | First measured installations and daily first/repeat feature reach | Locally deduplicated installation-days, not unique accounts. Reads the apps make on their own (history, history paging, Store list, model list; `PRODUCT_USAGE_AUTOMATIC_ACTIONS`) count reliability only. The Store and model lists get reach only from the request an app marks `userAction` when a person opens them (`<action>_user_*`, `PRODUCT_USAGE_USER_OPENED_ACTIONS`); history has none. |
 | Where do app flows break? | Setup, Harness/tmux/clipboard steps, sign-in, workspace/remote connections, computer linking, viewer-pane opening and manual update checking/staging | Fixed started/ok/failed/cancelled/unknown counts and coarse duration buckets. Opening a viewer pane is not rendering its content; staging an update is not a successful relaunch. |
+| Where does the phone's onboarding stall? | After sign-in: waiting for the first computer, opening its session, the first message, the notification prompt. A sign-in that went through, by button, counted again under the account's sharing. Waits past a minute split into 1–5 min, 5–15 min, 15 min–1 h and over 1 h for the computer and the first message. Once per step per sign-in: `resumed` (reopened in a run that did not sign in), "Not you? Sign out", the address sent from the share sheet, a joining computer that wants its password or is offline | Stage totals per day, not a linked funnel. Subtract `resumed` from starts for fresh starts; an unmatched start is a closed app or a step still waiting. A resumed step's duration starts at the reopening. Signed-in sign-in counts are successes only; failures and cancels before an account remain the signed-out opt-in's, but a success is marked `retried` (a failed or cancelled try came first in that app run) or `switched` (another button was tried first). Phone reports carry release and iOS/Android, so every phone count also splits by those two margins (above 20 collector days); debug builds are not kept. A chosen sign-out sends what is queued first (up to 2 s), so "Not you? Sign out" reaches the totals. |
 | Is measurement losing coverage? | Updated collector installation-days, pruned queues, full observation maps, unmatched app starts | Loss signals warrant caution. No signal does not prove complete collection. |
 | How many people use Harness, and do they come back? | People active / working / new per day and per app, and D1/D2/D3/D7 returns (backend rollup of 10-day pseudonymous marks) | Sharing accounts only, staff excluded; an app open across midnight counts on both days, so prefer working returns. Not available before `PRODUCT_USAGE_SUBJECT_KEY` is set. |
 
@@ -76,7 +77,8 @@ Desktop's only new disk state is the last consented run's version, clean-exit/up
 revision and a local-only account-scope hash. One serialized asynchronous write plus one latest
 pending value bounds disk work. It is cleared on sign-out/off and never enters a report. An unclean
 run can mean a force quit or power loss, and only becomes observable if the app returns. Update
-flags are best effort; analytics never delays exit. Gateway work-day flags expire after 35 days;
+flags are best effort; the existing expected-version flag starts during download so its disk write
+does not begin only at exit, and failed downloads clear it. Analytics never delays exit. Gateway work-day flags expire after 35 days;
 a local yes/no marker prevents an old installation from being counted as newly activated again.
 All new fields are allowlisted; no URLs, raw error strings, stack traces, device specifications,
 task/session IDs or content are accepted. Feedback is voluntary and shown/answered/dismissed
@@ -101,6 +103,9 @@ invalid, too-large, authentication, rate-limit, timeout, unreachable, write-conf
 server and other categories. A transaction failure does not by itself prove a timeout. No raw error
 message, database detail, URL or unknown error code is collected. These diagnostics share the same
 privacy choice and bounded queue, so a delivery outage can delay its own diagnostic counters.
+Desktop now splits failed delivery attempts into the same fixed categories. A permanently invalid
+or oversized packet is discarded so it cannot block newer reports; transient errors retry the
+same receipt. Delayed errors after a choice or account change are discarded.
 The local app proxy accepts only bounded UI counts, or Desktop health/UI counts with the exact
 public release, OS and channel context. It does not accept daemon counters or arbitrary context.
 
@@ -112,6 +117,21 @@ app transport retains its existing 15-second connect timeout. Signed-out transpo
 for all three phases. Counts expire after
 yesterday; app exit loses RAM counts. Update-stage outcomes may be lost during immediate exit;
 never delay an update to flush analytics. There is no persistent app identifier or local event log.
+
+hn reports as the `tui` surface: fixed `ui_tui_*` flow and `health_tui_*` milestone counters only,
+sent as one-way `product_observe` frames to this computer's daemon, which accepts them only from hn
+over the owner's socket, never relays them, and adds them to its own queue under the account's
+choice; those arriving before its first choice read wait in RAM (64 at most) until it is known.
+hn records only while signed in: nothing observed before sign-in is kept or sent, and a sign-in,
+sign-out or account change discards what is waiting, so its own sign-in is not observed. Flows are
+workspace and remote connections, computer linking, viewer opening (in a browser, or its link shown
+over SSH), app start, workspace ready and resume recovery, each started when it begins as on the
+Desktop; milestones are workspace ready, first work and first response, once per app session, with
+the Desktop's definitions. Milestones are not reset when the sharing choice changes within a session.
+At most 64 observations wait in hn's RAM (a full queue drops the rest and says so once per session,
+`health_tui_observation_overflow`); nothing is written to disk. Its counters travel in reports of
+their own. A backend that predates `tui` refuses only those, and the daemon then drops hn's counts
+until the next UTC day or its own restart, without counting a failed delivery.
 
 The signed-out endpoint permits only setup counters and explicit consent, rejects auth/cookie
 headers, limits bodies to 4 KiB and values to 1,000, and admits at most 120 writes/minute and four
@@ -127,6 +147,10 @@ immutable-report retry. Receipts prevent both immediate and later retries from c
 Reports update their counters and separate margins in one Mongo update command inside
 that transaction. A partial write aborts the receipt and all counts; no per-report body is stored.
 This shortens shared-row contention without adding a daemon timer or delaying product actions.
+Each backend process admits one aggregate report transaction at a time, with at most 32 waiting
+reports and a two-second queue deadline. Overflow returns a retryable busy response. Permission
+is checked inside the transaction after admission, including every conflict retry. Other server
+processes can still contend; this does not promise zero delivery failures.
 The public `/api/health` response includes validated release tag/SHA coordinates so a successful
 image build can be distinguished from the version actually serving requests.
 

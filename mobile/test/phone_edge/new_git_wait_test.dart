@@ -12,7 +12,8 @@ import 'edge_fixture.dart';
 /// A machine that holds every Git read until the test answers it — a laptop slow to say what its
 /// folder is, which is what a Start pressed as New opens runs into.
 class _SlowGitConn extends EdgeConn {
-  _SlowGitConn() : super(const {}, startsAgents);
+  _SlowGitConn([Map<String, Map<String, dynamic>> answers = const {}])
+    : super(answers, startsAgents);
 
   /// Every Git read asked for, in order: the folder, and the answer the test gives it.
   final reads = <({String path, Completer<Map<String, dynamic>> answer})>[];
@@ -69,9 +70,10 @@ void main() {
     WidgetTester tester, {
     String? folder,
     List<Agent>? agents,
+    Map<String, Map<String, dynamic>> answers = const {},
   }) async {
     setPhone(tester, largePhone);
-    final conn = _SlowGitConn();
+    final conn = _SlowGitConn(answers);
     final app = edgeApp(conn: conn, agents: agents ?? [edgeAgent('a')]);
     await tester.pumpWidget(
       phoneApp(
@@ -208,6 +210,58 @@ void main() {
     expect(payload['gitSource'], main);
     expect(payload['projectSource'], 'worktree');
     expect(payload['branchRef'], 'refs/heads/main');
+    await close(tester, app);
+  });
+
+  testWidgets('a worktree browsed to stays the project and starts on its '
+      'branch', (tester) async {
+    const worktree = '/home/u/harnesses/worktrees/web/silent-beacon';
+    const main = '/home/u/code/web';
+    final (:app, :conn) = await openNew(
+      tester,
+      answers: {
+        'fs_list_dir': {'path': worktree, 'entries': <Object>[]},
+      },
+    );
+    conn.reads.single.answer.complete(_repository('/code/web'));
+    await frames(tester);
+    await tapInView(tester, find.text('project'));
+    await frames(tester);
+    await tapInView(tester, find.text('+ Open Folder', findRichText: true));
+    await frames(tester);
+    await tester.tap(find.byType(FilledButton));
+    await frames(tester);
+    expect(conn.reads.last.path, worktree);
+    // The computer did not answer: Start reads the browsed folder again, still as itself.
+    conn.reads.last.answer.complete({'error': 'UNAVAILABLE'});
+    await frames(tester);
+    await tapInView(tester, find.text('Start'));
+    await frames(tester);
+    expect(conn.reads.last.path, worktree);
+    conn.reads.last.answer.complete({
+      ..._repository(worktree),
+      'branch': 'silent-beacon',
+      'mainFolder': main,
+      'mainBranch': 'main',
+      'branches': [
+        {'ref': 'refs/heads/main', 'name': 'main', 'worktree': main},
+        {
+          'ref': 'refs/heads/silent-beacon',
+          'name': 'silent-beacon',
+          'worktree': worktree,
+        },
+        {
+          'ref': 'refs/remotes/origin/main',
+          'name': 'origin/main',
+          'remote': true,
+        },
+      ],
+    });
+    await frames(tester, count: 20);
+    final payload = conn.created.single;
+    expect(payload['gitSource'], worktree);
+    expect(payload['projectSource'], 'branch');
+    expect(payload['branchRef'], 'refs/heads/silent-beacon');
     await close(tester, app);
   });
 

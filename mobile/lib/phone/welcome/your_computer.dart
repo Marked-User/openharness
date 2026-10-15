@@ -6,6 +6,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'package:harness_mobile/core/handoff.dart';
+import 'package:harness_mobile/measurement/onboarding_measurement.dart';
+import 'package:harness_mobile/measurement/product_measurement.dart';
 import 'package:harness_mobile/shared/theme/app_theme.dart';
 import 'package:harness_mobile/state/app_state.dart';
 
@@ -144,7 +146,12 @@ class _YourComputerPageState extends State<YourComputerPage>
 /// Signed in there with it, the computer joins the account, and the screen moves on by itself
 /// ([ComputerWatch]): no Add Phone, nothing to scan.
 class GoToComputer extends StatelessWidget {
-  const GoToComputer({super.key, required this.account, this.notYou});
+  const GoToComputer({
+    super.key,
+    required this.account,
+    this.notYou,
+    this.onSent,
+  });
 
   /// The account the computer has to sign in to — this phone's.
   final String? account;
@@ -153,12 +160,15 @@ class GoToComputer extends StatelessWidget {
   /// none with no account to name — "Not you?" would ask about nobody.
   final Widget? notYou;
 
+  /// The address went out through the share sheet ([GoAddressButton.onSent]).
+  final VoidCallback? onSent;
+
   @override
   Widget build(BuildContext context) => Column(
     mainAxisSize: MainAxisSize.min,
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      const GoAddressButton(),
+      GoAddressButton(onSent: onSent),
       const SizedBox(height: OnboardingFrame.stepsAbove),
       StepsTimeline(
         steps: goToSteps(account),
@@ -193,6 +203,10 @@ class NotYouSignOut extends StatelessWidget {
         behavior: HitTestBehavior.opaque,
         onTap: () {
           HapticFeedback.selectionClick();
+          notifier.onboardingMeasurement.mark(
+            ProductFlow.computerWait,
+            OnboardingMark.notYou,
+          );
           unawaited(confirmSignOut(context, notifier));
         },
         child: ConstrainedBox(
@@ -271,8 +285,25 @@ class _ComputerWatchState extends State<ComputerWatch> {
 ///
 /// While it is up it also offers the page to a Mac nearby by Handoff ([Handoff]): signed in to the
 /// same Apple account, the Mac shows it in its Dock, and nothing is typed at all.
+///
+/// [inline], it is words in a step instead — under the camera's "On your computer, go to"
+/// (`set_up_computer.dart`'s ComputerSteps): the address in green, underlined, the share mark after
+/// it, and no fill (owner, 2026-10-15). The full button there outweighed the camera, the one thing
+/// that page is for, and stood the first step three times as tall as the others.
 class GoAddressButton extends StatefulWidget {
-  const GoAddressButton({super.key});
+  const GoAddressButton({super.key, this.onSent, this.inline = false});
+
+  /// The share sheet sent the address somewhere — not merely opened and dismissed.
+  final VoidCallback? onSent;
+
+  /// Words in a step rather than the green button: see the class's note.
+  final bool inline;
+
+  /// [inline]'s height: one line of words to the eye, more than that to a thumb.
+  ///
+  /// ⚠️ Not 44: the room round the words is the gap between "On your computer, go to" and the
+  /// address, and at 44 the two read as two lines apart rather than one sentence.
+  static const double inlineHeight = 36;
 
   @override
   State<GoAddressButton> createState() => _GoAddressButtonState();
@@ -309,13 +340,14 @@ class _GoAddressButtonState extends State<GoAddressButton> {
         ? null
         : box.localToGlobal(Offset.zero) & box.size;
     try {
-      await SharePlus.instance.share(
+      final result = await SharePlus.instance.share(
         ShareParams(
           uri: _url,
           subject: 'Get Harness for your computer',
           sharePositionOrigin: origin,
         ),
       );
+      if (result.status == ShareResultStatus.success) widget.onSent?.call();
     } catch (_) {
       // No share sheet came up: the address is still there to type, and can be pressed again.
     }
@@ -324,7 +356,6 @@ class _GoAddressButtonState extends State<GoAddressButton> {
   @override
   Widget build(BuildContext context) {
     final tty = Tty.of(context);
-    final ink = tty.onFill(tty.theme.black);
     return Semantics(
       button: true,
       label: '${OnboardingCopy.goAddress}, Send link',
@@ -339,44 +370,81 @@ class _GoAddressButtonState extends State<GoAddressButton> {
           HapticFeedback.lightImpact();
           unawaited(_send());
         },
-        child: Container(
-          // At least this tall, and taller when the text is larger — never clipped.
-          constraints: const BoxConstraints(minHeight: TtyPrimaryButton.height),
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-          decoration: BoxDecoration(
-            // Pressed, it darkens on the finger's way DOWN, as the phone's other buttons do.
-            color: _down
-                ? Color.alphaBlend(
-                    Colors.black.withValues(alpha: 0.18),
-                    tty.green,
-                  )
-                : tty.green,
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: Row(
-            children: [
-              // One line on any phone: a narrow one shrinks it rather than breaking the address.
-              Expanded(
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    OnboardingCopy.goAddress,
-                    maxLines: 1,
-                    softWrap: false,
-                    style: tty.style(
-                      size: TtySize.title,
-                      weight: FontWeight.w600,
-                      color: ink,
-                    ),
+        child: widget.inline ? _words(tty) : _button(tty),
+      ),
+    );
+  }
+
+  /// Pressed, a fill or the words darken on the finger's way DOWN, as the phone's other buttons do.
+  Color _pressed(Color color) => _down
+      ? Color.alphaBlend(Colors.black.withValues(alpha: 0.18), color)
+      : color;
+
+  /// [GoAddressButton.inline]: the address and the share mark, in green, at the step's size — as
+  /// tall as [GoAddressButton.inlineHeight], the words centred in it.
+  Widget _words(Tty tty) {
+    final ink = _pressed(tty.green);
+    return ConstrainedBox(
+      constraints: const BoxConstraints(
+        minHeight: GoAddressButton.inlineHeight,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: Text(
+              OnboardingCopy.goAddress,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+              style: tty
+                  .style(size: TtySize.row, weight: FontWeight.w600, color: ink)
+                  .copyWith(
+                    decoration: TextDecoration.underline,
+                    decorationColor: ink.withValues(alpha: 0.45),
                   ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Icon(LucideIcons.share300, size: 16, color: ink),
+        ],
+      ),
+    );
+  }
+
+  /// The green button: the address at its left edge, the share mark at its right.
+  Widget _button(Tty tty) {
+    final ink = tty.onFill(tty.theme.black);
+    return Container(
+      // At least this tall, and taller when the text is larger — never clipped.
+      constraints: const BoxConstraints(minHeight: TtyPrimaryButton.height),
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+      decoration: BoxDecoration(
+        color: _pressed(tty.green),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: [
+          // One line on any phone: a narrow one shrinks it rather than breaking the address.
+          Expanded(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                OnboardingCopy.goAddress,
+                maxLines: 1,
+                softWrap: false,
+                style: tty.style(
+                  size: TtySize.title,
+                  weight: FontWeight.w600,
+                  color: ink,
                 ),
               ),
-              const SizedBox(width: 12),
-              Icon(LucideIcons.share300, size: 20, color: ink),
-            ],
+            ),
           ),
-        ),
+          const SizedBox(width: 12),
+          Icon(LucideIcons.share300, size: 20, color: ink),
+        ],
       ),
     );
   }

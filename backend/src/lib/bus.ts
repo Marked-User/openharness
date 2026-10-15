@@ -218,6 +218,15 @@ export function publishShareChanged(id: string): Promise<number> {
   return safePublish(`harness-share:${id}`, '{}')
 }
 
+/** A machine's sharing changed (routes/machineShares.ts): a session another account holds to it on any
+ *  instance asks again whether it may stay (lib/webWs.ts). No content on this channel. */
+export function subscribeMachineShareChanged(machineId: string, cb: () => void): Promise<() => void> {
+  return addSub(`machine-share:${machineId}`, cb)
+}
+export function publishMachineShareChanged(machineId: string): Promise<number> {
+  return safePublish(`machine-share:${machineId}`, '{}')
+}
+
 export function publishUp(machineId: string, msg: UpBusMsg): Promise<number> {
   const type = (msg.frame as { type?: unknown } | undefined)?.type
   if (typeof type === 'string' && STATUS_TYPES.has(type)) void safePublish(statusChannel(machineId), JSON.stringify(msg.frame))

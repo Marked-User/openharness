@@ -1,4 +1,4 @@
-import { PRODUCT_FEEDBACK, PRODUCT_FEEDBACK_REASONS, PRODUCT_FEEDBACK_OUTCOMES, PRODUCT_USAGE_ACTIONS, PRODUCT_USAGE_AUTOMATIC_ACTIONS, PRODUCT_USAGE_FLOWS, PRODUCT_USAGE_SETUP_FLOWS, PRODUCT_USAGE_SURFACES, PRODUCT_USAGE_USER_OPENED_ACTIONS } from '../types/productUsage.js'
+import { PRODUCT_FEEDBACK, PRODUCT_FEEDBACK_REASONS, PRODUCT_FEEDBACK_OUTCOMES, PRODUCT_USAGE_ACTIONS, PRODUCT_USAGE_AUTOMATIC_ACTIONS, PRODUCT_USAGE_FLOWS, PRODUCT_USAGE_LONG_FLOWS, PRODUCT_USAGE_LONG_MEASURES, PRODUCT_USAGE_ONBOARDING_MARKS, PRODUCT_USAGE_SETUP_FLOWS, PRODUCT_USAGE_SURFACES, PRODUCT_USAGE_UI_SURFACES, PRODUCT_USAGE_USER_OPENED_ACTIONS } from '../types/productUsage.js'
 import { DAILY_PRODUCT_METRICS } from './dailyProductUsage.js'
 
 type Row = { dayUtc: Date; metric: string; value: number }
@@ -52,6 +52,10 @@ export function dailyProductReview(rows: Row[], now: Date) {
     ...PRODUCT_USAGE_ACTIONS.map(action => comparison(`${action}: request refusal`, [`${action}_failed`], [`${action}_ok`, `${action}_failed`])),
   ]
   const c = recent.counters
+  const marksOf = (prefix: string) => {
+    const marks = PRODUCT_USAGE_ONBOARDING_MARKS.filter(metric => metric.startsWith(prefix))
+    return marks.length ? { marks: Object.fromEntries(marks.map(metric => [metric.slice(prefix.length), c[metric] ?? 0])) } : {}
+  }
   const signals = [
     { area: 'Agent setup', count: c.launch_failed_setup ?? 0, next: 'Reproduce a first launch on a clean machine; verify engine installation, tmux and native hook preparation.' },
     { area: 'Sign-in or permission', count: c.launch_failed_auth ?? 0, next: 'Exercise expired sign-in and reconnect with a test account; verify recovery and the visible explanation.' },
@@ -89,7 +93,8 @@ export function dailyProductReview(rows: Row[], now: Date) {
       percent: completeMonth.counters.monthly_working_installations ? rate(monthReturn, monthDenominator) : null,
       definition: 'Participating installations with work in two consecutive complete UTC calendar months; late uploads and measurement rollout affect coverage.',
     },
-    flows: ['setup', 'ui'].flatMap(channel => PRODUCT_USAGE_SURFACES.flatMap(surface => PRODUCT_USAGE_FLOWS
+    // hn has app flows but no signed-out setup channel.
+    flows: ['setup', 'ui'].flatMap(channel => ((channel === 'setup' ? PRODUCT_USAGE_SURFACES : PRODUCT_USAGE_UI_SURFACES) as readonly string[]).flatMap(surface => PRODUCT_USAGE_FLOWS
       .filter(flow => channel !== 'setup' || (PRODUCT_USAGE_SETUP_FLOWS as readonly string[]).includes(flow))
       .map(flow => {
         const prefix = `${channel}_${surface}_${flow}_`
@@ -99,6 +104,10 @@ export function dailyProductReview(rows: Row[], now: Date) {
           outcomes: Object.fromEntries(['ok', 'failed', 'cancelled', 'unknown'].map(outcome => [outcome, c[`${prefix}${outcome}`] ?? (started ? 0 : null)])),
           unmatchedStarts: started === null ? null : Math.max(0, started - observed),
           durationBuckets: Object.fromEntries(['under_1s', '1s_to_10s', '10s_to_1m', 'over_1m'].map(bucket => [bucket, c[`${prefix}${bucket}`] ?? (started ? 0 : null)])),
+          // The phone's onboarding: over_1m split further, and what happened on the way (once per sign-in).
+          ...(channel === 'ui' && surface === 'phone' && (PRODUCT_USAGE_LONG_FLOWS as readonly string[]).includes(flow)
+            ? { over1mBuckets: Object.fromEntries(PRODUCT_USAGE_LONG_MEASURES.map(bucket => [bucket, c[`${prefix}${bucket}`] ?? (started ? 0 : null)])) } : {}),
+          ...(channel === 'ui' ? marksOf(prefix) : {}),
           interpretation: channel === 'setup'
             ? 'Optional signed-out app-session counts, untrusted and self-selected. No cross-step linkage, unique people or signup conversion. Web pre-sign-in is not collected.'
             : 'Observed app operations, possibly automatic. Missing outcomes include closed apps, offline reports and choice changes; absence is not failure. Viewer opening is not page rendering; update staging is not successful relaunch.',

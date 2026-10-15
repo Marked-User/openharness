@@ -1,7 +1,6 @@
 // The Pro's glass: a 720 x 720 RGB565 panel and its GT911 touch, upright to the caller.
 //
-// A unit whose panel is mounted upside down runs with the runtime turn on (pro_turn.h: the app's setting, whose default
-// is -DPOD_PANEL_TURN=180). The picture is turned where strips are written and the contact where it is read, so callers
+// Every panel is mounted turned 180 degrees (pro_turn.h). The picture is turned where strips are written and the contact where it is read, so callers
 // always see an upright PRO_DISPLAY_PX x PRO_DISPLAY_PX glass.
 #pragma once
 

@@ -20,6 +20,7 @@ import { decodeTerminalLocal, encodeTerminalLocal } from '../lib/terminalBinary.
 import { accountLink } from '../services/accountLink.js'
 import { runServiceProcess, type CoreConnection, type ServiceProcess } from '../services/process.js'
 import { startGateway, type StartedGateway } from './start.js'
+import { sharedPeers } from './sharedTrust.js'
 
 type Payload = Record<string, unknown>
 
@@ -251,6 +252,14 @@ export function runGatewayService(options: GatewayServiceOptions): ServiceProces
       try {
         if (p.op === 'public') return { key: await key.publicKey() }
         return { key: await key.signWelcome(text(p.machineId), text(p.shareId), text(p.peer), text(p.ephemeral)) }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    },
+    // Machines shared across accounts (gateway/sharedTrust.ts): the stores made to hold what was asked.
+    [GATEWAY_CALLS.sharedTrust]: async (p: Payload): Promise<Payload> => {
+      try {
+        return { ...await ops().sharedTrust({ ...(p.pins !== undefined ? { pins: sharedPeers(p.pins) } : {}), ...(p.keys !== undefined ? { keys: sharedPeers(p.keys) } : {}) }) }
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) }
       }

@@ -25,8 +25,6 @@ bool config_load_muted(void);
 bool config_save_muted(bool muted);
 
 // The screen turned 180 degrees. `fallback` is the answer when nothing was saved (the build's default).
-bool config_load_turn(bool fallback);
-bool config_save_turn(bool turned);
 
 // The voice language the device captures in. The daemon PROPOSES one from the computer's locale on every
 // `welcome`; once the user has picked here, this wins — the person holding the device may well speak

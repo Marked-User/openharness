@@ -23,6 +23,7 @@ const requestActions = new Map<string, Reach>([
   ...PRODUCT_USAGE_ACTIONS.filter(action => !PRODUCT_USAGE_AUTOMATIC_ACTIONS.includes(action)).map(action => [`${action}_requests`, action] as const),
   ...PRODUCT_USAGE_USER_OPENED_ACTIONS.map(action => [`${action}_user_requests`, `${action}_user`] as const),
 ])
+const isTuiMetric = (metric: string): boolean => metric.startsWith('ui_tui_') || metric.startsWith('health_tui_')
 const key = (now: number) => new Date(now).toISOString().slice(0, 10)
 const week = (now: number) => { const d = new Date(now); return key(now - ((d.getUTCDay() + 6) % 7) * DAY) }
 type Counters = Partial<Record<ProductUsageMetric, number>>
@@ -73,6 +74,11 @@ export function createProductUsage(deps: ProductUsageDeps) {
   let state = fresh(-1), enabled = false, stopped = false, active = false
   let syncing: Promise<void> | null = null, persistTimer: ReturnType<typeof setTimeout> | undefined
   let writing: Promise<boolean> | null = null, writeAgain = false
+  // hn's counters: those it observed before the first choice read, held in RAM until that is known
+  // (hn is often opened at the daemon's start), and the UTC day a backend from before `tui` refused
+  // them. Neither is persisted; a restart tries again.
+  let choiceKnown = false, tuiHeld: ProductUsageMetric[] = [], tuiRefusedDay: string | null = null
+  const tuiRefused = (): boolean => tuiRefusedDay === key(now())
   const running = new Map<string, { started: number; response: boolean; error: boolean; waited: boolean }>()
   const launches = new Map<string, { started: number; done: boolean; waits: Set<string> }>()
   try {
@@ -221,6 +227,13 @@ export function createProductUsage(deps: ProductUsageDeps) {
       if (response.status !== 200 || typeof body?.enabled !== 'boolean'
           || !Number.isSafeInteger(body.revision) || body.revision < 0) { enabled = false; running.clear(); launches.clear(); health.clearObservations(); return }
       await choice(body)
+      if (!choiceKnown) {
+        // Counted only now that sharing is known to be on; discarded when it is off.
+        choiceKnown = true
+        const held = tuiHeld
+        tuiHeld = []
+        if (enabled && !tuiRefused()) for (const metric of held) add(metric)
+      }
       if (!enabled) return
       if (context) {
         health.start(context.release); health.checkpoint(); health.sample(deps.sample)
@@ -234,10 +247,19 @@ export function createProductUsage(deps: ProductUsageDeps) {
         if (now() - launch.started >= 35 * 60_000) launches.delete(id)
       }
       if (active) markActive()
+      // Refused today: hn's counts go, rather than waiting to become a past day's report.
+      if (tuiRefused()) for (const day of Object.keys(state.days)) {
+        for (const metric of Object.keys(state.days[day])) if (isTuiMetric(metric)) delete state.days[day][metric as ProductUsageMetric]
+        if (!Object.keys(state.days[day]).length) { delete state.days[day]; delete state.dayContexts[day] }
+      }
       if (!state.pending) {
         const day = Object.keys(state.days).sort().find(d => validDay(d) && Object.keys(state.days[d]).length)
         if (!day) return
-        const counters = Object.fromEntries(Object.entries(state.days[day]).slice(0, MAX_REPORT_METRICS)) as Counters
+        // hn's counters travel alone: a backend from before `tui` refuses its whole report (400), and
+        // that refusal drops the report, so it must never carry the daemon's or the Desktop's counts.
+        const entries = Object.entries(state.days[day])
+        const own = entries.filter(([metric]) => !isTuiMetric(metric))
+        const counters = Object.fromEntries((own.length ? own : entries).slice(0, MAX_REPORT_METRICS)) as Counters
         const reportContext = state.dayContexts[day] ?? context
         state.pending = { schemaVersion: 1, revision: state.revision, id: uuid(), day, counters, ...(reportContext ? { context: reportContext } : {}) }
         for (const metric of Object.keys(counters)) delete state.days[day][metric as ProductUsageMetric]
@@ -253,6 +275,11 @@ export function createProductUsage(deps: ProductUsageDeps) {
       if (answer.status === 200 && result?.accepted === true) { state.pending = null; await persist() }
       else if (result?.reason === 'CHOICE_CHANGED') { enabled = false; state = fresh(-1); running.clear(); launches.clear(); health.reset(); await persist() }
       else if (result?.reason === 'EXPIRED') { state.pending = null; add('health_cli_report_expired'); await persist() }
+      else if (answer.status === 400 && Object.keys(report.counters).length && Object.keys(report.counters).every(isTuiMetric)) {
+        // A backend from before `tui` knows none of hn's names. That is not a failed delivery, so it
+        // is not counted as one: the report goes, and hn's counts with it until the next UTC day.
+        state.pending = null; tuiRefusedDay = key(now()); await persist()
+      }
       else {
         add('health_cli_report_rejected')
         add(`health_cli_report_failure_${reportFailure(answer)}`)
@@ -271,7 +298,12 @@ export function createProductUsage(deps: ProductUsageDeps) {
   return {
     sync,
     counter(metric: ProductUsageMetric): void {
-      if (!enabled || stopped || !metricSet.has(metric)) return
+      if (stopped || !metricSet.has(metric)) return
+      if (isTuiMetric(metric)) {
+        if (!enabled) { if (!choiceKnown && tuiHeld.length < 64) tuiHeld.push(metric); return }
+        if (tuiRefused()) return
+      }
+      if (!enabled) return
       add(metric)
       const action = requestActions.get(metric)
       if (action && state.featureDays[action] !== key(now())) {
@@ -381,7 +413,7 @@ export function createProductUsage(deps: ProductUsageDeps) {
       }
     },
     stop(discard = false): Promise<boolean> {
-      stopped = true; enabled = false; clearInterval(timer); running.clear(); launches.clear(); health.stop()
+      stopped = true; enabled = false; clearInterval(timer); running.clear(); launches.clear(); health.stop(); tuiHeld = []
       if (discard) { state = fresh(-1); health.reset() }
       return persist()
     },

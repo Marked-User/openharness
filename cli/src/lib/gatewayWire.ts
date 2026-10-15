@@ -66,4 +66,5 @@ export const GATEWAY_CALLS = {
   lane: 'gateway_lane',
   observerKey: 'gateway_observer_key',
   connectorVault: 'gateway_connector_vault',
+  sharedTrust: 'gateway_shared_trust',
 } as const

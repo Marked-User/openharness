@@ -6,7 +6,9 @@ typedef _Field = ({String label, String text});
 const List<_Field> _sent = [
   (
     label: 'Each report',
-    text: 'UTC day, a random retry receipt, protocol and preference revisions.',
+    text:
+        'UTC day, a random retry receipt, protocol and preference revisions; '
+        'the app version and whether it runs on iOS or Android.',
   ),
   (
     label: 'Activity',
@@ -43,7 +45,8 @@ const List<_Field> _sent = [
     label: 'Phone setup steps',
     text:
         'Waiting for a computer, opening its session, sending a first message, '
-        'answering the notification prompt: outcomes and duration buckets.',
+        'answering the notification prompt: outcomes and duration buckets; '
+        'whether a sign-in that went through came after a failed try or on another button.',
   ),
   (label: 'Feedback', text: 'Only your selected task outcome or reason.'),
   (

@@ -40,6 +40,13 @@ it('does not reflect a database error or report contents', async () => {
   expect(response.statusCode).toBe(503)
   expect(response.body).not.toContain('PRIVATE_CANARY')
 })
+it('returns retryable backpressure without admitting another database write', async () => {
+  methods.ingestProductUsage.mockRejectedValue({ code: 'USAGE_BUSY', message: 'PRIVATE_CANARY' })
+  const response = await submit(good)
+  expect(response.statusCode).toBe(429)
+  expect(response.json().error.code).toBe('USAGE_BUSY')
+  expect(response.body).not.toContain('PRIVATE_CANARY')
+})
 it.each([['P2034', 'USAGE_WRITE_CONFLICT'], ['P2002', 'USAGE_WRITE_CONFLICT'],
   ['P2028', 'USAGE_TRANSACTION_FAILED'], ['PRIVATE_CANARY', 'USAGE_UNAVAILABLE']])(
   'returns only the fixed delivery category for storage error %s', async (code, expected) => {
@@ -86,6 +93,15 @@ it('the complete vocabulary fits bounded chunks, including the longest metric ke
   }
 })
 
+it('takes a phone build context: its release and iOS or Android, nothing finer', async () => {
+  for (const platform of ['ios', 'android']) {
+    const response = await submit({ ...good, context: { surface: 'phone', release: '1.0.3', platform, channel: 'production' } })
+    expect(response.statusCode).toBe(200)
+  }
+  const model = await submit({ ...good, context: { surface: 'phone', release: '1.0.3', platform: 'iPhone15,2', channel: 'production' } })
+  expect(model.statusCode).toBe(400)
+})
+
 it('rejects extra context, custom versions and device fingerprints without echoing them', async () => {
   const context = { surface: 'desktop', release: '1.2.73', platform: 'macos', channel: 'production' }
   for (const c of [{ ...context, path: 'PRIVATE_CANARY' }, { ...context, release: 'PRIVATE_CANARY' },
@@ -104,7 +120,9 @@ it('accepts only explicitly enabled setup counts without credentials or account 
   expect(methods.productUsageChoice).not.toHaveBeenCalled()
   expect(methods.ingestProductUsage).not.toHaveBeenCalled()
   for (const payload of [{ ...setup, consent: false }, { ...setup, account: 'PRIVATE_CANARY' },
-    { ...setup, counters: { turns_started: 1 } }, { ...setup, counters: { setup_desktop_sign_in_started: 1001 } }]) {
+    { ...setup, counters: { turns_started: 1 } }, { ...setup, counters: { setup_desktop_sign_in_started: 1001 } },
+    // hn has no signed-out channel: it counts only through its signed-in daemon.
+    { ...setup, counters: { setup_tui_sign_in_started: 1 } }, { ...setup, counters: { ui_tui_sign_in_started: 1 } }]) {
     const response = await sendSetup(payload)
     expect(response.statusCode).toBe(400)
     expect(response.body).not.toContain('PRIVATE_CANARY')

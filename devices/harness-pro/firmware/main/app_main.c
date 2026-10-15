@@ -20,7 +20,6 @@
 #include "last_words.h"
 #include "power.h"
 #include "pro_display.h"
-#include "pro_turn.h"
 #include "ram_telemetry.h"
 #include "sys/fw_update.h"
 
@@ -47,7 +46,6 @@ void app_main(void)
     // picks its I2C address) is done by hand inside pro_display_init(), before its driver opens.
     if (!board_i2c_get()) ESP_LOGE(TAG, "shared I2C bus did not come up; touch will stay off");
 
-    pro_turn_set(config_load_turn(pro_turn_build_default()));   // before the first frame and the first touch
     pro_display_init();
     pro_voice_init();    // the PSRAM ring and the microphone, while the heap is unfragmented
     audio_beep_init();   // the ES8311 speaker for the notification beep

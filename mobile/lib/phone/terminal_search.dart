@@ -12,6 +12,7 @@ import 'package:harness_mobile/shared/widgets/app_dialog.dart'
 import 'package:harness_mobile/state/app_state.dart';
 
 import '../demo/sample_mode.dart' show SampleMode;
+import 'agent_index.dart' show filterableMachines;
 import 'agents_page.dart' show openNewAgent;
 import 'find_models.dart';
 import 'tty.dart';
@@ -20,6 +21,7 @@ import 'voice_input_controller.dart';
 import 'phone_search_actions.dart';
 import 'phone_search_controller.dart';
 import 'phone_search_results.dart';
+import 'phone_status.dart';
 
 /// Find: the one way to another agent. A full-screen page in from the left edge over Focus —
 /// Snapchat's way to its chats — pulled by a swipe right on the terminal, or a tap on the agent's
@@ -264,19 +266,34 @@ class _TerminalSearchOverlayState extends State<TerminalSearchOverlay>
   /// `+ New Harness` and the button at the foot — in the project the query matched when there is
   /// one (the row only); else on the machine of the harness on screen; else the command's first
   /// ready machine.
+  ///
+  /// ⚠️ **Into the tab the chips are narrowed to, not the tab Find was opened over.** A harness
+  /// made here joins the tab the phone is in ([AppNotifier.activeDeskTabId]), and that is the
+  /// tab of the harness on screen — `AgentHome` re-derives it on every build, so selecting the
+  /// picked tab before the form opens would be undone while the form is up. The picked tab
+  /// travels with the request instead (`NewAgentPage.deskTabId`); on All it is null and the tab
+  /// the phone is in still decides.
   void Function(({String machineId, String folder, String label})? place)?
   _newAgent() {
     final showing = widget.showing;
     final here = showing == null
         ? null
         : widget.notifier.stateOf(showing.machineId);
-    final command = phoneSearchCommands(
-      context,
-      widget.notifier,
-    ).where((command) => command.id == 'agent.new').firstOrNull;
     final ready = here != null && here.nodeOnline != false && !here.needsLink;
-    if (!ready && command == null) return null;
+    // The `New Harness` command's own pick (`phoneSearchCommands`), opened here rather than
+    // through the command so the picked tab goes with it.
+    final first = ready
+        ? null
+        : filterableMachines(widget.notifier)
+              .where(
+                (machine) =>
+                    phoneMachineStatusOf(machine) == PhoneMachineStatus.ready,
+              )
+              .firstOrNull;
+    if (!ready && first == null) return null;
     return (place) {
+      // Read before Find goes away with the chips.
+      final deskTabId = _results.currentState?.deskTabId;
       _close();
       if (place != null) {
         unawaited(
@@ -285,6 +302,7 @@ class _TerminalSearchOverlayState extends State<TerminalSearchOverlay>
             widget.notifier,
             place.machineId,
             folder: place.folder,
+            deskTabId: deskTabId,
             voice: widget.voice,
           ),
         );
@@ -294,11 +312,19 @@ class _TerminalSearchOverlayState extends State<TerminalSearchOverlay>
             context,
             widget.notifier,
             showing!.machineId,
+            deskTabId: deskTabId,
             voice: widget.voice,
           ),
         );
       } else {
-        command!.run();
+        unawaited(
+          openNewAgent(
+            context,
+            widget.notifier,
+            first!.machine.machineId,
+            deskTabId: deskTabId,
+          ),
+        );
       }
     };
   }

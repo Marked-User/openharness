@@ -6,6 +6,7 @@ import '../tty.dart';
 import '../tty_controls.dart';
 import 'onboarding_copy.dart';
 import 'scan_to_connect.dart' show kAddPhoneWhere;
+import 'your_computer.dart' show GoAddressButton;
 
 /// The steps on a computer, as a timeline ([StepsTimeline]): under "On your computer, go to"'s link
 /// (`your_computer.dart`) — [goToSteps] — and under the camera opened from Computers —
@@ -20,18 +21,18 @@ import 'scan_to_connect.dart' show kAddPhoneWhere;
 /// One step: what to do, and a quieter line under it when one is needed — its lines split on `\n`.
 typedef ComputerStep = ({String title, String? note});
 
-/// The first step on the computer, for the camera: getting Harness there from ②'s address,
-/// [OnboardingCopy.goAddress] — the download for whatever computer opens it (owner, 2026-10-14).
-/// No link stands over the camera's steps, so the step names it.
+/// The first step on the computer, for the camera: ②'s headline and, under it, ②'s address — as
+/// words in the step, not ②'s green button ([ComputerSteps] hands it to [StepsTimeline.link]) —
+/// then installing Harness, in the words ② says them in (owner, 2026-10-15). The address is the
+/// download for whatever computer opens it, and a tap sends it there.
 ///
 /// ⚠️ **"On your computer" is said once on a screen** (owner, 2026-10-12: three times on one screen
 /// read as noise) — by the title over ②'s steps ("On your computer, go to"), and under the camera
 /// by this first step: the camera has no title of its own, and a step on its own, on a phone
-/// already in Harness, read as being about this phone. The address is the title and the rest its
-/// note: a title is one line ending in "…" ([StepsTimeline]).
+/// already in Harness, read as being about this phone.
 const ComputerStep _getHarness = (
-  title: 'Go to ${OnboardingCopy.goAddress}',
-  note: 'Download and install on your computer',
+  title: OnboardingCopy.goToHeadline,
+  note: OnboardingCopy.installStep,
 );
 
 /// The steps under "On your computer, go to"'s link: get Harness from it, and sign in — with
@@ -73,7 +74,7 @@ ComputerStep _signIn(String? account) =>
 const _howToGetCode = 'How to get the QR code';
 
 /// The steps on the computer under the camera ([computerSteps]) as a [StepsTimeline], under a
-/// quiet line that says what they are for.
+/// quiet line that says what they are for — with ②'s address, as words, under the first.
 class ComputerSteps extends StatelessWidget {
   const ComputerSteps({super.key, required this.account});
 
@@ -95,7 +96,10 @@ class ComputerSteps extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 12),
-        StepsTimeline(steps: computerSteps(account)),
+        StepsTimeline(
+          steps: computerSteps(account),
+          link: const GoAddressButton(inline: true),
+        ),
       ],
     );
   }
@@ -115,9 +119,14 @@ class ComputerSteps extends StatelessWidget {
 /// [heightOf] is exact: "On your computer, go to" holds that much room under its link, and the
 /// picture under the steps stays put.
 class StepsTimeline extends StatelessWidget {
-  const StepsTimeline({super.key, required this.steps, this.under});
+  const StepsTimeline({super.key, required this.steps, this.under, this.link});
 
   final List<ComputerStep> steps;
+
+  /// Under the first step's title, over its note, with no room of its own round it — it brings
+  /// its own: under the camera, ②'s address as words ([ComputerSteps]). Not counted by [heightOf] —
+  /// only ②'s own steps, which have none, are measured.
+  final Widget? link;
 
   /// Under the last step's note, as one more line of it: at home, "Not you? Sign out" under the
   /// account the sign-in names (`your_computer.dart`'s NotYouSignOut). Set in [noteStyle], and
@@ -167,6 +176,7 @@ class StepsTimeline extends StatelessWidget {
           number: i + 1,
           title: step.title,
           note: step.note,
+          link: i == 0 ? link : null,
           under: i == steps.length - 1 ? under : null,
           last: i == steps.length - 1,
         ),
@@ -175,12 +185,14 @@ class StepsTimeline extends StatelessWidget {
 }
 
 /// One step: its number in a ring, a thread down to the next one's, what to do, and under it a
-/// quieter line when one is needed — and [under] it, the last step's [StepsTimeline.under].
+/// quieter line when one is needed — between them the first step's [StepsTimeline.link], and
+/// [under] the note, the last step's [StepsTimeline.under].
 class _HowItWorksRow extends StatelessWidget {
   const _HowItWorksRow({
     required this.number,
     required this.title,
     this.note,
+    this.link,
     this.under,
     this.last = false,
   });
@@ -188,6 +200,7 @@ class _HowItWorksRow extends StatelessWidget {
   final int number;
   final String title;
   final String? note;
+  final Widget? link;
   final Widget? under;
   final bool last;
 
@@ -271,6 +284,7 @@ class _HowItWorksRow extends StatelessWidget {
                       ),
                     ),
                   ),
+                  ?link,
                   // A line each, ending in "…" rather than wrapping: a long account wrapping onto
                   // another would stand the steps taller than [StepsTimeline.heightOf] says.
                   if (note case final note?)

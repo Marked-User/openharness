@@ -317,7 +317,7 @@
       <tr><td>5 · Notifications</td><td><code>notify_permission</code></td><td>The system prompt shows</td><td>Allow</td><td>—</td><td>Don't Allow (<code>unknown</code> when the OS gives no answer)</td></tr>
     </table></div>
     <div class="note">Each flow runs at most once per sign-in and app launch. These are counts of attempts, not of people: the daily totals have no identity to deduplicate them.
-      Signing out clears the phone's unsent counts, so a step ended by signing out mostly shows as a start with no outcome rather than as <code>cancelled</code>.</div>
+      A chosen sign-out first sends what the phone has queued (up to 2 s), so a step ended by "Not you? Sign out" arrives as <code>cancelled</code> with its <code>not_you</code> mark.</div>
   </div></div>
 
   <h2>1. Welcome and sign-in</h2>
@@ -330,10 +330,12 @@
         <tr><td>sign_in_email_*</td><td>"Continue with email", then the 4-digit code (<code>signInWithCode</code>). Sending the code is not counted</td></tr>
         <tr><td>sign_in_scan_*</td><td>"QR code", then a computer's Add Phone code read by the camera (<code>signInWithScan</code>)</td></tr>
         <tr><td>sign_in_*</td><td>The total of all four, as before</td></tr>
+        <tr><td>sign_in_retried</td><td>A sign-in that went through after a failed or cancelled try in the same app run</td></tr>
+        <tr><td>sign_in_switched</td><td>A sign-in that went through on another button than the first one tried</td></tr>
       </table></div>
       <p>Google and Apple were not counted at all before this change, so <code>sign_in</code> totals rise when it ships. A scan that fails and falls back to the emailed code counts as a failed scan; the code typed after it is its own email attempt.</p>
-      <div class="note">These exist only for phones that ticked <b>Share setup and sign-in counts</b>, the one quiet line with ⓘ at the foot of every signed-out screen (not in these renders).
-        It starts off on every launch, so expect small numbers. This is deliberate: before an account exists there is no other consent.</div></figcaption></figure>
+      <div class="note">Every outcome, failures and cancels included, exists only for phones that ticked <b>Share setup and sign-in counts</b> (<code>setup_phone_*</code>), the one quiet line with ⓘ at the foot of every signed-out screen; it starts off on every launch.
+        A sign-in that <b>went through</b> is counted again under the account's own sharing (<code>ui_phone_sign_in_*_ok</code>, the large population), with <code>retried</code> and <code>switched</code> saying how hard it was. People who never get in stay invisible: take installs and first opens from App Store Connect and Play Console as the denominator.</div></figcaption></figure>
   <figure class="phone-pair"><div class="shots"><img src="img/03-code.jpg" alt="Check your email: the 4-digit code"></div>
     <figcaption><div class="row"><span class="num">1b</span><span class="ttl2">What a failure carries</span></div>
       <p>Only <code>failed</code>. The red reason under the picture ("Could not open the sign-in page…"), the email typed and the code never leave the phone. The old AA <code>reason</code> code is not sent either.</p></figcaption></figure>
@@ -345,8 +347,9 @@
         <tr><th>Counter</th><th>When</th></tr>
         <tr><td>computer_wait_started</td><td>The page shows, after a sign-in in this run or on a fresh phone, for an account with no computers</td></tr>
         <tr><td>computer_wait_ok</td><td>The first computer appears on the account (the 5 s poll)</td></tr>
-        <tr><td>computer_wait_cancelled</td><td>Signed out from here (rarely arrives: signing out drops the unsent counts)</td></tr>
-        <tr><td>computer_wait_&lt;bucket&gt;</td><td>How long it took to install Harness and sign in on the computer: the step most likely to need <code>over_1m</code></td></tr>
+        <tr><td>computer_wait_cancelled</td><td>Signed out from here; <code>computer_wait_not_you</code> when it was "Not you? Sign out"</td></tr>
+        <tr><td>computer_wait_link_shared</td><td>The address sent to the computer from the share sheet</td></tr>
+        <tr><td>computer_wait_&lt;bucket&gt;</td><td>How long it took to install Harness and sign in on the computer. Past a minute it also splits into <code>1m_to_5m</code>, <code>5m_to_15m</code>, <code>15m_to_1h</code>, <code>over_1h</code></td></tr>
       </table></div>
       <p>Accounts that already had a computer skip this step, so it has no <code>started</code> for them.</p></figcaption></figure>
 
@@ -358,9 +361,10 @@
         <tr><td>session_open_started</td><td>The join moment starts (a new computer, or the first ready one on the account)</td></tr>
         <tr><td>session_open_ok</td><td>The hand-over: the computer's session opens, or one picked meanwhile in Find or from a notice</td></tr>
         <tr><td>session_open_failed</td><td>"Waiting for its first session" passes 90 s</td></tr>
-        <tr><td>session_open_cancelled</td><td>Signed out meanwhile (rarely arrives: signing out drops the unsent counts)</td></tr>
+        <tr><td>session_open_cancelled</td><td>Signed out meanwhile</td></tr>
+        <tr><td>session_open_blocked_password · blocked_offline</td><td>The joining computer wanted its password, or was offline by the account's word too</td></tr>
       </table></div>
-      <p>A computer that wants a password or is offline leaves the step running: its time then includes unlocking it.</p></figcaption></figure>
+      <p>A computer that wants a password or is offline leaves the step running, marked once: its time then includes unlocking it.</p></figcaption></figure>
 
   <h2>4. The session</h2>
   <figure class="phone-pair"><div class="shots"><div class="ph"><div class="sb"><span>9:41</span><span class="bat"></span></div><div class="island"></div>
@@ -405,7 +409,7 @@
         <tr><td>notify_permission_unknown</td><td>The OS gave no answer, or the request failed</td></tr>
       </table></div>
       <p>To read the answer, <code>SystemNotices.requestPermission()</code> now returns the plugin's <code>bool?</code> instead of nothing. Settings ▸ Notifications and Focus's tips call it as before.</p>
-      <div class="note">Android 12 and older show no prompt, so there the step can end <code>ok</code> with nothing on screen. Counts do not say iOS or Android apart.</div></figcaption></figure>
+      <div class="note">Android 12 and older show no prompt, so there the step can end <code>ok</code> with nothing on screen. Every count splits by iOS and Android (see Reading the numbers).</div></figcaption></figure>
 
   <h2>Already counted, unchanged</h2>
   <p class="sub">The phone flows from #1301/#1303 that the onboarding passes through.</p>
@@ -423,7 +427,9 @@
       the four outcomes, <code>unmatchedStarts</code> and the duration buckets. The new flows appear there with no change, because the review reads the same vocabulary. Days are UTC; today is partial.</p>
     <ul class="plain">
       <li>Conversion between steps compares totals, not people: <code>session_open_started</code> ÷ <code>computer_wait_ok</code> is close to "joined, then went on", but nothing links the two counts.</li>
-      <li>Sign-in rates describe only phones that ticked the box: a self-selected group, not all new users.</li>
+      <li>Sign-in failure rates describe only phones that ticked the box: a self-selected group. Successes, <code>retried</code> and <code>switched</code> cover every sharing account.</li>
+      <li><code>resumed</code> marks a step started in an app run that did not sign in (the app reopened mid-step). Subtract it from starts for fresh starts.</li>
+      <li>Every phone report carries its release and iOS/Android, so <code>usage:daily</code>'s <code>health.breakdowns</code> splits each <code>ui_phone_*</code> count by release and by platform: compare the release before and after a UI change. A margin appears above 20 collector days. Debug builds report as <code>development</code> and are not kept, but TestFlight builds are release builds and do count.</li>
       <li>The web build of the same app counts under <code>ui_web_*</code>. Signed out, web sends nothing.</li>
     </ul>
   </div></div>

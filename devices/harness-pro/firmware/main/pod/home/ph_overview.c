@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "pod/home/ph.h"
+#include "pod/pod_draw.h"
 #include "pod/pod_pet.h"
 #include "pod/pod_view_shared.h"
 #include "pro_canvas.h"
@@ -237,35 +238,69 @@ void ph_engine_logo(ht_scene_t *s, int x, int y, int size, const char *engine, u
     ph_text(s, x + (size - w) / 2, y + size / 2, w + 2, &ph_mono_22, PH_INK2, ">_");
 }
 
-// The Notices card: the same card as a tab's, in the notice orange. A neighbour (full false) shows its gradient and name only.
+// The Notices card (the owner's mockup harness-pro-notices-card.html, option A "a letter"): the only light card on Home, so it never reads as one more tab.
+// Paper #F4EEE3 with two sheets stacked behind it (offset 12 and 24 px down-right), an orange envelope and "Notices" on top, the count in a round orange
+// badge at the right, then up to three rows (a 44 px engine logo; the agent's name in brown over the notice's text, one line each, cut with an ellipsis)
+// ruled apart, and "+N more · tap to read" (or "Tap to read") at the foot. A neighbour (full false) is the paper faded toward the ground and its name.
+enum { LT_STACK = 12, LT_HEAD_CY = 78, LT_ENV_W = 46, LT_ENV_H = 34, LT_BADGE = 76, LT_LIST_Y = 140, LT_ROW = 112, LT_FOOT_CY = 520 };
+static void envelope(ht_scene_t *s, int x, int y, unsigned ink, unsigned paper)
+{
+    ht_pro_rect_aa(s, x, y, LT_ENV_W, LT_ENV_H, 6, C(ink));
+    ht_pro_rect_aa(s, x + 4, y + 4, LT_ENV_W - 8, LT_ENV_H - 8, 3, C(paper));
+    const int l = (x + 6) * 16, r = (x + LT_ENV_W - 6) * 16, t = (y + 6) * 16, m = (x + LT_ENV_W / 2) * 16, v = (y + LT_ENV_H / 2 + 1) * 16, th = 5 * 16;
+    pod_tri_inner(s, l, t, m, v, m, v + th, C(ink), 0);         // the flap's left stroke
+    pod_tri_inner(s, l, t, l, t + th, m, v + th, C(ink), 0);
+    pod_tri_inner(s, r, t, m, v + th, m, v, C(ink), 0);         // and its right one
+    pod_tri_inner(s, r, t, r, t + th, m, v + th, C(ink), 0);
+}
 static void notices_card(pod_out_frame_t *f, const pod_model_t *m, int x, int y, int w, int h, int r, int fade, bool full)
 {
     ht_scene_t *s = f->scene;
-    unsigned c1 = PH_NOTICE1, c2 = PH_NOTICE2;
-    if (fade) { c1 = ph_mix(c1, PH_HOME_BG, (unsigned)fade); c2 = ph_mix(c2, PH_HOME_BG, (unsigned)fade); }
-    pod_grad_aa_dither(s, x, y, w, h, r, C(c1), C(c2));
-    char name[CABLE_NAME_MAX + 4];
-    const ht_pro_font_t *nf = shown_name(name, sizeof name, "Notices", full ? NAME_W : NAME_W * PEEK_PCT / 100, !full);
-    const int nx = x + (full ? NAME_X : NAME_X * PEEK_PCT / 100), nw = ht_pro_width(nf, name);
+    unsigned paper = PH_LETTER;
     if (!full) {
-        if (nx < POD_W && nx + nw > 0) ht_pro_text(s, nx, y + 40 * PEEK_PCT / 100, nw + 2, nf, C(ph_mix(PH_CARD_INK, c1, 80)), name);
+        paper = ph_mix(paper, PH_HOME_BG, (unsigned)fade);
+        ht_pro_rect_aa(s, x, y, w, h, r, C(paper));
+        char name[CABLE_NAME_MAX + 4];
+        const ht_pro_font_t *nf = shown_name(name, sizeof name, "Notices", NAME_W * PEEK_PCT / 100, true);
+        const int nx = x + NAME_X * PEEK_PCT / 100, nw = ht_pro_width(nf, name);
+        if (nx < POD_W && nx + nw > 0) ht_pro_text(s, nx, y + 40 * PEEK_PCT / 100, nw + 2, nf, C(ph_mix(PH_LETTER_INK, paper, 70)), name);
         return;
     }
-    ph_text(s, nx, y + NAME_Y + nf->height / 2, NAME_W, nf, PH_CARD_INK, name);
+    // The sheets behind: only a d px sliver along the right and the bottom shows, so each is drawn as its three outer corners (2r squares, rounded; their
+    // insides fall under the paper) and two straight slivers between them. Rounding is anti-aliased per pixel, so a full sheet would cost a card's worth.
+    for (int k = 2; k >= 1; k--) {
+        const int d = k * LT_STACK, sx = x + d, sy = y + d, c = 2 * r;
+        const uint16_t ink = C(k == 2 ? PH_LETTER_BACK : PH_LETTER_MID);
+        ht_pro_rect_aa(s, sx + w - c, sy, c, c, r, ink);            // top right
+        ht_pro_rect_aa(s, sx + w - c, sy + h - c, c, c, r, ink);    // bottom right
+        ht_pro_rect_aa(s, sx, sy + h - c, c, c, r, ink);            // bottom left
+        ht_pro_rect(s, x + w, sy + r, d, h - c, 0, ink);            // the right sliver
+        ht_pro_rect(s, sx + r, y + h, w - c, d, 0, ink);            // the bottom sliver
+    }
+    ht_pro_rect_aa(s, x, y, w, h, r, C(paper));
+    envelope(s, x + NAME_X, y + LT_HEAD_CY - LT_ENV_H / 2, PH_LETTER_MARK, paper);
+    ph_text(s, x + NAME_X + LT_ENV_W + 16, y + LT_HEAD_CY, 260, &ph_sb_48, PH_LETTER_INK, "Notices");
     const int count = pod_notice_count(m);
     char num[8];
     snprintf(num, sizeof num, "%d", count > 99 ? 99 : count);
-    const int nw2 = ht_pro_width(&ph_num_230, num);
-    ht_pro_text(s, x + NUM_X, y + NUM_TOP, nw2 + 2, &ph_num_230, C(PH_CARD_INK), num);
-    on_baseline(s, x + NUM_X + nw2 + LABEL_GAP, y + NUM_BASE, &ph_sb_26, ph_mix(0xFFFFFF, ph_mix(c1, c2, 100 - NUM_BASE * 100 / h), 85), "new");
+    const int cw = ht_pro_width(&ph_sb_48, num), bw = cw + 36 > LT_BADGE ? cw + 36 : LT_BADGE, bx = x + w - NAME_X - bw;
+    ht_pro_rect_aa(s, bx, y + LT_HEAD_CY - LT_BADGE / 2, bw, LT_BADGE, LT_BADGE / 2, C(PH_LETTER_BADGE));
+    ph_text(s, bx + (bw - cw) / 2, y + LT_HEAD_CY + 2, cw + 2, &ph_sb_48, 0xFFFFFF, num);
     ph_notice_line_t line[NOTE_ROWS];
     const int n = ph_notices_top(m, NOTE_ROWS, line);
+    const int tx = x + NAME_X + NOTE_LOGO + NOTE_GAP, tw = x + w - NAME_X - tx;
     for (int k = 0; k < n; k++) {
-        const int ry = y + NOTE_Y + k * NOTE_PITCH, tx = x + NAME_X + NOTE_LOGO + NOTE_GAP;
-        const unsigned ground = ph_mix(c1, c2, 100 - (NOTE_Y + k * NOTE_PITCH + NOTE_LOGO / 2) * 100 / h);   // the gradient where the row sits
-        ph_engine_logo(s, x + NAME_X, ry, NOTE_LOGO, line[k].engine, ground);
-        ph_text(s, tx, ry + NOTE_LOGO / 2, x + w - NAME_X - tx, &ph_rg_24, ph_mix(0xFFFFFF, ground, 92), line[k].text);
+        const int ry = y + LT_LIST_Y + k * LT_ROW;
+        if (k) ht_pro_rect(s, x + NAME_X, ry, w - 2 * NAME_X, 2, 0, C(PH_LETTER_RULE));
+        ph_engine_logo(s, x + NAME_X, ry + LT_ROW / 2 - NOTE_LOGO / 2, NOTE_LOGO, line[k].engine, paper);
+        const bool who = line[k].name && line[k].name[0];
+        if (who) ph_text(s, tx, ry + 38, tw, &ph_sb_22, PH_LETTER_WHO, line[k].name);
+        ph_text(s, tx, ry + (who ? 74 : LT_ROW / 2), tw, &ph_rg_24, PH_LETTER_INK, line[k].text);
     }
+    char foot[40];
+    if (count > n) snprintf(foot, sizeof foot, "+%d more \xc2\xb7 tap to read", count - n);
+    else snprintf(foot, sizeof foot, "Tap to read");
+    ph_text(s, x + NAME_X, y + LT_FOOT_CY, w - 2 * NAME_X, &ph_sb_22, PH_LETTER_MORE, foot);
 }
 
 // The card's content or, for a neighbour, only its gradient and name.

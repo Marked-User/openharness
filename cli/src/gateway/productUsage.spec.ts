@@ -97,6 +97,77 @@ it('discards a permanently invalid packet so later reports and loss counts can r
   expect(totals().health_cli_report_failure_invalid).toBe(1)
 })
 
+it('sends hn\'s counters alone, so a backend from before `tui` refuses only them', async () => {
+  const tui = (metric: string) => metric.startsWith('ui_tui_') || metric.startsWith('health_tui_')
+  await usage.sync()
+  usage.counter('ui_tui_sign_in_started'); usage.counter('search_requests'); usage.counter('health_tui_funnel_first_work')
+  usage.counter('ui_desktop_sign_in_ok'); usage.counter('ui_tui_sign_in_ok'); usage.counter('tui_opens')
+  // That backend's strict vocabulary: one unknown name makes the whole report invalid.
+  const accepted: Record<string, number>[] = []
+  request.mockImplementation(async (method: string, _path: string, body?: unknown) => {
+    if (method === 'GET') return { status: 200, body: { data: { enabled: true, revision: 0 } } }
+    const counters = (body as { counters: Record<string, number> }).counters
+    sent.push(structuredClone(body))
+    if (Object.keys(counters).some(tui)) return { status: 400, body: { error: { code: 'INVALID_USAGE_REPORT' } } }
+    accepted.push(counters)
+    return { status: 200, body: { data: { accepted: true } } }
+  })
+  for (let i = 0; i < 4; i++) await usage.sync()
+  for (const report of sent as { counters: Record<string, number> }[]) {
+    const names = Object.keys(report.counters)
+    expect(names.every(tui) || !names.some(tui), names.join()).toBe(true)
+  }
+  const kept = Object.assign({}, ...accepted)
+  expect(kept).toMatchObject({ search_requests: 1, ui_desktop_sign_in_ok: 1, tui_opens: 1 })
+  expect(Object.keys(kept).some(tui)).toBe(false)
+  // Its refusal is hn's alone: no delivery failure is counted for it.
+  expect(kept.health_cli_report_rejected).toBeUndefined()
+  expect(kept.health_cli_report_failure_invalid).toBeUndefined()
+  expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ pending: null, days: {} })
+  // Refused for the rest of the UTC day: hn's counts are dropped, not sent again or kept to age.
+  const refusals = () => (sent as { counters: Record<string, number> }[]).filter(r => Object.keys(r.counters).some(tui)).length
+  expect(refusals()).toBe(1)
+  usage.counter('ui_tui_viewer_open_started'); usage.counter('search_requests')
+  for (let i = 0; i < 3; i++) await usage.sync()
+  expect(refusals()).toBe(1)
+  expect(JSON.stringify(JSON.parse(readFileSync(file, 'utf8')).days)).not.toContain('_tui_')
+  // The next UTC day (an updated backend, say) takes them again.
+  now += 86_400_000
+  request.mockImplementation(async (method: string, _path: string, body?: unknown) => {
+    if (method === 'GET') return { status: 200, body: { data: { enabled: true, revision: 0 } } }
+    sent.push(structuredClone(body))
+    return { status: 200, body: { data: { accepted: true } } }
+  })
+  usage.counter('ui_tui_viewer_open_started')
+  for (let i = 0; i < 3; i++) await usage.sync()
+  expect(totals().ui_tui_viewer_open_started).toBe(1)
+})
+
+it('holds hn\'s observations until the first choice read: counted when sharing is on, discarded when off', async () => {
+  usage.counter('ui_tui_remote_connect_started'); usage.counter('health_tui_funnel_first_work'); usage.counter('search_requests')
+  await usage.sync(); await usage.sync()
+  expect(totals()).toMatchObject({ ui_tui_remote_connect_started: 1, health_tui_funnel_first_work: 1 })
+  expect(totals().search_requests).toBeUndefined()
+
+  await usage.stop(); sent = []; enabled = false
+  rmSync(file, { force: true })
+  usage = createProductUsage({ file, now: () => now, request })
+  for (let i = 0; i < 70; i++) usage.counter('ui_tui_remote_connect_started')
+  await usage.sync()
+  enabled = true
+  await usage.sync(); await usage.sync()
+  expect(totals().ui_tui_remote_connect_started).toBeUndefined()
+})
+
+it('keeps holding hn\'s observations through a failed choice read, bounded, and counts them once sharing is known on', async () => {
+  request.mockResolvedValueOnce({ status: 503, body: {} })
+  for (let i = 0; i < 70; i++) usage.counter('ui_tui_remote_connect_started')
+  await usage.sync()
+  expect(sent).toEqual([])
+  await usage.sync(); await usage.sync(); await usage.sync()
+  expect(totals().ui_tui_remote_connect_started).toBe(64)
+})
+
 it.each([
   [503, 'USAGE_WRITE_CONFLICT', 'write_conflict'], [503, 'USAGE_TRANSACTION_FAILED', 'transaction'],
   [504, 'BACKEND_TIMEOUT', 'timeout'], [502, 'BACKEND_UNREACHABLE', 'unreachable'],

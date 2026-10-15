@@ -777,6 +777,43 @@ model HarnessShare {
   @@map("harness_shares")
 }
 
+/// A whole machine its owner shares with other accounts (docs/plans/2026-10-15-share-machine-plan.md):
+/// with these addresses, and with everyone at `domain` when the owner turned that on. Off by default, so
+/// a machine with no row is shared with no one. The backend's copy decides who is LISTED the machine and
+/// who may select it on the relay; the machine's own daemon keeps the policy it published and trusts
+/// only the keys of accounts that policy names (cli services/sharedMachines.ts), as Share's owner does.
+model MachineShare {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  machineId     String   @unique
+  ownerId       String
+  autonomousEnv String
+  /// Normalized (trimmed, lower case), never the owner's own.
+  emails        String[]
+  /// The owner's email domain while "Everyone at @domain" is on; null when off. Written by the backend
+  /// from the owner's verified address, never taken from the client, and never a public domain.
+  domain        String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([emails, autonomousEnv])
+  @@index([domain, autonomousEnv])
+  @@index([ownerId])
+  @@map("machine_shares")
+}
+
+/// Someone at a machine's domain added it to their machines (a domain share takes one click to add; an
+/// address the owner named needs none). Only the accounts that added it are trusted by the machine.
+model MachineShareAdd {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  machineId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  @@unique([machineId, userId])
+  @@index([userId])
+  @@map("machine_share_adds")
+}
+
 /// The account's DESK: its tabs, in order, and the agents each holds — one document per user, the
 /// same on every computer the person signs in on (owner, 2026-09-21: "tab là global"). Holds only
 /// what the person would call "my tabs": ids, names, order, `(machineId, agentId)` pairs. Nothing

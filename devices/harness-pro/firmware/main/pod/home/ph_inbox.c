@@ -14,9 +14,10 @@
 
 #define C(rgb) ht_rgb(rgb)
 #define ELL "\xe2\x80\xa6"
-enum { BG = 0x0E1B2C, TOP = 120, PITCH = 170, SHOWN = 3, ROW_H = 150, AV_X = 60, AV_Y = 8, AV = 110, AV_ART = 92, BUB_X = 190, BUB_W = 470, PAD_X = 26, PAD_TOP = 20,
+enum { BG = PH_ROOM_BG, TOP = 120, PITCH = 170, SHOWN = 3, ROW_H = 150, AV_X = 60, AV_Y = 8, AV = 110, AV_ART = 92, BUB_X = 190, BUB_W = 470, PAD_X = 26, PAD_TOP = 20,
        PAD_BOT = 22, NAME_H = 30, MSG_PITCH = 39, MAX_ITEMS = 40, TAIL_X = 181, TAIL_Y = 52 };
-enum { BUB_FILL = 0xCFE6FB, INK = 0x26313D, META = 0x4C6A8A, AV_FILL = 0x16273B, HEAD_INK = 0xF2F7FC, HEAD_MUTED = 0x7F93AA };
+// The room's warm ground and the Notices letter's paper (owner, UI review option B): the letter card, this list and the recap are one family.
+enum { BUB_FILL = PH_LETTER, INK = PH_LETTER_INK, META = PH_LETTER_WHO, AV_FILL = PH_RAISED, HEAD_INK = PH_ROOM_INK, HEAD_MUTED = PH_ROOM_MUTED };
 static const ht_pro_font_t *const MSG = &ph_sb_32, *const META_F = &ph_sb_22;
 
 typedef struct { const pod_agent_t *a; const pod_unread_t *u; int unread_index; } item_t;
@@ -63,6 +64,7 @@ int ph_notices_top(const pod_model_t *m, int max, ph_notice_line_t *out)
     int k = 0;
     for (; k < n && k < max; k++) {
         out[k].engine = it[k].a ? it[k].a->engine : NULL;
+        out[k].name = it[k].a ? it[k].a->name : it[k].u ? it[k].u->name : "";
         item_line(&it[k], out[k].text, sizeof out[k].text);
     }
     return k;

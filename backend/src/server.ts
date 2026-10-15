@@ -10,6 +10,7 @@ import { registerAuthMiddleware } from './middlewares/authMiddleware.js'
 import { cursorRoutes } from './routes/cursor.js'
 import { voiceRoutes } from './routes/voice.js'
 import { harnessShareRoutes } from './routes/harnessShares.js'
+import { machineShareRoutes } from './routes/machineShares.js'
 import { harnessLinkRoutes } from './routes/harnessLinks.js'
 import { communityRoutes } from './routes/community.js'
 import { communityTranslateRoutes } from './routes/communityTranslate.js'
@@ -178,6 +179,7 @@ async function start(): Promise<void> {
   await app.register(deviceAuthRoutes) // device-authorization grant: how the desktop app gets a machine key
   await app.register(storeRoutes)      // the Harness Store's ratings and reviews; the catalogue is the CLI's registry
   await app.register(harnessShareRoutes)
+  await app.register(machineShareRoutes)
   await app.register(harnessLinkRoutes)
   await app.register(communityRoutes)
   await app.register(communityEditRoutes)      // an author edits their publication in place

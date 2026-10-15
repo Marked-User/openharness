@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 
 import 'product_health_contract.dart';
+import 'product_report_failure.dart';
 export 'product_health_contract.dart';
 
 enum ProductFlow {
@@ -482,8 +483,25 @@ class ProductMeasurement extends ChangeNotifier {
           _clear('ui');
           _clear('setup');
         }
-      } catch (_) {
-        if (channel == 'ui') health(ProductHealthMeasure.reportFailed);
+      } catch (error) {
+        // A late failure belongs to the old choice/account, just like a late success.
+        if (_disposed ||
+            (channel == 'setup'
+                ? epoch != _guestEpoch
+                : epoch != _accountEpoch))
+          continue;
+        if (channel == 'ui') {
+          health(ProductHealthMeasure.reportFailed);
+          health(
+            error is ProductReportFailure
+                ? error.measure
+                : ProductHealthMeasure.reportFailureOther,
+          );
+        }
+        // A malformed/oversized immutable packet will never succeed. Drop only that
+        // packet so new counts can proceed; transient failures keep the same receipt.
+        if (error is ProductReportFailure && error.permanent)
+          _pending.remove(channel);
         /* Same receipt on the next timer. No logs, aggressive retry, or product failure. */
       }
     }

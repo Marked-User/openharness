@@ -21,7 +21,6 @@
 #include "pro_app_api.h"
 #include "pro_display.h"
 #include "pro_frame.h"
-#include "pro_turn.h"
 #include "sys/config_store.h"
 #include "sys/fw_update.h"
 #include "sys/ram_telemetry.h"
@@ -81,9 +80,6 @@ static scroll_ev_t s_sq[SCROLL_MAX];
 static int s_sqn;
 
 static atomic_bool s_asleep, s_force_frame;
-// A finger held across a turn: its next samples arrive on the new axes, at the mirrored spot. The rest of that
-// contact is swallowed (pro_app_touch answers false once, and pro_touch keeps swallowing until the finger lifts).
-static atomic_bool s_turn_swallow;
 static atomic_bool s_updating, s_painted;   // a firmware image is being written (mirrors pod_ui_updating, readable without the lock); the first frame is out
 static char s_ota_from[24], s_ota_to[24];   // the update screen's versions, set at its begin
 static char s_updated[24];                  // "Updated to X": set by pro_app_note_update, shown (3 s) once the cable is up
@@ -686,11 +682,6 @@ static void cancel_locked(void)
 bool pro_app_touch(bool down, int x, int y)
 {
     pro_app_lock();
-    if (atomic_exchange(&s_turn_swallow, false)) {   // the finger that was down when the glass turned
-        leave();
-        flush_scroll();
-        return false;
-    }
     if (pro_app_asleep()) {
         // The screen went to sleep halfway through this contact (a power key, say). Nothing is delivered; the
         // caller swallows the rest of the contact.
@@ -879,7 +870,6 @@ static void render_task(void *arg)
     for (;;) {
         ESP_ERROR_CHECK(esp_task_wdt_reset());
         pro_app_tick();
-        pro_app_apply_turn();
         const bool fresh = pro_app_take_scene(&s_scene[front ^ 1]);
         uint32_t wake_ms = pro_app_next_wake_ms();
         const int64_t wake_at = esp_timer_get_time() + (int64_t)wake_ms * 1000;
@@ -925,29 +915,6 @@ static void render_task(void *arg)
 }
 
 void pro_app_set_brightness(uint8_t level) { pro_display_set_brightness(level); }
-
-// The cable task asks; the render task switches at the top of its next frame, so no frame is half one way.
-static atomic_int s_turn_req = -1;   // -1: nothing asked, else the wanted flag
-
-void pro_app_request_turn(bool turned)
-{
-    atomic_store(&s_turn_req, turned ? 1 : 0);
-    if (s_renderer) xTaskNotifyGive(s_renderer);
-}
-
-bool pro_app_apply_turn(void)
-{
-    const int want = atomic_exchange(&s_turn_req, -1);
-    if (want < 0 || (want != 0) == pro_turn_get()) return false;
-    pro_app_lock();
-    const bool held = s_pod.down;         // a contact began on the old axes
-    pro_app_unlock();
-    pro_turn_set(want != 0);
-    atomic_store(&s_force_frame, true);   // every pixel moved: the next awake frame paints the whole glass (as a wake does)
-    if (held) atomic_store(&s_turn_swallow, true);
-    pro_app_touch_cancel();
-    return true;
-}
 
 void pro_app_start(void)
 {
@@ -1084,7 +1051,6 @@ void pro_app_test_reset(void)
     s_lib_pending = false;
     atomic_store(&s_asleep, false);
     atomic_store(&s_force_frame, false);
-    atomic_store(&s_turn_req, -1);
     atomic_store(&s_updating, false);
     s_updated[0] = 0;
 }

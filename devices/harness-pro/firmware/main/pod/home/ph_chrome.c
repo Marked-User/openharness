@@ -1,4 +1,4 @@
-// Pets chrome: the Update screen's breadcrumb bar, the page dots, Home's equaliser and the room's frame. Sizes and colours are the mockup's.
+// Pets chrome: the page dots, Home's equaliser and the room's frame. Sizes and colours are the mockup's.
 #include <stdio.h>
 #include <string.h>
 
@@ -14,38 +14,6 @@ static void text(ht_scene_t *s, int x, int cy, int w, const ht_pro_font_t *f, un
 }
 
 void ph_text(ht_scene_t *s, int x, int cy, int w, const ht_pro_font_t *f, unsigned rgb, const char *t) { text(s, x, cy, w, f, rgb, t); }
-
-void ph_bar(pod_out_frame_t *f, const char *const crumbs[], int n)
-{
-    ht_scene_t *s = f->scene;
-    ht_pro_rect(s, 0, 0, POD_W, PH_BAR_H, 0, C(PH_GROUND));
-    ht_pro_rect(s, 0, PH_BAR_H - 1, POD_W, 1, 0, C(PH_BORDER));
-    const int cy = 36;
-    int lw = ht_pro_width(&ph_sb_22, "\xe2\x97\x86");   // ◆
-    text(s, 24, cy, lw + 2, &ph_sb_22, PH_MUTED, "\xe2\x97\x86");
-
-    const int limit = POD_W - 24;   // the middle may reach here
-    int x = 24 + lw + 16;
-    for (int i = 0; i < n; i++) {
-        bool cur = i == n - 1;
-        const ht_pro_font_t *font = cur ? &ph_sb_26 : &ph_rg_24;
-        int w = ht_pro_width(font, crumbs[i]);
-        if (x + w > limit) w = limit - x;
-        if (w <= 0) break;
-        if (!cur) {
-            ht_pro_rect_aa(s, x - 10, cy - 18, w + 20, 36, 8, C(PH_RAISED));
-            pod_hit_add(f, x - 10, 0, w + 20, PH_BAR_H, POD_A_BACK, n - 1 - i);
-        }
-        text(s, x, cy, w, font, cur ? PH_INK : PH_MUTED, crumbs[i]);
-        x += w;
-        if (!cur) {
-            x += 14;
-            int sw = ht_pro_width(&ph_rg_24, "/");
-            text(s, x, cy, sw + 2, &ph_rg_24, PH_TRACK, "/");
-            x += sw + 14;
-        }
-    }
-}
 
 // Home's equaliser: four 8 px bars 5 px apart in a 36 px box, each a triangle wave between 40 % and 100 % of its height, 900 ms.
 void ph_working_mark_big(ht_scene_t *s, int x, int y, uint32_t now_ms)

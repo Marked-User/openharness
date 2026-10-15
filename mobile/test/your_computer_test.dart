@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_mobile/auth/auth_session.dart';
 import 'package:harness_mobile/core/models.dart';
+import 'package:harness_mobile/phone/tty.dart';
 import 'package:harness_mobile/phone/welcome/onboarding_copy.dart';
 import 'package:harness_mobile/phone/welcome/onboarding_picture.dart';
 import 'package:harness_mobile/phone/welcome/your_computer.dart';
@@ -101,6 +102,23 @@ void main() {
   OnboardingScene scene(WidgetTester tester) =>
       tester.widget<OnboardingPicture>(find.byType(OnboardingPicture)).scene;
 
+  final address = find.byKey(const ValueKey('go-address'));
+
+  /// Whether the address stands on a fill — the green button — rather than as words.
+  bool filled(WidgetTester tester) => tester
+      .widgetList<Container>(
+        find.descendant(of: address, matching: find.byType(Container)),
+      )
+      .any(
+        (box) =>
+            box.decoration is BoxDecoration &&
+            (box.decoration! as BoxDecoration).color != null,
+      );
+
+  Text words(WidgetTester tester) => tester.widget<Text>(
+    find.descendant(of: address, matching: find.text(OnboardingCopy.goAddress)),
+  );
+
   testWidgets('On your computer, go to: the address, and the phone looking', (
     tester,
   ) async {
@@ -124,6 +142,55 @@ void main() {
     expect(OnboardingCopy.goUrl, 'https://autonomous.ai/go');
     await unmount(tester);
   });
+
+  testWidgets('② keeps the green button: the address on a fill', (
+    tester,
+  ) async {
+    await pump(tester);
+    expect(
+      tester.widget<GoAddressButton>(find.byType(GoAddressButton)).inline,
+      isFalse,
+    );
+    expect(filled(tester), isTrue);
+    expect(words(tester).style!.decoration, isNot(TextDecoration.underline));
+    await unmount(tester);
+  });
+
+  testWidgets(
+    'inline, the address is words: green, underlined, no fill — and it sends the link',
+    (tester) async {
+      setPhone(tester, largePhone);
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        phoneApp(
+          const Scaffold(body: Center(child: GoAddressButton(inline: true))),
+        ),
+      );
+      final tty = Tty.of(tester.element(address));
+      expect(filled(tester), isFalse);
+      expect(words(tester).style!.color, tty.green);
+      expect(words(tester).style!.decoration, TextDecoration.underline);
+      // As wide as its words, and a thumb's height all the same.
+      final size = tester.getSize(address);
+      expect(size.height, greaterThanOrEqualTo(GoAddressButton.inlineHeight));
+      expect(size.width, lessThan(300));
+      expect(
+        find.bySemanticsLabel('${OnboardingCopy.goAddress}, Send link'),
+        findsOneWidget,
+      );
+
+      // Pressed, the words darken on the finger's way down, and come back on its way up.
+      final finger = await tester.startGesture(tester.getCenter(address));
+      await tester.pump();
+      expect(words(tester).style!.color, isNot(tty.green));
+      await finger.up();
+      await tester.pump();
+      expect(words(tester).style!.color, tty.green);
+      expect(shared, [OnboardingCopy.goUrl]);
+      semantics.dispose();
+      await unmount(tester);
+    },
+  );
 
   testWidgets('the account is asked for its computers every five seconds', (
     tester,

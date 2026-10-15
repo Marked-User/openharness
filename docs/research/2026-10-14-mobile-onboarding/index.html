@@ -168,6 +168,10 @@
   .ph .stp .t { font: 600 3.85cqw/6.15cqw var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ph .stp .n { font: 3.33cqw/1.45 var(--mono); color: var(--pfaint); padding-top: .5cqw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ph .stp .n b { color: var(--pt); font-weight: 500; }
+  /* The camera's step 1 address: green words with the share mark, 36 pt tall to the thumb (GoAddressButton inline). */
+  .ph .stp .lk { display: flex; align-items: center; gap: 2cqw; height: 9.2cqw; font: 600 3.85cqw var(--mono); color: var(--pgreen); white-space: nowrap; }
+  .ph .stp .lk u { text-decoration-color: rgba(13,188,121,.45); text-underline-offset: .9cqw; }
+  .ph .stp .lk svg.i { font-size: 4.1cqw; }
 
   /* The camera page (scan_to_connect.dart). */
   .ph .cam { position: absolute; left: 0; right: 0; top: 23.3cqw; height: 92cqw; overflow: hidden; background: radial-gradient(60cqw 55cqw at 50% 45%, #3b3a35, #121210 75%); }
@@ -443,14 +447,15 @@
         <div class="under">
           <div class="h">How to get the QR code</div>
           <div class="steps">
-            <div class="stp"><div class="rg">1</div><div><div class="t">Go to autonomous.ai/go</div><div class="n">Download and install on your computer</div></div></div>
+            <div class="stp"><div class="rg">1</div><div><div class="t">On your computer, go to</div><div class="lk"><u>autonomous.ai/go</u><svg class="i"><use href="#i-share"/></svg></div><div class="n">Install Harness</div></div></div>
             <div class="stp"><div class="rg">2</div><div><div class="t">Sign in</div></div></div>
             <div class="stp"><div class="rg">3</div><div><div class="t">Click "Add Phone"</div><div class="n">Harness menu → Add Phone</div></div></div>
           </div>
         </div>
         <div class="usage"><span class="box"></span>Share setup and sign-in counts<svg class="i"><use href="#i-info"/></svg></div>
         <div class="home"></div></div>
-      <p class="cap"><b>QR code: the camera.</b> The camera says to scan; the three steps under it start from nothing on the computer: get Harness, sign in, open Add Phone. A stray QR in frame does nothing. Back is the only way out.</p>
+      <p class="cap"><b>QR code: the camera.</b> The camera says to scan; the three steps under it start from nothing on the computer: get Harness, sign in, open Add Phone.
+        Step 1 says it in ②'s words, with the address as green words rather than ②'s button: a tap sends the link, and the camera stays the biggest thing on the screen. A stray QR in frame does nothing. Back is the only way out.</p>
     </div>
     <div class="arrow"><i>→</i>a code read</div>
     <div class="step">
@@ -460,7 +465,7 @@
           <div class="h big">Signing in…</div>
           <div class="h">How to get the QR code</div>
           <div class="steps">
-            <div class="stp"><div class="rg">1</div><div><div class="t">Go to autonomous.ai/go</div><div class="n">Download and install on your computer</div></div></div>
+            <div class="stp"><div class="rg">1</div><div><div class="t">On your computer, go to</div><div class="lk"><u>autonomous.ai/go</u><svg class="i"><use href="#i-share"/></svg></div><div class="n">Install Harness</div></div></div>
             <div class="stp"><div class="rg">2</div><div><div class="t">Sign in</div></div></div>
             <div class="stp"><div class="rg">3</div><div><div class="t">Click "Add Phone"</div><div class="n">Harness menu → Add Phone</div></div></div>
           </div>
@@ -889,7 +894,7 @@
     <tr><td>① Welcome</td><td class="m">Manage all your agents on all your computers from your phone.</td><td>the picture, all lit</td><td class="m">Continue with Google · Continue with Apple</td><td class="m">✉ Continue with email · ⊞ QR code (Cancel in their place while an account's page is up)</td></tr>
     <tr><td>While Google's page is up</td><td class="m">“harness” Wants to Use “autonomous.ai” to Sign In (iOS)</td><td></td><td class="m">Waiting for Google… → Signing in…</td><td class="m">Cancel</td></tr>
     <tr><td>Welcome, in the headline's place</td><td colspan="4" class="m">✗ &lt;the reason&gt; · You were signed out. Sign in again to reach your computers. · This phone was removed from your account on another device. Sign in again to use it here. · Sign in first, then approve your computer.</td></tr>
-    <tr><td>Camera</td><td class="m">How to get the QR code</td><td class="m">1 Go to autonomous.ai/go (Download and install on your computer) · 2 Sign in (Use ada@example.com, when the phone knows the account) · 3 Click "Add Phone" (Harness menu → Add Phone)</td><td></td><td>none; back</td></tr>
+    <tr><td>Camera</td><td class="m">How to get the QR code</td><td class="m">1 On your computer, go to, the address, Install Harness · 2 Sign in (Use ada@example.com, when the phone knows the account) · 3 Click "Add Phone" (Harness menu → Add Phone)</td><td class="m">autonomous.ai/go ⇪ (green words in step 1, not a button)</td><td>none; back</td></tr>
     <tr><td>Every signed-out screen, at the foot</td><td class="m">☐ Share setup and sign-in counts ⓘ</td><td class="m">ⓘ Optional for this app session. Help us find setup problems without sharing account details, prompts, or files.</td><td></td><td></td></tr>
     <tr><td>Email</td><td class="m">Your email</td><td class="m">We’ll send you a 4-digit code.</td><td class="m">Send code</td><td></td></tr>
     <tr><td>Code</td><td class="m">Check your email</td><td class="m">We sent a 4-digit code to ada@example.com.</td><td class="m">Sign in</td><td class="m">Resend in 30s · Change email</td></tr>
@@ -911,6 +916,7 @@
     <b>Push notifications:</b> the phone notices a new computer only while it is open today, and catches up when it is opened again.</p>
   <h2>Decided</h2>
   <p class="note" style="font-size:15px;line-height:1.7">
+    <b>2026-10-15.</b> The camera's step 1 uses ②'s words: "On your computer, go to", autonomous.ai/go, Install Harness. The address there is green words with the share mark, not ②'s green button, which outweighed the camera and stood step 1 three times as tall as the others.<br>
     <b>2026-10-14.</b> Google and Apple are the only buttons; Continue with email · QR code are one line of words under them. The camera opened from it has no "Use email instead", and its steps start from the download: Go to autonomous.ai/go, Sign in, Click "Add Phone".
     A message (why the phone was signed out, why a sign-in did not finish) takes the headline's place until a way in is pressed. One optional line under every signed-out screen: Share setup and sign-in counts.<br>
     <b>2026-10-12.</b> No account, no app: there is no Skip and no sample before signing in.

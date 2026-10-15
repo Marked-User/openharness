@@ -27,7 +27,6 @@ class DeviceSettings {
     required this.scrollReversed,
     required this.round,
     required this.voiceLang,
-    this.screenTurned,
     this.followCompanion,
     this.companion,
     this.companionProtocol,
@@ -41,9 +40,6 @@ class DeviceSettings {
   final int face;
   final bool muted, quiet, straightTitle, focusFace, scrollReversed, round;
   final String voiceLang;
-
-  /// Harness Pro only; null from round dials and older Pro firmware.
-  final bool? screenTurned;
 
   final bool? followCompanion;
   final String? companion;
@@ -63,7 +59,6 @@ class DeviceSettings {
     'scrollReversed': scrollReversed,
     'round': round,
     'voiceLang': voiceLang,
-    if (screenTurned != null) 'screenTurned': screenTurned,
     if (followCompanion != null) 'followCompanion': followCompanion,
   };
 
@@ -104,7 +99,6 @@ class DeviceSettings {
       scrollReversed: scroll,
       round: round,
       voiceLang: lang,
-      screenTurned: flag('screenTurned'),
       followCompanion: value['followCompanion'] is bool
           ? value['followCompanion'] as bool
           : null,

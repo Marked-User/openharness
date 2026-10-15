@@ -72,14 +72,11 @@ echo "pets home: pixel (10,690) = #221F1D"
 # Pets render time: every screen within 85% of its pre-change host time (test_ph_perf.sh; opt-in: runs only with PH_PERF=1, since absolute host microseconds are flaky on CI machines).
 bash "$here/test_ph_perf.sh"
 
-# pro_frame: the strip and turn math against a fake 720 x 720 panel, upright and with the 180 degree turn. Same objects
-# as the Pod tests (terminal.c, pro_canvas.c, the fonts); the turn rules are display/pro_turn.h/.c, shared with the panel.
+# pro_frame: the strip and turn math against a fake 720 x 720 panel with the 180 degree turn. Same objects
+# as the Pod tests (terminal.c, pro_canvas.c, the fonts); the turn rules are display/pro_turn.h, shared with the panel.
 cc "${cflags[@]}" -Wframe-larger-than=2048 -I"$fw/test/host_esp" -c -o "$out/pro_frame.o" "$disp/pro_frame.c"
-for turn in "" "-DPOD_PANEL_TURN=180"; do
-    cc "${cflags[@]}" $turn -c -o "$out/pro_turn.o" "$disp/pro_turn.c"   # the flag's default is the build flag
-    cc "${cflags[@]}" $turn -I"$fw/test/host_esp" -o "$out/test_pro_frame" "$fw/test/test_pro_frame.c" "$out/pro_frame.o" "$out/pro_turn.o" "${objs[@]}"
-    "$out/test_pro_frame"
-done
+cc "${cflags[@]}" -I"$fw/test/host_esp" -o "$out/test_pro_frame" "$fw/test/test_pro_frame.c" "$out/pro_frame.o" "${objs[@]}"
+"$out/test_pro_frame"
 
 # pro_cable: the daemon's JSON in, pro_app_* out. Real cJSON from the ESP-IDF checkout (CI has the sparse one at
 # $IDF_PATH), a recording stub of pro_app_api.h and a stub cable_link (test_pro_cable.c). host_stubs/ is NOT on this
@@ -117,7 +114,7 @@ cc "${cc_flags[@]}" -I"$fw/main/sys" -o "$out/test_fw_update" "$here/test_fw_upd
 "$out/test_fw_update"
 
 # The app layer: pro_app.c, pod_glue.c and pro_touch.c with the cable, the recorder and the clock as host stubs,
-# replayed upright and with POD_PANEL_TURN=180. It builds its own fonts and objects.
+# replayed with the 180 degree turn. It builds its own fonts and objects.
 python3 "$here/test_pro_app.py"
 
 python3 "$here/test_pro_hello.py"

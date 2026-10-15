@@ -380,6 +380,19 @@ describe('the gateway in its own process, as the core sees it', () => {
     expect(await link.ops.connectorVault.open({})).toBeNull()
   })
 
+  it('asks the gateway to hold what sharing trusts, and says it could not while the gateway is not running', async () => {
+    let answer: Record<string, unknown> = { pins: 1, keys: 2 }
+    const { link, call } = setup({ call: async () => answer })
+    expect(await link.ops.sharedTrust({ pins: [], keys: [] })).toEqual({ pins: 1, keys: 2 })
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.sharedTrust, { pins: [], keys: [] }, LANE_WAIT_MS)
+    answer = { error: 'stores unwritable' }
+    await expect(link.ops.sharedTrust({})).rejects.toThrow('stores unwritable')
+    for (const error of ['SERVICE_UNAVAILABLE', undefined]) {
+      answer = error ? { error } : {}
+      await expect(link.ops.sharedTrust({})).rejects.toThrow(/not running/)
+    }
+  })
+
   it('carries the fleet\'s lane to the gateway\'s sessions, every step a call in order, and never a frame back unsealed', async () => {
     let answer: Record<string, unknown> = {}
     const { link, call } = setup({ call: async () => answer })

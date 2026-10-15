@@ -200,7 +200,7 @@ class ConsoleFontTests(unittest.TestCase):
             self.assertLessEqual(abs(height - size * 1.375), 1, name)   # the cell is ceil(size * 1.375)
             self.assertEqual(len(f['glyphs']), len(CODEPOINTS) + 9, name)   # same table shape, plus the 9 marks
             # a few faces keep only what their view draws (gen_fonts.CONSOLE_CUT); every other face is full
-            cut = {'ph_sb_48': '0123456789.-+_ abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'ph_num_230': '0123456789', 'ph_bd_84': 'Harness'}
+            cut = {'ph_sb_48': '0123456789.-+_% abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'ph_num_230': '0123456789', 'ph_bd_84': 'Harness0123456789'}
             if name == 'ph_sb_48':   # a cut long version ends in the ellipsis
                 off, width, _, _, rows = f['glyphs'][len(CODEPOINTS)]
                 self.assertTrue(any(f['alpha'][off:off + (width * rows + 1) // 2]), 'ph_sb_48 U+2026')

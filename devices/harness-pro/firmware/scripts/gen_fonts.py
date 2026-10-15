@@ -38,13 +38,13 @@ CONSOLE = [('ph_sb_48', 'Inter-SemiBold.ttf', 48), ('ph_sb_34', 'Inter-SemiBold.
            ('ph_rg_28', 'Inter-Regular.ttf', 28),   # the notice toast's message
            # Home's agent count on a cover card: digits only, 230 px (the cover cards' numerals); SemiBold plus a stroke stands in for the mockup's ExtraBold
            ('ph_num_230', 'Inter-SemiBold.ttf', 230),
-           # The round dial's wordmark, larger: Home with no tabs draws "Harness" (Inter Bold 84, only those glyphs)
+           # The round dial's wordmark, larger: Home with no tabs draws "Harness"; the Update ring its percent (Inter Bold 84, only those glyphs)
            ('ph_bd_84', 'Inter-Bold.ttf', 84)]
 CONSOLE_STROKE = {'ph_num_230': 3}   # at the 2x supersample
-# Faces that draw a known set of characters keep only those (the font total cap is 900 KB). ph_sb_48 draws the Update screen's version ("0.1.3", "0.1.0-RC1", "0.0.99-pod", a cut one ending in "\u2026").
-CONSOLE_CUT = {'ph_sb_48': '0123456789.-+_ abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\u2026',
+# Faces that draw a known set of characters keep only those (the font total cap is 900 KB). ph_sb_48 draws "Notices", the Update ring's "%" and "Harness" title.
+CONSOLE_CUT = {'ph_sb_48': '0123456789.-+_% abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\u2026',
                'ph_num_230': '0123456789',
-               'ph_bd_84': 'Harness'}
+               'ph_bd_84': 'Harness0123456789'}
 CONSOLE_EXTRA = [0x2026, 0x2192, 0x2191, 0x2193, 0x2190, 0x21e2, 0x25b2, 0x25c6, 0x2713]
 
 

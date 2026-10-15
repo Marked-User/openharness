@@ -1,5 +1,5 @@
-import type { HealthSource, ResumeReason } from './productHealthContract.js'
-import { PRODUCT_USAGE_USER_OPENED_ACTIONS, type ProductUsageMetric } from './productUsageContract.js'
+import { HEALTH_MEASURES, type HealthSource, type ResumeReason } from './productHealthContract.js'
+import { PRODUCT_USAGE_FLOWS, PRODUCT_USAGE_USER_OPENED_ACTIONS, type ProductUsageMetric } from './productUsageContract.js'
 
 const actions = { agent_create: 'create', agent_resume: 'resume', agent_restart: 'restart',
   agent_retarget: 'model_change', agent_recent: 'history',
@@ -111,4 +111,30 @@ export function productUsageIntent(type: string, intent: unknown, agent: unknown
     if (source === 'app' && intent === 'interactive') emit({ id: agent, phase: 'work_requested', origin: 'interactive' })
     else if (source === 'tool') emit({ id: agent, phase: 'work_requested', origin: 'tool' })
   } catch { /* Optional observation cannot block a message. */ }
+}
+
+const OBSERVED_OUTCOMES = ['ok', 'failed', 'cancelled', 'unknown']
+/**
+ * hn's own observation (`product_observe`), reduced to the counters the Desktop's `begin()` and
+ * `milestone()` count, each when it happens: `{flow}` is a flow's start, `{flow, outcome, durationMs}`
+ * its outcome and duration bucket, `{measure}` one health measure. Anything else — an unknown name,
+ * a bad duration, a field more or less than its shape has — is nothing, so no label, text or number
+ * of hn's own becomes a counter.
+ */
+export function productObservation(payload: unknown): ProductUsageMetric[] {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return []
+  const p = payload as Record<string, unknown>
+  const fields = Object.keys(p).sort().join()
+  if (fields === 'measure') {
+    return typeof p.measure === 'string' && (HEALTH_MEASURES as readonly string[]).includes(p.measure)
+      ? [`health_tui_${p.measure}` as ProductUsageMetric] : []
+  }
+  if (typeof p.flow !== 'string' || !(PRODUCT_USAGE_FLOWS as readonly string[]).includes(p.flow)) return []
+  const prefix = `ui_tui_${p.flow}_`
+  if (fields === 'flow') return [`${prefix}started` as ProductUsageMetric]
+  if (fields !== 'durationMs,flow,outcome' || typeof p.outcome !== 'string' || !OBSERVED_OUTCOMES.includes(p.outcome)
+      || typeof p.durationMs !== 'number' || !Number.isFinite(p.durationMs) || p.durationMs < 0) return []
+  const ms = p.durationMs
+  return [`${prefix}${p.outcome}`,
+    `${prefix}${ms < 1000 ? 'under_1s' : ms < 10_000 ? '1s_to_10s' : ms < 60_000 ? '10s_to_1m' : 'over_1m'}`] as ProductUsageMetric[]
 }

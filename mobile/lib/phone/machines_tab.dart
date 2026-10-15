@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import 'package:harness_mobile/core/models.dart' show Agent;
+import 'package:harness_mobile/core/project_folder.dart';
 import 'package:harness_mobile/shared/theme/app_theme.dart';
 import 'package:harness_mobile/shared/widgets/empty_state.dart';
 import 'package:harness_mobile/state/app_state.dart';
@@ -331,13 +333,29 @@ class _Body extends StatelessWidget {
       (word, color) = ('removing…', tty.faint);
     } else if (notifier.machineRetrying(machineId)) {
       (word, color) = ('trying…', tty.faint);
+    } else if (notifier.isNewMachine(machineId) &&
+        status == PhoneMachineStatus.ready) {
+      // Just set up from this phone (Set up a device): which one it is, among the rest.
+      word = 'new';
     }
+    // Whether it runs Harness OS and has an update, for its sheet's Update and Change Wi-Fi; asked
+    // at most every few minutes, the answer redrawing the list.
+    if (status == PhoneMachineStatus.ready) {
+      unawaited(notifier.refreshOsStatus(machineId));
+    }
+    // Just set up from this phone: Start, to its harness, or to a new OpenCode there when it has none.
+    final start =
+        notifier.isNewMachine(machineId) && status == PhoneMachineStatus.ready;
     return FindRow(
       title: state.machine.displayName,
       detail: ownLine ? detail : null,
       minHeight: ownLine ? FindRow.height : _gatheredRowHeight,
       state: word,
       stateColor: color,
+      accessory: start
+          ? _StartButton(notifier: notifier, machineId: machineId)
+          : null,
+      accessoryRoom: start ? _StartButton.room : 0,
       // ⚠️ An offline computer is tappable now. It used to be drawn inert, with nothing a tap could do
       // for it — and it is exactly the one somebody wants to try again, rename, or take off the
       // account.
@@ -348,8 +366,10 @@ class _Body extends StatelessWidget {
   /// One sheet for every computer, whatever it reads — see [openMachineActions]. A locked one has
   /// "Unlock…" at its head, the act its row offers; one place decides what a computer offers, so no
   /// state can lose the rename or the removal.
-  void _open(BuildContext context, MachineState state) =>
-      openMachineActions(context, notifier, state.machine.machineId);
+  void _open(BuildContext context, MachineState state) {
+    notifier.sawMachine(state.machine.machineId);
+    openMachineActions(context, notifier, state.machine.machineId);
+  }
 }
 
 /// Over a run of computers that want the same thing: what they are, then what to do about them —
@@ -643,4 +663,80 @@ class _RefreshButtonState extends State<_RefreshButton>
       ),
     );
   }
+}
+
+
+/// Start, on a computer just set up from this phone: its harness — OpenCode first — or, with none
+/// there yet, a new OpenCode in a fresh project of its own, opened as soon as it is up.
+class _StartButton extends StatefulWidget {
+  const _StartButton({required this.notifier, required this.machineId});
+
+  final AppNotifier notifier;
+  final String machineId;
+
+  /// Kept at the end of the row's first line for it.
+  static const double room = 76;
+
+  @override
+  State<_StartButton> createState() => _StartButtonState();
+}
+
+class _StartButtonState extends State<_StartButton> {
+  bool _busy = false;
+
+  AppNotifier get _app => widget.notifier;
+
+  Agent? _harness() {
+    final agents = _app.machineStates[widget.machineId]?.agents ?? const [];
+    bool opencode(Agent agent) => '${agent.name} ${agent.title ?? ''}'
+        .toLowerCase()
+        .contains('opencode');
+    return agents.where(opencode).firstOrNull ?? agents.firstOrNull;
+  }
+
+  Future<void> _start() async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    var harness = _harness();
+    if (harness == null) {
+      setState(() => _busy = true);
+      final failed = await _app.createAgent(
+        widget.machineId,
+        engine: 'opencode',
+        folder: '',
+        projectFolder: const ProjectFolderRequest.newProject(),
+      );
+      if (failed != null) {
+        if (mounted) setState(() => _busy = false);
+        messenger?.showSnackBar(SnackBar(content: Text(failed)));
+        return;
+      }
+      // Up when the computer lists it.
+      final deadline = DateTime.now().add(const Duration(seconds: 30));
+      while ((harness = _harness()) == null &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(seconds: 1));
+      }
+      if (!mounted) return;
+      setState(() => _busy = false);
+      if (harness == null) {
+        messenger?.showSnackBar(
+          const SnackBar(
+            content: Text('OpenCode is still starting there. Try again in a moment.'),
+          ),
+        );
+        return;
+      }
+    }
+    _app.sawMachine(widget.machineId);
+    if (mounted) openAgent(context, _app, widget.machineId, harness.id);
+  }
+
+  @override
+  Widget build(BuildContext context) => TtyTextButton(
+    key: ValueKey('machines-start-${widget.machineId}'),
+    label: _busy ? 'Starting…' : 'Start',
+    color: Tty.of(context).green,
+    weight: FontWeight.w600,
+    onPressed: _busy ? null : () => unawaited(_start()),
+  );
 }

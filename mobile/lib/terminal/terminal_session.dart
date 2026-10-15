@@ -132,7 +132,7 @@ class _ActiveUpload {
 /// One controller stream for one remote Harness agent.
 ///
 /// Sequence corruption is recovered with bounded resync retries and one clean
-/// reopen. Transport loss still freezes input until the user opens a session.
+/// reopen, and so is a stream that goes quiet without a word ([_sendHeartbeat]).
 class TerminalSession extends ChangeNotifier {
   static const protocolVersion = 3;
   static const minCols = 40;
@@ -169,8 +169,22 @@ class TerminalSession extends ChangeNotifier {
 
   /// When the transport last heard from this session's MACHINE — a frame it sealed, not the
   /// relay's own (`WsConn.lastHeardFromMachineAt`). Null hook: the open watchdog keeps its old,
-  /// impatient rule (see [_openPatience]).
+  /// impatient rule (see [_openPatience]), and a quiet stream is always resynced
+  /// ([_sendHeartbeat]) rather than its transport redialled.
   final DateTime? Function()? lastHeardFromMachine;
+
+  /// Takes this machine's whole transport down and dials it again, because a stream on it went
+  /// quiet and the socket heard nothing from the machine in that time either — see
+  /// [_sendHeartbeat]. Returns whether it did; false (the socket is mid-dial already, or cannot
+  /// redial) leaves the stream to its own resync.
+  ///
+  /// ⚠️ **The whole socket, not this stream.** A socket left half-open (Wi-Fi giving way to 4G)
+  /// carries every terminal of the machine, and every one of them is as dead as this one. Asking
+  /// the daemon for a resync over it would wait out three unanswered tries and an open's patience —
+  /// about twenty more seconds — before anything redialled. The caller marks the machine's
+  /// sessions lost before the redial (`AppNotifier._redialStaleTransport`), which is what puts
+  /// them back, screens kept, once the new socket is up.
+  final bool Function()? onTransportSilent;
 
   /// This client's own introduction, sent with every `terminal_open`; null
   /// for a viewer that never takes control and so is never anyone's taker.
@@ -186,6 +200,7 @@ class TerminalSession extends ChangeNotifier {
     this.client,
     this.onOpenStalled,
     this.lastHeardFromMachine,
+    this.onTransportSilent,
     this.resyncTimeout = const Duration(seconds: 4),
     this.takeover = true,
     this.scrollMemory,
@@ -318,6 +333,34 @@ class TerminalSession extends ChangeNotifier {
   /// Something to show: this attach's first frame, or a kept screen standing in for it.
   bool get hasScreen => hasRenderedFrame || _showingKeptScreen;
 
+  /// Whether a new stream of this session is on its way over a screen this session itself drew —
+  /// a reopen once its socket was dialled again, a recovery — rather than an empty terminal
+  /// waiting for its first keyframe.
+  ///
+  /// ⚠️ **Why the page needs to know.** An open forgets the stream's sequence ([hasRenderedFrame]
+  /// goes false) but keeps the terminal and what is on it (`preserveTerminal`, which every reopen
+  /// asks for). Read as "no screen", the page laid its attaching skeleton over that screen: back
+  /// from a network switch, the reader saw their terminal vanish into a skeleton and come back a
+  /// moment later. The page keeps it up under a spinner instead ([TerminalPage]).
+  ///
+  /// Only a screen of this session's own streams. A kept screen seeded from another session (the
+  /// pager's, see [seedScreen]) is [hasScreen] already, and needs no word while it attaches.
+  bool get showsEarlierScreen => !hasScreen && _drewScreen;
+
+  /// Set when a keyframe of this session's lands, and cleared only when an open puts a blank
+  /// terminal in its place — see [showsEarlierScreen].
+  bool _drewScreen = false;
+
+  /// The stream was lost with its socket ([transportLost]) and waits for the socket to come back
+  /// — the one `error` the app repairs by itself, by reopening once the machine's socket is up.
+  /// Other errors stay until somebody acts on them.
+  bool get lostWithTransport =>
+      status == TerminalSessionStatus.error &&
+      errorCode == transportLostCode;
+
+  /// The [errorCode] [transportLost] leaves.
+  static const transportLostCode = 'TERMINAL_DISCONNECTED';
+
   /// Shows [kept] — the screen this agent had when the phone last left it — until the live stream's
   /// first keyframe lands and replaces it.
   ///
@@ -382,6 +425,19 @@ class TerminalSession extends ChangeNotifier {
   int _resyncAttempts = 0;
   int _autoReopenAttempts = 0;
   bool _openStallRecovered = false;
+
+  /// Heartbeats in a row that heard nothing on this stream — see [_sendHeartbeat].
+  int _quietBeats = 0;
+
+  /// When this stream was last heard from: its `terminal_ready`, then each frame of it. Set beside
+  /// every reset of [_quietBeats], and compared against [lastHeardFromMachine] — never with a
+  /// clock's duration — to tell a dead socket from a dead stream ([_transportSilentToo]).
+  DateTime? _lastHeardOnStream;
+
+  /// The heartbeats a live stream cannot go without a frame: at least 15s of silence, the
+  /// desktop's limit. Four, not three, because the count is of beats that heard nothing, and the
+  /// last frame may have landed just before the first of them.
+  static const _quietBeatsBeforeResync = 4;
 
   /// When the open now in flight first left — kept through its resends, so its patience
   /// ([_openPatience]) counts from the first ask rather than starting over at each one.
@@ -566,7 +622,11 @@ class TerminalSession extends ChangeNotifier {
     // blank terminal where the reader's last screen should have been, with
     // [hasScreen] telling it not to show the skeleton either.
     final keep = preserveTerminal || _showingKeptScreen;
-    if (!keep) terminal = _newTerminal()..resize(cols, rows);
+    if (!keep) {
+      terminal = _newTerminal()..resize(cols, rows);
+      // A blank terminal: whatever this session drew before is gone with the old one.
+      _drewScreen = false;
+    }
     status = TerminalSessionStatus.opening;
     _openRequestId =
         'term_${DateTime.now().microsecondsSinceEpoch}_${Random.secure().nextInt(1 << 31)}';
@@ -816,6 +876,8 @@ class TerminalSession extends ChangeNotifier {
         // for the life of the process, beating twice as often and still
         // beating after [dispose].
         _heartbeat?.cancel();
+        _quietBeats = 0;
+        _lastHeardOnStream = DateTime.now();
         _heartbeat = Timer.periodic(
           const Duration(seconds: 5),
           (_) => unawaited(_sendHeartbeat()),
@@ -834,6 +896,16 @@ class TerminalSession extends ChangeNotifier {
         final accepted = payload['accepted'] == true;
         if (_activeUpload?.beginAccepted.isCompleted == false) {
           _activeUpload!.beginAccepted.complete(accepted);
+        }
+        // A stream the daemon no longer has takes no input and no upload, and nothing else says
+        // so: the picture fails, and the terminal sat on as if live. Its screen is kept and it is
+        // opened once more — the desktop's recovery — without sending the picture again. Older
+        // daemons give only the reason's words.
+        if (!accepted &&
+            (payload['code'] == 'TERMINAL_STREAM_NOT_FOUND' ||
+                payload['reason'] ==
+                    'no live terminal stream for this pane (reopen it and try again)')) {
+          await _recoverByReopen(reason: 'TERMINAL_STREAM_NOT_FOUND');
         }
         return true;
       case 'terminal_chunked_upload_progress':
@@ -991,6 +1063,9 @@ class TerminalSession extends ChangeNotifier {
 
   Future<void> handleBinary(TerminalBinaryFrame frame) async {
     if (_disposed || frame.streamId != streamId) return;
+    // Heard from: whatever the frame turns out to be, the stream is alive — see [_sendHeartbeat].
+    _quietBeats = 0;
+    _lastHeardOnStream = DateTime.now();
     final generation = _generation;
     _renderTail = _renderTail
         .then((_) async {
@@ -1304,6 +1379,7 @@ class TerminalSession extends ChangeNotifier {
     _bindTerminal(replacement);
     terminal = replacement;
     _showingKeptScreen = false;
+    _drewScreen = true;
     cols = _clampCols(nextCols);
     rows = _clampRows(nextRows);
     _utf8Tail = decoded.tail;
@@ -1996,13 +2072,59 @@ class TerminalSession extends ChangeNotifier {
     }
   }
 
+  /// Keeps the lease, and notices a stream that went quiet without a word.
+  ///
+  /// ⚠️ **A send that succeeds proves only that the socket takes bytes, not that THIS stream is
+  /// still there.** The daemon sends a sync frame every five seconds even while the terminal is idle
+  /// (`SYNC_INTERVAL_MS`, `cli/src/lib/terminalStreamManager.ts`), so a stream that hears nothing for
+  /// [_quietBeatsBeforeResync] beats is gone: a socket left half-open by Wi-Fi giving way to 4G
+  /// while the app was away, a stale relay session, a stream the daemon dropped and never said.
+  /// Until this, such a terminal looked live and took no input until the account's two-minute agent
+  /// poll gave up on the machine — about four minutes. It resyncs, then reopens, as the desktop does
+  /// (#432).
+  ///
+  /// Counted in beats, not by the clock, on purpose: an app the OS suspended runs no timers, so
+  /// the gap it was away is no beat at all, and coming back is not taken for a silence.
+  ///
+  /// Which repair, once the stream has gone quiet that long:
+  /// - **The socket heard nothing from the machine either** ([_transportSilentToo]): the socket is
+  ///   what died, and every stream on it with it. It is redialled at once ([onTransportSilent]),
+  ///   skipping the resync tries and the open's patience that only a live socket could answer.
+  /// - **The socket still hears the machine** (another agent's output, its sync frames, a reply):
+  ///   only this stream is gone, and the daemon can repair it — the resync, then a reopen.
   Future<void> _sendHeartbeat() async {
     if (!acceptsInput) return;
     final generation = _generation;
     final sent = await send('terminal_alive', {'streamId': streamId});
     if (!sent && _isCurrent(generation)) {
       transportLost('Terminal heartbeat was not sent');
+      return;
     }
+    if (!_isCurrent(generation) || !acceptsInput) return;
+    if (++_quietBeats < _quietBeatsBeforeResync) return;
+    _quietBeats = 0;
+    if (_transportSilentToo() && (onTransportSilent?.call() ?? false)) return;
+    // Read again: a redial the hook declined may still have taken this session down meanwhile —
+    // another stream of the machine got there first — and a resync now would overwrite its
+    // "Connection lost" with a timeout for a stream that is already being put back.
+    if (!_isCurrent(generation) || !acceptsInput) return;
+    await _requestResync('TERMINAL_STREAM_TIMEOUT');
+  }
+
+  /// Whether the machine's socket has heard nothing from the machine since this stream was last
+  /// heard from — so the silence is the socket's, not this stream's alone.
+  ///
+  /// Both times are moments, compared with each other, never a duration on a clock: an app the OS
+  /// suspended keeps both where they were, and the comparison stays true across the gap. A socket
+  /// carries every frame its machine seals — this stream's sync frames among them, every five
+  /// seconds — so on a live socket the machine is heard from after this stream's last frame as
+  /// soon as anything else of it arrives. False when there is no hook to ask, or the socket has
+  /// never heard the machine at all: the resync stays the repair, as it was before this check.
+  bool _transportSilentToo() {
+    final heard = lastHeardFromMachine?.call();
+    final streamHeard = _lastHeardOnStream;
+    if (heard == null || streamHeard == null) return false;
+    return !heard.isAfter(streamHeard);
   }
 
   Future<void> _requestResync(String reason) async {
@@ -2138,7 +2260,7 @@ class TerminalSession extends ChangeNotifier {
     streamId = null;
     linkMode = null;
     status = TerminalSessionStatus.error;
-    errorCode = 'TERMINAL_DISCONNECTED';
+    errorCode = transportLostCode;
     errorMessage = message;
     _abortActiveUpload();
     notifyListeners();

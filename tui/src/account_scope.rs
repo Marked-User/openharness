@@ -153,6 +153,8 @@ impl App {
         let next = Identity { machine:machine.into(), local_only };
         let Some(old) = self.daemon_identity.replace(next) else { return };
         self.account_epoch = self.account_epoch.wrapping_add(1);
+        // Another account, even with no sign-out between: none of the last one's measurement is its.
+        crate::measure::account_changed(self);
         self.removed_machines.clear();
         let migrate = (old.local_only || local_only || status["computerId"].as_str() == Some(old.machine.as_str())).then_some(old.machine.as_str());
 

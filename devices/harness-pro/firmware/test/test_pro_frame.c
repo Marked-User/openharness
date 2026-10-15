@@ -1,5 +1,5 @@
 // pro_frame.c's strip and turn math: whatever the damage, every damaged pixel reaches the panel exactly as a direct
-// full raster of the new scene would draw it (turned when built with -DPOD_PANEL_TURN=180), and every pixel of a damage
+// full raster of the new scene would draw it (turned 180), and every pixel of a damage
 // rectangle is written once. The panel is a host fake: it keeps a 720 x 720 "glass" and applies the real pro_turn.h
 // rules (the same inline functions pro_display.c calls once), and it checks the A/B overlap discipline.
 #include <assert.h>
@@ -120,40 +120,13 @@ int main(void)
     // 6. Identical scenes: nothing is pushed.
     replay(&a, &a, 0);
     CHECK(submits == 0);
-    // 7. The turn is a runtime flag whose default is the build's.
-#if defined(POD_PANEL_TURN) && POD_PANEL_TURN == 180
-    CHECK(pro_turn_get() && pro_turn_build_default());
-#else
-    CHECK(!pro_turn_get() && !pro_turn_build_default());
-#endif
-    // 8. Flipping it turns the picture and the contact: a full paint lands where the new orientation says, exactly.
-    for (int pass = 0; pass < 2; pass++) {
-        const bool turned = pass == 0;   // both orientations, whatever the build default
-        pro_turn_set(turned);
-        CHECK(pro_turn_get() == turned && pro_turn_coord(0) == (turned ? N - 1 : 0) && pro_turn_coord(N - 1) == (turned ? 0 : N - 1));
-        replay(NULL, &a, 1);
-        replay(&a, &b, 1);   // and a damage repaint on top of a glass drawn that way
-        ht_raster(&b, (ht_rect_t){0, 0, N, N}, full);
-        for (int y = 0; y < N; y += 7)
-            for (int x = 0; x < N; x += 5) CHECK(glass[(turned ? N - 1 - y : y) * N + (turned ? N - 1 - x : x)] == full[y * N + x]);
-    }
-    // 9. A flip with the glass left as it was is wrong everywhere the picture is not 180-symmetric: the owner's switch
-    // must repaint it all (pro_app forces a full present, tested in test_pro_app.py).
-    pro_turn_set(false);
+    // 7. The glass is turned 180: a full paint lands at (N-1-x, N-1-y), exactly.
+    CHECK(pro_turn_coord(0) == N - 1 && pro_turn_coord(N - 1) == 0);
     replay(NULL, &a, 1);
-    static uint16_t upright[N * N];
-    memcpy(upright, glass, sizeof upright);
-    pro_turn_set(true);
-    replay(NULL, &a, 1);
-    int differ = 0;
-    for (int i = 0; i < N * N; i++) differ += upright[i] != glass[i];
-    CHECK(differ > 0);
-    printf("test_pro_frame (%s): %d checks passed\n",
-#if defined(POD_PANEL_TURN) && POD_PANEL_TURN == 180
-           "turned 180",
-#else
-           "upright",
-#endif
-           checks);
+    replay(&a, &b, 1);   // and a damage repaint on top of a glass drawn that way
+    ht_raster(&b, (ht_rect_t){0, 0, N, N}, full);
+    for (int y = 0; y < N; y += 7)
+        for (int x = 0; x < N; x += 5) CHECK(glass[(N - 1 - y) * N + (N - 1 - x)] == full[y * N + x]);
+    printf("test_pro_frame (turned 180): %d checks passed\n", checks);
     return 0;
 }

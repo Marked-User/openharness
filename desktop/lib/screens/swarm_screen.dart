@@ -6113,7 +6113,18 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
     if (choice.destination.isCreate) {
       if (_search!.isMachineMode) {
-        _previewControls.invoke('picker.focus_actions');
+        // A click lands on the row it clicked, as a machine row's does: focusing the actions alone
+        // left the machine selected before it in charge, so clicking Add machine after a machine
+        // did nothing (2026-10-15).
+        final index = _search!.rows.indexWhere(
+          (row) => row.id == choice.destination.id,
+        );
+        if (index >= 0) _search!.move(index - _search!.cursor);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _search?.selected?.id == choice.destination.id) {
+            _previewControls.invoke('picker.focus_actions');
+          }
+        });
         return;
       }
       if (_search!.isModelMode) {

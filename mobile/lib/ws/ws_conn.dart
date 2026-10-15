@@ -199,6 +199,11 @@ class WsConn {
   /// True once this connection has permanently given up (a deliberate [close], or a non-retryable
   /// local failure like NO_PEER_LINK) — [WsPool] must not hand a closed connection back out.
   bool get isClosed => _closing;
+
+  /// Whether [forceReconnect] would dial again: a relay connection nobody has closed. Read it
+  /// before taking this machine's terminals down for a redial — when it is false, the redial is a
+  /// no-op, and the terminals would sit on "Connection lost" waiting for a socket that never comes.
+  bool get canForceReconnect => !_closing && relayCodecs != null;
   String get endpointKey => 'cloud:$wsBaseUrl:$autonomousEnv';
 
   WsConn({

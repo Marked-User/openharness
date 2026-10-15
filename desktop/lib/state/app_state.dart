@@ -2,7 +2,7 @@ import '../measurement/product_measurement.dart';
 import '../measurement/product_runtime_health.dart';
 import '../measurement/product_connections.dart';
 import '../core/crash_log.dart';
-import '../measurement/setup_transport.dart';
+import '../measurement/desktop_setup_report.dart';
 import 'attached_task_delivery.dart';
 import 'task_route.dart';
 import '../core/permission_modes.dart';
@@ -1348,6 +1348,10 @@ class AppNotifier extends ChangeNotifier {
   }
 
   List<Machine> machines = [];
+
+  /// Machines other accounts share with this one's domain, not added yet: Add machine lists them, and
+  /// [addSharedMachine] adds one.
+  List<Machine> machinesToAdd = const [];
   final Map<String, MachineState> machineStates = {};
   final Set<String> expandedMachines = {};
   String? selectedMachineId;
@@ -3301,7 +3305,7 @@ class AppNotifier extends ChangeNotifier {
                 )
               : null,
           sendSetup: (report) =>
-              sendSetupMeasurement(this.config.apiBaseUrl, report),
+              sendDesktopSetupMeasurement(this.config.apiBaseUrl, report),
         );
     productConnections = ProductConnections(this.productMeasurement);
     this.productMeasurement.addListener(_measurementChoiceChanged);
@@ -6128,6 +6132,10 @@ class AppNotifier extends ChangeNotifier {
       }
       info = fresh;
       availableUpdate = info;
+      // Start the existing last-run flag while download I/O is in progress. Saving
+      // it only just before exit races the asynchronous disk write on fast updates.
+      // No reporting or disk flush is awaited by the update.
+      productRuntimeHealth?.expectUpdate(info.version);
       // One notify per whole percent. Dio reports every chunk, and each notify
       // rebuilds the whole app shell (the banner lives in its ListenableBuilder),
       // so a 45 MB build would repaint thousands of times for a bar 200px wide.
@@ -6149,12 +6157,12 @@ class AppNotifier extends ChangeNotifier {
       );
       if (staged == null) {
         finish(ProductOutcome.failed);
+        productRuntimeHealth?.cancelUpdate();
         updateError = 'Could not download and verify Harness ${info.version}.';
         return false;
       }
       // The next consented launch can confirm the version; never wait for reporting.
       finish(ProductOutcome.ok);
-      productRuntimeHealth?.expectUpdate(info.version);
       finishApply = productMeasurement.begin(ProductFlow.updateApply);
       final applied = await updater.applyStaged(staged, selfPid: pid);
       finishApply(applied ? ProductOutcome.ok : ProductOutcome.failed);
@@ -7008,6 +7016,69 @@ class AppNotifier extends ChangeNotifier {
   /// machines", which an empty list alone cannot say.
   bool machinesLoading = false;
 
+  /// This machine's sharing with other accounts (CLI services/sharedMachines.ts), asked of [machineId]
+  /// itself: the policy lives on the machine. `{emails, sameDomain, domain, members}`, or `{error,
+  /// message}`.
+  Future<Map<String, dynamic>> machineSharing(String machineId) =>
+      _sharedMachines(machineId, {'action': 'get'});
+
+  /// Share [machineId] with these addresses and, when [sameDomain], everyone at its owner's domain.
+  Future<Map<String, dynamic>> setMachineSharing(
+    String machineId,
+    List<String> emails, {
+    required bool sameDomain,
+  }) => _sharedMachines(machineId, {
+    'action': 'set',
+    'emails': emails,
+    'sameDomain': sameDomain,
+  });
+
+  /// Add a machine shared with this account's domain to its machines, or take one back out
+  /// ([remove]). Asked of this computer's daemon, which pins the machine's key; null when done, else
+  /// what went wrong.
+  Future<String?> addSharedMachine(
+    String machineId, {
+    bool remove = false,
+  }) async {
+    final here = machineStates.values
+        .where(
+          (state) => state.isLocalMachine && !state.machine.isSharedMachine,
+        )
+        .firstOrNull;
+    if (here == null) return 'This computer’s Harness is not running.';
+    try {
+      final answer = await _sharedMachines(here.machine.machineId, {
+        'action': remove ? 'remove' : 'add',
+        'machineId': machineId,
+      });
+      if (answer['error'] != null) {
+        return answer['message'] as String? ??
+            'Could not ${remove ? 'remove' : 'add'} it: ${answer['error']}.';
+      }
+    } catch (error) {
+      return 'Could not ${remove ? 'remove' : 'add'} it: $error';
+    }
+    await refreshMachines();
+    return null;
+  }
+
+  /// A refusal is an answer (`{error, message}`), shown in the machine's own words: only a request that
+  /// never got one is "could not reach".
+  Future<Map<String, dynamic>> _sharedMachines(
+    String machineId,
+    Map<String, dynamic> payload,
+  ) async {
+    try {
+      return await _conn(machineId).request(
+        'shared_machines',
+        payload: payload,
+        timeout: const Duration(seconds: 30),
+      );
+    } on WsRequestFailure catch (failure) {
+      return {...failure.payload, 'error': failure.code};
+    }
+  }
+
   Future<Map<String, dynamic>> manageHarnessShares(
     String machineId,
     String agentId,
@@ -7331,6 +7402,7 @@ class AppNotifier extends ChangeNotifier {
     if (!_machineInventoryCurrent(revision, request)) return;
     _machineInventoryLoaded = true;
     machinesAreStale = stale;
+    if (list is MachineInventory) machinesToAdd = list.toAdd;
     final localEndpoint = probed;
     if (localEndpoint != null) {
       _noteBackendOnline(localEndpoint.backendOnline, refetch: false);
@@ -7619,7 +7691,8 @@ class AppNotifier extends ChangeNotifier {
   ) async {
     final revision = _authRevision;
     bool current() =>
-        _authWorkCurrent(revision) && identical(machineStates[machineId], state);
+        _authWorkCurrent(revision) &&
+        identical(machineStates[machineId], state);
     final finishConnection = productConnections.manual(machineId);
     final done = Completer<bool>();
     var dialed = false;
@@ -9304,10 +9377,8 @@ class AppNotifier extends ChangeNotifier {
   ///
   /// Never throws — a machine whose daemon is too old to know the RPC, one with no grid, and one
   /// that timed out are all "nothing to offer", which is what the picker shows.
-  Future<GridModels> gridModels(
-    String machineId, {
-    bool userAction = false,
-  }) => _askGridModels(machineId, {
+  Future<GridModels> gridModels(String machineId, {bool userAction = false}) =>
+      _askGridModels(machineId, {
         'rowState': true,
         if (userAction) 'userAction': true,
       });
@@ -12874,6 +12945,9 @@ class AppNotifier extends ChangeNotifier {
     if (machine == null) return Future.value('Machine not found');
     if (machine.machine.isShared) {
       return Future.value('Shared machines are view-only.');
+    }
+    if (machine.machine.isSharedMachine) {
+      return Future.value('Only its owner can rename or remove this machine.');
     }
     if (name == null && machine.isLocalMachine) {
       return Future.value('This computer cannot be deleted here.');

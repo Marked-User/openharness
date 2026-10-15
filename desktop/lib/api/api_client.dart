@@ -7,6 +7,8 @@ import '../core/config.dart';
 import '../core/models.dart';
 import '../core/test_run.dart';
 import '../logging/http_log.dart';
+import '../measurement/product_report_failure.dart';
+import '../measurement/product_health_contract.dart';
 import '../viewer/device_ack.dart';
 import '../viewer/device_log.dart';
 import '../viewer/device_log_sync.dart'
@@ -17,9 +19,17 @@ import 'bearer_auth_interceptor.dart';
 
 /// Rows and freshness from one response, even when requests overlap.
 class MachineInventory extends UnmodifiableListView<Machine> {
-  MachineInventory(super.source, {required this.isStale});
+  MachineInventory(
+    super.source, {
+    required this.isStale,
+    this.toAdd = const [],
+  });
 
   final bool isStale;
+
+  /// Machines shared with this account's domain and not added yet: listed under Add machine, where one
+  /// click adds it (backend routes/machineShares.ts).
+  final List<Machine> toAdd;
 }
 
 /// Control-plane REST client.
@@ -111,16 +121,40 @@ class ApiClient {
   Future<Map<String, dynamic>> productUsageReport(
     Map<String, dynamic> report,
   ) async {
-    final response = await _dio.post(
-      '/api/product-usage/report',
-      data: report,
-      options: Options(
-        headers: {'x-adapter-local': '1'},
-        receiveTimeout: const Duration(seconds: 5),
-        sendTimeout: const Duration(seconds: 5),
-      ),
-    );
-    return Map<String, dynamic>.from(unwrapApiResponse(response) as Map);
+    try {
+      final response = await _dio.post(
+        '/api/product-usage/report',
+        data: report,
+        options: Options(
+          headers: {'x-adapter-local': '1'},
+          receiveTimeout: const Duration(seconds: 5),
+          sendTimeout: const Duration(seconds: 5),
+        ),
+      );
+      final body = response.data;
+      if (response.statusCode != 200 ||
+          body is! Map ||
+          body['success'] != true ||
+          body['data'] is! Map) {
+        throw ProductReportFailure.http(
+          response.statusCode,
+          body is Map && body['error'] is Map
+              ? (body['error'] as Map)['code']
+              : null,
+        );
+      }
+      return Map<String, dynamic>.from(body['data'] as Map);
+    } on DioException catch (error) {
+      throw ProductReportFailure(switch (error.type) {
+        DioExceptionType.connectionTimeout ||
+        DioExceptionType.sendTimeout ||
+        DioExceptionType.receiveTimeout =>
+          ProductHealthMeasure.reportFailureTimeout,
+        DioExceptionType.connectionError =>
+          ProductHealthMeasure.reportFailureUnreachable,
+        _ => ProductHealthMeasure.reportFailureOther,
+      });
+    }
   }
 
   Future<void> productUsageFeedback(String answer, String receipt) async {
@@ -587,6 +621,12 @@ class ApiClient {
     final owned = list
         .map((e) => Machine.fromJson(e as Map<String, dynamic>))
         .toList();
+    // Whole machines other accounts share with this one: those named for it and those it added are its
+    // machines too; those shared with its domain and not added wait under Add machine.
+    final sharedWhole = [
+      for (final row in data['sharedMachines'] as List? ?? const [])
+        Machine.fromJson(Map<String, dynamic>.from(row as Map)),
+    ].where((m) => !owned.any((own) => own.machineId == m.machineId)).toList();
     var sharedMachines = _sharedMachines;
     try {
       final shared = await _dio.get('/api/harness-shares');
@@ -609,12 +649,20 @@ class ApiClient {
       _sharedMachines = sharedMachines;
       lastMachinesStale = stale;
     }
-    return MachineInventory([
+    final usable = [
       ...owned,
-      ...sharedMachines.where(
-        (shared) => !owned.any((own) => own.machineId == shared.machineId),
-      ),
-    ], isStale: stale);
+      ...sharedWhole.where((m) => m.machineShare?.added == true),
+    ];
+    return MachineInventory(
+      [
+        ...usable,
+        ...sharedMachines.where(
+          (shared) => !usable.any((own) => own.machineId == shared.machineId),
+        ),
+      ],
+      isStale: stale,
+      toAdd: sharedWhole.where((m) => m.machineShare?.added != true).toList(),
+    );
   }
 
   Future<String?> renameMachine({

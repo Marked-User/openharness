@@ -33,6 +33,7 @@ import { DeviceLogStore } from '../lib/e2ee/deviceLogStore.js'
 import { DeviceLogSyncer, type DeviceKeysSeen, type DeviceLogFetched, type DeviceLogTrustOutcome } from '../lib/e2ee/deviceLogSyncer.js'
 import { GroupSyncer, relayRequester, SELF_STAMP } from '../lib/e2ee/groupSyncer.js'
 import { MachinePeerStore } from '../lib/e2ee/machinePeers.js'
+import { applySharedTrust, isSharedKey } from './sharedTrust.js'
 import { E2eeStore } from '../lib/e2ee/store.js'
 import { TrustGroupStore, type GroupMember } from '../lib/e2ee/trustGroup.js'
 import { RemoteRelayPool } from '../lib/remoteRelay.js'
@@ -175,6 +176,9 @@ export function startGateway(host: GatewayHost): StartedGateway {
       // A machine the account's device key log names under this very key will trust us as soon as it
       // reads the log: keep its pin through a few denials, and nudge it (and us) to read.
       expectsTrust: (machineId, pub) => {
+        // A machine shared with this account trusts it once its own daemon has read who it is shared
+        // with (gateway/sharedTrust.ts): its pin stays until sharing takes it back.
+        if (relayPeers.get(machineId)?.shared && relayPeers.get(machineId)?.pub === pub) return true
         const m = devLogSyncer?.list().members.find((x) => x.pub === pub)
         const expected = !!m && m.kind === 'machine' && m.machineId === machineId && !devLogSyncer?.suspendedKeys().includes(pub)
         if (expected) void devLogSyncer?.refresh()
@@ -216,6 +220,7 @@ export function startGateway(host: GatewayHost): StartedGateway {
     suspended: () => new Set(devLogSyncer?.suspendedKeys() ?? []),
     // Only a list the backend answered says who is offline; otherwise try every member.
     reachable: () => reachable,
+    shared: (pub) => isSharedKey(gateway.pairedPeers(), pub),
     ready: () => devLogSyncer?.current() ?? false,
     log: (line) => console.log(line),
   })
@@ -510,6 +515,14 @@ export function startGateway(host: GatewayHost): StartedGateway {
     reachable: (machineIds) => { reachable = machineIds ? new Set(machineIds) : null },
     lane,
     observerKey: ownerKey,
+    sharedTrust: async (desired) => applySharedTrust({
+      peers: relayPeers,
+      paired: () => gateway.pairedPeers(),
+      trust: (peer) => gateway.trustPeer(peer),
+      untrust: (pub) => { gateway.untrustPeer(pub) },
+      dropSessions: (machineId) => { relayPool.invalidate(machineId); relayPool.invalidateIsolated(machineId) },
+      selfPub: () => b64e(relayIdentityStore.getIdentity().pub),
+    }, desired),
     connectorVault: {
       // Sealed for every machine the verified log holds, this one included, but never a key a fork
       // suspended or one nobody has yet said is theirs (pending): a device added by whoever got hold of

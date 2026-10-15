@@ -19,6 +19,7 @@ import 'package:harness_mobile/state/app_state.dart';
 import 'package:harness_mobile/terminal/terminal_font_store.dart';
 import 'package:harness_mobile/terminal/terminal_theme_store.dart';
 
+import 'add_device/add_device_page.dart';
 import 'approve_sign_in.dart';
 import 'connectors_page.dart';
 import 'devices_page.dart';
@@ -219,6 +220,15 @@ class _Body extends StatelessWidget {
             key: const Key('settings-sign-in-computer'),
             title: 'Sign in a computer',
             onTap: () => unawaited(signInAComputer(context, notifier)),
+          ),
+          // A Harness with no screen (a box, a mini PC): onto the person's Wi-Fi and signed in to
+          // this account through its setup hotspot.
+          SettingsRow(
+            key: const Key('settings-add-device'),
+            title: 'Set up a device',
+            onTap: () => Navigator.of(context).push(
+              phoneRoute((_) => AddDevicePage(notifier: notifier)),
+            ),
           ),
           SettingsRow(
             title: 'Your devices',

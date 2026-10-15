@@ -1139,7 +1139,7 @@ class _TerminalPageState extends State<TerminalPage>
     for (final key in questionKeys(view)) {
       if (key.number == band.key) {
         HapticFeedback.selectionClick();
-        _answer(view, key);
+        _tapAnswer(view, key);
         return;
       }
     }
@@ -1155,7 +1155,7 @@ class _TerminalPageState extends State<TerminalPage>
     for (final key in questionKeys(view)) {
       if (key.number == number) {
         HapticFeedback.selectionClick();
-        _answer(view, key);
+        _tapAnswer(view, key);
         return true;
       }
     }
@@ -1163,6 +1163,65 @@ class _TerminalPageState extends State<TerminalPage>
   }
 
   static final _optionLine = RegExp(r'^\s*(?:[❯›>]\s*)?(\d{1,2})[.)]\s');
+
+  /// A tapped answer: pressed at once on a terminal this phone holds, else once it is taken back.
+  ///
+  /// ⚠️ **A tap on an answer is a claim on the terminal, as speaking one is ([_sessionForInput]).**
+  /// The bands are drawn on a terminal only being watched too — after the computer took it, or
+  /// when it opened watching on a reconnect — and a tap there used to buzz and send nothing: the
+  /// band answers before the panel's own tap could take control, and a session that is not
+  /// [TerminalSession.acceptsInput] drops the keys.
+  void _tapAnswer(QuestionPaneView view, QuestionKey key) {
+    final session = widget.notifier
+        .paneOfAgent(widget.machineId, widget.agentId)
+        ?.session;
+    if (session != null && session.acceptsInput) {
+      _answer(view, key);
+      return;
+    }
+    unawaited(_answerOnceTaken(view, key));
+  }
+
+  /// Set while a tapped answer waits for the terminal to come back, so a second tap in that wait
+  /// does not press a second answer once it has.
+  bool _answerWaiting = false;
+
+  /// Takes the terminal back, then presses [key] — only on the same question still open: one
+  /// answered on the computer meanwhile has closed, and a digit then would land in the prompt.
+  ///
+  /// ⚠️ **Read off the screen the stream came back with, not the watcher's view.** Taking the
+  /// terminal back answers with a keyframe of the screen as it is now, and the watcher keeps a
+  /// dialog it no longer finds for one more read (its close debounce) — so a question the computer
+  /// answered in the meantime would still be the watcher's at the moment the press goes out.
+  Future<void> _answerOnceTaken(QuestionPaneView view, QuestionKey key) async {
+    if (_answerWaiting) return;
+    _answerWaiting = true;
+    try {
+      final session = await _sessionForInput(why: 'answer');
+      if (!mounted) return;
+      if (session == null) {
+        _flash('✗ not sent', error: true);
+        return;
+      }
+      final engine = _questionEngine;
+      final now = engine == null
+          ? null
+          : readQuestionPane(session.terminal, engine);
+      if (now == null ||
+          now.fingerprint != view.fingerprint ||
+          !_answersTappable(now)) {
+        return;
+      }
+      for (final pressed in questionKeys(now)) {
+        if (pressed.number == key.number) {
+          _answer(now, pressed);
+          return;
+        }
+      }
+    } finally {
+      _answerWaiting = false;
+    }
+  }
 
   /// Presses an answer: its digit, and Return only where the dialog asks for one (Codex's
   /// `request_user_input`) — a chosen Return, never a blind one. An MCP server's Accept or Decline
@@ -1213,12 +1272,13 @@ class _TerminalPageState extends State<TerminalPage>
 
   /// The pane's session, able to take input — taken back first when another client took the
   /// terminal (the desktop, on a click there) while the take was being spoken. Speaking to a
-  /// harness is as plain a claim on it as a tap or a scroll. Null when it cannot be had in 6s.
-  Future<TerminalSession?> _sessionForInput() async {
+  /// harness is as plain a claim on it as a tap or a scroll, and so are a tapped answer and
+  /// Interrupt; [why] names which in the log. Null when it cannot be had in 6s.
+  Future<TerminalSession?> _sessionForInput({String why = 'voice'}) async {
     TerminalSession? current() =>
         widget.notifier.paneOfAgent(widget.machineId, widget.agentId)?.session;
     if (current() case final session? when session.acceptsInput) return session;
-    appLog.info('voice', 'terminal not ours at send — taking it back');
+    appLog.info(why, 'terminal not ours at send — taking it back');
     await _takeControl();
     for (var waited = 0; waited < 60 && mounted; waited++) {
       if (current() case final session? when session.acceptsInput) {
@@ -1226,7 +1286,7 @@ class _TerminalPageState extends State<TerminalPage>
       }
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
-    appLog.warn('voice', 'terminal not back in 6s — take kept');
+    appLog.warn(why, 'terminal not back in 6s — take kept');
     return null;
   }
 
@@ -1902,6 +1962,30 @@ class _TerminalPageState extends State<TerminalPage>
     final placeholder = machineAway
         ? _MachineAway(name: machine.machine.displayName)
         : _Attaching(key: _skeletonKey);
+    // A screen this terminal already drew, being brought back: its stream reopening, or its socket
+    // dialling again after the stream was lost with it. Kept up under [_Reconnecting] rather than
+    // covered by the skeleton, which is for a terminal with nothing on it yet. Not while the machine
+    // is away — nothing is on its way then, and [_MachineAway] says why.
+    //
+    // ⚠️ **Lost with its socket, it counts from the drop to the reopen, with no gap between.** The
+    // socket comes back (`connected`) before the terminal is reopened: the one on screen waits as
+    // the machine's `pendingOfflineAgentId` while the app re-reads the machine's list, a round
+    // trip, and only then reopens it (`AppNotifier._recoverPendingAgent`). Read off the socket
+    // alone, the spinner went in that round trip and came back a beat later, a flicker. Waiting as
+    // the pending agent keeps it up; a session lost and NOT waiting — nothing is going to reopen
+    // it — shows its screen plainly, as it did, for a tap to reopen.
+    final waitingToReopen =
+        session != null &&
+        (machine?.connectionStatus != ConnectionStatus.connected ||
+            machine?.pendingOfflineAgentId == widget.agentId);
+    final reconnecting =
+        session != null &&
+        !agentGone &&
+        !machineAway &&
+        (session.showsEarlierScreen ||
+            (session.lostWithTransport &&
+                session.hasScreen &&
+                waitingToReopen));
     // Read-only either way — the terminal was never this pane's (a watcher) or was taken from it.
     // `_AgentGone` owns the page when the agent itself is missing, so this stays out of its way.
     final blocked =
@@ -2252,7 +2336,13 @@ class _TerminalPageState extends State<TerminalPage>
                                   // computer just restarted left the phone on it for close
                                   // to 90 seconds, read as a launch that hung. [_MachineAway]
                                   // covers the panel the same way and says why.
-                                  if (session != null && !session.hasScreen)
+                                  //
+                                  // ⚠️ **Unless the panel already shows a screen this
+                                  // terminal drew** — see `reconnecting` above. Then the
+                                  // screen stays and only [_Reconnecting] lies over it.
+                                  if (reconnecting)
+                                    const Positioned.fill(child: _Reconnecting())
+                                  else if (session != null && !session.hasScreen)
                                     Positioned.fill(child: placeholder),
                                   // The mic and Search, floating in the
                                   // terminal's bottom-right corner — see
@@ -2722,12 +2812,7 @@ class _TerminalPageState extends State<TerminalPage>
         icon: LucideIcons.octagonPause300,
         label: 'Interrupt',
         value: 'esc',
-        onTap: () {
-          final session = widget.notifier
-              .paneOfAgent(widget.machineId, widget.agentId)
-              ?.session;
-          session?.terminal.keyInput(TerminalKey.escape);
-        },
+        onTap: () => unawaited(_interrupt()),
       ),
     // Where this agent runs, above the actions that act ON it: the desktop
     // keeps it in the pane header, and this sheet is the phone's pane header.
@@ -2814,6 +2899,39 @@ class _TerminalPageState extends State<TerminalPage>
   /// agent was withdrawn).
   Future<void> _takeControl() =>
       widget.notifier.selectAgent(widget.machineId, widget.agentId);
+
+  /// The sheet's Interrupt: Esc, on a terminal taken back first when another client holds it.
+  ///
+  /// ⚠️ **Offered while the terminal is only watched, so it takes it.** The row shows whenever the
+  /// agent works, and a terminal held by the computer drops a key the phone sends — so Interrupt,
+  /// wanted most when something has to stop now, used to do nothing there and say nothing.
+  Future<void> _interrupt() async {
+    final held = widget.notifier
+        .paneOfAgent(widget.machineId, widget.agentId)
+        ?.session;
+    if (held != null && held.acceptsInput) {
+      held.terminal.keyInput(TerminalKey.escape);
+      return;
+    }
+    if (_interruptWaiting) return;
+    _interruptWaiting = true;
+    try {
+      final session = await _sessionForInput(why: 'interrupt');
+      if (!mounted) return;
+      if (session == null) {
+        _flash('✗ not sent', error: true);
+        return;
+      }
+      session.terminal.keyInput(TerminalKey.escape);
+    } finally {
+      _interruptWaiting = false;
+    }
+  }
+
+  /// Set while an Interrupt waits for the terminal to come back, so a second one pressed in that
+  /// wait — the sheet opened again because nothing seemed to happen — adds no second Esc once it
+  /// has: on Claude Code's empty prompt, Esc twice opens the rewind to an earlier message.
+  bool _interruptWaiting = false;
 
   /// Restarting is a round trip that can fail, and the phone has no status rail to fail into — so
   /// the answer lands as a snackbar, which is the one surface a pushed page here always has.
@@ -2968,6 +3086,102 @@ class _MachineAway extends StatelessWidget {
                 ],
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Laid over a screen this terminal already drew while it is brought back — its stream reopened,
+/// or its socket dialled again — a light blur and a spinner, with the screen still under them.
+///
+/// ⚠️ **Over the old screen, not in its place (owner, 2026-10-15).** The skeleton ([_Attaching])
+/// stands for a terminal with nothing on it yet. Laid over one the reader was just reading — back
+/// from a network switch, a redial — it made their terminal vanish into a skeleton and come back a
+/// moment later, which read as lost work. The screen stays; this only says it is being refreshed,
+/// and goes the moment the new stream's keyframe replaces it.
+///
+/// ⚠️ **After a beat ([showAfter]).** A reopen on a good line is answered in a few hundred
+/// milliseconds; a spinner and a blur flashed over a terminal for that long read as a glitch. Only
+/// a wait that lasts gets them, faded in.
+///
+/// ⚠️ **The blur is light and short-lived, and the spinner is on its own layer.** A `BackdropFilter`
+/// re-blurs what is under it whenever the frame is drawn again, which is why the floating buttons
+/// lost theirs (`FloatingGlass`, `floating_glass.dart`): they sit over a streaming terminal all
+/// the time. This is up only for the seconds a terminal is being brought back, over a screen that
+/// is not streaming, at a small sigma; the spinner's own [RepaintBoundary] keeps its animation out
+/// of the blurred layer. With animations off it stands still, so nothing redraws at all.
+///
+/// Taps go through to the terminal, as the skeleton's do: a swipe to Find or another agent, or a tap
+/// to raise the keyboard, should not wait for the reconnect.
+class _Reconnecting extends StatefulWidget {
+  const _Reconnecting();
+
+  /// How long a reconnect may take before it is shown at all.
+  static const showAfter = Duration(milliseconds: 300);
+
+  @override
+  State<_Reconnecting> createState() => _ReconnectingState();
+}
+
+class _ReconnectingState extends State<_Reconnecting> {
+  Timer? _wait;
+  bool _shown = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _wait = Timer(_Reconnecting.showAfter, () {
+      if (mounted) setState(() => _shown = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _wait?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Not even the blur before the beat: a quick reopen should leave the screen exactly as it was.
+    if (!_shown) return const SizedBox.shrink();
+    final tty = Tty.of(context);
+    final still = MediaQuery.disableAnimationsOf(context);
+    return IgnorePointer(
+      child: Semantics(
+        key: const ValueKey('terminal-reconnecting'),
+        label: 'Reconnecting to the harness',
+        liveRegion: true,
+        child: TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0, end: 1),
+          duration: still ? Duration.zero : const Duration(milliseconds: 180),
+          builder: (context, fade, child) => Opacity(opacity: fade, child: child),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              ClipRect(
+                child: BackdropFilter(
+                  filter: ui.ImageFilter.blur(sigmaX: 2.5, sigmaY: 2.5),
+                  child: ColoredBox(color: tty.ground.withValues(alpha: 0.3)),
+                ),
+              ),
+              Center(
+                child: RepaintBoundary(
+                  child: SizedBox.square(
+                    dimension: 22,
+                    // The app's one spinner, as Settings ▸ Sign out and the home screen draw it.
+                    // Still with animations off: three quarters of a ring, so it reads as waiting.
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: AppPalette.accent,
+                      value: still ? 0.75 : null,
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),

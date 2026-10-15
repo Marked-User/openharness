@@ -1,3 +1,4 @@
+import '../core/app_version.dart';
 import '../core/test_run.dart';
 import '../measurement/onboarding_measurement.dart';
 import '../measurement/product_measurement.dart';
@@ -106,6 +107,10 @@ class AgentCreationAttempt {
 
   final String _id;
   String? _machineId, _targetId;
+
+  /// The desk tab the agent joins once started, picked before it was asked for — see
+  /// [PhoneDesk.adopt]. Null joins the tab the phone is in.
+  String? _deskTabId;
   Map<String, dynamic>? _choices;
   Future<String?>? _inFlight;
   bool _awaitingConfirmation = false, _finished = false;
@@ -1122,7 +1127,33 @@ class AppNotifier extends ChangeNotifier {
               sendSetupMeasurement(this.config.apiBaseUrl, report),
         );
     addListener(_syncProductMeasurement);
+    unawaited(_measurementContext());
     _initDeviceLog();
+  }
+
+  /// Which build this phone's reports come from ([ProductMeasurement.context]): the public release
+  /// and the OS family, nothing that tells one phone from another. A debug build reports as
+  /// `development`, which the backend does not keep. Not the web, which has no such context.
+  Future<void> _measurementContext() async {
+    if (kIsWeb || kUnderTest) return;
+    var release = 'unknown';
+    try {
+      release = await runningAppVersion();
+    } catch (_) {}
+    if (_disposed) return;
+    productMeasurement.context = {
+      'surface': 'phone',
+      // The backend refuses a whole report whose release is not a plain x.y.z.
+      'release': RegExp(r'^(0|[1-9]\d{0,2})(\.(0|[1-9]\d{0,2})){2}$').hasMatch(release)
+          ? release
+          : 'unknown',
+      'platform': switch (defaultTargetPlatform) {
+        TargetPlatform.iOS => 'ios',
+        TargetPlatform.android => 'android',
+        _ => 'other',
+      },
+      'channel': kReleaseMode ? 'production' : 'development',
+    };
   }
 
   void _syncProductMeasurement() {
@@ -1734,9 +1765,24 @@ class AppNotifier extends ChangeNotifier {
   /// `viewer/email_code_api.dart`.
   Future<void> sendLoginCode(String email) => viewer.emailLogin.sendCode(email);
 
-  /// A sign-in attempt, counted as `sign_in` and under the welcome-screen button that started it.
-  void Function(ProductOutcome) _measureSignIn(ProductFlow method) =>
-      productMeasurement.beginEach([ProductFlow.signIn, method]);
+  /// A sign-in attempt, counted as `sign_in` and under the welcome-screen button that started it:
+  /// every outcome for a signed-out session that opted in, and a success once more under the
+  /// account's own sharing ([OnboardingMeasurement.signedIn]).
+  void Function(ProductOutcome) _measureSignIn(ProductFlow method) {
+    final finish = productMeasurement.beginEach([ProductFlow.signIn, method]);
+    final watch = Stopwatch()..start();
+    var done = false;
+    return (outcome) {
+      finish(outcome);
+      // Called again by each attempt's `finally`: only its first outcome is the attempt's.
+      if (done) return;
+      done = true;
+      onboardingMeasurement.attempted(method, outcome);
+      if (outcome == ProductOutcome.ok) {
+        onboardingMeasurement.signedIn(method, watch.elapsed);
+      }
+    };
+  }
 
   /// The phone's sign-in, second step: trade the emailed [code] for a session
   /// and go in.
@@ -1956,6 +2002,13 @@ class AppNotifier extends ChangeNotifier {
   /// Everything a sign-out does, whoever asked for it. [reason] is what the welcome screen says
   /// ([signedOutReason]): null when the person chose it.
   Future<void> _endSession({String? reason}) async {
+    // Chosen by the person, the sign-out is itself a step's end ("Not you? Sign out"): end the steps
+    // it abandons, then send what is queued while the session can still send it — the queue goes
+    // with the account.
+    if (reason == null) {
+      onboardingMeasurement.reset();
+      await productMeasurement.sendBeforeSignOut();
+    }
     // Signing out takes this phone's key out of the account's devices, while the sign-in still works
     // to say so. Best effort, and brief.
     if (_deviceLog case final log?) {
@@ -4979,6 +5032,50 @@ class AppNotifier extends ChangeNotifier {
     unawaited(connection.forceReconnect());
   }
 
+  /// A socket that still calls itself open but has stopped bringing anything from its machine:
+  /// put its terminals down as a dropped socket's are, and dial it again. True when it did; false
+  /// leaves everything as it was, for the caller's own repair.
+  ///
+  /// Two callers, one rule each:
+  /// - a terminal stream quiet for 15s on a socket that heard nothing from the machine in that time
+  ///   ([TerminalSession.onTransportSilent]);
+  /// - the app back from the background after [resumeRedialAfter], on a socket that heard nothing
+  ///   while it was away ([handleAppResumed]).
+  ///
+  /// ⚠️ **The sessions go down first, because [WsConn.forceReconnect] does not say so.** It drops
+  /// the old channel without a close event and dials again reporting `connecting`, which
+  /// [_onConnectionStatus] — rightly — does not read as a lost socket. Without this, every
+  /// terminal would stay `controlling` on a stream that left with the old socket, and wait out its
+  /// own watchdog all over again. Marked lost here, as the `reconnecting` branch there marks them,
+  /// the new socket's `connected` puts them back: the one on screen through
+  /// [MachineState.pendingOfflineAgentId], the rest through `_attachPendingPanes`, each in place
+  /// with its screen kept ([_reattachPane]).
+  ///
+  /// ⚠️ **Not offline.** The machine may be perfectly fine — it is the phone's own line to the
+  /// relay that went (a network switch, a tunnel), so this is [_recoverStaleSession]'s redial
+  /// without its offline flag, which would flash "Offline" over a machine nobody lost.
+  ///
+  /// ⚠️ **Only a connection that is up and can redial.** One mid-dial is already on its way back,
+  /// and redialling it would throw that dial away; one that cannot redial
+  /// ([WsConn.canForceReconnect]) would leave the sessions marked lost with no socket coming.
+  bool _redialStaleTransport(
+    MachineState machine,
+    WsConn connection, {
+    required String why,
+  }) {
+    if (_disposed || !connection.isReady || !connection.canForceReconnect) {
+      return false;
+    }
+    appLog.info(
+      'ws',
+      '${_shortId(machine.machine.machineId)}: $why — dialling the relay again',
+    );
+    _markSessionsUnreachable(machine, 'Connection lost. Reconnecting…');
+    notifyListeners();
+    unawaited(connection.forceReconnect());
+    return true;
+  }
+
   bool _machineWorkCurrent(MachineState machine, int revision) =>
       _authWorkCurrent(revision) &&
       identical(machineStates[machine.machine.machineId], machine);
@@ -5752,6 +5849,56 @@ class AppNotifier extends ChangeNotifier {
     }
   }
 
+  /// A Harness OS computer, managed from here (CLI services/osDevice.ts): `status`, `update`,
+  /// `wifi_scan`, `wifi_join` {ssid, password}, `wifi_result`. `{error: 'UNAVAILABLE'}` while it
+  /// cannot be reached — as it is for a while after `update` and `wifi_join`.
+  Future<Map<String, dynamic>> osDevice(
+    String machineId,
+    Map<String, dynamic> payload, {
+    Duration timeout = const Duration(seconds: 25),
+  }) async {
+    final machine = machineStates[machineId];
+    if (machine == null || machine.needsLink) return {'error': 'UNAVAILABLE'};
+    try {
+      return await _conn(
+        machineId,
+      ).request('os_device', payload: payload, timeout: timeout);
+    } catch (_) {
+      return {'error': 'UNAVAILABLE'};
+    }
+  }
+
+  /// What each computer's `os_device` `status` said: whether it runs Harness OS, its update and its
+  /// Wi-Fi. Asked again at most every few minutes ([refreshOsStatus]).
+  final Map<String, Map<String, dynamic>> osStatus = {};
+  final Map<String, DateTime> _osAsked = {};
+
+  bool runsHarnessOs(String machineId) => osStatus[machineId]?['harnessOs'] == true;
+
+  bool updateAvailable(String machineId) {
+    final update = osStatus[machineId]?['update'];
+    return update is Map && update['available'] == true;
+  }
+
+  /// Asks [machineId] what it is and whether it has an update, unless asked lately ([force] asks now).
+  Future<void> refreshOsStatus(String machineId, {bool force = false}) async {
+    final asked = _osAsked[machineId];
+    if (!force &&
+        asked != null &&
+        DateTime.now().difference(asked) < const Duration(minutes: 5)) {
+      return;
+    }
+    _osAsked[machineId] = DateTime.now();
+    final status = await osDevice(machineId, {'action': 'status'});
+    // An older CLI answers it UNSUPPORTED/SERVICE_UNAVAILABLE: not Harness OS as far as the phone knows.
+    if (status['error'] == 'UNAVAILABLE') {
+      _osAsked.remove(machineId);
+      return;
+    }
+    osStatus[machineId] = status;
+    notifyListeners();
+  }
+
   Future<Map<String, dynamic>> connectors(
     String machineId,
     Map<String, dynamic> payload, {
@@ -5894,6 +6041,9 @@ class AppNotifier extends ChangeNotifier {
   /// instruction to make one would have to guess which was meant. `cli/src/lib/projectFolder.ts`
   /// reads the pair, and `[folder]` stays required so the ordinary case — a folder the person
   /// picked — cannot be forgotten.
+  ///
+  /// [deskTabId] is the desk tab the agent joins once started — the one Find was narrowed to —
+  /// instead of the tab the phone is in. See [PhoneDesk.adopt].
   Future<String?> createAgent(
     String machineId, {
     required String engine,
@@ -5903,6 +6053,7 @@ class AppNotifier extends ChangeNotifier {
     String? codexHome,
     GridModel? model,
     String? swarmId,
+    String? deskTabId,
     AgentCreationAttempt? attempt,
     String? prompt,
     String? name,
@@ -5933,7 +6084,13 @@ class AppNotifier extends ChangeNotifier {
       'gridModel': ?model?.id,
       'gridName': ?model?.grid,
     };
-    return _create(machineId, choices, swarmId: swarmId, attempt: creation);
+    return _create(
+      machineId,
+      choices,
+      swarmId: swarmId,
+      deskTabId: deskTabId,
+      attempt: creation,
+    );
   }
 
   /// A Claude Code or Codex conversation Harness did not start, opened as a harness that resumes
@@ -5981,6 +6138,7 @@ class AppNotifier extends ChangeNotifier {
     String machineId,
     Map<String, dynamic> choices, {
     String? swarmId,
+    String? deskTabId,
     AgentCreationAttempt? attempt,
   }) {
     final creation = attempt ?? AgentCreationAttempt();
@@ -5997,6 +6155,8 @@ class AppNotifier extends ChangeNotifier {
       creation._choices = choices;
       creation._machineId = machineId;
       creation._targetId = swarmId ?? activeSwarmId;
+      // With the request, not read again on a Check status: the tab picked is the one asked for.
+      creation._deskTabId = deskTabId;
     }
     final work = _createAgentWithReceipt(creation);
     creation._inFlight = work;
@@ -6321,12 +6481,13 @@ class AppNotifier extends ChangeNotifier {
       return null;
     }
     // Created HERE, so it joins the tab this phone is in — the way an agent
-    // created in a window joins that window's tab. See [PhoneDesk.adopt] for
-    // what happens when the phone is in no tab.
-    _desk.adopt((
-      machineId: machineId,
-      agentId: agent.id,
-    ), name: agent.displayName);
+    // created in a window joins that window's tab — or the tab picked for it.
+    // See [PhoneDesk.adopt] for what happens when the phone is in no tab.
+    _desk.adopt(
+      (machineId: machineId, agentId: agent.id),
+      name: agent.displayName,
+      tabId: creation._deskTabId,
+    );
     await assignAgentToPane(null, machineId, agent.id, swarmId: targetId);
     return null;
   }
@@ -6334,6 +6495,20 @@ class AppNotifier extends ChangeNotifier {
   /// The longest name the backend keeps for a computer — `renameBody` in
   /// `backend/src/routes/machines.ts` refuses anything longer.
   static const machineNameMaxLength = 40;
+
+  /// Computers this phone just set up (Settings ▸ Set up a device): Computers marks them "new" until
+  /// one is opened. This run only.
+  final Set<String> _newMachines = {};
+
+  bool isNewMachine(String machineId) => _newMachines.contains(machineId);
+
+  void markMachineNew(String machineId) {
+    if (_newMachines.add(machineId)) notifyListeners();
+  }
+
+  void sawMachine(String machineId) {
+    if (_newMachines.remove(machineId)) notifyListeners();
+  }
 
   /// Renames a machine via `PATCH /api/machines/:machineId` (control-plane REST — the machine's
   /// `name` is backend-owned, unlike an agent's, which lives on the harness CLI). Returns null on
@@ -7748,6 +7923,19 @@ class AppNotifier extends ChangeNotifier {
         await connection.forceReconnect();
         return true;
       },
+      // A live stream gone quiet on a socket that heard nothing from the machine either — see
+      // [TerminalSession.onTransportSilent]. The socket held now, never one built for the asking:
+      // a pane whose machine has no socket has nothing to redial.
+      onTransportSilent: () {
+        final machine = machineStates[pane.machineId];
+        final connection = _heldConnection(pane.machineId);
+        if (machine == null || connection == null) return false;
+        return _redialStaleTransport(
+          machine,
+          connection,
+          why: 'a terminal stream and its socket went quiet',
+        );
+      },
       // ⚠️ **Opening IS taking, for everything a person does.** A page opened, swiped onto or
       // restored at launch claims the terminal; the one open that still asks politely is the warm
       // tile the pager builds ahead of the thumb, which is a guess and must not cost the desktop
@@ -8716,6 +8904,9 @@ class AppNotifier extends ChangeNotifier {
   ///
   /// Safe to call on every resume. [WsPool.reconnectAll] skips connections that are already open
   /// and connections somebody closed on purpose, so a tab switch that cost nothing costs nothing.
+  ///
+  /// An open socket is not always a live one, though: after [resumeRedialAfter] away, one that
+  /// heard nothing from its machine meanwhile is dialled again too — see [_redialSocketsSilentSince].
   void handleAppResumed() {
     if (kTypingTrace) {
       final pane = focusedPane;
@@ -8724,7 +8915,15 @@ class AppNotifier extends ChangeNotifier {
         ' ${pane == null ? '-' : '${_shortId(pane.machineId)}/${_shortId(pane.agentId ?? '-')}'}',
       );
     }
+    final pausedAt = _pausedAt;
+    _pausedAt = null;
     _pool?.reconnectAll();
+    // After reconnectAll, not before: a socket it has just started dialling is not ready, and is
+    // left to that dial.
+    if (pausedAt != null &&
+        DateTime.now().difference(pausedAt) >= resumeRedialAfter) {
+      _redialSocketsSilentSince(pausedAt);
+    }
     // Back in front of the agent that was on screen: whatever it finished
     // while the phone was in a pocket has now been seen.
     _seeWatchedAgent();
@@ -8755,10 +8954,66 @@ class AppNotifier extends ChangeNotifier {
   /// And write the machine cache now ([_keepMachineCache]): this is the last moment the app is sure
   /// to run, since closing it from the app switcher starts by sending it here.
   void handleAppPaused() {
+    // The first pause of this time away: a second without a resume between (the OS repeating
+    // itself) does not move the moment the phone actually left.
+    _pausedAt ??= DateTime.now();
     _desk.pause();
     _stopDeafPoll();
     // The agents this run learned between lists, for the next launch — see [_keepMachineCache].
     _keepMachineCache();
+  }
+
+  /// When the app last went into the background ([handleAppPaused]); null while it is in front.
+  DateTime? _pausedAt;
+
+  /// How long the app has to have been away before [handleAppResumed] stops trusting an open
+  /// socket that heard nothing from its machine in that time.
+  ///
+  /// ⚠️ **Thirty seconds, the daemon's terminal lease** (`HEARTBEAT_TIMEOUT_MS`,
+  /// `cli/src/lib/terminalStreamManager.ts`). A phone the OS suspended sends no `terminal_alive`, so
+  /// past this the daemon has closed this phone's terminal streams anyway, and they have to be
+  /// opened again whatever the socket: a fresh socket costs nothing they were not going to cost.
+  /// Shorter, a glance at another app would redial a socket that was fine and reopen terminals
+  /// that were still live — the "every tab switch costs a handshake" [WsConn.reconnectNow] warns
+  /// about.
+  ///
+  /// A field rather than a constant only so a test can stand in for half a minute in a pocket, as
+  /// [trustSettleRound] does for its wait.
+  @visibleForTesting
+  Duration resumeRedialAfter = const Duration(seconds: 30);
+
+  /// Back after [resumeRedialAfter] away: dial again every socket that still calls itself open
+  /// but heard nothing from its machine since [since], the moment the app left.
+  ///
+  /// ⚠️ **Why an open socket is not taken at its word.** The phone's line to the relay is lost by
+  /// being backgrounded, and above all by the network changing under it — Wi-Fi giving way to 4G
+  /// in a pocket — and the OS does not always say so: the old socket stays "open", bound to a
+  /// network that is gone, and takes every send while nothing comes back. Waited out, that was the
+  /// terminal's 15s watchdog plus its repairs, about twenty seconds of a screen that looked live
+  /// and took no keys; dialled now, the terminal is back in a couple of seconds.
+  ///
+  /// ⚠️ **Nothing heard while away is the test, not the time away alone.** A phone whose OS let it
+  /// run in the background (Android often does, for a while) kept its streams alive and heard
+  /// their sync frames: that socket is proved alive and left alone, terminals and all.
+  ///
+  /// Only a machine with a terminal attached: this exists to bring terminals back, and a machine
+  /// with none has nothing on screen waiting — its socket keeps its own repairs, as it did.
+  void _redialSocketsSilentSince(DateTime since) {
+    if (status != AppStatus.authenticated) return;
+    final away = DateTime.now().difference(since).inSeconds;
+    for (final machine in machineStates.values.toList()) {
+      final machineId = machine.machine.machineId;
+      if (!panesFor(machineId).any((pane) => pane.session != null)) continue;
+      final connection = _heldConnection(machineId);
+      if (connection == null) continue;
+      final heard = connection.lastHeardFromMachineAt;
+      if (heard != null && heard.isAfter(since)) continue;
+      _redialStaleTransport(
+        machine,
+        connection,
+        why: 'back after ${away}s away with nothing heard from it',
+      );
+    }
   }
 
   /// The app lost the foreground for a moment — the app switcher, a system sheet. Nothing stops;

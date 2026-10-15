@@ -1,6 +1,7 @@
 import { expect, it, vi } from 'vitest'
-import { productUsageIntent, productUsageLaunch, productUsageRequest } from './productUsageSignals.js'
-import { PRODUCT_USAGE_METRICS } from './productUsageContract.js'
+import { productObservation, productUsageIntent, productUsageLaunch, productUsageRequest } from './productUsageSignals.js'
+import { PRODUCT_USAGE_FLOWS, PRODUCT_USAGE_METRICS, PRODUCT_USAGE_SETUP_METRICS } from './productUsageContract.js'
+import { HEALTH_MEASURES } from './productHealthContract.js'
 
 it('separates automated polling, tool and app RPCs without inspecting error objects or content', () => {
   const emit = vi.fn()
@@ -114,4 +115,42 @@ it('never coerces private reply values and leaves successful resumes without a d
   productUsageRequest('agent_resume', emit, () => 0, 'app')(undefined, 'created', true)
   expect(emit.mock.calls.flat()).toContain('request_app_resume_ok')
   expect(emit.mock.calls.flat().some(name => name.includes('_reason_'))).toBe(false)
+})
+
+it('names every flow and health measure for hn, and no signed-out setup counter', () => {
+  const metrics = new Set<string>(PRODUCT_USAGE_METRICS)
+  for (const flow of PRODUCT_USAGE_FLOWS) for (const measure of ['started', 'ok', 'failed', 'cancelled', 'unknown', 'under_1s', 'over_1m']) {
+    expect(metrics.has(`ui_tui_${flow}_${measure}`), `${flow}_${measure}`).toBe(true)
+  }
+  for (const measure of HEALTH_MEASURES) expect(metrics.has(`health_tui_${measure}`), measure).toBe(true)
+  expect(PRODUCT_USAGE_SETUP_METRICS.some(metric => metric.includes('_tui_'))).toBe(false)
+})
+
+it('reduces hn\'s observations to the Desktop\'s flow and milestone counters, and nothing else', () => {
+  // Started when it begins, as the Desktop's `begin()` counts it; the outcome alone when it ends.
+  expect(productObservation({ flow: 'computer_link' })).toEqual(['ui_tui_computer_link_started'])
+  expect(productObservation({ flow: 'computer_link', outcome: 'ok', durationMs: 999 }))
+    .toEqual(['ui_tui_computer_link_ok', 'ui_tui_computer_link_under_1s'])
+  expect(productObservation({ durationMs: 1000, outcome: 'failed', flow: 'remote_connect' }))
+    .toEqual(['ui_tui_remote_connect_failed', 'ui_tui_remote_connect_1s_to_10s'])
+  expect(productObservation({ flow: 'resume_recovery', outcome: 'cancelled', durationMs: 59_999 })[1]).toBe('ui_tui_resume_recovery_10s_to_1m')
+  expect(productObservation({ flow: 'app_start', outcome: 'unknown', durationMs: 60_000 })[1]).toBe('ui_tui_app_start_over_1m')
+  expect(productObservation({ measure: 'funnel_first_work' })).toEqual(['health_tui_funnel_first_work'])
+  expect(productObservation({ measure: 'first_response_1m_to_5m' })).toEqual(['health_tui_first_response_1m_to_5m'])
+  const invalid = [null, undefined, 'sign_in', [], {}, { flow: 'PRIVATE_CANARY', outcome: 'ok', durationMs: 1 },
+    { flow: 'sign_in', outcome: 'started', durationMs: 1 }, { flow: 'sign_in', outcome: 'PRIVATE_CANARY', durationMs: 1 },
+    ...[-1, NaN, Infinity, '1', null].map(durationMs => ({ flow: 'sign_in', outcome: 'ok', durationMs })),
+    { flow: 'sign_in', outcome: 'ok' }, { flow: 'sign_in', outcome: 'ok', durationMs: 1, path: 'PRIVATE_CANARY' },
+    { flow: 'sign_in', durationMs: 1 }, { flow: 'sign_in', path: 'PRIVATE_CANARY' }, { flow: 'PRIVATE_CANARY' }, { flow: 1 },
+    { measure: 'PRIVATE_CANARY' }, { measure: 'tui_opens' }, { measure: 'funnel_first_work', agentId: 'PRIVATE_CANARY' },
+    { measure: 'funnel_first_work', flow: 'sign_in', outcome: 'ok', durationMs: 1 }, { flow: 'toString', outcome: 'ok', durationMs: 1 },
+    { measure: 'constructor' }]
+  for (const value of invalid) expect(productObservation(value), JSON.stringify(value)).toEqual([])
+  const all = new Set<string>(PRODUCT_USAGE_METRICS)
+  for (const flow of PRODUCT_USAGE_FLOWS) {
+    for (const metric of productObservation({ flow })) expect(all.has(metric), metric).toBe(true)
+    for (const outcome of ['ok', 'failed', 'cancelled', 'unknown']) {
+      for (const metric of productObservation({ flow, outcome, durationMs: 0 })) expect(all.has(metric), metric).toBe(true)
+    }
+  }
 })

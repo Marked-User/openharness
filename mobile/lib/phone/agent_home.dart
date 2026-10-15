@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:harness_mobile/demo/sample_mode.dart';
 import 'package:harness_mobile/logging/startup_trace.dart';
 import 'package:harness_mobile/logging/typing_trace.dart';
+import 'package:harness_mobile/measurement/onboarding_measurement.dart';
 import 'package:harness_mobile/measurement/product_measurement.dart';
 import 'package:harness_mobile/shared/theme/app_theme.dart';
 import 'package:harness_mobile/core/models.dart';
@@ -1136,6 +1137,10 @@ class _AgentHomeState extends State<AgentHome>
         child: GoToComputer(
           account: notifier.currentUser?.email,
           notYou: NotYouSignOut(notifier: notifier),
+          onSent: () => notifier.onboardingMeasurement.mark(
+            ProductFlow.computerWait,
+            OnboardingMark.linkShared,
+          ),
         ),
       ),
       status: const OnboardingStatus(OnboardingCopy.looking),
@@ -1207,13 +1212,25 @@ class _AgentHomeState extends State<AgentHome>
     final machine = notifier.stateOf(joining.machineId);
     if (machine == null) return false;
     return switch (phoneMachineStatusOf(machine)) {
-      PhoneMachineStatus.needsPassword => notifier.deviceTrustSettling,
-      PhoneMachineStatus.offline => phoneAccountSaysOnline(
-        machine.machine.status,
+      PhoneMachineStatus.needsPassword => _holdUnless(
+        notifier.deviceTrustSettling,
+        OnboardingMark.blockedPassword,
+      ),
+      PhoneMachineStatus.offline => _holdUnless(
+        phoneAccountSaysOnline(machine.machine.status),
+        OnboardingMark.blockedOffline,
       ),
       PhoneMachineStatus.connecting => true,
       PhoneMachineStatus.ready => _waitForFirstSession(),
     };
+  }
+
+  /// [holding] as it is; letting go, the session will not open by itself, and [why] is counted.
+  bool _holdUnless(bool holding, OnboardingMark why) {
+    if (!holding) {
+      widget.notifier.onboardingMeasurement.mark(ProductFlow.sessionOpen, why);
+    }
+    return holding;
   }
 
   /// The onboarding hands over to a session — its computer's own, or one picked meanwhile — and

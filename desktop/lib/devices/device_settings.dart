@@ -197,21 +197,6 @@ class _DeviceSettingsPanelState extends State<DeviceSettingsPanel> {
           ),
           const SizedBox(height: 10),
         ],
-        if (device.status.isPro && settings.screenTurned != null) ...[
-          SettingRow(
-            title: 'Rotate screen 180°',
-            detail: 'For a unit whose screen is mounted the other way up.',
-            controlSemanticLabel: 'Rotate screen 180°',
-            control: Switch(
-              key: ValueKey('devices-screen-turn-${device.key}'),
-              value: settings.screenTurned!,
-              onChanged: enabled
-                  ? (value) => change({'screenTurned': value})
-                  : null,
-            ),
-          ),
-          const SizedBox(height: 10),
-        ],
         SettingRow(
           title: 'Voice language',
           detail: 'The language you speak to this device.',
