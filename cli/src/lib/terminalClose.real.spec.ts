@@ -61,7 +61,7 @@ it.runIf(process.env.RUN_REAL_TMUX_DISCOVERY === '1')('saves and closes an inact
       return actualKill(runtime)
     })
     const stop = createStopAgentService({ registry, stoppedAgents,
-      restartJobs: new AgentRestartCoordinator(), stopJobs: new Map(), tmuxBackend: backend,
+      restartJobs: new AgentRestartCoordinator(), stopJobs: new Map(), backendFor: () => backend,
       agentReconciler: { suppress() {}, holdRoute() {}, releaseRoute() {}, trigger: async () => {} },
       forgetSession: id => registry.removeAgent(id), markDeleted() {}, clearDeleted() {}, stopNative: inlineNativeControls().stop,
     })

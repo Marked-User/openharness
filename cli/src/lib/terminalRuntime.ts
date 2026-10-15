@@ -1,5 +1,5 @@
 import type { AgentEngine } from '../engines/types.js'
-import type { ProcessIdentity, TerminalBackendName, TerminalRuntimeRef, TmuxRuntimeRef } from './terminalTypes.js'
+import type { ProcessIdentity, TerminalBackendName, TerminalRuntimeRef } from './terminalTypes.js'
 
 const SEP = '\u0000'
 
@@ -50,13 +50,6 @@ export function primaryRuntime(session: { readonly runtimes: readonly TerminalRu
   return session.runtimes[0]
 }
 
-/**
- * A session's tmux runtime, if it has one: what code that drives tmux itself addresses. Never `tmuxPane`,
- * which is the primary runtime's pane on whatever backend (registry.ts `paneProjection`).
- */
-export function tmuxRuntimeOf(session: { readonly runtimes: readonly TerminalRuntimeRef[] }): TmuxRuntimeRef | undefined {
-  return session.runtimes.find((runtime): runtime is TmuxRuntimeRef => runtime.backend === 'tmux')
-}
 
 /** A pty host pane as its shell names itself: `HARNESS_PANE`, `<instance>:%N`. */
 const PTY_HOST_PANE = /^(p\d{1,4}):(%\d{1,9})$/

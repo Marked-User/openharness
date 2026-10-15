@@ -424,7 +424,7 @@ async function stopFixture() {
   })
   const kill = vi.fn(async () => ({ state: 'succeeded' as const, dispatch: 'executed' as const }))
   const stop = createStopAgentService({ registry, stoppedAgents, restartJobs: new AgentRestartCoordinator(), stopJobs: new Map(),
-    tmuxBackend: { kill }, agentReconciler: { suppress: vi.fn(), holdRoute: vi.fn(), releaseRoute: vi.fn(), trigger: vi.fn(async () => {}) },
+    backendFor: () => ({ kill }), agentReconciler: { suppress: vi.fn(), holdRoute: vi.fn(), releaseRoute: vi.fn(), trigger: vi.fn(async () => {}) },
     forgetSession, markDeleted: vi.fn(), clearDeleted: vi.fn(), stopNative: vi.fn(async () => {}),
   })
   return { stop, registry, stoppedAgents, live, profile, kill, terminateDeletedAgent }

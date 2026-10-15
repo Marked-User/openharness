@@ -409,10 +409,10 @@ it.each(['Stop', 'checkpointed Stop', 'unknown process', 'unknown descriptors', 
   const { AgentRestartCoordinator } = await import('./restartAgent.js')
   const { createStopAgentService } = await import('./stopAgentService.js')
   const { terminateDeletedAgent } = await import('./deleteAgentFallback.js')
-  const checkpoint = vi.fn(), save = vi.fn()
+  const checkpoint = vi.fn(), save = vi.fn(), kill = vi.fn()
   const deps: StopAgentServiceDeps = {
     registry: { resolve: () => row }, stoppedAgents: { save } as unknown as StopAgentServiceDeps['stoppedAgents'],
-    restartJobs: new AgentRestartCoordinator(), stopJobs: new Map(), tmuxBackend: { kill: vi.fn() },
+    restartJobs: new AgentRestartCoordinator(), stopJobs: new Map(), backendFor: () => ({ kill }),
     agentReconciler: { suppress: vi.fn(), holdRoute: vi.fn(), releaseRoute: vi.fn(), trigger: vi.fn() },
     forgetSession: vi.fn(), markDeleted: vi.fn(), clearDeleted: vi.fn(), stopNative: vi.fn(),
   }
@@ -420,7 +420,7 @@ it.each(['Stop', 'checkpointed Stop', 'unknown process', 'unknown descriptors', 
     .rejects.toThrow(reason)
   expect(save).not.toHaveBeenCalled(); expect(checkpoint).not.toHaveBeenCalled()
   expect(deps.stopNative).not.toHaveBeenCalled(); expect(terminateDeletedAgent).not.toHaveBeenCalled()
-  expect(deps.tmuxBackend!.kill).not.toHaveBeenCalled(); expect(deps.forgetSession).not.toHaveBeenCalled()
+  expect(kill).not.toHaveBeenCalled(); expect(deps.forgetSession).not.toHaveBeenCalled()
   expect(deps.markDeleted).not.toHaveBeenCalled(); expect(deps.registry.resolve(row.agentId)).toBe(row)
   expect(deps.stopJobs.size).toBe(0)
 })

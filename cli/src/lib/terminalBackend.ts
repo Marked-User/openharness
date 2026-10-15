@@ -133,6 +133,39 @@ export function heldIn(
   return Promise.resolve(false)
 }
 
+/** Where a row's pane is reached, and the backend that holds it. */
+export interface TerminalTarget<B = TerminalBackend> {
+  backend: B
+  runtime: TerminalRuntimeRef
+}
+
+/**
+ * The runtime [session]'s pane is asked about and closed through, and its backend: its tmux runtime first, as before
+ * any other backend could resume, then the rest in row order. Undefined when none of its runtimes is on a backend this
+ * daemon has (`missingBackendCode` names which).
+ */
+export function terminalTargetOf<B>(
+  session: { readonly runtimes: readonly TerminalRuntimeRef[] },
+  backendFor: (runtime: TerminalRuntimeRef) => B | undefined,
+): TerminalTarget<B> | undefined {
+  for (const runtime of tmuxFirst(session.runtimes)) {
+    const backend = backendFor(runtime)
+    if (backend) return { backend, runtime }
+  }
+  return undefined
+}
+
+/** The code a backend that is not there answers creates, restores and resumes with. */
+export const TERMINAL_UNAVAILABLE_CODE: Record<TerminalBackendName, string> = { tmux: 'TMUX_UNAVAILABLE', ptyhost: 'PTY_HOST_UNAVAILABLE' }
+
+/**
+ * What a row none of whose runtimes is on a backend here answers (`terminalTargetOf` undefined): the backend it would
+ * have been asked of, tmux first. A tmux row keeps the `TMUX_UNAVAILABLE` it always had.
+ */
+export function missingBackendCode(session: { readonly runtimes: readonly TerminalRuntimeRef[] }): string {
+  return TERMINAL_UNAVAILABLE_CODE[tmuxFirst(session.runtimes)[0]?.backend ?? 'tmux']
+}
+
 /** [runtimes] with their tmux ones first, the rest in row order. */
 function tmuxFirst(runtimes: readonly TerminalRuntimeRef[]): TerminalRuntimeRef[] {
   return [...runtimes].sort((a, b) => Number(b.backend === 'tmux') - Number(a.backend === 'tmux'))

@@ -49,6 +49,23 @@ const paneState = vi.fn()
 const releaseHold = vi.fn()
 const rootProcess = vi.fn()
 const inventory = vi.fn<() => Promise<TerminalInventoryResult>>()
+const tmuxTerminal = { create, kill, paneState, releaseHold, rootProcess, inventory }
+/** No backend at all: none to create on, none holding any pane. */
+const noBackend = () => { deps.createBackend = null; deps.backendFor = () => undefined }
+// A pty host, the backend new panes are made on where it is the only one (Windows).
+const pty = { backend: 'ptyhost' as const, instance: 'p1', paneId: '%5' }
+const ptyCreate = vi.fn()
+const ptyKill = vi.fn()
+const ptyPaneState = vi.fn()
+const ptyReleaseHold = vi.fn()
+const ptyRootProcess = vi.fn()
+const ptyInventory = vi.fn<() => Promise<TerminalInventoryResult>>()
+const ptyTerminal = { create: ptyCreate, kill: ptyKill, paneState: ptyPaneState, releaseHold: ptyReleaseHold, rootProcess: ptyRootProcess, inventory: ptyInventory }
+const ptyListed = (...panes: string[]): TerminalInventoryResult => ({ state: 'available', roots: panes.map(paneId => ({ runtime: { ...pty, paneId }, rootPid: 1, cwd: '/' })) })
+/** A machine whose only backend is the pty host. */
+const ptyhostOnly = () => { deps.createBackend = ptyTerminal; deps.backendFor = runtime => runtime.backend === 'ptyhost' ? ptyTerminal : undefined }
+/** Nothing was asked of tmux. */
+const tmuxUntouched = () => { for (const call of Object.values(tmuxTerminal)) expect(call).not.toHaveBeenCalled() }
 /** The backend's inventory, listing [panes]. */
 const listed = (...panes: string[]): TerminalInventoryResult => ({ state: 'available', roots: panes.map(paneId => ({ runtime: { backend: 'tmux', paneId }, rootPid: 1, cwd: '/' })) })
 function live(extra: Partial<RegisteredSession> = {}) {
@@ -82,6 +99,11 @@ beforeEach(() => {
   vi.mocked(refusePermissionFlagIfUnsupported).mockReset().mockResolvedValue(null)
   vi.mocked(installedDsh).mockReturnValue(undefined)
   inventory.mockReset().mockResolvedValue(listed(pane))
+  ptyCreate.mockReset().mockResolvedValue({ state: 'succeeded', runtime: pty })
+  ptyKill.mockReset().mockResolvedValue({ state: 'succeeded' })
+  ptyPaneState.mockReset().mockResolvedValue({ dead: false })
+  ptyReleaseHold.mockReset().mockResolvedValue(undefined)
+  ptyInventory.mockReset().mockResolvedValue(ptyListed(pty.paneId))
   vi.mocked(checkPidRuntime).mockReset().mockResolvedValue({ state: 'gone', reason: 'fixture' })
   vi.mocked(checkSessionRuntime).mockReset().mockResolvedValue({ state: 'alive' })
   paneState.mockReset().mockResolvedValue({ dead: false } as any)
@@ -92,7 +114,8 @@ beforeEach(() => {
     return identity
   })
   deps = {
-    registry, stoppedAgents: store, tmuxBackend: { create, kill, paneState, releaseHold, rootProcess, inventory }, restartJobs: new AgentRestartCoordinator(),
+    registry, stoppedAgents: store, createBackend: tmuxTerminal, backendFor: runtime => runtime.backend === 'tmux' ? tmuxTerminal : undefined,
+    restartJobs: new AgentRestartCoordinator(),
     stopJobs: new Map(), pinnedControls: new Set(),
     retainExitedSession: vi.fn((row, alive) => { store.save(row); if (alive) registry.releaseEngine(row.agentId, true); else registry.removeAgent(row.agentId) }),
     announceSession: vi.fn(), relaunchOverrides: vi.fn(async () => ({ ok: true as const, overrides: { env: {}, extraArgs: [], clearEnv: [] } })),
@@ -345,7 +368,7 @@ describe('production resume handler', () => {
     expect(await start()).toMatchObject({ error: 'AGENT_BUSY' }); expect(create).not.toHaveBeenCalled()
   })
   it.each([
-    ['missing tmux', () => { deps.tmuxBackend = null }, 'TMUX_UNAVAILABLE'],
+    ['missing tmux', () => { noBackend() }, 'TMUX_UNAVAILABLE'],
     ['missing provider', () => rewrite({ grid: { baseUrl: 'https://fixture.invalid', model: null }, gridLaunch: null }), 'GRID_CREDENTIAL_REQUIRED'],
     ['missing DSH', () => rewrite({ dsh: 'missing' }), 'INVALID_DSH'],
     ['missing cwd', () => rewrite({ cwd: null }), 'CWD_NOT_FOUND'],
@@ -447,20 +470,20 @@ describe('existing runtime and readiness verification', () => {
     if (engine === 'terminal') rewrite({ engine, sessionId: '', transcriptPath: '' })
     live({ engine, resumeOnly: undefined, launch: { state: 'ready' } }); vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' })
     expect(await start()).toMatchObject({ ok: true }); expect(create).not.toHaveBeenCalled()
-    if (engine === 'claude') expect(checkSessionRuntime).toHaveBeenCalledWith(deps.tmuxBackend, expect.objectContaining({ agentId: saved.agentId }), { backend: 'tmux', paneId: pane })
+    if (engine === 'claude') expect(checkSessionRuntime).toHaveBeenCalledWith(tmuxTerminal, expect.objectContaining({ agentId: saved.agentId }), { backend: 'tmux', paneId: pane })
   })
   it('checks a mixed row through its tmux pane, not the ptyhost pane its `tmuxPane` projects', async () => {
     const tmux = { backend: 'tmux' as const, paneId: '%9' }
     live({ resumeOnly: undefined, launch: { state: 'ready' }, runtimes: [{ backend: 'ptyhost', instance: 'p1', paneId: pane }, tmux] })
     vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }); inventory.mockResolvedValue(listed('%9'))
     expect(await start()).toMatchObject({ ok: true }); expect(create).not.toHaveBeenCalled()
-    expect(checkSessionRuntime).toHaveBeenCalledExactlyOnceWith(deps.tmuxBackend, expect.objectContaining({ agentId: saved.agentId }), tmux)
+    expect(checkSessionRuntime).toHaveBeenCalledExactlyOnceWith(tmuxTerminal, expect.objectContaining({ agentId: saved.agentId }), tmux)
   })
   it.each(['no route', 'no inventory', 'process unknown', 'process detached', 'unidentified engine', 'no tmux backend'] as const)('does not disturb %s', async reason => {
     // No tmux route: a ptyhost pane only, whose `tmuxPane` projection names the id tmux lists below.
     live({ resumeOnly: undefined, launch: { state: 'ready' }, ...(reason === 'no route' ? { runtimes: [{ backend: 'ptyhost', instance: 'p1', paneId: pane }] } : {}) })
     if (reason === 'no route') vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' })
-    if (reason === 'no tmux backend') { deps.tmuxBackend = null; vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }) }
+    if (reason === 'no tmux backend') { noBackend(); vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }) }
     if (reason === 'no inventory') inventory.mockResolvedValue({ state: 'unavailable', reason: 'fixture' })
     if (reason === 'process unknown') vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'unknown', reason: 'fixture' })
     if (reason === 'process detached') { vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' }); inventory.mockResolvedValue(listed()) }
@@ -476,7 +499,7 @@ describe('existing runtime and readiness verification', () => {
     if (alive) expect(registry.byRuntimeTerminal({ backend: 'tmux', paneId: pane })?.engine).toBe('terminal')
   })
   it('cannot verify a surviving shell with no tmux backend to list it', async () => {
-    live({ engine: 'terminal', resumeOnly: undefined, launch: { state: 'ready' } }); deps.tmuxBackend = null
+    live({ engine: 'terminal', resumeOnly: undefined, launch: { state: 'ready' } }); noBackend()
     await expect(start()).rejects.toThrow('Could not verify')
     expect(deps.retainExitedSession).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled()
   })
@@ -498,11 +521,11 @@ describe('existing runtime and readiness verification', () => {
   it('rechecks a pending allocation after reconnect without spawning again', async () => {
     live(); expect(await start()).toMatchObject({ ok: true }); expect(create).not.toHaveBeenCalled()
     // Asked of the pane's own backend, about the pane the row records.
-    expect(resolvePaneEngineProcess).toHaveBeenCalledWith(deps.tmuxBackend, { backend: 'tmux', paneId: pane }, 'codex')
+    expect(resolvePaneEngineProcess).toHaveBeenCalledWith(tmuxTerminal, { backend: 'tmux', paneId: pane }, 'codex')
     expect(releaseHold).toHaveBeenCalledWith({ backend: 'tmux', paneId: pane })
   })
   it('confirms nothing of a pending allocation with no tmux backend to ask', async () => {
-    live(); deps.tmuxBackend = null
+    live(); noBackend()
     expect(await start()).toEqual({ ok: false, error: 'TMUX_UNAVAILABLE' })
     expect(resolvePaneEngineProcess).not.toHaveBeenCalled(); expect(deps.announceSession).not.toHaveBeenCalled()
   })
@@ -646,3 +669,85 @@ describe('resume edges the desk sees', () => {
   })
 })
 
+
+// Resume on the pty host, the only backend on Windows: each pane is asked of the backend it is on, and a new one is made
+// where new panes are. Before this, every resume there answered TMUX_UNAVAILABLE once its pane was up.
+describe('resume on the pty host', () => {
+  beforeEach(() => ptyhostOnly())
+
+  it('resumes a stopped harness in a new pty host pane and confirms it there, never asking tmux', async () => {
+    expect(await start()).toMatchObject({ ok: true, resumed: true, session: { agentId: saved.agentId, runtimes: [pty] } })
+    expect(ptyCreate).toHaveBeenCalledOnce()
+    expect(buildEngineLaunchArgv).toHaveBeenCalledWith('codex', expect.objectContaining({ resumeSessionId: saved.sessionId }))
+    expect(ptyCreate.mock.calls[0][0].command).toEqual(['fixture-engine'])
+    expect(resolvePaneEngineProcess).toHaveBeenCalledWith(ptyTerminal, pty, 'codex')
+    expect(ptyReleaseHold).toHaveBeenCalledWith(pty)
+    tmuxUntouched()
+  })
+
+  it('opens a stopped shell in a new pty host pane', async () => {
+    rewrite({ engine: 'terminal', sessionId: '', transcriptPath: '' })
+    expect(await start()).toMatchObject({ ok: true, session: { runtimes: [pty], launch: { state: 'ready' } } })
+    expect(ptyReleaseHold).toHaveBeenCalledWith(pty)
+    tmuxUntouched()
+  })
+
+  it('closes a cancelled allocation on the pty host', async () => {
+    ptyCreate.mockImplementation(async () => { deps.restartJobs.cancel(saved.agentId); return { state: 'succeeded', runtime: pty } })
+    expect(await start()).toMatchObject({ error: 'AGENT_CHANGED' })
+    expect(ptyKill).toHaveBeenCalledExactlyOnceWith(pty)
+    tmuxUntouched()
+  })
+
+  it('attaches a live pty host harness verified through its own inventory and pane', async () => {
+    live({ resumeOnly: undefined, launch: { state: 'ready' }, runtimes: [pty] })
+    vi.mocked(checkPidRuntime).mockResolvedValue({ state: 'alive' })
+    expect(await start()).toMatchObject({ ok: true }); expect(ptyCreate).not.toHaveBeenCalled()
+    expect(ptyInventory).toHaveBeenCalledOnce()
+    expect(checkSessionRuntime).toHaveBeenCalledExactlyOnceWith(ptyTerminal, expect.objectContaining({ agentId: saved.agentId }), pty)
+    tmuxUntouched()
+  })
+
+  it.each([true, false])('retains a pty host engine that exited, its shell surviving = %s', async alive => {
+    live({ resumeOnly: undefined, processIdentity: identity, launch: { state: 'ready' }, runtimes: [pty] })
+    ptyInventory.mockResolvedValue(alive ? ptyListed(pty.paneId) : ptyListed())
+    ptyCreate.mockResolvedValue({ state: 'succeeded', runtime: { ...pty, paneId: '%6' } })
+    expect(await start()).toMatchObject({ ok: true })
+    expect(deps.retainExitedSession).toHaveBeenCalledWith(expect.objectContaining({ agentId: saved.agentId }), alive)
+    tmuxUntouched()
+  })
+
+  it('rechecks a pending pty host allocation through its own backend', async () => {
+    live({ runtimes: [pty] })
+    expect(await start()).toMatchObject({ ok: true }); expect(ptyCreate).not.toHaveBeenCalled()
+    expect(resolvePaneEngineProcess).toHaveBeenCalledWith(ptyTerminal, pty, 'codex')
+    expect(ptyReleaseHold).toHaveBeenCalledWith(pty)
+    tmuxUntouched()
+  })
+
+  it('reads a pty host pane whose engine exited, to keep or drop its row', async () => {
+    live({ runtimes: [pty] })
+    vi.mocked(resolvePaneEngineProcess).mockResolvedValue(null)
+    ptyPaneState.mockResolvedValueOnce({ dead: false, engineExit: 1 }).mockResolvedValueOnce('gone')
+    expect(await start()).toMatchObject({ ok: false, error: 'RESUME_FAILED' })
+    expect(ptyPaneState).toHaveBeenCalledWith(pty)
+    expect(deps.retainExitedSession).toHaveBeenCalledWith(expect.objectContaining({ agentId: saved.agentId }), false)
+    tmuxUntouched()
+  })
+
+  it('names the pty host when a pty host row has no backend to ask', async () => {
+    live({ runtimes: [pty] }); deps.backendFor = () => undefined
+    expect(await start()).toEqual({ ok: false, error: 'PTY_HOST_UNAVAILABLE' })
+    expect(resolvePaneEngineProcess).not.toHaveBeenCalled()
+  })
+
+  it('asks tmux for the tmux pane of a mixed row', async () => {
+    deps.backendFor = runtime => runtime.backend === 'tmux' ? tmuxTerminal : ptyTerminal
+    const tmux = { backend: 'tmux' as const, paneId: pane }
+    live({ runtimes: [pty, tmux] })
+    expect(await start()).toMatchObject({ ok: true })
+    expect(resolvePaneEngineProcess).toHaveBeenCalledWith(tmuxTerminal, tmux, 'codex')
+    expect(releaseHold).toHaveBeenCalledWith(tmux)
+    expect(ptyReleaseHold).not.toHaveBeenCalled()
+  })
+})

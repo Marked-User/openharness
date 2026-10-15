@@ -1,16 +1,30 @@
 // Restart's primitives against the real Harness PTY host: a pane keeps its id and its scrollback while the
-// process in it is replaced, as tmux's `remain-on-exit` + `respawn-pane -k` keep a tmux pane. Build it first:
+// process in it is replaced, as tmux's `remain-on-exit` + `respawn-pane -k` keep a tmux pane. And stop and resume
+// through their services on a machine whose only backend is the host, as on Windows. Build it first:
 //   cd pty && cargo +stable build
 //   cd cli && HARNESS_PTY_BIN=$(pwd)/../pty/target/debug/harness-pty npx vitest run src/lib/ptyHostBackend.restart.spec.ts
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { PtyHostBackend } from './ptyHostBackend.js'
 import { readDiscovery } from './ptyHost/launch.js'
 import { PTY_PROTOCOL } from './ptyHost/protocol.js'
 import { canRestart } from './terminalBackend.js'
-import type { PtyRuntimeRef } from './terminalTypes.js'
+import type { PtyRuntimeRef, TerminalRuntimeRef } from './terminalTypes.js'
+import { registry } from './registry.js'
+import { StoppedAgentStore } from './stoppedAgents.js'
+import { AgentRestartCoordinator } from './restartAgent.js'
+import { createStopAgentService } from './stopAgentService.js'
+import { createResumeAgentService } from './resumeAgentService.js'
+
+// The command a resume launches, standing in for an engine's resume argv: everything else about the launch is the
+// service's own. A shell's real argv is the user's login shell, which a test must not run.
+const RESUME_COMMAND = ['/bin/sh', '-c', 'echo resumed-here; exec /bin/sh']
+vi.mock('./engineLaunch.js', async (original) => ({
+  ...await original<typeof import('./engineLaunch.js')>(),
+  buildEngineLaunchArgv: () => RESUME_COMMAND,
+}))
 
 const enabled = !!process.env.HARNESS_PTY_BIN
 const CASE_TIMEOUT_MS = 20_000
@@ -46,6 +60,11 @@ async function created(backend: PtyHostBackend, command: string[]): Promise<PtyR
   const result = await backend.create({ command })
   if (result.state !== 'succeeded') throw new Error(`create failed: ${JSON.stringify(result)}`)
   return result.runtime
+}
+
+/** Whether [pid] is still a process (one this test may not signal still is). */
+const running = (pid: number): boolean => {
+  try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
 }
 
 const screen = async (backend: PtyHostBackend, runtime: PtyRuntimeRef): Promise<string> => {
@@ -121,6 +140,62 @@ const screen = async (backend: PtyHostBackend, runtime: PtyRuntimeRef): Promise<
       expect(await until(() => screen(backend, replaced), (text) => /^engine-up$/m.test(text))).toMatch(/^engine-up$/m)
       expect(await backend.isHeld(replaced, token)).toBe(false)
       expect((await backend.kill(replaced)).state).toBe('succeeded')
+    })
+  }, CASE_TIMEOUT_MS)
+
+  it('stop closes a pty host harness\'s pane and ends its whole process tree; resume opens it again on the host', async () => {
+    await withHost(async (backend) => {
+      const dir = mkdtempSync(join(tmpdir(), 'pty-stop-resume-'))
+      try {
+        // A shell with a child that ignores the hangup a pane's close sends first: only the host's kill of the
+        // pane's whole group, escalated after its grace, ends it.
+        const pane = await created(backend, ['/bin/sh', '-c', '(trap "" HUP; exec sleep 300) & echo child=$!; exec /bin/sh'])
+        const child = Number((await until(() => screen(backend, pane), (text) => /child=\d+/.test(text))).match(/child=(\d+)/)?.[1])
+        const root = await backend.rootProcess(pane)
+        if (typeof root !== 'number' || !child) throw new Error(`no process tree: root=${String(root)} child=${child}`)
+        expect(running(root) && running(child)).toBe(true)
+
+        const row = registry.openPendingAgent({ engine: 'terminal', runtimes: [pane], cwd: dir })!
+        registry.setLaunch(row.agentId, { state: 'ready' })
+        const stoppedAgents = new StoppedAgentStore(join(dir, 'saved'))
+        const restartJobs = new AgentRestartCoordinator()
+        const stopJobs = new Map<string, Promise<void>>()
+        // The only backend: every pane is the host's, as on Windows.
+        const backendFor = (runtime: TerminalRuntimeRef) => runtime.backend === 'ptyhost' ? backend : undefined
+        const stop = createStopAgentService({
+          registry, stoppedAgents, restartJobs, stopJobs, backendFor,
+          agentReconciler: { suppress() {}, holdRoute() {}, releaseRoute() {}, trigger: async () => {} },
+          forgetSession: (id) => { registry.removeAgent(id) }, markDeleted() {}, clearDeleted() {}, stopNative: async () => {},
+        })
+        await stop(row.agentId)
+        expect(registry.byAgent(row.agentId)).toBeUndefined()
+        expect(stoppedAgents.get(row.agentId)).toMatchObject({ agentId: row.agentId, active: false })
+        expect(await until(() => backend.paneState(pane), (state) => state === 'gone')).toBe('gone')
+        const listed = await backend.inventory()
+        expect(listed.state === 'available' && listed.roots.some((entry) => entry.runtime.paneId === pane.paneId)).toBe(false)
+        expect(await until(async () => running(root) || running(child), (alive) => !alive)).toBe(false)
+
+        const resume = createResumeAgentService({
+          registry, stoppedAgents, createBackend: backend, backendFor, restartJobs, stopJobs, pinnedControls: new Set(),
+          retainExitedSession() { throw new Error('nothing live to retain') }, announceSession() {},
+          relaunchOverrides: async () => ({ ok: true, overrides: { env: {}, extraArgs: [], clearEnv: [] } }),
+          prepareSessionResume() {}, refreshGridWebSearch() {}, clearDeleted() {}, attachDsh() {}, attachSession: async () => true,
+        })
+        const resumed = await resume(row.agentId)
+        if (!resumed.ok) throw new Error(`resume failed: ${JSON.stringify(resumed)}`)
+        const [again] = resumed.session.runtimes as PtyRuntimeRef[]
+        expect(resumed.session).toMatchObject({ agentId: row.agentId, launch: { state: 'ready' } })
+        expect(again).toMatchObject({ backend: 'ptyhost', instance: pane.instance })
+        expect(again.paneId).not.toBe(pane.paneId)
+        expect(await until(() => screen(backend, again), (text) => /^resumed-here$/m.test(text))).toMatch(/^resumed-here$/m)
+        expect(await backend.paneState(again)).toMatchObject({ dead: false })
+
+        await stop(row.agentId)
+        expect(await until(() => backend.paneState(again), (state) => state === 'gone')).toBe('gone')
+      } finally {
+        for (const entry of registry.list()) registry.removeAgent(entry.agentId)
+        rmSync(dir, { recursive: true, force: true })
+      }
     })
   }, CASE_TIMEOUT_MS)
 })

@@ -2487,7 +2487,9 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     registry,
     stoppedAgents,
     restartJobs,
-    tmuxBackend: createBackend,
+    // A resumed harness opens where new panes are made; every pane is stopped and asked about on its own backend.
+    createBackend,
+    backendFor: (runtime) => terminals.backendFor(runtime),
     agentReconciler,
     forgetSession,
     markDeleted,

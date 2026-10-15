@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { canRestart, heldIn, restartTargetOf, type TerminalBackend } from './terminalBackend.js'
+import { canRestart, heldIn, missingBackendCode, restartTargetOf, terminalTargetOf, type TerminalBackend } from './terminalBackend.js'
 import type { TerminalRuntimeRef } from './terminalTypes.js'
 
 const tmux = { backend: 'tmux' as const, paneId: '%3' }
@@ -54,5 +54,25 @@ describe('whether a row\'s pane holds a launch', () => {
     expect(ptyHeld).toHaveBeenCalledExactlyOnceWith(pty, 'token')
     expect(await heldIn({ runtimes: [pty, tmux] }, 'token', (runtime) => runtime.backend === 'tmux' ? plain : undefined)).toBe(false)
     expect(await heldIn({ runtimes: [] }, 'token', backendFor)).toBe(false)
+  })
+})
+
+describe('where a row\'s pane is reached', () => {
+  it('is its tmux runtime first, then any runtime on a backend this daemon has, and none when none is', () => {
+    const tmuxBackend = { name: 'tmux' } as unknown as TerminalBackend
+    const ptyBackend = { name: 'ptyhost' } as unknown as TerminalBackend
+    const both = (runtime: TerminalRuntimeRef) => runtime.backend === 'tmux' ? tmuxBackend : ptyBackend
+    expect(terminalTargetOf({ runtimes: [pty, tmux] }, both)).toEqual({ backend: tmuxBackend, runtime: tmux })
+    expect(terminalTargetOf({ runtimes: [pty, tmux] }, (runtime) => runtime.backend === 'ptyhost' ? ptyBackend : undefined))
+      .toEqual({ backend: ptyBackend, runtime: pty })
+    expect(terminalTargetOf({ runtimes: [pty] }, () => undefined)).toBeUndefined()
+    expect(terminalTargetOf({ runtimes: [] }, both)).toBeUndefined()
+  })
+
+  it('names the missing backend when none is: tmux for a tmux row, as before, the pty host for a pty host row', () => {
+    expect(missingBackendCode({ runtimes: [tmux] })).toBe('TMUX_UNAVAILABLE')
+    expect(missingBackendCode({ runtimes: [pty, tmux] })).toBe('TMUX_UNAVAILABLE')
+    expect(missingBackendCode({ runtimes: [pty] })).toBe('PTY_HOST_UNAVAILABLE')
+    expect(missingBackendCode({ runtimes: [] })).toBe('TMUX_UNAVAILABLE')
   })
 })

@@ -21,7 +21,11 @@ export interface LifecycleDeps {
   registry: typeof registry
   stoppedAgents: StoppedAgentStore
   restartJobs: StopAgentServiceDeps['restartJobs']
-  tmuxBackend: StopAgentServiceDeps['tmuxBackend'] & ResumeAgentServiceDeps['tmuxBackend']
+  /** Where a resumed harness's new pane is made. */
+  createBackend: ResumeAgentServiceDeps['createBackend']
+  /** The backend that holds a pane (`terminals.backendFor`): stop closes, and resume asks about, each pane on its own. */
+  backendFor: (runtime: Parameters<StopAgentServiceDeps['backendFor']>[0]) =>
+    (ReturnType<StopAgentServiceDeps['backendFor']> & ReturnType<ResumeAgentServiceDeps['backendFor']>) | undefined
   agentReconciler: StopAgentServiceDeps['agentReconciler']
   forgetSession: StopAgentServiceDeps['forgetSession']
   stopNative: StopAgentServiceDeps['stopNative']
@@ -48,18 +52,18 @@ export interface LifecycleDeps {
 }
 
 export function createAgentLifecycle({
-  registry, stoppedAgents, restartJobs, tmuxBackend, agentReconciler, forgetSession, markDeleted, clearDeleted, stopNative, settlePane, cancelExternal,
+  registry, stoppedAgents, restartJobs, createBackend, backendFor, agentReconciler, forgetSession, markDeleted, clearDeleted, stopNative, settlePane, cancelExternal,
   sessionCheckpoints, mirror, sessionSearch, send, pinnedControls, retainExitedSession, announceSession,
   relaunchOverrides, prepareSessionResume, refreshGridWebSearch, attachDsh, attachSession, relaunchMarks, stopped,
 }: LifecycleDeps) {
   /**
    * Stop Harness (`agent_delete`) archives its conversation and launch settings, removes the live
-   * registry entry, and closes only its exact tmux pane. Exact PID/start-marker validation guards the engine's
+   * registry entry, and closes only its exact panes, each on its own backend. Exact PID/start-marker validation guards the engine's
    * SIGTERM/SIGKILL fallback. Engine conversation files, recaps and the Harness name remain on disk.
    */
   const stopJobs = new Map<string, Promise<void>>()
   const stop = createStopAgentService({
-    registry, stoppedAgents, restartJobs, stopJobs, tmuxBackend, agentReconciler,
+    registry, stoppedAgents, restartJobs, stopJobs, backendFor, agentReconciler,
     forgetSession, markDeleted, clearDeleted, stopNative, settlePane, cancelExternal,
   })
   /**
@@ -83,7 +87,7 @@ export function createAgentLifecycle({
   })
 
   const resume = createResumeAgentService({
-    registry, stoppedAgents, tmuxBackend, restartJobs, stopJobs, pinnedControls,
+    registry, stoppedAgents, createBackend, backendFor, restartJobs, stopJobs, pinnedControls,
     retainExitedSession, announceSession, relaunchOverrides, prepareSessionResume,
     refreshGridWebSearch, clearDeleted, attachDsh, attachSession, relaunchMarks,
   })

@@ -50,7 +50,7 @@ beforeEach(() => {
   vi.mocked(terminateDeletedAgent).mockResolvedValue('terminated')
   const stop = createStopAgentService({
     registry, stoppedAgents, restartJobs: new AgentRestartCoordinator(), stopJobs: new Map(),
-    tmuxBackend: { kill: killPane },
+    backendFor: () => ({ kill: killPane }),
     agentReconciler: { suppress: vi.fn(), holdRoute: vi.fn(), releaseRoute: vi.fn(), trigger: vi.fn(async () => {}) },
     forgetSession: id => registry.removeAgent(id), markDeleted: vi.fn(), clearDeleted: vi.fn(),
     // The real chain: the core's broker, Codex's own control in process, the process table mocked above.

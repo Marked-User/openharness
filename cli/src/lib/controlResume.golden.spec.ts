@@ -54,6 +54,7 @@ it.each(['linux', 'darwin'])('keeps healthy native resume composition on %s', as
     const { StoppedAgentStore } = await import('./stoppedAgents.js')
     const { AgentRestartCoordinator } = await import('./restartAgent.js')
     const { createResumeAgentService } = await import('./resumeAgentService.js')
+    type ResumeAgentServiceDeps = import('./resumeAgentService.js').ResumeAgentServiceDeps
     let pane = 0
     for (const engine of ['claude', 'codex', 'terminal'] as const) {
       const directory = join(root, engine === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR', engine === 'codex' ? 'sessions' : 'projects')
@@ -68,15 +69,16 @@ it.each(['linux', 'darwin'])('keeps healthy native resume composition on %s', as
       registry.removeAgent(saved.agentId)
       const stopped = new StoppedAgentStore(join(root, 'saved', engine)); stopped.save(saved)
       const events: unknown[] = []
-      const resume = createResumeAgentService({ registry, stoppedAgents: stopped, restartJobs: new AgentRestartCoordinator(),
-        stopJobs: new Map(), pinnedControls: new Set(), tmuxBackend: {
+      const terminal: ResumeAgentServiceDeps['createBackend'] & ReturnType<ResumeAgentServiceDeps['backendFor']> = {
           create: async request => { events.push(['create', request.command]); return { state: 'succeeded', dispatch: 'executed',
             runtime: { backend: 'tmux', paneId: `%${++pane}` } } },
           kill: async () => { throw Error('A healthy resume must not kill a pane') },
           releaseHold: async () => {}, paneState: async () => ({ dead: false, exitStatus: null, command: '<engine>', engineExit: null }),
           rootProcess: async () => { throw Error('The engine process is resolved through paneEngineProcess.js') },
           inventory: async () => ({ state: 'available', roots: [] }),
-        }, retainExitedSession: () => { throw Error('No live session exists in this fixture') },
+        }
+      const resume = createResumeAgentService({ registry, stoppedAgents: stopped, restartJobs: new AgentRestartCoordinator(),
+        stopJobs: new Map(), pinnedControls: new Set(), createBackend: terminal, backendFor: () => terminal, retainExitedSession: () => { throw Error('No live session exists in this fixture') },
         announceSession: session => { events.push(['announce', session.engine, session.sessionId, session.launch?.state]) },
         relaunchOverrides: async session => { events.push(['launch-prepare', session.engine, session.sessionId]);
           return { ok: true, overrides: { env: {}, extraArgs: [], clearEnv: [] } } },
