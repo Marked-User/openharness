@@ -39,7 +39,7 @@ python3 devices/harness-pro/firmware/test/test_tree_isolation.py
 python3 devices/harness-pro/firmware/test/test_fonts.py
 ```
 
-`run.sh` also runs the app, hello and voice-gate tests. It can also check the Console render time (`test/test_cs_perf.sh`: each screen within 85% of its recorded host time in `test/cs_perf_baseline.txt`). That check is opt-in, because absolute microseconds recorded on a Mac are flaky on shared or Linux CI machines: run it with `CS_PERF=1` (`CS_PERF_RECORD=1` prints fresh numbers).
+`run.sh` also runs the app, hello and voice-gate tests. It can also check the Pets render time (`test/test_ph_perf.sh`: each screen within 85% of its recorded host time in `test/ph_perf_baseline.txt`). That check is opt-in, because absolute microseconds recorded on a Mac are flaky on shared or Linux CI machines: run it with `PH_PERF=1` (`PH_PERF_RECORD=1` prints fresh numbers).
 
 Golden screens: `firmware/test/golden.sh --check` renders every Pod screen at five instants and compares hashes with
 `test/golden.txt` (or `golden-liberation.txt` when `PRO_FONT` is Liberation). Run it after any change to drawing or

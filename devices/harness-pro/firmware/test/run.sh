@@ -38,7 +38,7 @@ build_obj() {   # build_obj <limit-bytes> <source>...
 }
 cable_task=("$pod/pod_model.c" "$pod/pod_nav.c")
 [[ -f "$fw/main/app/pod_glue.c" ]] && cable_task+=("$fw/main/app/pod_glue.c")
-render_task=("$pod/pod_draw.c" "$pod/pod_pet.c" "$pod/pod_view.c" "$pod"/home/*.c)
+render_task=("$pod/pod_draw.c" "$pod/pod_pet.c" "$pod/pod_view.c" "$pod/pod_shared.c" "$pod/pod_time.c" "$pod"/home/*.c)
 other=()
 for f in "$pod"/*.c; do
     case " ${cable_task[*]} ${render_task[*]} " in *" $f "*) ;; *) other+=("$f") ;; esac

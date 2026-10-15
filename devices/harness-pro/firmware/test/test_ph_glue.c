@@ -800,6 +800,22 @@ static void selected_tab_follows(void) {
     CHECK(U.nav.depth == 3 && !strcmp(top()->agent, "a4"));
     sw_select("s2");
     CHECK(!strcmp(top()->agent, "a4"));
+    // After the echo window a selected-tab change follows again, and an old focus never blocks it once the clock wraps.
+    fresh();
+    sw_select("s1");
+    to_agent(0, 0);
+    pod_ui_focus(&U, "a3", 5000);
+    CHECK(!strcmp(top()->agent, "a3"));
+    U.model.clock_ms = 5000 + POD_FOLLOW_ECHO_MS;
+    sw_select("s2");
+    CHECK(!strcmp(top()->agent, "a4") && !U.followed);
+    fresh();
+    sw_select("s1");
+    to_agent(0, 0);
+    pod_ui_focus(&U, "a3", 5000);
+    U.model.clock_ms = 5000u + 0x80000000u + 100u;   // ~24.8 days later: a signed difference would read as "just now"
+    sw_select("s2");
+    CHECK(!strcmp(top()->agent, "a4"));
     // A new link only records the first frame.
     fresh();
     sw_select("s1");

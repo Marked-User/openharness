@@ -138,10 +138,11 @@ pod_out_t pod_ui_swarms(pod_ui_t *u, const cable_swarm_t *items, int n, const ca
     } else {
         rebuild_tabs(u);
     }
+    if (u->followed && (uint32_t)(u->model.clock_ms - u->followed_ms) >= POD_FOLLOW_ECHO_MS) u->followed = false;   // the echo window is over
     // The app window moved to another tab without focusing an agent: the device follows (pod_nav_follow_tab), unless the person is
     // busy (a contact, TALK, the update) or a host focus landed within the echo window (it wins). Notices stays put (pod_nav_follow_tab).
     if (sel_changed && !u->ota && !u->down && !pod_ui_talking(u) &&
-        !(u->followed && (int32_t)(u->model.clock_ms - u->followed_ms) < (int32_t)POD_FOLLOW_ECHO_MS) &&
+        !(u->followed && (uint32_t)(u->model.clock_ms - u->followed_ms) < POD_FOLLOW_ECHO_MS) &&
         pod_nav_follow_tab(&u->nav, &u->model)) {
         u->scroll_px = 0;
         u->dirty = true;

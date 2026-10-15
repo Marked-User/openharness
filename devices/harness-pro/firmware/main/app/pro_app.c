@@ -338,6 +338,7 @@ void pro_app_swarms(const cable_swarm_t *items, int n, const cable_swarm_members
                     const cable_tile_t *tiles, int tile_n)
 {
     pro_app_lock();
+    pod_model_clock(&s_pod.model, ms());   // the focus echo window is measured on this clock, which otherwise stands still while the glass sleeps
     settle(pod_ui_swarms(&s_pod, items, n, members, selected, tiles, tile_n));   // every frame, changed or not (P12)
     leave();
 }

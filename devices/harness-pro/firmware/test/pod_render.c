@@ -330,7 +330,7 @@ int main(int argc, char **argv)
     } else if (!strcmp(screen, "tabs:9")) more_tabs(3);   // nine tabs: more than one page
     else if (!strcmp(screen, "tabs:seven") || !strcmp(screen, "tabs:single")) cover_tabs(!strcmp(screen, "tabs:seven"));
     else if (!strcmp(screen, "tabs:none")) { static const char *const *no_ids[1]; static const uint8_t no_n[1]; pod_model_swarms(&M, NULL, no_ids, no_n, 0, "", NULL, 0); pod_model_question_close(&M, "cli"); }   // the first screen: no tabs
-    else if (!strcmp(screen, "tabs:long")) snprintf(M.tabs[0].name, CABLE_NAME_MAX, "marketing-site-redesign-with-a-long-name");   // Home: a name as long as the model keeps one
+    else if (!strcmp(screen, "tabs:long")) snprintf(M.tabs[0].name, CABLE_NAME_MAX, "%.*s", CABLE_NAME_MAX - 1, "marketing-site-redesign-with-a-long-name");   // Home: a name as long as the model keeps one
     else if (!strncmp(screen, "tabs", 4)) {   // tabs, or tabs:<n>: Home on tab n
         if (screen[4] == ':' && !strcmp(screen + 5, "mock")) mock_tabs();
         else if (screen[4] == ':') {

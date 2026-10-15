@@ -22,11 +22,12 @@ static const struct { unsigned fill, edge, ink, muted; } LOOK[] = {
 // A newline, return or tab in a message reads as a space (ht_pro_text stops at a newline).
 static bool is_sp(char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t'; }
 static void flatten(char *s) { for (; *s; s++) if (is_sp(*s)) *s = ' '; }
-// Bytes of the UTF-8 sequence at s (at least 1; a stray continuation byte or a truncated sequence counts as the bytes there are).
+// Bytes of the UTF-8 sequence at s (1..4; a stray continuation byte or a truncated sequence counts as the bytes there are, a run
+// of continuation bytes from the host is cut every 4 so no "code point" outgrows a row).
 static size_t cp_len(const char *s)
 {
     size_t m = 1;
-    while (s[m] && ((unsigned char)s[m] & 0xc0) == 0x80) m++;
+    while (m < 4 && s[m] && ((unsigned char)s[m] & 0xc0) == 0x80) m++;
     return m;
 }
 

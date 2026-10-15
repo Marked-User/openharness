@@ -1,6 +1,6 @@
 # Fonts
 
-Console faces (always these files, whatever `PRO_FONT` is; baked by `scripts/gen_fonts.py`). All SIL OFL 1.1.
+Pets faces (always these files, whatever `PRO_FONT` is; baked by `scripts/gen_fonts.py`). All SIL OFL 1.1.
 
 | File | Source | Version | sha256 |
 |---|---|---|---|

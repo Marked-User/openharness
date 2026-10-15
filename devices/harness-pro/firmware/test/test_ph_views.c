@@ -1041,6 +1041,18 @@ int main(void) {
         CHECK(text_run("restart into 0.1.2") && ph_runs(&F) <= 184);
     }
     // Bubbles
+    {   // malformed UTF-8 from the host (a lead byte, then a run of continuation bytes, past the cache's bypass length) stays in its rows
+        static char bad[520];
+        bad[0] = (char)0xC3; memset(bad + 1, 0x80, 500); bad[501] = 0;
+        fresh();
+        CHECK(ph_bubble_height(&ph_sb_34, 640, bad, 3, false) > 0);
+        (void)ph_bubble(&S, PH_SPEECH, 40, 100, 640, 100, 0, &ph_sb_34, bad, 3, NULL);
+        for (int i = 0; i < S.count; i++) CHECK(memchr(S.runs[i].text, 0, sizeof S.runs[i].text) != NULL);
+        bad[200] = 0;   // and the cached path
+        fresh();
+        (void)ph_bubble(&S, PH_SPEECH, 40, 100, 640, 100, 0, &ph_sb_34, bad, 3, NULL);
+        for (int i = 0; i < S.count; i++) CHECK(memchr(S.runs[i].text, 0, sizeof S.runs[i].text) != NULL);
+    }
     {   // a layout is worked out once per text: the height and the bubble of one frame share it, and so does every beat after it
         const char *q = "Run the migration on the dev database now, or do you want me to wait until the retry queue drains and the nightly backup has finished?";
         (void)ph_bubble_height(&ph_sb_34, 640, q, 3, false);
