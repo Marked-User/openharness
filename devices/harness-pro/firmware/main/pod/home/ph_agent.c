@@ -81,7 +81,8 @@ void ph_room(pod_out_frame_t *f, const pod_nav_t *nav, pod_model_t *m, uint32_t 
     if (st == POD_WORKING) {
         const int cx = 380, foot = 566;
         ph_room_floor(s, cx - 40, foot, 400);
-        int top = ph_room_pet(s, m, a, scene, cx, foot, now_ms, 0);
+        // Codex's robot at work fills more of the room than the other pets at 2x: 13/8, a fifth smaller (owner, 2026-10-15), as on the voice screens.
+        int top = ph_room_pet_z(s, m, a, scene, cx, foot, now_ms, 0, !strcmp(a->engine, "codex") ? 13u : 16u);
         char verb[POD_VERB_BYTES + 4], line[POD_VERB_BYTES + 24], t[12];
         capitalise(verb, sizeof verb, a->verb[0] ? a->verb : "Working");
         pod_fmt_elapsed(t, sizeof t, pod_agent_secs(a, now_ms));
