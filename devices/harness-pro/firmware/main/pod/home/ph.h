@@ -131,7 +131,9 @@ void ph_bell(ht_scene_t *, int x, int y, int count);
 // The scene the room plays for the agent: WORK while working, ASK while asking, RELAX when it has a recap (or an unread FINISHED entry) and did not fail, else REST (failed, offline, nothing to say).
 pod_scene_t ph_room_scene(const pod_model_t *, const pod_agent_t *);
 // The agent's pet in `scene`, 2x, its feet on `foot`, centred on cx (an engine with no pet: its 72 px logo or the ">_" outline). Returns the top of what is drawn.
-int ph_room_pet(ht_scene_t *, const pod_model_t *, const pod_agent_t *, pod_scene_t scene, int cx, int foot, uint32_t now_ms, uint32_t started_ms);   // started_ms: when a one-shot scene (SEND, LISTEN) began
+int ph_room_pet(ht_scene_t *, const pod_model_t *, const pod_agent_t *, pod_scene_t scene, int cx, int foot, uint32_t now_ms, uint32_t started_ms);
+int ph_room_pet_z(ht_scene_t *, const pod_model_t *, const pod_agent_t *, pod_scene_t scene, int cx, int foot, uint32_t now_ms, uint32_t started_ms,
+                  unsigned zoom8);   // started_ms: when a one-shot scene (SEND, LISTEN) began
 // The room's frame: the scene ground (PH_ROOM_BG), no glow (a flat block bands and shows its edge), the agent's name centred on x 360 (ph_title:
 // ph_sb_26, cut with an ellipsis at 640 px). No dots.
 void ph_room_chrome(pod_out_frame_t *, const pod_nav_t *, const pod_model_t *, const pod_agent_t *);

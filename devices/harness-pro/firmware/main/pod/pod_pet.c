@@ -75,6 +75,7 @@ typedef struct {
     uint32_t ground;       // 0xRRGGBB the listening waves fade toward
     bool flat;             // the ground under the scene's main frame is the one colour `ground` (pod_pet_draw_flat): a frame below 1x is baked
     bool beat;             // Pets: a step shorter than the 66 ms beat lasts one beat (see beat_step_ms)
+    bool smooth;           // the pet is painted art, not pixel art: at 2x it is interpolated, not doubled (pod_cell_smooth)
 } ctx_t;
 
 static void rect_in(const ctx_t *c, int *x, int *y, int w, int h)
@@ -87,6 +88,7 @@ static void put_frame(const ctx_t *c, int x, int y, const ht_cell_frame_t *f, bo
     int w = (f->cols * f->cell * (int)c->z + 7) / 8, h = (f->rows * f->cell * (int)c->z + 7) / 8;
     rect_in(c, &x, &y, w, h);
     if (main_frame && c->flat) pod_cell_flat(c->s, x, y, f, c->z, ht_rgb(c->ground));   // only the main frame: an overlay lands on the frame, not on the ground
+    else if (c->smooth) pod_cell_smooth(c->s, x, y, f, c->z);
     else pod_cell(c->s, x, y, f, c->z);
 }
 static void put_overlay(const ctx_t *c, const ht_pet_scene_t *e, unsigned level, unsigned step)
@@ -167,7 +169,7 @@ static extent_t scene_extent(const ht_pet_scene_t *e, unsigned level)
     extent_t u = {0x7fff, 0x7fff, -0x7fff, -0x7fff};
     for (unsigned n = 0; n < 24 + 128; n++) {
         uint32_t clock_ms = n < 24 ? n * e->step_ms : (n - 24) * 41u;
-        ctx_t c = {&scratch, -4000, -4000, 8000, 0, 0, 8, 8, 0xffffff, false, false};
+        ctx_t c = {&scratch, -4000, -4000, 8000, 0, 0, 8, 8, 0xffffff, false, false, false};
         scratch.count = 0;
         play_scene(&c, e, level, scene_clock_step(e, clock_ms, false), clock_ms);
         for (int i = 0; i < scratch.count; i++) {
@@ -349,8 +351,8 @@ int pod_pet_ink_h(const char *engine, pod_scene_t scene, int side, unsigned zoom
 {
     const ht_pet_t *pet = pod_pet_for(engine);
     if (!pet) return 0;
-    unsigned zmax = zoom8 == 16 ? 16u : 8u;
-    if (zmax == 16) side *= 2;
+    unsigned zmax = zoom8 > 8 && zoom8 <= 16 ? zoom8 : 8u;
+    if (zmax > 8) side = side * (int)zmax / 8;
     const ht_pet_scene_t *e = scene_of(pet, scene);
     if (!e) {   // the small pet (play_rest): the ink of the loop's first frame at the zoom it picks
         ht_pet_state_t state = HT_PET_IDLE;
@@ -367,15 +369,16 @@ int pod_pet_ink_h(const char *engine, pod_scene_t scene, int side, unsigned zoom
     }
     extent_t u = cached_extent(e, scene_level(e, scene));   // the level the draw uses
     int uw = u.x1 - u.x0, uh = u.y1 - u.y0, room = imax(1, side - 6), big = imax(uw, uh);
-    unsigned z = zmax == 16 && 2 * big <= room ? 16u : big <= room ? 8u : (unsigned)imax(4, 8 * room / big);
+    const bool fits = zmax > 8 && big * (int)zmax / 8 <= room && (zmax == 16 || !strcmp(engine, "codex"));
+    unsigned z = fits ? zmax : big <= room ? 8u : (unsigned)imax(4, 8 * room / big);
     return sc(uh, z);
 }
 enum { DRAW_BEAT = 1, DRAW_FLAT = 2 };
 static void draw(ht_scene_t *s, int x, int y, int side, const char *engine, pod_scene_t scene,
                  uint32_t clock_ms, uint32_t started_ms, uint32_t ground_rgb, unsigned zoom8, unsigned flags)
 {
-    unsigned zmax = zoom8 == 16 ? 16u : 8u;
-    if (zmax == 16) { x -= side / 2; y -= side / 2; side *= 2; }   // the 2x square, same centre
+    unsigned zmax = zoom8 > 8 && zoom8 <= 16 ? zoom8 : 8u;   // 9..15: a smooth pet's in-between zoom (pod_cell_smooth); a scene only
+    if (zmax > 8) { int grown = side * (int)zmax / 8; x -= (grown - side) / 2; y -= (grown - side) / 2; side = grown; }   // the zoomed square, same centre
     const ht_pet_t *pet = pod_pet_for(engine);
     if (!pet) {   // the logo, big, on a pale box; a light mark (Cursor's) on a dark one, else it would vanish
         const pod_mark_t *m = pod_mark(engine);
@@ -385,7 +388,8 @@ static void draw(ht_scene_t *s, int x, int y, int side, const char *engine, pod_
         if (!pod_logo_draw(s, mx, my, size, engine)) pod_mark_default_big(s, mx, my, size, ht_rgb(0xf0f4f0));
         return;
     }
-    ctx_t c = {s, x, y, side, x, y, 8, zmax, ground_rgb, (flags & DRAW_FLAT) != 0, (flags & DRAW_BEAT) != 0};
+    // Codex's robot is a painted render cut down to 192 x 208 (owner: doubled pixel by pixel it looked jagged on the voice screen).
+    ctx_t c = {s, x, y, side, x, y, 8, zmax, ground_rgb, (flags & DRAW_FLAT) != 0, (flags & DRAW_BEAT) != 0, !strcmp(engine, "codex")};
     const ht_pet_scene_t *e = scene_of(pet, scene);
     if (!e) {
         ht_pet_state_t state = HT_PET_IDLE;
@@ -397,7 +401,7 @@ static void draw(ht_scene_t *s, int x, int y, int side, const char *engine, pod_
     // Fit what the scene draws (a margin of 3 px for rounding), zooming down only when it is larger than the square.
     extent_t u = cached_extent(e, level);
     int uw = u.x1 - u.x0, uh = u.y1 - u.y0, room = imax(1, side - 6), big = imax(uw, uh);
-    if (zmax == 16 && 2 * big <= room) c.z = 16;
+    if (zmax > 8 && big * (int)zmax / 8 <= room && (zmax == 16 || c.smooth)) c.z = zmax;
     else c.z = big <= room ? 8u : (unsigned)imax(4, 8 * room / big);
     c.ox = x + (side - sc(uw, c.z)) / 2 - sc(u.x0, c.z);
     c.oy = y + (side - sc(uh, c.z)) / 2 - sc(u.y0, c.z);

@@ -56,6 +56,16 @@ bool pod_cell(ht_scene_t *s, int x, int y, const ht_cell_frame_t *f, unsigned zo
     r->radius = (uint8_t)zoom8;
     return true;
 }
+bool pod_cell_smooth(ht_scene_t *s, int x, int y, const ht_cell_frame_t *f, unsigned zoom8)
+{
+    if (zoom8 <= 8 || zoom8 > 16 || !f || f->cell != 1) return pod_cell(s, x, y, f, zoom8);
+    if (!pod_cell(s, x, y, f, 8)) return false;
+    ht_run_t *r = &s->runs[s->count - 1];
+    r->w = (int16_t)((f->cols * (int)zoom8 + 7) / 8); r->pro_height = (int16_t)((f->rows * (int)zoom8 + 7) / 8);
+    r->radius = (uint8_t)zoom8;
+    r->text[1] = 1;   // text[0] is pod_cell_flat's bake mark
+    return true;
+}
 static uint16_t swapped(uint16_t v) { return __builtin_bswap16(v); }
 
 // A few frame rows kept unpacked, by row index (a packed row is unpacked on a miss), so a pixel can look at the
@@ -99,6 +109,13 @@ static uint16_t soften_mix(uint16_t c, unsigned k, uint16_t dest)
 }
 static uint16_t soften(uint16_t c, uint16_t dest) { return soften_mix(c, soften_k(c), dest); }
 
+// Two RGB565 colours within a small distance (each channel in 6-bit units, summed): the same shade for the corner rule.
+static bool near565(uint16_t a, uint16_t b)
+{
+    int dr = (int)(a >> 11) * 2 - (int)(b >> 11) * 2, dg = (int)((a >> 5) & 63) - (int)((b >> 5) & 63), db = (int)(a & 31) * 2 - (int)(b & 31) * 2;
+    return (dr < 0 ? -dr : dr) + (dg < 0 ? -dg : dg) + (db < 0 ? -db : db) <= 12;
+}
+static uint16_t mix565(uint16_t fg, uint16_t bg, unsigned a, unsigned levels);
 static void cell_raster_core(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
 {
     const ht_cell_frame_t *f = r->bitmap.asset;
@@ -110,6 +127,90 @@ static void cell_raster_core(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
     static uint8_t E[3][256];
     memset(rc.row, 0xff, sizeof rc.row);
     rc.next = 0;
+    if (z > 8 && z < 16 && cell == 1 && r->text[1] == 1) {   // pod_cell_smooth at an in-between zoom: bilinear between pixel centres
+        static uint16_t brow[2][256];
+        int rows = f->rows, at[2] = {-2, -2};
+        for (int y = top; y < bottom; y++) {
+            int sv = ((y - r->y)  * 16 + 8) * 128 / z - 128;   // the glass pixel's centre, (y + 0.5) * 8 / z source pixels, x 256, from the source pixels' centres
+            int y0 = sv >> 8, fy = sv & 255;
+            for (int k = 0; k < 2; k++) {
+                int want = y0 + k;
+                if (at[k] == want) continue;
+                if (at[1 - k] == want) { memcpy(brow[k], brow[1 - k], sizeof brow[k]); at[k] = want; continue; }
+                at[k] = want;
+                if (want < 0 || want >= rows) { memset(brow[k], 0, sizeof brow[k]); continue; }
+                const uint8_t *src = cache_row(f, &rc, want);
+                for (int c = 0; c < cols; c++) brow[k][c] = src[c] ? (uint16_t)(swapped(f->palette[src[c]]) | 0x20) : 0;   // never 0 when opaque
+            }
+            uint16_t *dst = out + (y - clip.y) * clip.w - clip.x;
+            for (int x = left; x < right; x++) {
+                int su = ((x - r->x)  * 16 + 8) * 128 / z - 128, x0 = su >> 8, fx = su & 255;
+                const bool l = x0 >= 0 && x0 < cols, rt = x0 + 1 >= 0 && x0 + 1 < cols;
+                uint16_t p[4] = {l ? brow[0][x0] : 0, rt ? brow[0][x0 + 1] : 0, l ? brow[1][x0] : 0, rt ? brow[1][x0 + 1] : 0};
+                if (!(p[0] | p[1] | p[2] | p[3])) continue;
+                const uint16_t under = dst[x];
+                if (!(p[0] && p[1] && p[2] && p[3])) for (int k = 0; k < 4; k++) p[k] = p[k] ? soften(p[k], under) : under;
+                const unsigned w[4] = {(unsigned)((256 - fx) * (256 - fy)), (unsigned)(fx * (256 - fy)), (unsigned)((256 - fx) * fy), (unsigned)(fx * fy)};
+                unsigned rr = 0, gg = 0, bb = 0;
+                for (int k = 0; k < 4; k++) { rr += (p[k] >> 11) * w[k]; gg += ((p[k] >> 5) & 63) * w[k]; bb += (p[k] & 31) * w[k]; }
+                dst[x] = (uint16_t)(((rr + 32768) >> 16) << 11 | ((gg + 32768) >> 16) << 5 | ((bb + 32768) >> 16));
+            }
+        }
+        return;
+    }
+    if (z == 16 && cell == 1 && r->text[1] == 1) {   // pod_cell_smooth
+        // Glass pixel (2c + qx, 2r + qy) is the quadrant of source pixel C = (c, r) toward H = (c + dx, r), V = (c, r + dy) and the
+        // diagonal D, dx = qx ? 1 : -1. Where H and V agree and both differ from C and from what lies opposite them (the EPX / Scale2x
+        // corner rule, with a colour tolerance since the art is shaded), the quadrant is a stair step of a diagonal edge and takes H and V:
+        // the edge runs straight instead of in 2 px blocks. Elsewhere it is bilinear at a quarter-pixel offset: 9/16 C, 3/16 H and V,
+        // 1/16 D. A transparent pixel lends what is under it, so the outline fades into the ground; an outline colour lightens (soften).
+        // Each source row's colours are looked up once (crow, by row) and shared by the four glass pixels of every source pixel.
+        static uint16_t crow[3][256];
+        static int crow_at[3];
+        crow_at[0] = crow_at[1] = crow_at[2] = -2;
+        int rows = f->rows;
+        for (int y = top; y < bottom; y++) {
+            int oy = y - r->y, cy = oy >> 1, dy = (oy & 1) ? 1 : -1;
+            const uint16_t *cr[3];   // rows cy - 1, cy, cy + 1 in colours; 0 is transparent (no palette colour is 0 after |1)
+            for (int k = 0; k < 3; k++) {
+                int want = cy - 1 + k, slot = ((want % 3) + 3) % 3;
+                if (crow_at[slot] != want) {
+                    crow_at[slot] = want;
+                    if (want < 0 || want >= rows) memset(crow[slot], 0, sizeof crow[slot]);
+                    else {
+                        const uint8_t *src = cache_row(f, &rc, want);
+                        for (int c = 0; c < cols; c++) crow[slot][c] = src[c] ? (uint16_t)(swapped(f->palette[src[c]]) | 0x20) : 0;   // green's low bit set: never 0
+                    }
+                }
+                cr[k] = crow[slot];
+            }
+            const uint16_t *cur = cr[1], *nb = cr[1 + dy], *op = cr[1 - dy];
+            uint16_t *dst = out + (y - clip.y) * clip.w - clip.x;
+            for (int x = left; x < right; x++) {
+                int ox = x - r->x, cx = ox >> 1, dx = (ox & 1) ? 1 : -1;
+                const bool in = cx + dx >= 0 && cx + dx < cols;
+                uint16_t pc = cur[cx], ph = in ? cur[cx + dx] : 0, pv = nb[cx], pd = in ? nb[cx + dx] : 0;
+                if (!(pc | ph | pv | pd)) continue;
+                const uint16_t under = dst[x];
+                const bool rim = !(pc && ph && pv && pd);
+                if (rim) {   // on the outline
+                    pc = pc ? soften(pc, under) : under; ph = ph ? soften(ph, under) : under;
+                    pv = pv ? soften(pv, under) : under; pd = pd ? soften(pd, under) : under;
+                }
+                if (!near565(pc, ph) && near565(ph, pv)) {   // a corner candidate: only then are the opposite pixels read
+                    const bool back = cx - dx >= 0 && cx - dx < cols;
+                    uint16_t ho = back ? cur[cx - dx] : 0, vo = op[cx];
+                    ho = !ho ? under : rim ? soften(ho, under) : ho; vo = !vo ? under : rim ? soften(vo, under) : vo;
+                    if (!near565(ph, ho) && !near565(pv, vo)) { dst[x] = mix565(ph, pv, 1, 2); continue; }
+                }
+                const unsigned rr = (pc >> 11) * 9u + (ph >> 11) * 3u + (pv >> 11) * 3u + (pd >> 11);
+                const unsigned gg = ((pc >> 5) & 63) * 9u + ((ph >> 5) & 63) * 3u + ((pv >> 5) & 63) * 3u + ((pd >> 5) & 63);
+                const unsigned bb = (pc & 31) * 9u + (ph & 31) * 3u + (pv & 31) * 3u + (pd & 31);
+                dst[x] = (uint16_t)(((rr + 8) / 16) << 11 | ((gg + 8) / 16) << 5 | ((bb + 8) / 16));
+            }
+        }
+        return;
+    }
     if (z == 16 && cell == 1) {   // exact 2x: one decision per source pixel (colour, edge flag, how far it softens), written to both output rows of its source row
         int rows = f->rows;
         for (int y = top; y < bottom;) {
