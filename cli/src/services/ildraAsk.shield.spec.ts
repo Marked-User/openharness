@@ -57,14 +57,21 @@ describe('Shield R5 runtime: who may answer an Ask', () => {
     expect(await p).toMatchObject({ approved: false })
   })
   it('FIXED R5-1: a remote connection that is not the paired phone (key X, phone paired as P) approves a locked_ask', async () => {
-    const r = rig({ obs: { identity: OTHER, role: 'observer' }, web: { identity: OTHER, role: 'web' } })
+    const r = rig({ obs: { identity: OTHER, role: 'observer' }, web: { identity: OTHER, role: 'web' }, ph: { identity: PHONE, role: 'web' } })
     r.pairPhone()
     const p = r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
     await tick()
     expect(await r.answer(r.sent[0]!, 'obs', { from: { phoneId: 'p1' } })).toEqual({ ok: false, reason: 'no_authority' })
-    // Not an observer, but still not the paired phone's key: refused by the ledger.
+    // Not an observer, but still not the paired phone's key: refused (R7-10: first, nothing recorded or spent).
+    const before = JSON.stringify(r.svc.journal().ledger.toJSON().spent)
     await r.answer(r.sent[0]!, 'web', { from: { phoneId: 'p1' } })
-    expect(await p).toMatchObject({ approved: false, reason: 'unpaired_phone' })
+    await tick()
+    expect(r.svc.journal().ledger.pending()).toBe(1)
+    expect(JSON.stringify(r.svc.journal().ledger.toJSON().spent)).toBe(before)
+    // The real phone (its paired key) still approves the same Ask.
+    const open = r.sent[r.sent.length - 1]!
+    await r.answer(open, 'ph', { from: { phoneId: 'p1' } })
+    expect(await p).toMatchObject({ approved: true, channel: 'phone' })
   })
   it('FIXED R5-1: a non-device remote client answers a touch Ask as the device', async () => {
     const r = rig({ web: { identity: OTHER, role: 'web' } })
