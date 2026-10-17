@@ -7,6 +7,7 @@ import {
   ApprovalDenied, ApprovalWindow, AskLedger, CHALLENGE_WORDS, actionDigest8, ask as askProd, drawChallenge,
   PhonePairing, openJournal, transcriptMatches,
   type AskAnswer, type AskChannel, type AskRequest, type ApprovalTemplate,
+  stampManifest,
 } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
 /** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
@@ -16,7 +17,7 @@ const aid = (): string => aidBytes(16).toString('hex')
 const HOLD = 2000
 
 /** Production defaults for these tests: manifest lists the tool as a write with send:false (pilot review a), and a window. */
-const ask: typeof askProd = (t, a, p, f, o = {}) => askProd(t, a, p, f, { kind: { manifest: [{ name: a, send: false, owner: 'bridge' }], tool: a }, window: new ApprovalWindow(), agentId: 'agent', ...o })
+const ask: typeof askProd = (t, a, p, f, o = {}) => askProd(t, a, p, f, { kind: { manifest: stampManifest([{ name: a, send: false }], 'bridge'), tool: a }, window: new ApprovalWindow(), agentId: 'agent', ...o })
 /** Pair through the full F6 flow: device touch, phone offers code + key, device touch confirms the match. */
 function complete(p: PhonePairing, id: string, code: string, origin?: { shared?: boolean }): boolean {
   const o = p.offer(id, `pub-${id}`, code, origin)

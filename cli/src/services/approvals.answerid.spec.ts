@@ -9,7 +9,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { AskLedger, openJournal, type AskAnswer, type AskRequest } from './approvals.js'
+import { AskLedger, openJournal, type AskAnswer, type AskRequest, MAX_SHORT_HOLDS } from './approvals.js'
 
 const aid = (): string => randomBytes(16).toString('hex')
 function clock(t = 5_000_000) { return { now: () => t, advance: (ms: number) => { t += ms } } }
@@ -57,12 +57,26 @@ describe('answerId', () => {
 })
 
 describe('hold_too_short keeps the Ask open', () => {
-  it('any number of short holds, then a proper hold approves', () => {
+  it('up to four short holds, then a proper hold approves', () => {
     const l = new AskLedger(); const req = touch(l)
-    for (let i = 0; i < 6; i++) expect(l.settle(ans(req, { holdMs: 900 }))).toEqual({ ok: false, reason: 'hold_too_short' })
+    for (let i = 0; i < MAX_SHORT_HOLDS - 1; i++) expect(l.settle(ans(req, { holdMs: 900 }))).toEqual({ ok: false, reason: 'hold_too_short' })
     expect(l.pending()).toBe(1)
     expect(l.settle(ans(req, { holdMs: 1500 }))).toEqual({ ok: true })
     expect(l.pending()).toBe(0)
+  })
+  it('Shield R5-4: the fifth short hold spends the Ask (hold_limit), is still logged, and survives a restart', () => {
+    const l = new AskLedger(); const req = touch(l)
+    const seen: unknown[] = []
+    l.onAttempt = (a) => seen.push(a)
+    for (let i = 0; i < 3; i++) l.settle(ans(req, { holdMs: 900 }))
+    const back = new AskLedger(); back.restore(JSON.parse(JSON.stringify(l.toJSON())))
+    back.onAttempt = (a) => seen.push(a)
+    expect(back.settle(ans(req, { holdMs: 900 }))).toEqual({ ok: false, reason: 'hold_too_short' })
+    expect(back.settle(ans(req, { holdMs: 900 }))).toEqual({ ok: false, reason: 'hold_limit' })
+    expect(seen).toHaveLength(5)
+    expect(back.pending()).toBe(0)
+    expect(back.settle(ans(req, { holdMs: 2000 }))).toEqual({ ok: false, reason: 'replayed' })
+    expect(MAX_SHORT_HOLDS).toBe(5)
   })
   it('until it expires', () => {
     const c = clock(); const l = new AskLedger({ now: c.now, ttlMs: 1000 }); const req = touch(l)

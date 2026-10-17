@@ -46,8 +46,11 @@ describe('R3-1: the marker and journal folders are compared by realpath', () => 
 
 describe('R3-3: who may declare send:false', () => {
   it('only first_party or bridge entries opt out of the send checks', () => {
-    expect(isSendTool([{ name: 't', send: false, owner: 'first_party' }], 't')).toBe(false)
-    expect(isSendTool([{ name: 't', send: false, owner: 'bridge' }], 't')).toBe(false)
+    expect(isSendTool(stampManifest([{ name: 't', send: false }], 'first_party'), 't')).toBe(false)
+    expect(isSendTool(stampManifest([{ name: 't', send: false }], 'bridge'), 't')).toBe(false)
+    // R5-2: the same owners written by the manifest itself (not stamped by the loader) are not believed.
+    expect(isSendTool([{ name: 't', send: false, owner: 'first_party' }], 't')).toBe(true)
+    expect(isSendTool([{ name: 't', send: false, owner: 'bridge' }], 't')).toBe(true)
     for (const owner of [undefined, 'third_party', 'store:acme', '', 'Bridge', 1, null]) {
       expect(isSendTool([{ name: 't', send: false, owner }], 't'), String(owner)).toBe(true)
     }

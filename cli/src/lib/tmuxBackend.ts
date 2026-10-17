@@ -7,6 +7,7 @@ import {
   TERMINAL_ACTION_SUCCEEDED,
   terminalActionNotStarted,
   terminalActionPossiblyExecuted,
+  terminalActionRejected,
   terminalEnterWithheld,
   type SubmitOptions,
   type TerminalActionResult,
@@ -513,16 +514,38 @@ export class TmuxBackend implements TerminalBackend<TmuxRuntimeRef> {
       : { state: 'succeeded', value: captured }
   }
 
+  /**
+   * Shield R5-3 (F13 for every key path): answers whether a pane shows an open Ildra Ask (core/ildraAsk.ts
+   * guard, mapped from the pane to its agent in core/main.ts). While it does, typeLiteral, submitText and
+   * sendKey refuse, whoever calls them: phone chat (sessionInput), device input and askQuestion all reach
+   * the pane only through these. The loopback desktop types through the terminal stream (its own `local`
+   * check in terminalStreamManager), never through here. A guard that throws counts as an open Ask.
+   */
+  inputGuard: ((paneId: string) => boolean) | null = null
+
+  private askPaneRefuses(runtime: TmuxRuntimeRef): TerminalActionResult | null {
+    if (!this.inputGuard) return null
+    let blocked = true
+    try { blocked = this.inputGuard(runtime.paneId) !== false } catch { blocked = true }
+    return blocked ? terminalActionRejected('ILDRA_ASK_PANE: this pane is showing an Ildra Ask; answer it in the Ask, not with keys') : null
+  }
+
   async typeLiteral(runtime: TmuxRuntimeRef, text: string): Promise<TerminalActionResult> {
+    const refused = this.askPaneRefuses(runtime)
+    if (refused) return refused
     return legacyActionResult(await sendLiteralToTmux(runtime.paneId, text), 'tmux literal input')
   }
 
   async submitText(runtime: TmuxRuntimeRef, text: string, options?: SubmitOptions): Promise<TerminalActionResult> {
+    const refused = this.askPaneRefuses(runtime)
+    if (refused) return refused
     const sent = await sendToTmux(runtime.paneId, text, options?.beforeEnter, options?.allowed)
     return typeof sent === 'boolean' ? legacyActionResult(sent, 'tmux submission') : terminalEnterWithheld(sent.withheld)
   }
 
   async sendKey(runtime: TmuxRuntimeRef, key: TerminalLogicalKey): Promise<TerminalActionResult> {
+    const refused = this.askPaneRefuses(runtime)
+    if (refused) return refused
     return legacyActionResult(await sendKeyToTmux(runtime.paneId, TMUX_KEYS[key]), 'tmux key input')
   }
 

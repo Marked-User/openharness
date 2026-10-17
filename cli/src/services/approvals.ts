@@ -181,6 +181,11 @@ export interface ToolManifestEntry {
    * never taken from the manifest itself. Only 'first_party' or 'bridge' entries may declare send:false.
    */
   owner?: unknown
+  /**
+   * Shield R5-2: the MCP server (or bridge) the entry was loaded from, set by the loader. Entries are keyed
+   * by server+tool (`server/name`); a bare name that matches more than one entry is a sending write tool.
+   */
+  server?: unknown
 }
 
 /** Manifest sources whose send:false is believed (R3-3). */
@@ -192,27 +197,78 @@ export type ManifestSource = 'first_party' | 'bridge' | 'third_party'
  * claims for itself is overwritten, so a third-party (store) manifest cannot pose as bridge-owned. An
  * unknown source is stamped third_party.
  */
-export function stampManifest(entries: readonly ToolManifestEntry[] | null | undefined, source: ManifestSource): ToolManifestEntry[] {
+export function stampManifest(
+  entries: readonly ToolManifestEntry[] | null | undefined, source: ManifestSource, server?: string,
+): ToolManifestEntry[] {
   const owner: ManifestSource = source === 'first_party' || source === 'bridge' ? source : 'third_party'
-  return (entries ?? []).map((e) => ({ ...e, owner }))
+  return (entries ?? []).map((e) => {
+    const out: ToolManifestEntry = { ...e, owner }
+    if (server !== undefined) out.server = server
+    else delete out.server
+    if (out.annotations) out.annotations = Object.freeze({ ...out.annotations })
+    Object.freeze(out)
+    STAMPED.add(out)
+    return out
+  })
+}
+
+/**
+ * Shield R5-2: entries that came out of stampManifest (frozen, so nothing changes them afterwards). An
+ * owner on any other object, a copy included, is the manifest's own claim and is not believed.
+ */
+const STAMPED = new WeakSet<object>()
+
+/** True only for an entry stampManifest made with a first-party or bridge source. */
+export function trustedEntry(e: ToolManifestEntry): boolean {
+  return STAMPED.has(e) && typeof e.owner === 'string' && TRUSTED_MANIFEST_OWNERS.has(e.owner)
+}
+
+/**
+ * Shield R5-2: the one entry for a tool, keyed by server+tool. `tool` is `server/name` or a bare name. An
+ * entry matches when its `server/name` key or its bare name equals `tool`. No match is 'missing'; more
+ * than one (a third-party tool reusing a first-party name, or two servers with the same tool) is
+ * 'ambiguous', which every caller treats as a sending write tool with no kind.
+ */
+export function lookupTool(
+  manifest: readonly ToolManifestEntry[] | null | undefined, tool: string,
+): ToolManifestEntry | 'missing' | 'ambiguous' {
+  const hits = (manifest ?? []).filter((e) => e.name === tool || (typeof e.server === 'string' && `${e.server}/${e.name}` === tool))
+  if (hits.length === 0) return 'missing'
+  return hits.length === 1 ? hits[0]! : 'ambiguous'
+}
+
+/**
+ * Shield R5-2: the daemon's manifest loader. Every source is stamped with where it was loaded from
+ * (first_party, bridge, third_party) and its server name, so the merged manifest is keyed by server+tool
+ * and no entry's owner comes from the manifest itself.
+ */
+export class ToolManifestLoader {
+  private readonly bySource = new Map<string, ToolManifestEntry[]>()
+  /** Replace what `server` declared, stamped as `source`. */
+  load(source: ManifestSource, server: string, entries: readonly ToolManifestEntry[] | null | undefined): void {
+    if (typeof server !== 'string' || !server) throw new ApprovalDenied('a tool manifest needs its server name')
+    this.bySource.set(server, stampManifest(entries, source, server))
+  }
+  unload(server: string): void { this.bySource.delete(server) }
+  entries(): ToolManifestEntry[] { return [...this.bySource.values()].flat() }
 }
 
 /**
  * F8 + Shield pilot review (a): a tool can send unless the manifest lists it with literal `send: false`
- * from a first-party or bridge-owned entry (R3-3; see stampManifest).
- * Missing from the manifest, no manifest, or any other value means it gets the recipient and first-line
- * checks. The caller can tighten (isSend, send details), never loosen.
+ * from a first-party or bridge-owned entry stamped by the loader (R3-3, R5-2; see stampManifest).
+ * Missing from the manifest, listed more than once, no manifest, or any other value means it gets the
+ * recipient and first-line checks. The caller can tighten (isSend, send details), never loosen.
  */
 export function isSendTool(manifest: readonly ToolManifestEntry[] | null | undefined, toolName: string): boolean {
-  const e = manifest?.find((x) => x.name === toolName)
-  if (!e || e.send !== false) return true
-  return !(typeof e.owner === 'string' && TRUSTED_MANIFEST_OWNERS.has(e.owner))
+  const e = lookupTool(manifest, toolName)
+  if (typeof e === 'string' || e.send !== false) return true
+  return !trustedEntry(e)
 }
 
-/** A tool is a read only when the manifest lists it as read-only. Unknown tools are writes. */
+/** A tool is a read only when the manifest lists it (once) as read-only. Unknown or duplicate tools are writes. */
 export function classifyTool(manifest: readonly ToolManifestEntry[] | null | undefined, toolName: string): 'read' | 'write' {
-  const entry = manifest?.find((e) => e.name === toolName)
-  if (!entry) return 'write'
+  const entry = lookupTool(manifest, toolName)
+  if (typeof entry === 'string') return 'write'
   if (entry.readOnly === true || entry.annotations?.readOnlyHint === true) return 'read'
   return 'write'
 }
@@ -429,8 +485,10 @@ export interface AskRequest {
   action: string
   /** Send Asks: recipient. Display; bound into digest8 via the send details. */
   recipient?: string
-  /** Send Asks: first non-empty line of the message, trimmed, at most 80 chars. Display only. */
+  /** Send Asks: first non-empty line of the message, trimmed, at most 80 chars, hidden characters marked (R5-5). Display only. */
   firstLine?: string
+  /** Send Asks: display warnings about the recipient (R5-5), e.g. mixed_script. Daemon-set, not in digest8. */
+  recipientFlags?: RecipientFlag[]
   /** Display only, not in digest8; locked_ask only; daemon-set (askKindFor). */
   kind?: AskKind
   /** Daemon-drawn 2-word spoken challenge, voice Asks only. */
@@ -473,6 +531,12 @@ export interface AskAnswer {
    * a UUID; device: Gadget answer_id, 32 hex). Single use: the ledger refuses one it has seen (journaled).
    */
   answerId: string
+  /**
+   * Shield R5-1, daemon-internal (never on the wire, never from a payload): the channel the answer's connection
+   * may answer on, set by core/ildraAsk.ts from the gateway-authenticated connection. 'touch' only for the device
+   * bridge session; 'phone' for other remote sessions (then from.machinePub must be the paired phone's key).
+   */
+  via?: AskChannel
   /** Only literal true approves. */
   approved: boolean
   transcript?: string
@@ -492,6 +556,7 @@ export type AnswerVerifier = (req: AskRequest, ans: AskAnswer) => boolean
 export type SettleReason =
   | 'malformed' | 'unknown_id' | 'replayed' | 'expired' | 'digest_mismatch' | 'challenge_mismatch'
   | 'verifier_rejected' | 'shared_machine' | 'unpaired_phone' | 'hold_too_short' | 'stale_channel'
+  | 'wrong_channel' | 'hold_limit'
 export type SettleResult = { ok: true } | { ok: false; reason: SettleReason }
 
 /**
@@ -507,6 +572,8 @@ export const ANSWER_ID = /^[A-Za-z0-9-]{16,64}$/
 export interface AskAttempt { id: string; answerId: string; channel: AskChannel; reason: 'hold_too_short' | 'stale_channel'; holdMs?: number; at: number }
 /** Attempts kept per journal (oldest dropped first). */
 export const MAX_ATTEMPTS = 200
+/** Shield R5-4: short holds allowed on one Ask; the last one spends it with reason hold_limit. */
+export const MAX_SHORT_HOLDS = 5
 
 /**
  * Open Asks, spent request ids and spent answer ids (DECISIONS ad47477). Every answerId is accepted at most
@@ -524,6 +591,8 @@ export class AskLedger {
   private attempts_: AskAttempt[] = []
   /** Asks moved by handoff: id to the channel they left (answers from it are stale_channel). */
   private readonly handedOff = new Map<string, AskChannel>()
+  /** Short holds per open Ask (Shield R5-4). */
+  private readonly shortHolds = new Map<string, number>()
   onChange?: () => void
   /** Called with each ildra.ask.attempt as it is recorded (the daemon forwards it to the phone). */
   onAttempt?: (a: AskAttempt) => void
@@ -545,6 +614,8 @@ export class AskLedger {
     }
     for (const k of DIGEST_RESERVED) if (o.details && k in o.details) throw new ApprovalDenied(`a detail may not be named ${k}`)
     if (o.firstLine !== undefined && (typeof o.firstLine !== 'string' || o.firstLine === '')) throw new ApprovalDenied('a send Ask needs a non-empty first line')
+    if (o.recipient !== undefined && (typeof o.recipient !== 'string' || hasHiddenChar(o.recipient))) throw new UnsafeRecipient()
+    const flags = o.recipient !== undefined ? recipientFlags(o.recipient) : []
     const openedAt = this.now()
     const currency = o.amountMinor !== undefined ? ('USD' as const) : undefined
     const req: AskRequest = {
@@ -555,6 +626,7 @@ export class AskLedger {
       ...(o.templateId !== undefined ? { templateId: o.templateId } : {}),
       ...(o.recipient !== undefined ? { recipient: o.recipient } : {}),
       ...(o.firstLine !== undefined ? { firstLine: o.firstLine } : {}),
+      ...(flags.length ? { recipientFlags: flags } : {}),
       ...(o.kind !== undefined ? { kind: o.kind } : {}),
       ...(currency ? { currency } : {}),
       openedAt,
@@ -573,6 +645,7 @@ export class AskLedger {
     const t = this.now()
     for (const [id, r] of this.open_) if (t >= r.expiresAt) { this.open_.delete(id); this.spent.set(id, r.expiresAt) }
     for (const id of this.handedOff.keys()) if (!this.open_.has(id)) this.handedOff.delete(id)
+    for (const id of this.shortHolds.keys()) if (!this.open_.has(id)) this.shortHolds.delete(id)
     // Spent ids are kept until a further day past expiry so a late replay reads as replayed.
     for (const [id, at] of this.spent) if (at + OTHER_ASK_EXPIRY_MS < t) this.spent.delete(id)
     for (const [id, at] of this.spentAnswers) if (at + OTHER_ASK_EXPIRY_MS < t) this.spentAnswers.delete(id)
@@ -644,18 +717,35 @@ export class AskLedger {
     // the Ask stays open for its current channel. Replayed still spends the Ask on the current channel.
     const left = this.handedOff.get(req.id)
     if (left !== undefined && this.now() < req.expiresAt && answerChannel(ans, ctx) === left) return this.attempt(req, ans, left, 'stale_channel')
+    // R5-1: only the device bridge answers a touch Ask. Any other connection is refused without spending it
+    // (before the replay check, so a client cannot spend the Ask by repeating its own answerId), except a
+    // shared machine, which spends it as before (F12).
+    if (ans.via !== undefined && req.channel === 'touch' && ans.via !== 'touch') {
+      return originShared(ans.from, ctx.isShared) ? spend('shared_machine') : { ok: false, reason: 'wrong_channel' }
+    }
     if (answerSeen) return spend('replayed')
     if (this.now() >= req.expiresAt) return spend('expired')
     if (ans.digest8 !== req.digest8) return spend('digest_mismatch')
     if (originShared(ans.from, ctx.isShared)) return spend('shared_machine')
     if (req.channel === 'phone') {
       const id = ans.from?.phoneId
-      if (typeof id !== 'string' || !ctx.isPaired || !ctx.isPaired(id)) return spend('unpaired_phone')
+      // R5-1: the phone id is a claim. An answer that came through the daemon's runtime (via set by
+      // core/ildraAsk.ts, the only production path) or that names a key must come from the key that phone
+      // paired with. Only a direct in-process ledger caller (tests, reference mode) is checked by id alone.
+      const strict = ans.via !== undefined || ans.from?.machinePub !== undefined
+      const key = strict ? (typeof ans.from?.machinePub === 'string' ? ans.from.machinePub : '') : undefined
+      if (typeof id !== 'string' || !ctx.isPaired || !ctx.isPaired(id, key)) return spend('unpaired_phone')
     }
     if (req.channel === 'touch' && ans.approved === true) {
       const h = ans.holdMs
       // DECISIONS ad47477: a short hold leaves the Ask open for a proper one; its answerId is spent.
-      if (typeof h !== 'number' || !Number.isFinite(h) || h < DEVICE_HOLD_MIN_MS) return this.attempt(req, ans, req.channel, 'hold_too_short')
+      if (typeof h !== 'number' || !Number.isFinite(h) || h < DEVICE_HOLD_MIN_MS) {
+        // Shield R5-4: the MAX_SHORT_HOLDS-th short hold on one Ask spends it (hold_limit); each is still logged.
+        const n = (this.shortHolds.get(req.id) ?? 0) + 1
+        this.shortHolds.set(req.id, n)
+        const r = this.attempt(req, ans, req.channel, 'hold_too_short')
+        return n >= MAX_SHORT_HOLDS ? spend('hold_limit') : r
+      }
     }
     this.open_.delete(ans.id)
     this.handedOff.delete(ans.id)
@@ -670,16 +760,16 @@ export class AskLedger {
     return { ok: true }
   }
 
-  toJSON(): { open: AskRequest[]; spent: [string, number][]; spentAnswers: [string, number][]; attempts: AskAttempt[]; handoffs: [string, AskChannel][] } {
+  toJSON(): { open: AskRequest[]; spent: [string, number][]; spentAnswers: [string, number][]; attempts: AskAttempt[]; handoffs: [string, AskChannel][]; shortHolds: [string, number][] } {
     this.prune()
     return {
       open: [...this.open_.values()].map((r) => ({ ...r })), spent: [...this.spent], spentAnswers: [...this.spentAnswers],
-      attempts: this.attempts(), handoffs: [...this.handedOff],
+      attempts: this.attempts(), handoffs: [...this.handedOff], shortHolds: [...this.shortHolds],
     }
   }
 
   /** @internal journal restore. */
-  restore(data: { open: AskRequest[]; spent: [string, number][]; spentAnswers?: [string, number][]; attempts?: AskAttempt[]; handoffs?: [string, AskChannel][] }): void {
+  restore(data: { open: AskRequest[]; spent: [string, number][]; spentAnswers?: [string, number][]; attempts?: AskAttempt[]; handoffs?: [string, AskChannel][]; shortHolds?: [string, number][] }): void {
     for (const [id, at] of data.spentAnswers ?? []) this.spentAnswers.set(id, at)
     this.attempts_ = (data.attempts ?? []).filter((a) => a && typeof a.id === 'string' && (a.reason === 'hold_too_short' || a.reason === 'stale_channel'))
       .slice(-MAX_ATTEMPTS).map((a) => ({ ...a }))
@@ -691,11 +781,13 @@ export class AskLedger {
     }
     for (const [id, at] of data.spent) this.spent.set(id, at)
     for (const [id, from] of data.handoffs ?? []) if (this.open_.has(id) && KNOWN_CHANNELS.has(from)) this.handedOff.set(id, from)
+    for (const [id, n] of data.shortHolds ?? []) if (this.open_.has(id) && Number.isInteger(n) && n > 0) this.shortHolds.set(id, n)
   }
 }
 
 export interface SettleContext {
-  isPaired?: (phoneId: string) => boolean
+  /** Phone answers: is this phone paired, and (R5-1) is `machinePub` the key it paired with? */
+  isPaired?: (phoneId: string, machinePub?: string) => boolean
   extra?: AnswerVerifier
   isShared?: SharedOriginLookup
   /** The channel the answer arrived on, when the caller knows it (the device bridge says touch). */
@@ -705,6 +797,7 @@ export interface SettleContext {
 /** The channel an answer came from: ctx.via, else a paired-phone id means phone, a transcript voice, else touch. */
 function answerChannel(ans: AskAnswer, ctx: SettleContext): AskChannel {
   if (ctx.via) return ctx.via
+  if (ans.via) return ans.via
   if (typeof ans.from?.phoneId === 'string') return 'phone'
   if (typeof ans.transcript === 'string') return 'voice'
   return 'touch'
@@ -766,7 +859,8 @@ export class PhonePairing {
   private readonly ttlMs: number
   private readonly codes = new Map<string, { expiresAt: number; deviceNonce: string }>()
   private readonly pendingPairs = new Map<string, PendingPair>()
-  private readonly phones = new Set<string>()
+  /** Paired phones and the public key each paired with (R5-1: phone answers must come from that key). */
+  private readonly phones = new Map<string, string>()
   private readonly lastRefusal = new Map<string, string>()
   /** Ledger of every pairing, unpairing and refused attempt. */
   readonly log: PairingLogEntry[] = []
@@ -843,7 +937,7 @@ export class PhonePairing {
     this.pendingPairs.delete(phoneId)
     if (this.now() >= pend.expiresAt) return this.refuse(phoneId, 'expired')
     if (matched !== true) return this.refuse(phoneId, 'check_mismatch')
-    this.phones.add(phoneId)
+    this.phones.set(phoneId, pend.phonePub)
     this.lastRefusal.delete(phoneId)
     this.log.push({ at: this.now(), event: 'pair', phoneId })
     this.onChange?.()
@@ -869,13 +963,31 @@ export class PhonePairing {
     return phoneId === undefined ? this.phones.size > 0 : this.phones.has(phoneId)
   }
 
-  toJSON(): { phones: string[]; log: PairingLogEntry[]; refused: Record<string, string> } {
-    return { phones: [...this.phones], log: this.log.map((e) => ({ ...e })), refused: Object.fromEntries(this.lastRefusal) }
+  /** The public key a paired phone paired with (F6 offer), or null. */
+  phoneKey(phoneId: string): string | null {
+    return this.phones.get(phoneId) || null
+  }
+
+  /** R5-1: paired, and `pub` (the authenticated connection key) is the key it paired with. */
+  isPairedKey(phoneId: string, pub: string | undefined): boolean {
+    const want = this.phones.get(phoneId)
+    return typeof want === 'string' && want !== '' && typeof pub === 'string' && pub === want
+  }
+
+  toJSON(): { phones: string[]; phoneKeys: Record<string, string>; log: PairingLogEntry[]; refused: Record<string, string> } {
+    return {
+      phones: [...this.phones.keys()], phoneKeys: Object.fromEntries(this.phones),
+      log: this.log.map((e) => ({ ...e })), refused: Object.fromEntries(this.lastRefusal),
+    }
   }
 
   /** @internal */
-  restore(data: { phones: string[]; log?: PairingLogEntry[]; refused?: Record<string, string> }): void {
-    for (const p of data.phones) this.phones.add(p)
+  restore(data: { phones: string[]; phoneKeys?: Record<string, string>; log?: PairingLogEntry[]; refused?: Record<string, string> }): void {
+    // A phone paired before keys were kept (no phoneKeys entry) stays listed but cannot answer until re-paired.
+    for (const p of data.phones) {
+      const k = data.phoneKeys?.[p]
+      this.phones.set(p, typeof k === 'string' ? k : '')
+    }
     for (const [id, why] of Object.entries(data.refused ?? {})) this.lastRefusal.set(id, why)
     for (const e of data.log ?? []) this.log.push({ ...e })
   }
@@ -895,8 +1007,67 @@ export interface SendDetails {
  */
 export function firstLine(message: string): string {
   const line = message.split(/\r?\n/).find((l) => l.trim() !== '') ?? ''
-  const points = Array.from(line.trim())
+  const points = Array.from(markHidden(line.trim()))
   return points.length > 80 ? `${points.slice(0, 79).join('')}…` : points.join('')
+}
+
+/**
+ * Shield R5-5: characters that change what a line looks like without showing themselves: bidi embeddings,
+ * overrides and isolates (U+202A–202E, U+2066–2069), the marks U+200E/U+200F/U+061C, zero-width characters
+ * (U+200B–200D, U+2060, U+FEFF), the line and paragraph separators U+2028/U+2029, and every C0/C1 control
+ * (CR, LF and tab included).
+ */
+const HIDDEN_CHAR = /[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u2028-\u202E\u2060\u2066-\u2069\uFEFF]/u
+const HIDDEN_CHARS = new RegExp(HIDDEN_CHAR.source, 'gu')
+
+/** True when `s` holds a character from HIDDEN_CHAR. A recipient with one is refused (malformed). */
+export function hasHiddenChar(s: string): boolean { return HIDDEN_CHAR.test(s) }
+
+/**
+ * Shield R5-5: the first-line display shows each hidden character as a visible marker, `⟦U+202E⟧` (a tab shows as a space), so a
+ * reversed or split line cannot pass for a plain one. Display only: the digest covers the message's sha256.
+ */
+export function markHidden(s: string): string {
+  return s.replace(HIDDEN_CHARS, (c) => c === '\t' ? ' ' : `⟦U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟧`)
+}
+
+/** Shield R5-5: flags on a recipient, display only (the recipient itself is in digest8). */
+export type RecipientFlag = 'mixed_script'
+const SCRIPTS = ['Latin', 'Cyrillic', 'Greek', 'Armenian', 'Georgian', 'Hebrew', 'Arabic', 'Cherokee', 'Han', 'Hiragana', 'Katakana', 'Hangul', 'Thai', 'Devanagari']
+  .map((n) => [n, new RegExp(`\\p{Script=${n}}`, 'u')] as const)
+const LETTER = /\p{L}/u
+
+/** The scripts of the letters in `s`; a letter in none of SCRIPTS counts as its own 'Other' script. */
+function scriptsOf(s: string): Set<string> {
+  const out = new Set<string>()
+  for (const ch of s) {
+    if (!LETTER.test(ch)) continue
+    out.add(SCRIPTS.find(([, re]) => re.test(ch))?.[0] ?? 'Other')
+  }
+  return out
+}
+
+/**
+ * Shield R5-5: 'mixed_script' when the recipient's domain mixes letter scripts (as a whole or within one
+ * label, e.g. Cyrillic а in "pаypal.com"), or its local part does. Shown, never refused: the digest still
+ * binds the exact text, so the device approves what it showed.
+ */
+export function recipientFlags(recipient: string): RecipientFlag[] {
+  const at = recipient.lastIndexOf('@')
+  const local = at >= 0 ? recipient.slice(0, at) : ''
+  const domain = at >= 0 ? recipient.slice(at + 1) : recipient
+  const mixed = scriptsOf(domain).size > 1 || scriptsOf(local).size > 1
+  return mixed ? ['mixed_script'] : []
+}
+
+/** Display form of a recipient: as is, with a visible marker when it is flagged. */
+export function recipientDisplay(recipient: string, flags: readonly RecipientFlag[] = recipientFlags(recipient)): string {
+  return flags.includes('mixed_script') ? `${recipient} [⚠ mixed script]` : recipient
+}
+
+/** Shield R5-5: a recipient carrying a hidden character; the Ask is refused as malformed. */
+export class UnsafeRecipient extends ApprovalDenied {
+  constructor() { super('a recipient may not contain bidi controls, zero-width characters, line breaks or other controls (malformed)') }
 }
 
 // ---- Gadget device mapping (protocol/README.md; eng/reference device_api v2) ----
@@ -933,7 +1104,7 @@ export type DeviceMessage =
 export function toDeviceMessage(req: AskRequest, now: number): DeviceMessage {
   const ttl_s = Math.max(0, Math.floor((req.expiresAt - now) / 1000))
   if (req.channel === 'touch') {
-    const text = req.recipient !== undefined ? `${req.action}\nTo ${req.recipient}: ${req.firstLine ?? ''}` : req.action
+    const text = req.recipient !== undefined ? `${req.action}\nTo ${recipientDisplay(req.recipient, req.recipientFlags ?? [])}: ${req.firstLine ?? ''}` : req.action
     return { type: 'prompt', id: req.id, title: 'Ask', text, ttl_s, digest8: req.digest8 }
   }
   if (req.channel === 'phone') return { type: 'display', title: 'Ask', body: USE_YOUR_PHONE, ttl_s }
@@ -957,6 +1128,7 @@ function isRequest(r: unknown): r is AskRequest {
     && typeof x.action === 'string' && (x.currency === undefined ? x.amountMinor === undefined : x.currency === 'USD' && x.amountMinor !== undefined)
     && ['agentId', 'templateId', 'recipient', 'firstLine'].every((k) => (x as unknown as Record<string, unknown>)[k] === undefined || typeof (x as unknown as Record<string, unknown>)[k] === 'string')
     && (x.kind === undefined || (x.kind === 'safety_verification' && x.tier === 'locked_ask'))
+    && (x.recipientFlags === undefined || (Array.isArray(x.recipientFlags) && x.recipientFlags.every((f) => f === 'mixed_script')))
 }
 
 function isLog(e: unknown): boolean {
@@ -1140,20 +1312,22 @@ export type AskOutcome = AskResult & { reason: AskOutcomeReason; request?: AskRe
 /** The `never` outcome for a wire consumer (ask() itself throws ApprovalDenied so the agent is told). */
 /** ask(): re-prompts after hold_too_short before it gives up on a runaway answerer (the Ask stays open). */
 export const MAX_REPROMPTS = 100
+/** Rejections that leave the Ask open, so ask() waits for another answer. */
+const KEEPS_ASK_OPEN: ReadonlySet<SettleReason> = new Set(['hold_too_short', 'stale_channel', 'wrong_channel'])
 
 export function neverOutcome(): AskOutcome { return { approved: false, channel: null, tier: 'never', reason: 'never' } }
 
 /**
  * AskRequest.kind from the daemon's own inputs only: the template's safety_verification list, or the called
- * tool's manifest entry with safetyVerification: true from a trusted owner (R3-3). Only for locked_ask.
+ * tool's single manifest entry with safetyVerification: true, stamped by a trusted source (R3-3, R5-2). Only for locked_ask.
  */
 export function askKindFor(
   template: ApprovalTemplate, action: string, tier: Tier, kind?: { manifest: readonly ToolManifestEntry[] | null | undefined; tool: string },
 ): AskKind | undefined {
   if (tier !== 'locked_ask') return undefined
   if (Array.isArray(template.safety_verification) && template.safety_verification.includes(action)) return 'safety_verification'
-  const e = kind?.manifest?.find((m) => m.name === kind.tool)
-  if (e && e.safetyVerification === true && typeof e.owner === 'string' && TRUSTED_MANIFEST_OWNERS.has(e.owner)) return 'safety_verification'
+  const e = kind ? lookupTool(kind.manifest, kind.tool) : 'missing'
+  if (typeof e !== 'string' && e.safetyVerification === true && trustedEntry(e)) return 'safety_verification'
   return undefined
 }
 
@@ -1215,7 +1389,9 @@ export async function ask(
   const send = opts.send
   // v3: a lone surrogate in the message (hashed as messageSha256) or any digest input refuses the Ask.
   if (send && (hasLoneSurrogate(send.message) || hasLoneSurrogate(send.recipient))) return malformed(tier)
-  const what = send ? `${action} to ${send.recipient}: "${firstLine(send.message)}"` : action
+  // R5-5: a recipient that hides characters (bidi, zero-width, line breaks, controls) is refused the same way.
+  if (send && hasHiddenChar(send.recipient)) return malformed(tier)
+  const what = send ? `${action} to ${recipientDisplay(send.recipient)}: "${firstLine(send.message)}"` : action
   const details = { ...opts.details, ...(send ? { recipient: send.recipient, messageSha256: createHash('sha256').update(send.message).digest('hex') } : {}) }
   const amount = opts.amountMinor !== undefined ? ` ${money(opts.amountMinor)}` : ''
   let prompt = `${tier.toUpperCase()}: ${what}${send ? amount : ''}${suffix}`
@@ -1232,7 +1408,7 @@ export async function ask(
         ...(send ? { recipient: send.recipient, firstLine: firstLine(send.message) } : {}),
       })
     } catch (e) {
-      if (e instanceof InvalidUnicode) return malformed(tier)
+      if (e instanceof InvalidUnicode || e instanceof UnsafeRecipient) return malformed(tier)
       throw e
     }
     request = req
@@ -1250,9 +1426,9 @@ export async function ask(
       } finally {
         if (voice) opts.mic!.speaking(false)
       }
-      s = bound.settle(ans as AskAnswer, { isPaired: pairing ? (id) => pairing.isPaired(id) : undefined, extra: opts.verifier, isShared: opts.isShared })
+      s = bound.settle(ans as AskAnswer, { isPaired: pairing ? (id, pub) => (pub === undefined ? pairing.isPaired(id) : pairing.isPairedKey(id, pub)) : undefined, extra: opts.verifier, isShared: opts.isShared })
       // hold_too_short and stale_channel leave the Ask open: ask again on its (current) channel.
-      if (s.ok || (s.reason !== 'hold_too_short' && s.reason !== 'stale_channel') || prompts >= MAX_REPROMPTS) break
+      if (s.ok || !KEEPS_ASK_OPEN.has(s.reason) || prompts >= MAX_REPROMPTS) break
     }
     approved = s.ok && (ans as AskAnswer).approved === true
     reason = s.ok ? (approved ? 'approved' : 'denied') : s.reason

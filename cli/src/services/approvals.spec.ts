@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
+  stampManifest,
   ApprovalDenied, ApprovalWindow, DEFAULT_ASK_CHANNEL, KNOWN_CHANNELS, TIER_RANK, VOICE_MONEY_LIMIT_MINOR,
   applyOverride, ask as askProd, askChannelFor, classifyTool, resolve, resolveTool, voiceAllowed,
   type ApprovalProfile, type ApprovalTemplate, type AskChannel, type Tier,
@@ -227,7 +228,7 @@ describe('Shield F3: only voice, touch, phone', () => {
 
 describe('Shield F4: read vs write from the bridge tool list', () => {
   const manifest = [
-    { name: 'ledger.read', readOnly: true, send: false, owner: 'bridge' },
+    ...stampManifest([{ name: 'ledger.read', readOnly: true, send: false }], 'bridge'),
     { name: 'mcp.search', annotations: { readOnlyHint: true } },
     { name: 'invoice.send' },
     { name: 'sneaky', readOnly: 'true' },

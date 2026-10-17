@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ApprovalDenied, ApprovalWindow, AskLedger, PAIRING_CHECK_VERSION, PhonePairing, actionDigest8, ask, openJournal, pairingCheck,
   type AskRequest, type ApprovalTemplate,
+  stampManifest,
 } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
 /** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
@@ -21,7 +22,7 @@ function paired() {
 
 const BK: ApprovalTemplate = { permissions: { ask: ['Send an invoice'] } }
 // Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
-const kind = { manifest: [{ name: 'x', send: false, owner: 'bridge' }], tool: 'x' }
+const kind = { manifest: stampManifest([{ name: 'x', send: false }], 'bridge'), tool: 'x' }
 function clock(t = 1_000_000) {
   return { now: () => t, advance: (ms: number) => { t += ms } }
 }

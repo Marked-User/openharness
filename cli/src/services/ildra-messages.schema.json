@@ -63,15 +63,17 @@
         "action": { "type": "string", "minLength": 1 },
         "agentId": { "type": "string", "minLength": 1 },
         "templateId": { "type": "string", "minLength": 1 },
-        "recipient": { "description": "Send Asks only.", "type": "string", "minLength": 1 },
-        "firstLine": { "description": "Send Asks only: first non-empty line of the message, trimmed; never empty (a send whose message has no non-blank line is refused, no Ask is opened). At most 80 Unicode code points: a longer line is cut to 79 code points plus \u2026.", "type": "string", "minLength": 1, "maxLength": 80 },
+        "recipient": { "description": "Send Asks only. Shield R5-5: never carries a bidi control (U+202A-202E, U+2066-2069, U+200E, U+200F, U+061C), a zero-width character (U+200B-200D, U+2060, U+FEFF), U+2028, U+2029 or any C0/C1 control (CR and LF included); a send whose recipient has one is refused as malformed and no Ask is opened.", "type": "string", "minLength": 1, "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F\\u061C\\u200B-\\u200F\\u2028-\\u202E\\u2060\\u2066-\\u2069\\uFEFF]+$" },
+        "recipientFlags": { "description": "Send Asks only, display only, not in digest8 (the recipient itself is). Set by the daemon. mixed_script (Shield R5-5): the recipient's domain, one of its labels, or its local part mixes letter scripts (for example Cyrillic \u0430 in p\u0430ypal.com); show a visible warning next to the recipient. The device text appends [\u26a0 mixed script] to the recipient.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["mixed_script"] } },
+        "firstLine": { "description": "Send Asks only: first non-empty line of the message, trimmed; never empty (a send whose message has no non-blank line is refused, no Ask is opened). At most 80 Unicode code points: a longer line is cut to 79 code points plus \u2026. Shield R5-5: each hidden character in the line (the recipient's list above; a tab shows as a space) is shown as a visible marker \u27e6U+XXXX\u27e7, for example \u27e6U+2028\u27e7, before the cut.", "type": "string", "minLength": 1, "maxLength": 80 },
         "kind": { "description": "Display only, not in digest8: what sort of locked_ask this is, so the phone can word it (Design copy). safety_verification: a safety check step. Set by the daemon from the template (safety_verification list) or a trusted tool manifest entry (safetyVerification: true), never by the asking caller. Only on locked_ask. More values may be added.", "enum": ["safety_verification"] }
       },
       "dependentRequired": {
         "amountMinor": ["currency"],
         "currency": ["amountMinor"],
         "recipient": ["firstLine"],
-        "firstLine": ["recipient"]
+        "firstLine": ["recipient"],
+        "recipientFlags": ["recipient"]
       },
       "allOf": [
         {
@@ -128,11 +130,11 @@
     },
 
     "AskRejectionReason": {
-      "enum": ["malformed", "unknown_id", "replayed", "expired", "digest_mismatch", "challenge_mismatch", "verifier_rejected", "shared_machine", "unpaired_phone", "hold_too_short", "stale_channel"]
+      "enum": ["malformed", "unknown_id", "replayed", "expired", "digest_mismatch", "challenge_mismatch", "verifier_rejected", "shared_machine", "unpaired_phone", "hold_too_short", "stale_channel", "wrong_channel", "hold_limit"]
     },
 
     "AskRejection": {
-      "description": "Daemon to answering surface when an answer is not accepted (approvals.ts SettleResult with ok false). The request is spent by the rejection (it can no longer be answered), with two exceptions: hold_too_short and stale_channel on an unexpired request leave it open until expiresAt, and the daemon emits ildra.ask.attempt. A malformed answer changes nothing; otherwise the rejected answerId is spent too.",
+      "description": "Daemon to answering surface when an answer is not accepted (approvals.ts SettleResult with ok false). The request is spent by the rejection (it can no longer be answered), with three exceptions that leave an unexpired request open until expiresAt: hold_too_short and stale_channel (the daemon emits ildra.ask.attempt), and wrong_channel (Shield R5-1: an answer to a touch Ask from a connection that is not the device bridge; not logged, answerId not spent, checked before replayed). hold_limit (Shield R5-4): the fifth hold_too_short on one request spends it; that attempt is still logged and the daemon sends ildra.ask.outcome with reason hold_limit. A malformed answer changes nothing; otherwise the rejected answerId is spent too.",
       "type": "object",
       "additionalProperties": false,
       "required": ["ok", "reason"],

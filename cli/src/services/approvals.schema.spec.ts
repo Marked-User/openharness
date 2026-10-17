@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ApprovalWindow, AskLedger, PhonePairing, ask, pairingCheck,
   type AskAnswer, type AskRequest, type ApprovalTemplate,
+  stampManifest,
 } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
 /** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
@@ -40,7 +41,7 @@ function envelope(type: string, body: unknown): string[] {
 const T: ApprovalTemplate = { permissions: { auto: ['Read the ledger'], ask: ['Send an invoice', 'Pay a bill'], locked_ask: ['Brakes step'] } }
 const MIC = { speaking: () => {} }
 // Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
-const kind = { manifest: [{ name: 'x', send: false, owner: 'bridge' }], tool: 'x' }
+const kind = { manifest: stampManifest([{ name: 'x', send: false }], 'bridge'), tool: 'x' }
 const PUB = 'A'.repeat(43) + '='
 
 describe('vendored schema', () => {
@@ -114,7 +115,7 @@ describe('real AskAnswer, AskRejection and AskOutcome outputs', () => {
   it('answers, rejections and outcomes from a run validate', async () => {
     const l = new AskLedger()
     const pairing = new PhonePairing()
-    const s = pairing.begin('touch'); pairing.offer('p1', 'pub1', s.code); pairing.confirm('p1', 'touch', true)
+    const s = pairing.begin('touch'); pairing.offer('p1', PUB, s.code); pairing.confirm('p1', 'touch', true)
     const answers: AskAnswer[] = []
     const outcomes = []
     const answer = (extra: Partial<AskAnswer>) => (_c: unknown, _p: unknown, r?: AskRequest) => {

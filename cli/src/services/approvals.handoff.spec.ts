@@ -4,6 +4,7 @@ import {
   ApprovalDenied, ApprovalWindow, AskLedger, MONEY_ASK_EXPIRY_MS, OTHER_ASK_EXPIRY_MS, PhonePairing,
   answerMcpElicitation, applyOverride, ask, askExpired, askExpiryMs, resolve,
   type AskAnswer, type AskRequest, type ApprovalTemplate, type AskOptions,
+  stampManifest,
 } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
 /** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
@@ -31,7 +32,7 @@ const good = (req: AskRequest, extra: Partial<AskAnswer> = {}): AskAnswer =>
   ({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: HOLD, transcript: req.challenge ? `ok ${req.challenge}` : undefined, from: { phoneId: 'p1' }, ...extra })
 // Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
 // locked_ask and money Asks are phone-only (pilot review A1), so the default has phone p1 paired.
-const prod = (o: Partial<AskOptions> = {}): AskOptions => ({ ledger: new AskLedger(), kind: { manifest: [{ name: 'x', send: false, owner: 'bridge' }], tool: 'x' }, pairing: pairedP1(), ...o })
+const prod = (o: Partial<AskOptions> = {}): AskOptions => ({ ledger: new AskLedger(), kind: { manifest: stampManifest([{ name: 'x', send: false }], 'bridge'), tool: 'x' }, pairing: pairedP1(), ...o })
 function pairedP1(): PhonePairing {
   const p = new PhonePairing()
   complete(p, 'p1', p.begin('touch').code)
@@ -119,7 +120,7 @@ describe('production is the default', () => {
 })
 
 describe('F4 mandatory manifests', () => {
-  const manifest = [{ name: 'ledger.read', readOnly: true, send: false, owner: 'bridge' }, { name: 'invoice.send' }]
+  const manifest = stampManifest([{ name: 'ledger.read', readOnly: true, send: false }, { name: 'invoice.send' }], 'bridge')
   const k = (tool: string, m: typeof manifest | null = manifest) => ({ manifest: m, tool })
   // Unlisted and send-capable tools (pilot review a) carry send details and a window so the tier is what is tested.
   const send = { send: { recipient: 'dana@example.com', message: 'Hi' }, window: new ApprovalWindow(), agentId: 'a' }
@@ -217,7 +218,7 @@ describe('F6 and #1358 shared machines', () => {
 describe('#1340: phone MCP Accept/Decline goes through the Ask gate', () => {
   const pairing = new PhonePairing()
   complete(pairing, 'p1', pairing.begin('touch').code)
-  const base = { ledger: new AskLedger(), pairing, manifest: [{ name: 'calendar.read', readOnly: true, send: false, owner: 'bridge' }], available: ['phone'] }
+  const base = { ledger: new AskLedger(), pairing, manifest: stampManifest([{ name: 'calendar.read', readOnly: true, send: false }], 'bridge'), available: ['phone'] }
   const el = { server: 'calendar', message: 'Allow access to your work calendar?', tool: 'calendar.read' }
   it('an approved bound answer accepts and the prompt names the server and message', async () => {
     let prompt = ''

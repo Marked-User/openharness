@@ -15,11 +15,12 @@ import {
   ApprovalDenied, ApprovalWindow, AskLedger, DEVICE_HOLD_MIN_MS, MONEY_ASK_EXPIRY_MS, OTHER_ASK_EXPIRY_MS, PhonePairing,
   InvalidUnicode, USE_YOUR_PHONE, actionDigest8, ask, canonicalJson, firstLine, neverOutcome, fromDeviceReply, toDeviceMessage,
   type AskAnswer, type AskRequest, type ApprovalTemplate,
+  stampManifest,
 } from './approvals.js'
 
 const NOW = 1_760_596_400_000
 const T: ApprovalTemplate = { permissions: { auto: ['Read the ledger'], ask: ['Send an invoice', 'Rename a file'], locked_ask: ['Brakes step'], never: ['Move money out'] } }
-const kind = { manifest: [{ name: 'fs.rename', send: false, owner: 'bridge' }], tool: 'fs.rename' }
+const kind = { manifest: stampManifest([{ name: 'fs.rename', send: false }], 'bridge'), tool: 'fs.rename' }
 const hex = (): string => randomBytes(16).toString('hex')
 const clock = () => { let t = NOW; return { now: () => t, set: (v: number) => { t = v } } }
 function paired(): PhonePairing {
@@ -60,7 +61,7 @@ describe('digest (v2 DigestTests)', () => {
 
 describe('pilot open (v2 PilotOpenTests)', () => {
   it('auto and never never reach the wire', async () => {
-    const a = await opened('Read the ledger', { kind: { manifest: [{ name: 'ledger.read', readOnly: true, send: false, owner: 'bridge' }], tool: 'ledger.read' } })
+    const a = await opened('Read the ledger', { kind: { manifest: stampManifest([{ name: 'ledger.read', readOnly: true, send: false }], 'bridge'), tool: 'ledger.read' } })
     expect(a.req).toBeNull()
     expect(a.outcome).toMatchObject({ approved: true, channel: null, tier: 'auto' })
     // ask() refuses a never item outright (ApprovalDenied) before any prompt; the wire outcome is neverOutcome().
@@ -411,7 +412,7 @@ describe('v3 outcome reasons (PM spec: always present)', () => {
     expect(late).toMatchObject({ approved: false, reason: 'expired' })
     expect((await opened('Brakes step', { available: ['touch'] })).outcome.reason).toBe('no_channel')
     expect(neverOutcome().reason).toBe('never')
-    const auto = await opened('Read the ledger', { kind: { manifest: [{ name: 'r', readOnly: true, send: false, owner: 'bridge' }], tool: 'r' } })
+    const auto = await opened('Read the ledger', { kind: { manifest: stampManifest([{ name: 'r', readOnly: true, send: false }], 'bridge'), tool: 'r' } })
     expect(auto.outcome).toEqual({ approved: true, channel: null, tier: 'auto', reason: 'approved' })
   })
 })

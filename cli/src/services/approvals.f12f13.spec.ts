@@ -4,6 +4,7 @@ import {
   AskLedger, AskPaneGuard, ApprovalDenied, ILDRA_ASK_MARKER, PhonePairing, ask, ildraAskTitle, isIldraAskQuestion,
   phoneElicitationPress, sharedOriginFromPeers,
   type AskAnswer, type AskRequest, type ApprovalTemplate,
+  stampManifest,
 } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
 /** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
@@ -14,7 +15,7 @@ const HOLD = 2000
 
 const T: ApprovalTemplate = { permissions: { ask: ['Send an email'], locked_ask: ['Brakes step'] } }
 // Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
-const kind = { manifest: [{ name: 'x', send: false, owner: 'bridge' }], tool: 'x' }
+const kind = { manifest: stampManifest([{ name: 'x', send: false }], 'bridge'), tool: 'x' }
 const SHARED_PUB = 'S'.repeat(43) + '='
 const OWN_PUB = 'O'.repeat(43) + '='
 const isShared = sharedOriginFromPeers([{ machineId: 'm-shared', pub: SHARED_PUB }])
@@ -63,7 +64,7 @@ describe('F12: the shared flag comes from the gateway, not the answer', () => {
 describe('F13: phone elicitation handler routed through the Ask gate', () => {
   const pairing = new PhonePairing()
   const s = pairing.begin('touch'); pairing.offer('p1', 'pub1', s.code); pairing.confirm('p1', 'touch', true)
-  const base = () => ({ ledger: new AskLedger(), pairing, manifest: [{ name: 'db.query', send: false, owner: 'bridge' }], available: ['phone'], guard: new AskPaneGuard() })
+  const base = () => ({ ledger: new AskLedger(), pairing, manifest: stampManifest([{ name: 'db.query', send: false }], 'bridge'), available: ['phone'], guard: new AskPaneGuard() })
   const el = { paneId: 'pane-1', server: 'db', message: 'Drop table users?', tool: 'db.query' }
   it('marker helpers', () => {
     expect(ildraAskTitle({ digest8: 'abcd1234' }, 'ASK: x')).toBe(`${ILDRA_ASK_MARKER}abcd1234] ASK: x`)

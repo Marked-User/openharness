@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest'
 import { ILDRA_ASK_REQUESTS } from '../core/api.js'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { createIldraAsk } from './ildraAsk.js'
-import { PhonePairing, type ApprovalTemplate, type AskRequest } from './approvals.js'
+import { PhonePairing, stampManifest, type ApprovalTemplate, type AskRequest } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
 /** DECISIONS ad47477: every answer carries a fresh answerId (device firmware: 32 hex from 128 random bits). */
 const aid = (): string => aidBytes(16).toString('hex')
@@ -18,7 +18,7 @@ const aid = (): string => aidBytes(16).toString('hex')
 const T: ApprovalTemplate = { permissions: { ask: ['Rename a file', 'Send an email'], locked_ask: ['Brakes step'] } }
 const OWN = 'O'.repeat(43) + '='
 const SHARED = 'S'.repeat(43) + '='
-const kind = { manifest: [{ name: 'fs.rename', send: false, owner: 'bridge' }], tool: 'fs.rename' }
+const kind = { manifest: stampManifest([{ name: 'fs.rename', send: false }], 'bridge'), tool: 'fs.rename' }
 
 function setup(clients: Record<string, IldraAskClient | null> = {}) {
   const d = mkdtempSync(join(tmpdir(), 'ildra-ask-'))
@@ -102,14 +102,15 @@ describe('ildra_ask_answer', () => {
     expect(await p).toMatchObject({ approved: false, reason: 'shared_machine' })
   })
   it('F12: the payload cannot pose as another machine (machinePub comes from the connection)', async () => {
-    const { rt, sent } = setup({ own: { identity: OWN, role: 'web' } })
+    const { rt, sent } = setup({ dev: { identity: OWN, role: 'device' }, web: { identity: SHARED, role: 'web' } })
     const p = rt.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
     await Promise.resolve()
     const seen: unknown[] = []
-    rt.onSettled = (_id, ans) => seen.push(ans.from)
-    await rt.requests.ildra_ask_answer(answerFor(sent[0]!.req, { from: { machinePub: SHARED, shared: true, phoneId: 'p9' } }), { local: false, owner: true, connection: 'own' })
+    rt.onSettled = (_id, ans) => seen.push({ from: ans.from, via: ans.via })
+    await rt.requests.ildra_ask_answer(answerFor(sent[0]!.req, { from: { machinePub: SHARED, shared: true, phoneId: 'p9' }, via: 'phone' }), { local: false, owner: true, connection: 'dev' })
     expect(await p).toMatchObject({ approved: true })
-    expect(seen).toEqual([{ machinePub: OWN, phoneId: 'p9' }])
+    // R5-1: the device session answers on touch only; a phone id it claims is dropped, and via is the core's.
+    expect(seen).toEqual([{ from: { machinePub: OWN }, via: 'touch' }])
   })
   it('an answer with no connection, or from an unknown one, is refused', async () => {
     const { rt, sent } = setup()
@@ -120,12 +121,26 @@ describe('ildra_ask_answer', () => {
     rt.cancel(sent[0]!.req.id)
     expect((await p).approved).toBe(false)
   })
-  it('the loopback desktop answers as this machine', async () => {
-    const { rt, sent } = setup()
+  it('R5-1: the loopback desktop (local socket) has no answer authority; observers neither', async () => {
+    const { rt, sent, core } = setup({ obs: { identity: OWN, role: 'observer' } })
     const p = rt.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
     await Promise.resolve()
-    await rt.requests.ildra_ask_answer(answerFor(sent[0]!.req), { local: true, owner: true, connection: 'desk' })
-    expect(await p).toMatchObject({ approved: true })
+    expect(await rt.requests.ildra_ask_answer(answerFor(sent[0]!.req), { local: true, owner: true, connection: 'desk' })).toEqual({ ok: false, reason: 'no_authority' })
+    expect(await rt.requests.ildra_ask_answer(answerFor(sent[0]!.req), { local: false, owner: false, connection: 'obs' })).toEqual({ ok: false, reason: 'no_authority' })
+    core.cancel(sent[0]!.req.id)
+    expect(await p).toMatchObject({ approved: false })
+  })
+  it('R5-1: a web client answering a touch Ask is refused without spending it; the device then answers', async () => {
+    const { rt, sent } = setup({ dev: { identity: OWN, role: 'device' }, web: { identity: SHARED, role: 'web' } })
+    const p = rt.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
+    await until(() => sent.length === 1)
+    const a = answerFor(sent[0]!.req)
+    await rt.requests.ildra_ask_answer(a, { local: false, owner: false, connection: 'web' })
+    await until(() => sent.length === 2) // wrong_channel keeps the Ask open; ask() re-shows it
+    await rt.requests.ildra_ask_answer(a, { local: false, owner: false, connection: 'web' }) // its own answerId again: still not spent
+    await until(() => sent.length === 3)
+    await rt.requests.ildra_ask_answer(answerFor(sent[2]!.req), { local: false, owner: false, connection: 'dev' })
+    expect(await p).toMatchObject({ approved: true, channel: 'touch' })
   })
   it('an answer for no open Ask is refused and never approves; a second answer to the same Ask is refused', async () => {
     const { rt, sent } = setup({ dev: { identity: OWN, role: 'device' } })
@@ -142,11 +157,21 @@ describe('ildra_ask_answer', () => {
   it('phone answers need the phone paired in the runtime journal', async () => {
     const { rt, sent } = setup({ ph: { identity: OWN, role: 'web' } })
     const pairing: PhonePairing = rt.journal().pairing
-    const { code } = pairing.begin('touch'); pairing.offer('p1', 'pub1', code); pairing.confirm('p1', 'touch', true)
+    const { code } = pairing.begin('touch'); pairing.offer('p1', OWN, code); pairing.confirm('p1', 'touch', true)
     const p = rt.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
     await Promise.resolve()
     expect(sent[0]!.channel).toBe('phone')
     await rt.requests.ildra_ask_answer(answerFor(sent[0]!.req, { from: { phoneId: 'p1' } }), { local: false, owner: true, connection: 'ph' })
     expect(await p).toMatchObject({ approved: true, channel: 'phone' })
+  })
+  it('R5-1: a phone answer is accepted only from the key the phone paired with (F6 offer phonePub)', async () => {
+    const { rt, sent } = setup({ other: { identity: SHARED, role: 'web' } })
+    const pairing: PhonePairing = rt.journal().pairing
+    const { code } = pairing.begin('touch'); pairing.offer('p1', OWN, code); pairing.confirm('p1', 'touch', true)
+    expect(pairing.phoneKey('p1')).toBe(OWN)
+    const p = rt.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
+    await Promise.resolve()
+    await rt.requests.ildra_ask_answer(answerFor(sent[0]!.req, { from: { phoneId: 'p1' } }), { local: false, owner: true, connection: 'other' })
+    expect(await p).toMatchObject({ approved: false, reason: 'unpaired_phone' })
   })
 })

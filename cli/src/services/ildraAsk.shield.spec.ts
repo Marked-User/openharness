@@ -10,11 +10,11 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { createIldraAsk } from './ildraAsk.js'
-import { type ApprovalTemplate, type AskRequest } from './approvals.js'
+import { stampManifest, type ApprovalTemplate, type AskRequest } from './approvals.js'
 
 const aid = (): string => randomBytes(16).toString('hex')
 const T: ApprovalTemplate = { permissions: { ask: ['Rename a file', 'Pay a bill'], locked_ask: ['Brakes step'] } }
-const kind = { manifest: [{ name: 'fs.rename', send: false, owner: 'bridge' }], tool: 'fs.rename' }
+const kind = { manifest: stampManifest([{ name: 'fs.rename', send: false }], 'bridge'), tool: 'fs.rename' }
 const DEV = 'D'.repeat(43) + '='
 const PHONE = 'P'.repeat(43) + '='
 const OTHER = 'X'.repeat(43) + '='
@@ -34,36 +34,44 @@ function rig(clients: Record<string, IldraAskClient>) {
 }
 
 describe('Shield R5 runtime: who may answer an Ask', () => {
-  it('REOPEN R5-1: any local process (the agent itself) answers a touch Ask over the local socket', async () => {
+  // Flipped by Build (R5-1 fix): each REOPEN below now asserts the refusal; setup and inputs are Shield's.
+  it('FIXED R5-1: any local process (the agent itself) answers a touch Ask over the local socket', async () => {
     const r = rig({})
     const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'agent-1', available: ['touch'] })
     await tick()
-    expect(await r.answer(r.sent[0]!, 'local:agent-shell', {}, true)).toEqual({ ok: true })
-    expect(await p).toMatchObject({ approved: true, channel: 'touch' })
+    expect(await r.answer(r.sent[0]!, 'local:agent-shell', {}, true)).toEqual({ ok: false, reason: 'no_authority' })
+    r.core.cancel(r.sent[0]!.id)
+    expect(await p).toMatchObject({ approved: false })
   })
-  it('REOPEN R5-1: a local process names the paired phone id and approves a phone-only money Ask', async () => {
+  it('FIXED R5-1: a local process names the paired phone id and approves a phone-only money Ask', async () => {
     const r = rig({})
     r.pairPhone()
     const p = r.svc.ask(T, 'Pay a bill', null, { kind, agentId: 'agent-1', available: ['phone'], amountMinor: 20000 })
     await tick()
     expect(r.sent[0]!.channel).toBe('phone')
-    await r.answer(r.sent[0]!, 'local:agent-shell', { from: { phoneId: 'p1' } }, true)
-    expect(await p).toMatchObject({ approved: true, channel: 'phone' })
+    expect(await r.answer(r.sent[0]!, 'local:agent-shell', { from: { phoneId: 'p1' } }, true)).toEqual({ ok: false, reason: 'no_authority' })
+    r.core.cancel(r.sent[0]!.id)
+    expect(await p).toMatchObject({ approved: false })
   })
-  it('REOPEN R5-1: a remote connection that is not the paired phone (key X, phone paired as P) approves a locked_ask', async () => {
-    const r = rig({ obs: { identity: OTHER, role: 'observer' } })
+  it('FIXED R5-1: a remote connection that is not the paired phone (key X, phone paired as P) approves a locked_ask', async () => {
+    const r = rig({ obs: { identity: OTHER, role: 'observer' }, web: { identity: OTHER, role: 'web' } })
     r.pairPhone()
     const p = r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
     await tick()
-    await r.answer(r.sent[0]!, 'obs', { from: { phoneId: 'p1' } })
-    expect(await p).toMatchObject({ approved: true, channel: 'phone' })
+    expect(await r.answer(r.sent[0]!, 'obs', { from: { phoneId: 'p1' } })).toEqual({ ok: false, reason: 'no_authority' })
+    // Not an observer, but still not the paired phone's key: refused by the ledger.
+    await r.answer(r.sent[0]!, 'web', { from: { phoneId: 'p1' } })
+    expect(await p).toMatchObject({ approved: false, reason: 'unpaired_phone' })
   })
-  it('REOPEN R5-1: a non-device remote client answers a touch Ask as the device', async () => {
+  it('FIXED R5-1: a non-device remote client answers a touch Ask as the device', async () => {
     const r = rig({ web: { identity: OTHER, role: 'web' } })
     const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
     await tick()
     await r.answer(r.sent[0]!, 'web')
-    expect(await p).toMatchObject({ approved: true, channel: 'touch' })
+    await tick()
+    expect(r.svc.journal().ledger.pending()).toBe(1) // wrong_channel: refused, Ask not spent
+    r.core.cancel(r.sent[r.sent.length - 1]!.id)
+    expect(await p).toMatchObject({ approved: false })
   })
   it('a gateway-shared connection, an unknown connection, or none never approves', async () => {
     const r = rig({ sh: { identity: OTHER, role: 'web', shared: true } })
@@ -109,15 +117,16 @@ describe('Shield R5 runtime: answerId and hold_too_short', () => {
     await r.answer(r.sent[0]!, 'dev', { holdMs: 10, digest8: '00000000' })
     expect(await p).toMatchObject({ approved: false, reason: 'digest_mismatch' })
   })
-  it('GAP R5-4: short holds are not capped per Ask; each one is journaled and its answerId kept until expiry', async () => {
+  it('FIXED R5-4: short holds are capped per Ask (5): the fifth spends it; each one is journaled and its answerId kept until expiry', async () => {
     const r = rig({ dev: { identity: DEV, role: 'device' } })
-    void r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
+    const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
     await tick()
     const req = r.sent[0]!
     for (let i = 0; i < 60; i++) { await r.answer(req, 'dev', { holdMs: 100 }); await tick() }
-    const onDisk = JSON.parse(readFileSync(r.journalPath, 'utf8')) as { ledger: { open: { id: string }[]; spentAnswers: unknown[] } }
-    expect(onDisk.ledger.open.map((o) => o.id)).toContain(req.id) // still open after 60 short holds
-    expect(onDisk.ledger.spentAnswers.length).toBeGreaterThanOrEqual(60)
-    r.core.cancel(req.id)
+    const onDisk = JSON.parse(readFileSync(r.journalPath, 'utf8')) as { ledger: { open: { id: string }[]; spentAnswers: unknown[]; attempts: unknown[] } }
+    expect(onDisk.ledger.open.map((o) => o.id)).not.toContain(req.id) // spent by the fifth short hold
+    expect(onDisk.ledger.spentAnswers.length).toBeGreaterThanOrEqual(5)
+    expect(onDisk.ledger.attempts).toHaveLength(5)
+    expect(await p).toMatchObject({ approved: false, reason: 'hold_limit' })
   })
 })

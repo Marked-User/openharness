@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ApprovalDenied, ApprovalWindow, AskLedger, answerMcpElicitation, DEVICE_HOLD_MIN_MS, PhonePairing, ask, defaultMarkerPath, isSendTool, openJournal,
   type AskAnswer, type AskRequest, type ApprovalTemplate, type ToolManifestEntry,
+  stampManifest,
 } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
 /** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
@@ -19,7 +20,7 @@ const aid = (): string => aidBytes(16).toString('hex')
 const T: ApprovalTemplate = { permissions: { ask: ['Send an email', 'Pay a bill', 'Rename a file'], locked_ask: ['Brakes step'] } }
 const MIC = { speaking: () => {} }
 const dir = () => mkdtempSync(join(tmpdir(), 'pilot-'))
-const notSend = (tool: string): ToolManifestEntry[] => [{ name: tool, send: false, owner: 'bridge' }]
+const notSend = (tool: string): ToolManifestEntry[] => stampManifest([{ name: tool, send: false }], 'bridge')
 function paired() {
   const p = new PhonePairing()
   const { code } = p.begin('touch'); p.offer('p1', 'pub1', code); p.confirm('p1', 'touch', true)
@@ -30,7 +31,8 @@ const yes = (extra: Partial<AskAnswer> = {}) => (_c: unknown, _p: unknown, req?:
 
 describe('(a) unknown tools can send', () => {
   it('only an explicit send:false entry is not a send', () => {
-    expect(isSendTool([{ name: 't', send: false, owner: 'bridge' }], 't')).toBe(false)
+    expect(isSendTool(stampManifest([{ name: 't', send: false }], 'bridge'), 't')).toBe(false)
+    expect(isSendTool([{ name: 't', send: false, owner: 'bridge' }], 't')).toBe(true) // R5-2: unstamped
     expect(isSendTool([{ name: 't', send: true }], 't')).toBe(true)
     expect(isSendTool([], 't')).toBe(true) // missing from the list
     expect(isSendTool(null, 't')).toBe(true)
@@ -57,7 +59,7 @@ describe('(a) unknown tools can send', () => {
 
 describe('(a) MCP elicitations from unknown tools', () => {
   it('an elicitation whose tool is unlisted or missing declines (it would need send details)', async () => {
-    const base = { ledger: new AskLedger(), pairing: paired(), manifest: [{ name: 'db.query', send: false, owner: 'bridge' }], available: ['phone'] }
+    const base = { ledger: new AskLedger(), pairing: paired(), manifest: stampManifest([{ name: 'db.query', send: false }], 'bridge'), available: ['phone'] }
     for (const tool of ['mystery', undefined]) {
       const r = await answerMcpElicitation(T, { server: 'db', message: 'Drop table?', ...(tool ? { tool } : {}) }, null, yes(), base)
       expect(r.action, String(tool)).toBe('decline')
@@ -137,7 +139,8 @@ describe('(c) on-device approval', () => {
     for (const [holdMs, ok] of [[undefined, false], [0, false], [600, false], [1499, false], [1500, true], [4000, true]] as const) {
       const r = await ask(T, 'Rename a file', null, yes(holdMs === undefined ? {} : { holdMs }), { ...o, ledger: new AskLedger() })
       expect(r.approved, String(holdMs)).toBe(ok)
-      if (!ok) expect(r.reason).toBe('hold_too_short')
+      // The same short hold every time: the Ask stays open for MAX_SHORT_HOLDS - 1, then hold_limit spends it (R5-4).
+      if (!ok) expect(r.reason).toBe('hold_limit')
     }
   })
   it('a non-number, NaN or negative hold is not a hold', () => {

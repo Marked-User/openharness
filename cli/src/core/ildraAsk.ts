@@ -27,7 +27,7 @@ class PaneGuard implements IldraPaneGuard {
   filterInput(paneId: string, from: 'local' | 'remote'): 'pass' | 'block' { return from === 'remote' && this.open_.has(paneId) ? 'block' : 'pass' }
 }
 
-export type IldraAnswerReply = { ok: true } | { ok: false; reason: 'malformed' | 'no_connection' | 'unknown_id' }
+export type IldraAnswerReply = { ok: true } | { ok: false; reason: 'malformed' | 'no_connection' | 'unknown_id' | 'no_authority' }
 
 export interface IldraAskCore extends IldraAskInputs {
   readonly requests: { ildra_ask_answer: (payload: Record<string, unknown>, asker: Asker) => Promise<IldraAnswerReply> } & Record<string, ServiceRequest>
@@ -46,15 +46,27 @@ export function createIldraAskCore(deps: {
   /** The gateway's word on each identity key that has answered. */
   const sharedByPub = new Map<string, boolean>()
 
-  const originOf = (connId: string | undefined, claimed: unknown): IldraAnswerOrigin | null => {
-    if (!connId) return null
+  /**
+   * Shield R5-1: who may answer, from the connection alone.
+   * - The loopback / local socket has no answer authority (the agent itself runs there).
+   * - Observers never answer.
+   * - The device bridge session (role 'device', a key this daemon paired as a device) answers on touch only;
+   *   any phone id it claims is dropped.
+   * - Any other remote session answers as a phone: the ledger accepts it only when its authenticated key
+   *   (machinePub) is the key the claimed phone paired with (PhonePairing.isPairedKey).
+   */
+  type Origin = { from: IldraAnswerOrigin; via: 'touch' | 'phone' } | 'no_connection' | 'no_authority'
+  const originOf = (connId: string | undefined, claimed: unknown): Origin => {
+    if (!connId) return 'no_connection'
+    if (deps.isLoopback(connId)) return 'no_authority'
+    const client = deps.clientOf(connId)
+    if (!client || typeof client.identity !== 'string' || !client.identity) return 'no_connection'
+    sharedByPub.set(client.identity, client.shared === true)
+    if (client.role === 'observer') return 'no_authority'
+    if (client.role === 'device') return { from: { machinePub: client.identity }, via: 'touch' }
     const c = claimed && typeof claimed === 'object' ? (claimed as Record<string, unknown>) : {}
     const phoneId = typeof c.phoneId === 'string' && c.phoneId ? c.phoneId : undefined
-    if (deps.isLoopback(connId)) return phoneId ? { phoneId } : {}
-    const client = deps.clientOf(connId)
-    if (!client || typeof client.identity !== 'string' || !client.identity) return null
-    sharedByPub.set(client.identity, client.shared === true)
-    return { machinePub: client.identity, ...(phoneId ? { phoneId } : {}) }
+    return { from: { machinePub: client.identity, ...(phoneId ? { phoneId } : {}) }, via: 'phone' }
   }
 
   const core: IldraAskCore = {
@@ -77,10 +89,11 @@ export function createIldraAskCore(deps: {
     requests: {
       ildra_ask_answer: async (payload, asker) => {
         if (!payload || typeof payload !== 'object' || typeof payload.id !== 'string' || typeof payload.digest8 !== 'string') return { ok: false, reason: 'malformed' }
-        const from = originOf(asker.connection, payload.from)
-        if (!from) return { ok: false, reason: 'no_connection' }
+        const origin = originOf(asker.connection, payload.from)
+        if (typeof origin === 'string') return { ok: false, reason: origin }
         const answer: Record<string, unknown> = {
-          id: payload.id, digest8: payload.digest8, answerId: payload.answerId /* checked by the ledger (malformed) */, approved: payload.approved === true, from,
+          id: payload.id, digest8: payload.digest8, answerId: payload.answerId /* checked by the ledger (malformed) */, approved: payload.approved === true,
+          from: origin.from, via: origin.via,
           ...(typeof payload.holdMs === 'number' ? { holdMs: payload.holdMs } : {}),
           ...(typeof payload.transcript === 'string' ? { transcript: payload.transcript } : {}),
           ...(typeof payload.signature === 'string' ? { signature: payload.signature } : {}),

@@ -129,19 +129,19 @@ describe('AskRequest.kind (Design copy): safety_verification on locked_ask, daem
     return req!
   }
   it('comes from the template list or a trusted manifest entry; validates; not in the digest', async () => {
-    const a = await run('Brakes step', [{ name: 't', send: false, owner: 'bridge' }])
+    const a = await run('Brakes step', stampManifest([{ name: 't', send: false }], 'bridge'))
     expect(a.kind).toBe('safety_verification')
     expect(env('ildra.ask.request', a)).toEqual([])
-    const b = await run('Torque check', [{ name: 't', send: false, owner: 'bridge', safetyVerification: true }])
+    const b = await run('Torque check', stampManifest([{ name: 't', send: false, safetyVerification: true }], 'bridge'))
     expect(b.kind).toBe('safety_verification')
-    const plain = await run('Brakes step', [{ name: 't', send: false, owner: 'bridge' }], 't', { permissions: T.permissions })
+    const plain = await run('Brakes step', stampManifest([{ name: 't', send: false }], 'bridge'), 't', { permissions: T.permissions })
     expect(plain.kind).toBeUndefined()
     expect(plain.digest8).toBe(a.digest8)
     expect(a.digest8).toBe(actionDigest8('Brakes step', { agentId: 'rg', tier: 'locked_ask' }))
   })
   it('never from an untrusted manifest entry, never on a plain Ask, never from the caller', async () => {
-    expect((await run('Torque check', [{ name: 't', send: false, owner: 'bridge', safetyVerification: 'yes' }])).kind).toBeUndefined()
-    const third = stampManifest([{ name: 't', safetyVerification: true, owner: 'bridge' }], 'third_party') // claimed owner is overwritten
+    expect((await run('Torque check', stampManifest([{ name: 't', send: false, safetyVerification: 'yes' }], 'bridge'))).kind).toBeUndefined()
+    const third = stampManifest(stampManifest([{ name: 't', safetyVerification: true }], 'bridge'), 'third_party') // claimed owner is overwritten
     expect(askKindFor(T, 'Torque check', 'locked_ask', { manifest: third, tool: 't' })).toBeUndefined()
     expect(askKindFor(T, 'Torque check', 'locked_ask', { manifest: stampManifest([{ name: 't', safetyVerification: true }], 'bridge'), tool: 't' })).toBe('safety_verification')
     expect(askKindFor({ permissions: { ask: ['x'] }, safety_verification: ['x'] }, 'x', 'ask')).toBeUndefined()

@@ -769,6 +769,14 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     clientOf: (connId) => backend.remoteClient(connId),
     isLoopback: isLocalClientId,
   })
+  // Shield R5-3: every key path into a tmux pane (phone chat, device input, askQuestion) passes the same guard.
+  // The guard is keyed by agent id; the pane is mapped to its agent the way onTerminalHandoff does it below.
+  if (tmuxBackend) tmuxBackend.inputGuard = (tmuxPane) => {
+    if (ildraAsk.guard.filterInput(tmuxPane, 'remote') === 'block') return true
+    const agentId = registry.advertised().find((session) => session.tmuxPane === tmuxPane
+      || session.runtimes.some((runtime) => runtime.backend === 'tmux' && runtime.paneId === tmuxPane))?.agentId
+    return agentId !== undefined && ildraAsk.guard.filterInput(agentId, 'remote') === 'block'
+  }
   const coreApi = createCoreApi({
     ildraAsk,
     cloud: cloudDoors,
