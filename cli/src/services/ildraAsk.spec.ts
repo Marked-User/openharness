@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ILDRA_ASK_REQUESTS } from '../core/api.js'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
+import { enrollBridge } from './ildraAsk.testkit.js'
 import { createIldraAsk } from './ildraAsk.js'
 import { PhonePairing, stampManifest, type ApprovalTemplate, type AskRequest } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
@@ -27,6 +28,7 @@ function setup(clients: Record<string, IldraAskClient | null> = {}) {
   const journalPath = join(d, 'j', 'approvals.json')
   const svc = createIldraAsk({ inputs: core, journalPath, markerPath: join(d, 'm', 'x.installed') })
   svc.bridge = (channel, _prompt, req) => { sent.push({ channel, req }) }
+  enrollBridge(core, svc, clients) // Shield R7-1
   // One object for the tests: the core's requests and guard, the service's ask and journal.
   const rt = { requests: core.requests, guard: core.guard, ask: svc.ask, journal: svc.journal, cancel: core.cancel,
     set onSettled(fn: (id: string, ans: Record<string, unknown>) => void) { core.onAnswer = fn } }
@@ -152,7 +154,8 @@ describe('ildra_ask_answer', () => {
     await p
     // v3.3: an answer nothing waits for is still recorded by the ledger (it never approves): here a reuse, replayed.
     expect(await rt.requests.ildra_ask_answer(a, { local: false, owner: false, connection: 'dev' })).toEqual({ ok: false, reason: 'replayed' })
-    expect(rt.journal().ledger.settle({ ...a, from: {} })).toEqual({ ok: false, reason: 'replayed' })
+    // Shield R7 ledger via rule: an in-process answer the core did not stamp settles nothing on the service's ledger.
+    expect(rt.journal().ledger.settle({ ...a, from: {} })).toEqual({ ok: false, reason: 'no_authority' })
     expect(await rt.requests.ildra_ask_answer('junk' as never, { local: false, owner: false, connection: 'dev' })).toEqual({ ok: false, reason: 'malformed' })
   })
   it('phone answers need the phone paired in the runtime journal', async () => {
@@ -166,13 +169,22 @@ describe('ildra_ask_answer', () => {
     expect(await p).toMatchObject({ approved: true, channel: 'phone' })
   })
   it('R5-1: a phone answer is accepted only from the key the phone paired with (F6 offer phonePub)', async () => {
-    const { rt, sent } = setup({ other: { identity: SHARED, role: 'web' } })
+    // Shield R7-10: the other key is refused (unpaired_phone) without spending or recording anything; the Ask
+    // stays open and the paired phone's key then approves it.
+    const { rt, sent } = setup({ other: { identity: SHARED, role: 'web' }, ph: { identity: OWN, role: 'web' } })
     const pairing: PhonePairing = rt.journal().pairing
     const { code } = pairing.begin('touch'); pairing.offer('p1', OWN, code); pairing.confirm('p1', 'touch', true)
     expect(pairing.phoneKey('p1')).toBe(OWN)
     const p = rt.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
     await Promise.resolve()
+    const before = JSON.stringify(rt.journal().ledger.toJSON())
     await rt.requests.ildra_ask_answer(answerFor(sent[0]!.req, { from: { phoneId: 'p1' } }), { local: false, owner: true, connection: 'other' })
-    expect(await p).toMatchObject({ approved: false, reason: 'unpaired_phone' })
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+    expect(JSON.stringify(rt.journal().ledger.toJSON())).toBe(before)
+    expect(rt.journal().ledger.attempts()).toEqual([])
+    const last = sent[sent.length - 1]!.req
+    expect(last.id).toBe(sent[0]!.req.id)
+    await rt.requests.ildra_ask_answer(answerFor(last, { from: { phoneId: 'p1' } }), { local: false, owner: true, connection: 'ph' })
+    expect(await p).toMatchObject({ approved: true, channel: 'phone', reason: 'approved' })
   })
 })

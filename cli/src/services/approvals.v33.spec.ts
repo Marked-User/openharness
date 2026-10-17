@@ -11,6 +11,7 @@ import Ajv2020Module from 'ajv/dist/2020.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { createIldraAsk, type IldraAskEvent } from './ildraAsk.js'
+import { enrollBridge } from './ildraAsk.testkit.js'
 import {
   ApprovalDenied, ApprovalWindow, AskLedger, DEVICE_WINDOW_SEC, MAX_SHORT_HOLDS, PRACTICE_ACTION, PhonePairing, PracticeRefused,
   ASK_REJECTION_REASONS, actionDigest8, digestInput, ask, openJournal, practiceAsk, stampManifest, toDeviceMessage,
@@ -123,6 +124,7 @@ function rig(clients: Record<string, IldraAskClient>, opts: { now?: () => number
   svc.bridge = (channel, _p, req) => { shown.push({ channel, req }) }
   svc.withdraw = (channel, req) => { withdrawn.push({ channel, id: req.id }) }
   svc.events = (type, body) => { events.push({ type, body }) }
+  enrollBridge(core, svc, clients) // Shield R7-1
   const pairPhone = () => { const p = svc.journal().pairing; const { code } = p.begin('touch'); p.offer('p1', KEY, code); p.confirm('p1', 'touch', true) }
   const send = (req: AskRequest, conn: string, extra: Record<string, unknown> = {}) =>
     core.requests.ildra_ask_answer({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: 2000, from: { phoneId: 'p1' }, ...extra }, { local: conn.startsWith('local:'), owner: false, connection: conn })
@@ -246,7 +248,7 @@ describe('v3.3 recipients: phone only when flagged, punycode, NFC, no Auto', () 
   it('lookalike: the skeleton (local part and domain) of a known contact or domain, text different; learned from approved sends too', async () => {
     const l = new AskLedger()
     const a = l.open({ action: 'Send an email', tier: 'ask', channel: 'phone', recipient: 'pay\u0440al@x.com', firstLine: 'hi', known: { contacts: ['paypal@x.com'] } })
-    expect(a.recipientFlags).toEqual(['mixed_script', 'lookalike', 'new_recipient'])
+    expect(a.recipientFlags).toEqual(['mixed_script', 'lookalike', 'non_ascii', 'new_recipient']) // R7-3: non-ASCII local part
     const b = l.open({ action: 'Send an email', tier: 'ask', channel: 'phone', recipient: 'ann@rnicrosoft.com', firstLine: 'hi', known: { domains: ['microsoft.com'] } })
     expect(b.recipientFlags).toEqual(['lookalike', 'new_recipient'])
     const c = l.open({ action: 'Send an email', tier: 'ask', channel: 'phone', recipient: 'paypal@X.com', firstLine: 'hi', known: { contacts: ['paypal@x.com'] } })
@@ -279,10 +281,12 @@ describe('v3.3 recipients: phone only when flagged, punycode, NFC, no Auto', () 
     expect(recipientAscii('a@[bad')).toBeNull()
     expect(await ask(T, 'Send an email', null, c.fn, o({ available: ['phone'], send: { recipient: 'a@xn--zz.', message: 'hi' } })).catch(() => 'threw')).toBeDefined()
   })
-  it('no Auto rule covers a flagged recipient; a plain one stays auto', async () => {
+  it('no Auto rule covers a send (R7-4), flagged or not; a flagged one goes to the phone', async () => {
     const auto: ApprovalTemplate = { permissions: { auto: ['Send an email'] } }
-    const plain = await ask(auto, 'Send an email', null, () => { throw new Error('no prompt for auto') }, o({ available: ['phone'], send: { recipient: 'ann@example.com', message: 'hi' } }))
-    expect(plain).toMatchObject({ approved: true, tier: 'auto', channel: null })
+    const cp = capture()
+    const plain = await ask(auto, 'Send an email', null, cp.fn, o({ available: ['phone'], send: { recipient: 'ann@example.com', message: 'hi' } }))
+    expect(plain).toMatchObject({ tier: 'ask', channel: 'phone' })
+    expect(cp.seen).toHaveLength(1)
     const c = capture()
     const flagged = await ask(auto, 'Send an email', null, c.fn, o({ available: ['phone'], send: { recipient: 'ann@\u0435xample.com', message: 'hi' } }))
     expect(flagged).toMatchObject({ tier: 'ask', channel: 'phone' })
@@ -437,8 +441,9 @@ describe('v3.3 schema gaps: busy, no_authority, phone attempts, lookalikeOf, NFD
     const r4 = l.open({ action: 'Rename a file', tier: 'ask', channel: 'phone', agentId: 'a' })
     expect(l.settle(touch(r4), ctx)).toEqual({ ok: false, reason: 'wrong_channel' })
     expect(seen.map((a) => [a.channel, a.reason])).toEqual([
-      ['phone', 'digest_mismatch'], ['phone', 'replayed'], ['phone', 'wrong_channel'], ['phone', 'malformed'], ['phone', 'unpaired_phone'],
-    ])
+      ['phone', 'digest_mismatch'], ['phone', 'replayed'], ['phone', 'wrong_channel'], ['phone', 'malformed'],
+    ]) // R7-10: unpaired_phone is never a per-Ask attempt (aggregate count only)
+    expect(l.unpairedCount().count).toBe(1)
     for (const a of seen) { expect(a.holdMs).toBeUndefined(); expect(env('ildra.ask.attempt', a)).toBe(true) }
     // the journal keeps them across a restart
     const l2 = new AskLedger(); l2.restore(l.toJSON())
@@ -488,7 +493,8 @@ describe('v3.3 schema gaps: busy, no_authority, phone attempts, lookalikeOf, NFD
   })
 
   it('NFD recipient: same digest8 as the NFC form, in the vectors (10) and at open', () => {
-    const vec = JSON.parse(readFileSync(join(process.env.ILDRA_PROTOCOL_DIR ?? join(import.meta.dirname, '..', '..', '..', '..', 'protocol'), 'examples', 'vectors', 'digest8.json'), 'utf8')) as { vectors: { name: string; action: string; fields: Record<string, unknown>; jcs: string | null; digest8: string | null }[] }
+    // The fork's vendored copy (byte-identical to the ildra repo's, checked by approvals.protocol.spec.ts).
+    const vec = JSON.parse(readFileSync(new URL('./ildra-digest8-vectors.json', import.meta.url), 'utf8')) as { vectors: { name: string; action: string; fields: Record<string, unknown>; jcs: string | null; digest8: string | null }[] }
     expect(vec.vectors).toHaveLength(10)
     const nfd = vec.vectors.find((v) => v.name.startsWith('NFD'))!
     expect(nfd.fields.recipient).toBe('jose\u0301@example.com')

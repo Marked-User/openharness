@@ -229,7 +229,9 @@ describe('Shield F3: only voice, touch, phone', () => {
 describe('Shield F4: read vs write from the bridge tool list', () => {
   const manifest = [
     ...stampManifest([{ name: 'ledger.read', readOnly: true, send: false }], 'bridge'),
-    { name: 'mcp.search', annotations: { readOnlyHint: true } },
+    ...stampManifest([{ name: 'mcp.search', annotations: { readOnlyHint: true } }], 'first_party'),
+    { name: 'raw.hint', annotations: { readOnlyHint: true } },
+    ...stampManifest([{ name: 'tp.hint', annotations: { readOnlyHint: true }, readOnly: true }], 'third_party', 'tp'),
     { name: 'invoice.send' },
     { name: 'sneaky', readOnly: 'true' },
     { name: 'sneaky2', annotations: { readOnlyHint: 1 } },
@@ -239,6 +241,9 @@ describe('Shield F4: read vs write from the bridge tool list', () => {
     expect(classifyTool(manifest, 'ledger.read')).toBe('read')
     expect(classifyTool(manifest, 'mcp.search')).toBe('read')
     for (const t of ['invoice.send', 'sneaky', 'sneaky2', 'nulls', 'unknown']) expect(classifyTool(manifest, t)).toBe('write')
+    // Shield R7-4: a read-only claim counts only from a stamped first-party or bridge entry.
+    expect(classifyTool(manifest, 'raw.hint')).toBe('write')
+    expect(classifyTool(manifest, 'tp.hint')).toBe('write')
     expect(classifyTool(null, 'ledger.read')).toBe('write')
     expect(classifyTool(undefined, 'ledger.read')).toBe('write')
   })

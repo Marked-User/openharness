@@ -11,6 +11,7 @@ import Ajv2020Module from 'ajv/dist/2020.js'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore } from '../core/ildraAsk.js'
 import { createIldraAsk } from './ildraAsk.js'
+import { enrollBridge } from './ildraAsk.testkit.js'
 import {
   ApprovalDenied, ApprovalWindow, AskLedger, ToolManifestLoader, ask, askKindFor, classifyTool, firstLine, hasHiddenChar,
   isSendTool, lookupTool, markHidden, recipientFlags, stampManifest, toDeviceMessage, trustedEntry,
@@ -86,6 +87,7 @@ describe('R5-4: the phone hears that the device closed an Ask', () => {
     const events: [string, unknown][] = []
     svc.bridge = (_c, _p, req) => { sent.push(req) }
     svc.events = ((type: string, body: unknown) => { events.push([type, body]) }) as never
+    enrollBridge(core, svc, { dev: { identity: DEV, role: 'device' } }) // Shield R7-1
     const p = svc.ask(T, 'Rename a file', null, { kind: { tool: 'fs/rename', manifest: stampManifest([{ name: 'rename', send: false }], 'bridge', 'fs') }, agentId: 'a', available: ['touch'] })
     for (let i = 0; i < 20; i++) await Promise.resolve()
     for (let i = 0; i < 5; i++) {
@@ -127,7 +129,7 @@ describe('R5-5: recipient Unicode', () => {
   it('mixed-script domains (and local parts) are flagged and marked; a single script is not', async () => {
     expect(recipientFlags('bob@p\u0430ypal.com')).toEqual(['mixed_script', 'non_ascii']) // Cyrillic а in a Latin label
     expect(recipientFlags('bob@\u043f\u0440\u0438\u043c\u0435\u0440.com')).toEqual(['mixed_script', 'non_ascii']) // Cyrillic label, Latin TLD
-    expect(recipientFlags('\u0430lice@x.com')).toEqual(['mixed_script'])
+    expect(recipientFlags('\u0430lice@x.com')).toEqual(['mixed_script', 'non_ascii']) // R7-3: non-ASCII anywhere
     expect(recipientFlags('alice@example.com')).toEqual([])
     expect(recipientFlags('\u0438\u0432\u0430\u043d@\u043f\u0440\u0438\u043c\u0435\u0440.\u0440\u0444')).toEqual(['non_ascii'])
     expect(recipientFlags('+1 555 0100')).toEqual([])

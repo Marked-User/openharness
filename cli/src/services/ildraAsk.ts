@@ -10,7 +10,7 @@
  * (`withdraw`) and shows the Ask on the phone (`bridge('phone', ...)`).
  */
 import {
-  ask as askGate, openJournal, practiceAsk, ToolManifestLoader,
+  ask as askGate, deviceFingerprint, openJournal, practiceAsk, ToolManifestLoader,
   type ApprovalJournal, type ApprovalProfile, type ApprovalTemplate, type AskAnswer, type AskAttempt, type AskChannel,
   type AskHandoff, type AskOptions, type AskOutcome, type AskRequest, type ToolManifestEntry,
 } from './approvals.js'
@@ -21,6 +21,9 @@ export type IldraAskEvent =
   | { type: 'ildra.ask.handoff'; body: AskHandoff }
   | { type: 'ildra.ask.outcome'; body: AskOutcome }
   | { type: 'ildra.settings.value'; body: { key: string; value: number } }
+  | { type: 'ildra.ask.unpaired'; body: { count: number; since: number; at: number } }
+  | { type: 'ildra.device.enroll'; body: { devicePub: string; fingerprint: string; expiresAt: number } }
+  | { type: 'ildra.device.enroll.status'; body: { state: 'enrolled' | 'refused' | 'revoked' | 'expired'; fingerprint: string; at: number } }
 
 export interface IldraAsk {
   journal(): ApprovalJournal
@@ -71,9 +74,11 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
   }
   const open = (): ApprovalJournal => {
     if (journal) return journal
-    journal = openJournal(deps.journalPath, { ...(deps.now ? { now: deps.now } : {}), ...(deps.markerPath ? { markerPath: deps.markerPath } : {}) })
+    // Shield R7 ledger via rule: this journal's ledger settles only answers the core stamped with their channel.
+    journal = openJournal(deps.journalPath, { requireChannelStamp: true, ...(deps.now ? { now: deps.now } : {}), ...(deps.markerPath ? { markerPath: deps.markerPath } : {}) })
     journal.ledger.onAttempt = (a) => emit('ildra.ask.attempt', a)
     journal.ledger.onHandoff = onHandoff
+    journal.ledger.onUnpaired = (u) => emit('ildra.ask.unpaired', u)
     return journal
   }
   const pairedKey = (j: ApprovalJournal) => (id: string, pub?: string) => (pub === undefined ? j.pairing.isPaired(id) : j.pairing.isPairedKey(id, pub))
@@ -89,6 +94,22 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     }
     const r = j.ledger.settle(a as unknown as AskAnswer, { isPaired: pairedKey(j), isShared: (o) => deps.inputs.isShared(o) })
     return r.ok ? null : r.reason
+  }
+  // Shield R7-1: the enrolled Ildra device key, kept in the journal; enrollment confirmed by the paired phone.
+  deps.inputs.deviceKey = () => open().device.device()
+  deps.inputs.onDeviceEnroll = (devicePub) => {
+    const p = open().device.begin(devicePub)
+    if (!p) return { ok: false, reason: 'malformed' }
+    emit('ildra.device.enroll', p)
+    return { ok: true, ...p }
+  }
+  deps.inputs.onDeviceConfirm = (msg, from) => {
+    const j = open()
+    if (typeof from.phoneId !== 'string' || typeof from.machinePub !== 'string' || !j.pairing.isPairedKey(from.phoneId, from.machinePub)) return { ok: false, reason: 'unpaired_phone' }
+    const state = j.device.confirm(msg.devicePub, msg.approved)
+    if (state === null) return { ok: false, reason: 'unknown_id' }
+    emit('ildra.device.enroll.status', { state, fingerprint: deviceFingerprint(msg.devicePub as string), at: (deps.now ?? Date.now)() })
+    return { ok: true, state }
   }
   deps.inputs.onSettings = (msg, from) => {
     const j = open()

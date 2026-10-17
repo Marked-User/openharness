@@ -80,7 +80,7 @@ export function lookalikeOf(recipient: string, known: RecipientKnowledge): strin
   const sk = recipientSkeleton(recipient)
   for (const c of known.contacts ?? []) {
     if (typeof c !== 'string') continue
-    if (recipientKey(c) !== key && recipientSkeleton(c) === sk) return asciiForm(c)
+    if (recipientKey(c) !== key && recipientSkeleton(c) === sk) { const a = asciiForm(c); if (a !== null) return a }
   }
   const { domain } = splitRecipient(recipient)
   if (domain === null) return null
@@ -93,13 +93,21 @@ export function lookalikeOf(recipient: string, known: RecipientKnowledge): strin
     const cd = splitRecipient(c).domain
     if (cd !== null) domains.add(cd.normalize('NFC').toLowerCase())
   }
-  for (const x of domains) if (x !== d && skeleton(x) === dsk) return domainToASCII(x) || x
+  for (const x of domains) if (x !== d && skeleton(x) === dsk) { const a = domainToASCII(x); if (a) return a }
   return null
 }
 
-/** The ASCII form of a known contact for display (lookalikeOf): domain in punycode, local part as is. */
-function asciiForm(contact: string): string {
-  return recipientAscii(contact) ?? recipientKey(contact)
+/**
+ * The ASCII form of a known contact for display (lookalikeOf, ASCII only): the contact with its domain in
+ * punycode when its local part is ASCII; otherwise just the punycode domain (a local part has no ASCII form);
+ * null when there is no ASCII form at all (that contact then is not a match, so lookalike and lookalikeOf agree).
+ */
+function asciiForm(contact: string): string | null {
+  const a = recipientAscii(contact) ?? recipientKey(contact)
+  if (/^[\u0021-\u007E]+$/.test(a)) return a
+  const d = splitRecipient(contact).domain
+  const dd = d === null ? null : (domainToASCII(d.normalize('NFC').toLowerCase()) || null)
+  return dd
 }
 
 export function isLookalike(recipient: string, known: RecipientKnowledge): boolean {

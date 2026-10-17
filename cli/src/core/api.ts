@@ -52,6 +52,12 @@ export type { RouteAnswer }
 /** What a service guards its own parts with, as the core guards a service (core/serviceHost.ts): the
  *  devices keep a dial failing from costing ⌘K its routing (services/devices.ts). */
 export { FAIL, later, readFallback, ServiceUnavailableError, type PortFallbacks }
+/**
+ * Shield R7, for services/approvals.ts: the read side of the core channel stamp (only core/ildraAsk.ts stamps)
+ * and the Ildra device key helpers (Ed25519 proof of the enrolled device).
+ */
+export { stampedChannel } from './ildraChannel.js'
+export { deviceFingerprint, deviceProofMessage, rawDeviceKey, verifyDeviceProof } from './ildraDeviceProof.js'
 
 /** A service may open a terminal with a literal argv, never shell source. */
 export interface TerminalOpen {
@@ -563,11 +569,20 @@ export interface IldraAskInputs {
    * connection; the service accepts it only from the paired phone's key and returns the stored value.
    */
   onSettings?: ((msg: { key: unknown; value: unknown }, from: IldraAnswerOrigin) => { ok: true; key: string; value: number } | { ok: false; reason: string }) | null
+  /**
+   * Shield R7-1, set by services/ildraAsk.ts: the enrolled Ildra device's Ed25519 key (journal), or null. A
+   * device-role connection answers touch only after signing a core nonce with it. Unset: none answers.
+   */
+  deviceKey?: (() => string | null) | null
+  /** R7-1: `ildra_device_enroll {devicePub}`: records a pending enrollment, grants nothing. */
+  onDeviceEnroll?: ((devicePub: unknown) => { ok: true; devicePub: string; fingerprint: string; expiresAt: number } | { ok: false; reason: string }) | null
+  /** R7-1: `ildra.device.enroll.confirm {devicePub, approved}` from the paired phone's key (checked by the service). */
+  onDeviceConfirm?: ((msg: { devicePub: unknown; approved: boolean }, from: IldraAnswerOrigin) => { ok: true; state: string } | { ok: false; reason: string }) | null
 }
 
 /** Ildra Asks (services/ildraAsk.ts): an answer from the phone or the device to an open Ask. Its origin is the
  *  connection it came over (Shield F12), never the payload. Always in the core's own process. */
-export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer', 'ildra_settings_set'] as const
+export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer', 'ildra_settings_set', 'ildra_device_enroll', 'ildra_device_enroll_confirm', 'ildra_device_challenge', 'ildra_device_prove'] as const
 /** Sharing this machine with other accounts, and adding machines shared with this one, in the edge host
  *  (services/sharedMachines.ts). */
 export const SHARED_MACHINES_REQUESTS = ['shared_machines'] as const

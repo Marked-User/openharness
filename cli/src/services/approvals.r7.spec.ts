@@ -1,0 +1,335 @@
+/**
+ * Build's tests for Shield round 7 (R7-1, R7-2, R7-3, R7-4, R7-10, the core channel stamp) and the App R7 schema
+ * rule (lookalike requires an ASCII lookalikeOf). Shield's own GAP tests in approvals.shield-r6.spec.ts flip
+ * (fail) when these hold, as intended.
+ */
+import { generateKeyPairSync, randomBytes, sign } from 'node:crypto'
+import { mkdtempSync, readFileSync, readdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import Ajv2020Module from 'ajv/dist/2020.js'
+import { describe, expect, it } from 'vitest'
+import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
+import { deviceProofMessage } from '../core/ildraDeviceProof.js'
+import { createIldraAsk } from './ildraAsk.js'
+import { deviceKeyPair, proveBridge } from './ildraAsk.testkit.js'
+import {
+  ApprovalWindow, AskLedger, HIDDEN_SCHEMA_PATTERN, PhonePairing, UNPAIRED_NOTIFY, UNPAIRED_WINDOW_MS, ask, classifyTool, markHidden,
+  openJournal, recipientFlags, resolveTool, stampManifest, toDeviceMessage,
+  type AskAnswer, type AskRequest, type ApprovalTemplate,
+} from './approvals.js'
+import { HIDDEN_COUNT, HIDDEN_SOURCES, HIDDEN_VERSION } from './unicode/hidden.js'
+import { lookalikeOf } from './recipient.js'
+
+const schema = JSON.parse(readFileSync(new URL('./ildra-messages.schema.json', import.meta.url), 'utf8'))
+const Ajv2020 = (Ajv2020Module as unknown as { default: typeof Ajv2020Module }).default ?? Ajv2020Module
+const ajv = new (Ajv2020 as unknown as new (o: object) => import('ajv').default)({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true })
+ajv.addSchema(schema)
+const valid = (name: string, v: unknown): boolean => ajv.getSchema(`${schema.$id}#/$defs/${name}`)!(v) as boolean
+const env = (type: string, body: unknown): boolean => ajv.getSchema(schema.$id)!({ type, proto: 1, body }) as boolean
+
+const aid = (): string => randomBytes(16).toString('hex')
+const T: ApprovalTemplate = { permissions: { ask: ['Rename a file', 'Send an email'], locked_ask: ['Brakes step'], auto: ['Send a note'] } }
+const kind = { manifest: stampManifest([{ name: 'fs.rename', send: false }], 'bridge'), tool: 'fs.rename' }
+const DEV = 'D'.repeat(43) + '='
+const DEV2 = 'E'.repeat(43) + '='
+const PHONE = 'P'.repeat(43) + '='
+const OTHER = 'X'.repeat(43) + '='
+const paired = (): PhonePairing => { const p = new PhonePairing(); const { code } = p.begin('touch'); p.offer('p1', PHONE, code); p.confirm('p1', 'touch', true); return p }
+const tick = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve() }
+
+function rig(clients: Record<string, IldraAskClient>, path?: string) {
+  const d = path ?? mkdtempSync(join(tmpdir(), 'build-r7-'))
+  const core = createIldraAskCore({ clientOf: (c) => clients[c] ?? null, isLoopback: (c) => c.startsWith('local:') })
+  const svc = createIldraAsk({ inputs: core, journalPath: join(d, 'j', 'a.json'), markerPath: join(d, 'm', 'x.installed') })
+  const sent: AskRequest[] = []
+  const events: { type: string; body: unknown }[] = []
+  svc.bridge = (_c, _p, req) => { sent.push(req) }
+  svc.events = (type, body) => { events.push({ type, body }) }
+  const answer = (req: AskRequest, connection: string, extra: Record<string, unknown> = {}) =>
+    core.requests.ildra_ask_answer({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: 2000, ...extra }, { local: false, owner: false, connection })
+  const pair = (key: string) => { const p = svc.journal().pairing; const { code } = p.begin('touch'); p.offer('p1', key, code); p.confirm('p1', 'touch', true) }
+  const remote = (connection: string) => ({ local: false, owner: false, connection })
+  return { d, core, svc, sent, events, answer, pair, remote }
+}
+
+describe('R7-1: only the phone-confirmed, proven Ildra device answers on touch', () => {
+  const full = () => rig({ dev: { identity: DEV, role: 'device' }, dev2: { identity: DEV2, role: 'device' }, ph: { identity: PHONE, role: 'web' }, x: { identity: OTHER, role: 'web' } })
+
+  it('with no enrolled key, a device-role connection is no_authority and gets no challenge', async () => {
+    const r = full()
+    expect(r.core.challengeDevice('dev')).toBeNull()
+    const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
+    await tick()
+    expect(await r.answer(r.sent[0]!, 'dev')).toEqual({ ok: false, reason: 'no_authority' })
+    expect(r.svc.journal().ledger.pending()).toBe(1)
+    r.core.cancel(r.sent[0]!.id); await p
+  })
+
+  it('enroll is pending until the paired phone confirms; the device itself, another key or an unpaired phone cannot confirm', async () => {
+    const r = full(); r.pair(PHONE)
+    const { pub, key } = deviceKeyPair()
+    const begun = await r.core.requests.ildra_device_enroll({ devicePub: pub }, r.remote('dev'))
+    expect(begun).toMatchObject({ ok: true, devicePub: pub })
+    expect(r.events.find((e) => e.type === 'ildra.device.enroll')?.body).toMatchObject({ devicePub: pub })
+    expect(r.svc.journal().device.device()).toBeNull()
+    expect(proveBridge(r.core, 'dev', key)).toBe(false) // pending grants nothing
+    // The device (device role), a web key that is not the paired phone, or a loopback owner cannot confirm.
+    expect(await r.core.requests.ildra_device_enroll_confirm({ devicePub: pub, approved: true, from: { phoneId: 'p1' } }, r.remote('dev'))).toMatchObject({ ok: false })
+    expect(await r.core.requests.ildra_device_enroll_confirm({ devicePub: pub, approved: true, from: { phoneId: 'p1' } }, r.remote('x'))).toEqual({ ok: false, reason: 'unpaired_phone' })
+    expect(await r.core.requests.ildra_device_enroll_confirm({ devicePub: pub, approved: true }, { local: true, owner: true, connection: 'local:sock' })).toMatchObject({ ok: false })
+    expect(r.svc.journal().device.device()).toBeNull()
+    expect(await r.core.requests.ildra_device_enroll_confirm({ devicePub: pub, approved: true, from: { phoneId: 'p1' } }, r.remote('ph'))).toEqual({ ok: true, state: 'enrolled' })
+    expect(r.events.find((e) => e.type === 'ildra.device.enroll.status')?.body).toMatchObject({ state: 'enrolled' })
+    expect(r.svc.journal().device.device()).toBe(pub)
+    expect(proveBridge(r.core, 'dev', key)).toBe(true)
+  })
+
+  it('after enrollment only the proven connection answers; an unproven device-role connection or a second key is no_authority, even with holdMs 2000', async () => {
+    const r = full(); r.pair(PHONE)
+    const { pub, key } = deviceKeyPair(); const j = r.svc.journal(); j.device.begin(pub); j.device.confirm(pub, true)
+    expect(proveBridge(r.core, 'dev', key)).toBe(true)
+    const other = deviceKeyPair()
+    expect(proveBridge(r.core, 'dev2', other.key)).toBe(false)
+    const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
+    await tick()
+    expect(await r.answer(r.sent[0]!, 'dev2')).toEqual({ ok: false, reason: 'no_authority' })
+    expect(await r.answer(r.sent[0]!, 'local:pair')).toEqual({ ok: false, reason: 'no_authority' })
+    await r.answer(r.sent[0]!, 'dev')
+    expect(await p).toMatchObject({ approved: true, channel: 'touch' })
+  })
+
+  it('a wrong signature, a reused nonce, a stale nonce or a loopback connection never proves', () => {
+    let now = 1_000_000
+    const clients: Record<string, IldraAskClient> = { dev: { identity: DEV, role: 'device' }, 'local:dev': { identity: DEV, role: 'device' } }
+    const core = createIldraAskCore({ clientOf: (c) => clients[c] ?? null, isLoopback: (c) => c.startsWith('local:'), now: () => now })
+    const { pub, key } = deviceKeyPair()
+    core.deviceKey = () => pub
+    expect(core.challengeDevice('local:dev')).toBeNull()
+    const n1 = core.challengeDevice('dev')!
+    const wrong = generateKeyPairSync('ed25519').privateKey
+    expect(core.proveDevice('dev', sign(null, Buffer.from(deviceProofMessage(n1)), wrong).toString('base64'))).toBe(false)
+    const n2 = core.challengeDevice('dev')!
+    const good = sign(null, Buffer.from(deviceProofMessage(n2)), key).toString('base64')
+    expect(core.proveDevice('dev', good)).toBe(true)
+    expect(core.proveDevice('dev', good)).toBe(false) // nonce spent
+    const n3 = core.challengeDevice('dev')!
+    now += 61_000
+    expect(core.proveDevice('dev', sign(null, Buffer.from(deviceProofMessage(n3)), key).toString('base64'))).toBe(false)
+  })
+
+  it('the phone revokes with approved false: the bridge loses authority at once; the journal stores only the public key', async () => {
+    const r = full(); r.pair(PHONE)
+    const { pub, key } = deviceKeyPair(); const j = r.svc.journal(); j.device.begin(pub); j.device.confirm(pub, true)
+    expect(proveBridge(r.core, 'dev', key)).toBe(true)
+    const text = readFileSync(join(r.d, 'j', 'a.json'), 'utf8')
+    expect(text).toContain(pub)
+    expect(text).not.toMatch(/PRIVATE|privateKey/)
+    expect(await r.core.requests.ildra_device_enroll_confirm({ devicePub: pub, approved: false, from: { phoneId: 'p1' } }, r.remote('ph'))).toEqual({ ok: true, state: 'revoked' })
+    const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
+    await tick()
+    expect(await r.answer(r.sent[0]!, 'dev')).toEqual({ ok: false, reason: 'no_authority' })
+    r.core.cancel(r.sent[0]!.id); await p
+  })
+
+  it('a pending key expires after 10 minutes unconfirmed', () => {
+    let now = 5_000_000
+    const j = openJournal(join(mkdtempSync(join(tmpdir(), 'build-r7e-')), 'j.json'), { now: () => now, markerPath: join(mkdtempSync(join(tmpdir(), 'build-r7m-')), 'x') })
+    const { pub } = deviceKeyPair()
+    j.device.begin(pub)
+    now += 10 * 60_000 + 1
+    expect(j.device.confirm(pub, true)).toBe('expired')
+    expect(j.device.device()).toBeNull()
+  })
+
+  it('wire: the device messages and the examples match the schema', () => {
+    const { pub } = deviceKeyPair()
+    expect(env('ildra.device.enroll', { devicePub: pub, fingerprint: '0123456789abcdef', expiresAt: 1 })).toBe(true)
+    expect(env('ildra.device.enroll.confirm', { devicePub: pub, approved: true })).toBe(true)
+    expect(env('ildra.device.enroll.confirm', { devicePub: pub })).toBe(false)
+    expect(env('ildra.device.enroll.status', { state: 'revoked', fingerprint: '0123456789abcdef', at: 1 })).toBe(true)
+    expect(env('ildra.device.challenge', { nonce: randomBytes(32).toString('base64url') })).toBe(true)
+    expect(env('ildra.device.proof', { signature: Buffer.alloc(64, 1).toString('base64') })).toBe(true)
+    expect(env('ildra.device.proof', { signature: 'x' })).toBe(false)
+  })
+})
+
+describe('R7 ledger rule: the Ask service settles only answers stamped by the core channel layer', () => {
+  it('a direct settle on the service ledger, whatever via it claims, is no_authority; the core-stamped answer settles', async () => {
+    const r = rig({ ph: { identity: PHONE, role: 'web' } }); r.pair(PHONE)
+    const p = r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
+    await tick()
+    const req = r.sent[0]!
+    const l = r.svc.journal().ledger
+    expect(l.requiresChannelStamp()).toBe(true)
+    const forged = { id: req.id, digest8: req.digest8, answerId: aid(), approved: true, via: 'phone', from: { phoneId: 'p1', machinePub: PHONE } } as AskAnswer
+    expect(l.settle(forged, { via: 'phone', isPaired: () => true })).toEqual({ ok: false, reason: 'no_authority' })
+    expect(l.pending()).toBe(1)
+    await r.answer(req, 'ph', { from: { phoneId: 'p1' } })
+    expect(await p).toMatchObject({ approved: true, channel: 'phone' })
+  })
+  it('architecture: only core/ildraAsk.ts imports stampChannel', () => {
+    const root = new URL('..', import.meta.url)
+    const hits: string[] = []
+    const walk = (dir: URL, rel: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.isDirectory()) { if (e.name !== 'node_modules') walk(new URL(`${e.name}/`, dir), `${rel}${e.name}/`); continue }
+        if (!/\.tsx?$/.test(e.name) || /\.spec\.tsx?$/.test(e.name)) continue
+        const text = readFileSync(new URL(e.name, dir), 'utf8')
+        if (/\bstampChannel\b/.test(text) && `${rel}${e.name}` !== 'core/ildraChannel.ts') hits.push(`${rel}${e.name}`)
+      }
+    }
+    walk(root, '')
+    expect(hits).toEqual(['core/ildraAsk.ts'])
+  })
+})
+
+describe('R7-2: hidden characters by category (Unicode 16.0.0)', () => {
+  const send = async (recipient: string, message = 'hi') => {
+    let req: AskRequest | undefined
+    const out = await ask(T, 'Send an email', null, (_c, _p, q) => { req = q!; return null },
+      { kind, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch', 'phone'], isPaired: () => true, send: { recipient, message } })
+    return { out, req }
+  }
+  const tags = Array.from({ length: 0x80 }, (_, i) => String.fromCodePoint(0xE0000 + i))
+  const samples = ['\u00AD', '\u034F', '\u2063', '\uFE0F', '\u061C', '\u180E', '\u200B', '\u2066', '\u3164', '\uFFA0', '\u{1D173}', '\u{E0100}', ...tags]
+  it('each one in the recipient is refused (malformed) and no Ask opens; in the first line each is a visible marker', async () => {
+    for (const c of ['\u00AD', '\u034F', '\u2063', '\uFE0F', '\u{E0000}', '\u{E0041}', '\u{E007F}']) {
+      const { out, req } = await send(`bo${c}b@x.com`)
+      expect(out, JSON.stringify(c)).toMatchObject({ approved: false, reason: 'malformed' })
+      expect(req, JSON.stringify(c)).toBeUndefined()
+      const cp = c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')
+      expect(markHidden(`a${c}b`)).toBe(`a\u27E6U+${cp}\u27E7b`)
+      const shown = await send('bob@x.com', `Hi${c} there`)
+      expect(shown.req!.firstLine).toContain(`\u27E6U+${cp}\u27E7`)
+    }
+  })
+  it('every sample, all 128 tags included, is refused by the daemon and by the schema pattern', async () => {
+    const re = new RegExp(HIDDEN_SCHEMA_PATTERN, 'u')
+    for (const c of samples) {
+      expect((await send(`a${c}@x.com`)).out.reason, JSON.stringify(c)).toBe('malformed')
+      expect(re.test(`a${c}@x.com`), JSON.stringify(c)).toBe(false)
+    }
+    expect(re.test('jos\u00E9@example.com')).toBe(true)
+  })
+  it('the table is pinned and the schema carries exactly its pattern', () => {
+    expect(HIDDEN_VERSION).toBe('16.0.0')
+    expect(HIDDEN_COUNT).toBe(4273)
+    expect(Object.keys(HIDDEN_SOURCES).sort()).toEqual(['DerivedCoreProperties.txt', 'PropList.txt', 'UnicodeData.txt'])
+    expect(schema.$defs.AskRequest.properties.recipient.pattern).toBe(HIDDEN_SCHEMA_PATTERN)
+  })
+})
+
+describe('R7-3: script mixing over the whole address, non-ASCII anywhere', () => {
+  const show = async (recipient: string, contacts: string[] = []) => {
+    let req: AskRequest | undefined
+    const out = await ask(T, 'Send an email', null, (_c, _p, q) => { req = q!; return null },
+      { kind, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch'], contacts, send: { recipient, message: 'hi' } })
+    return { out, req }
+  }
+  it('an all-Cyrillic local part before an ASCII domain (palochka, skeleton apple-ish) is mixed_script and non_ascii, never on the device', async () => {
+    const cyr = '\u0430\u0440\u0440\u04CF\u0435@gmail.com'
+    for (const contacts of [[], ['apple@gmail.com']]) {
+      expect(recipientFlags(cyr, { contacts })).toEqual(expect.arrayContaining(['mixed_script', 'non_ascii']))
+      const { out, req } = await show(cyr, contacts)
+      expect(req).toBeUndefined() // phone only, and no phone here
+      expect(out).toMatchObject({ approved: false, reason: 'no_channel' })
+    }
+  })
+  it('a non-ASCII local part alone is non_ascii (phone only), not mixed_script', () => {
+    const f = recipientFlags('jos\u00E9@example.com')
+    expect(f).toContain('non_ascii'); expect(f).not.toContain('mixed_script')
+    expect(recipientFlags('ann@example.com')).not.toContain('non_ascii')
+  })
+})
+
+describe('R7-4: no Auto from an untrusted hint; a send is never Auto', () => {
+  it('a third-party or unstamped readOnlyHint is a write; a trusted first-party one is a read', () => {
+    const tp = stampManifest([{ name: 'evil.wipe', annotations: { readOnlyHint: true } }], 'third_party', 'evil')
+    expect(classifyTool(tp, 'evil.wipe')).toBe('write')
+    expect(resolveTool(T, 'evil.wipe', tp)).toBe('ask')
+    expect(classifyTool([{ name: 'raw', annotations: { readOnlyHint: true } }], 'raw')).toBe('write')
+    expect(classifyTool(stampManifest([{ name: 'mcp.search', annotations: { readOnlyHint: true } }], 'first_party'), 'mcp.search')).toBe('read')
+  })
+  it('a send through a trusted read tool, or on an auto template item, still asks', async () => {
+    const fp = stampManifest([{ name: 'mcp.search', annotations: { readOnlyHint: true } }], 'first_party')
+    for (const [action, k] of [['Search', { manifest: fp, tool: 'mcp.search' }], ['Send a note', kind]] as const) {
+      let prompted = 0
+      const out = await ask(T, action, null, () => { prompted++; return null },
+        { kind: k, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch'], send: { recipient: 'boss@company.com', message: 'Wire $9,000 now' } })
+      expect(out.tier, action).not.toBe('auto')
+      expect(prompted, action).toBe(1)
+    }
+  })
+})
+
+describe('R7-10: an unpaired phone answer is refused first and spends nothing', () => {
+  it('an unpaired answer leaves the Ask open with nothing recorded; then the real phone approves', async () => {
+    const r = rig({ ph: { identity: PHONE, role: 'web' }, x: { identity: OTHER, role: 'web' } }); r.pair(PHONE)
+    const p = r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
+    await tick()
+    const l = r.svc.journal().ledger
+    const before = JSON.stringify(l.toJSON())
+    const answerId = aid()
+    await r.answer(r.sent[0]!, 'x', { from: { phoneId: 'p1' }, answerId })
+    await tick()
+    expect(JSON.stringify(l.toJSON())).toBe(before) // no answerId, no spend
+    expect(l.attempts()).toEqual([])
+    expect(r.events.filter((e) => e.type === 'ildra.ask.attempt')).toEqual([])
+    // The real phone may even reuse that answerId: it was never recorded.
+    await r.answer(r.sent[r.sent.length - 1]!, 'ph', { from: { phoneId: 'p1' }, answerId })
+    expect(await p).toMatchObject({ approved: true, channel: 'phone', reason: 'approved' })
+  })
+  it('it is checked before anything else: a wrong digest or a bad challenge from an unpaired key is still unpaired_phone', () => {
+    const l = new AskLedger(); const pp = new PhonePairing(); const { code } = pp.begin('touch'); pp.offer('p1', PHONE, code); pp.confirm('p1', 'touch', true)
+    const req = l.open({ action: 'Brakes step', tier: 'locked_ask', channel: 'phone' })
+    const ctx = { via: 'phone' as const, isPaired: (id: string, pub?: string) => (pub === undefined ? pp.isPaired(id) : pp.isPairedKey(id, pub)) }
+    expect(l.settle({ id: req.id, digest8: 'deadbeef', answerId: aid(), approved: true, via: 'phone', from: { phoneId: 'p1', machinePub: OTHER } } as AskAnswer, ctx)).toEqual({ ok: false, reason: 'unpaired_phone' })
+    expect(l.pending()).toBe(1)
+    expect(l.settle({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, via: 'phone', from: { phoneId: 'p1', machinePub: PHONE } } as AskAnswer, ctx)).toEqual({ ok: true })
+  })
+  it('only an aggregate count reaches the paired phone: once per window at the threshold', () => {
+    let now = 1_000_000
+    const l = new AskLedger({ now: () => now })
+    const seen: { count: number; since: number; at: number }[] = []
+    l.onUnpaired = (u) => seen.push(u)
+    const req = l.open({ action: 'Brakes step', tier: 'locked_ask', channel: 'phone' })
+    const ctx = { via: 'phone' as const, isPaired: () => false }
+    const bad = (): unknown => l.settle({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, via: 'phone', from: { phoneId: 'p1', machinePub: OTHER } } as AskAnswer, ctx)
+    for (let i = 0; i < UNPAIRED_NOTIFY - 1; i++) bad()
+    expect(seen).toEqual([])
+    bad(); bad(); bad()
+    expect(seen).toEqual([{ count: UNPAIRED_NOTIFY, since: 1_000_000, at: 1_000_000 }])
+    now += UNPAIRED_WINDOW_MS
+    for (let i = 0; i < UNPAIRED_NOTIFY; i++) bad()
+    expect(seen).toHaveLength(2)
+    expect(l.pending()).toBe(1)
+    expect(valid('AskUnpaired', seen[0])).toBe(true)
+    expect(seen[0]).not.toHaveProperty('id')
+  })
+})
+
+describe('App R7 schema rule: lookalike requires an ASCII lookalikeOf, and the daemon always sends one', () => {
+  const base = { id: '3a1f7c2e-9d4b-4e6a-8c0f-1b2d3e4f5a6b', digest8: 'c6327fa9', openedAt: 1, expiresAt: 86400001, channel: 'phone', tier: 'ask', action: 'Send an email', recipient: 'dana@ex\u0430mple.com', firstLine: 'hi', recipientAscii: 'dana@xn--exmple-4nf.com' }
+  it('the schema requires lookalikeOf with the flag and only allows ASCII', () => {
+    expect(valid('AskRequest', { ...base, recipientFlags: ['lookalike'] })).toBe(false)
+    expect(valid('AskRequest', { ...base, recipientFlags: ['lookalike'], lookalikeOf: 'dana@example.com' })).toBe(true)
+    expect(valid('AskRequest', { ...base, recipientFlags: ['lookalike'], lookalikeOf: 'jos\u00E9@example.com' })).toBe(false)
+  })
+  it('the daemon request with the flag carries an ASCII lookalikeOf, also for a contact whose local part is not ASCII', async () => {
+    for (const [recipient, contact, expected] of [
+      ['dana@ex\u0430mple.com', 'dana@example.com', 'dana@example.com'],
+      ['jos\u00E9@ex\u0430mple.com', 'jos\u00E9@example.com', 'example.com'],
+    ] as const) {
+      expect(lookalikeOf(recipient, { contacts: [contact] })).toBe(expected)
+      let req: AskRequest | undefined
+      await ask(T, 'Send an email', null, (_c, _p, q) => { req = q!; return null },
+        { kind, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['phone'], isPaired: () => true, pairing: paired(), contacts: [contact], send: { recipient, message: 'hi' } })
+      expect(req!.recipientFlags).toContain('lookalike')
+      expect(req!.lookalikeOf).toBe(expected)
+      expect(/^[\u0021-\u007E]+$/.test(req!.lookalikeOf!)).toBe(true)
+      expect(valid('AskRequest', req), JSON.stringify(req)).toBe(true)
+      expect(toDeviceMessage(req!, 1)).toBeDefined()
+    }
+  })
+})

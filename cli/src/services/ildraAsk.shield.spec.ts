@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
+import { enrollBridge, proveBridge } from './ildraAsk.testkit.js'
 import { createIldraAsk } from './ildraAsk.js'
 import { stampManifest, type ApprovalTemplate, type AskRequest } from './approvals.js'
 
@@ -27,10 +28,12 @@ function rig(clients: Record<string, IldraAskClient>) {
   const svc = createIldraAsk({ inputs: core, journalPath, markerPath: join(d, 'm', 'x.installed') })
   const sent: AskRequest[] = []
   svc.bridge = (_c, _p, req) => { sent.push(req) }
+  // Shield R7-1 (Build): only a connection that proved the enrolled device key answers touch; fixture only, assertions unchanged.
+  const cred = enrollBridge(core, svc, clients)
   const answer = (req: AskRequest, connection: string, extra: Record<string, unknown> = {}, local = false) =>
     core.requests.ildra_ask_answer({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: 2000, ...extra }, { local, owner: local, connection })
   const pairPhone = () => { const p = svc.journal().pairing; const { code } = p.begin('touch'); p.offer('p1', PHONE, code); p.confirm('p1', 'touch', true) }
-  return { core, svc, sent, answer, pairPhone, journalPath, d }
+  return { core, svc, sent, answer, pairPhone, journalPath, d, cred }
 }
 
 describe('Shield R5 runtime: who may answer an Ask', () => {
@@ -105,6 +108,7 @@ describe('Shield R5 runtime: answerId and hold_too_short', () => {
     const svc2 = createIldraAsk({ inputs: r2core, journalPath: r.journalPath, markerPath: join(r.d, 'm', 'x.installed') })
     const sent2: AskRequest[] = []
     svc2.bridge = (_c, _p, req) => { sent2.push(req) }
+    proveBridge(r2core, 'dev', r.cred!) // Shield R7-1 (Build): the bridge proves the device key again after a restart
     const p2 = svc2.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
     await tick()
     await r2core.requests.ildra_ask_answer({ id: sent2[0]!.id, digest8: sent2[0]!.digest8, answerId: used, approved: true, holdMs: 2000 }, { local: false, owner: false, connection: 'dev' })

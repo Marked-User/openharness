@@ -125,12 +125,15 @@ describe('F4 mandatory manifests', () => {
   // Unlisted and send-capable tools (pilot review a) carry send details and a window so the tier is what is tested.
   const send = { send: { recipient: 'dana@example.com', message: 'Hi' }, window: new ApprovalWindow(), agentId: 'a' }
   const run = (action: string, o: Partial<AskOptions>) => ask(BK, action, null, (_c, _p, req) => good(req!), prod({ available: ['touch'], ...send, ...o }))
+  // A trusted read-only tool with no send: the only way to Auto (Shield R7-4: a send is never Auto).
+  const read = (action: string, o: Partial<AskOptions>) => ask(BK, action, null, (_c, _p, req) => good(req!), prod({ available: ['touch'], ...o }))
   it('tool not in the manifest is a write, so Ask', async () => {
     expect((await run('unlisted', { kind: k('nope') })).tier).toBe('ask')
   })
   it('read-only tool with isWrite true is still a write', async () => {
     expect((await run('unlisted', { kind: k('ledger.read'), isWrite: true })).tier).toBe('ask')
-    expect((await run('unlisted', { kind: k('ledger.read') })).tier).toBe('auto')
+    expect((await read('unlisted', { kind: k('ledger.read') })).tier).toBe('auto')
+    expect((await run('unlisted', { kind: k('ledger.read') })).tier).toBe('ask') // R7-4: with send details it is a send
   })
   it('tool not read-only with isWrite false is a write', async () => {
     expect((await run('unlisted', { kind: k('invoice.send'), isWrite: false })).tier).toBe('ask')
@@ -141,7 +144,8 @@ describe('F4 mandatory manifests', () => {
   })
   it('listed template items keep their tier whatever the manifest says', async () => {
     expect((await run('Send an invoice', { kind: k('ledger.read') })).tier).toBe('ask')
-    expect((await run('Read the ledger', { kind: k('invoice.send') })).tier).toBe('auto')
+    expect((await read('Read the ledger', { kind: k('ledger.read') })).tier).toBe('auto')
+    expect((await run('Read the ledger', { kind: k('invoice.send') })).tier).toBe('ask') // R7-4: a send is never Auto, even on an auto item
     await expect(run('Move money out', { kind: k('ledger.read') })).rejects.toThrow(ApprovalDenied)
   })
 })

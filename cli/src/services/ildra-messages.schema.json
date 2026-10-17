@@ -16,7 +16,8 @@
             "ildra.ask.request", "ildra.ask.answer", "ildra.ask.rejection", "ildra.ask.outcome",
             "ildra.pairing.begin", "ildra.pairing.offer", "ildra.pairing.offer_result",
             "ildra.pairing.confirm", "ildra.pairing.status", "ildra.ask.handoff", "ildra.ask.attempt",
-            "ildra.settings.set", "ildra.settings.value"
+            "ildra.settings.set", "ildra.settings.value", "ildra.ask.unpaired",
+            "ildra.device.enroll", "ildra.device.enroll.confirm", "ildra.device.enroll.status", "ildra.device.challenge", "ildra.device.proof"
           ]
         },
         "proto": { "const": 1 },
@@ -35,7 +36,13 @@
         { "if": { "properties": { "type": { "const": "ildra.ask.handoff" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/AskHandoff" } } } },
         { "if": { "properties": { "type": { "const": "ildra.ask.attempt" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/AskAttempt" } } } },
         { "if": { "properties": { "type": { "const": "ildra.settings.set" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/SettingsSet" } } } },
-        { "if": { "properties": { "type": { "const": "ildra.settings.value" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/SettingsValue" } } } }
+        { "if": { "properties": { "type": { "const": "ildra.settings.value" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/SettingsValue" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.ask.unpaired" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/AskUnpaired" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.device.enroll" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceEnroll" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.device.enroll.confirm" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceEnrollConfirm" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.device.enroll.status" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceEnrollStatus" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.device.challenge" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceChallenge" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.device.proof" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceProof" } } } }
       ]
     },
 
@@ -66,10 +73,10 @@
         "action": { "type": "string", "minLength": 1 },
         "agentId": { "type": "string", "minLength": 1 },
         "templateId": { "type": "string", "minLength": 1 },
-        "recipient": { "description": "Send Asks only. Shield R5-5: never carries a bidi control (U+202A-202E, U+2066-2069, U+200E, U+200F, U+061C), a zero-width character (U+200B-200D, U+2060, U+FEFF), U+2028, U+2029 or any C0/C1 control (CR and LF included); a send whose recipient has one is refused as malformed and no Ask is opened. v3.3: the daemon puts the recipient in Unicode NFC before it is shown or hashed, so digest8 covers the NFC form.", "type": "string", "minLength": 1, "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F\\u061C\\u200B-\\u200F\\u2028-\\u202E\\u2060\\u2066-\\u2069\\uFEFF]+$" },
-        "recipientFlags": { "description": "Send Asks only, set by the daemon, not in digest8 (the recipient itself is). mixed_script (Shield R5-5): the domain, one of its labels, or the local part mixes letter scripts (for example Cyrillic \u0430 in p\u0430ypal.com). lookalike (v3.3): the UTS #39 skeleton (Unicode confusables.txt 16.0.0, pinned) of the recipient, local part and domain, equals that of a known contact, or the domain's skeleton equals a known domain's, while the text differs. non_ascii (v3.3): the domain has any non-ASCII character; surfaces show recipientAscii (punycode). new_recipient (v3.3): no approved send has gone to this recipient and it is not a known contact; informational only, it does not change routing. mixed_script, lookalike and non_ascii make the Ask phone only (as locked_ask; device touch and voice answers are wrong_channel, the device shows Use your phone) and no Auto or standing rule ever covers it.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["mixed_script", "lookalike", "non_ascii", "new_recipient"] } },
+        "recipient": { "description": "Send Asks only. Shield R7-2 (category rule, Unicode 16.0.0 pinned): never carries a hidden character, that is any code point that is General_Category Cc, Cf, Zl or Zp, Default_Ignorable_Code_Point, Bidi_Control, Variation_Selector, or a tag (U+E0000-E007F); for example U+00AD, U+034F, U+061C, U+200B-200F, U+202A-202E, U+2063, U+2066-2069, U+FE0F, U+FEFF, CR and LF. A send whose recipient has one is refused as malformed and no Ask is opened. The daemon's table (openharness cli/src/services/unicode/hidden.ts) is generated from UnicodeData.txt, DerivedCoreProperties.txt and PropList.txt 16.0.0 and is the same set as this pattern. The daemon puts the recipient in Unicode NFC before it is shown or hashed, so digest8 covers the NFC form.", "type": "string", "minLength": 1, "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u0600-\\u0605\\u061C\\u06DD\\u070F\\u0890-\\u0891\\u08E2\\u115F-\\u1160\\u17B4-\\u17B5\\u180B-\\u180F\\u200B-\\u200F\\u2028-\\u202E\\u2060-\\u206F\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0\\uFFF0-\\uFFFB\ud804\udcbd\ud804\udccd\ud80d\udc30-\ud80d\udc3f\ud82f\udca0-\ud82f\udca3\ud834\udd73-\ud834\udd7a\udb40\udc00-\udb43\udfff]+$" },
+        "recipientFlags": { "description": "Send Asks only, set by the daemon, not in digest8 (the recipient itself is). mixed_script (Shield R5-5, R7-3): the local part, the domain, one of its labels, or the whole address mixes letter scripts (for example Cyrillic а in pаypal.com, or the all-Cyrillic local part аррӏе before @gmail.com, flagged even when its skeleton maps to ASCII). lookalike (v3.3): the UTS #39 skeleton (Unicode confusables.txt 16.0.0, pinned) of the recipient, local part and domain, equals that of a known contact, or the domain's skeleton equals a known domain's, while the text differs. non_ascii (v3.3, Shield R7-3): the address has a non-ASCII character anywhere, local part or domain; surfaces show recipientAscii (domain in punycode). new_recipient (v3.3): no approved send has gone to this recipient and it is not a known contact; informational only, it does not change routing. mixed_script, lookalike and non_ascii make the Ask phone only (as locked_ask; device touch and voice answers are wrong_channel, the device shows Use your phone) and no Auto or standing rule ever covers it.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["mixed_script", "lookalike", "non_ascii", "new_recipient"] } },
         "recipientAscii": { "description": "Send Asks only (v3.3), display only: the recipient with its domain in ASCII (IDNA, punycode, lowercased) and the local part as is (it may be non-ASCII, for example jos\u00e9@example.com; only the domain is converted). Always set by the daemon with recipient. A recipient whose domain has no ASCII form is refused as malformed.", "type": "string", "minLength": 1, "pattern": "^[^@]+@[\\u0021-\\u003F\\u0041-\\u007E]+$|^[^@]+$" },
-        "lookalikeOf": { "description": "Send Asks with the lookalike flag only (v3.3), set by the daemon, display only, not in digest8: the known contact or known domain the recipient's skeleton matched, in ASCII form (domain in punycode, local part as is), so the phone can say It looks like dana@acme.com.", "type": "string", "minLength": 1 },
+        "lookalikeOf": { "description": "Send Asks with the lookalike flag only, and required with it (v3.3; App R7): set by the daemon, display only, not in digest8. The known contact or known domain the recipient's skeleton matched, ASCII only: the contact with its domain in punycode, or just the punycode domain when the contact's local part is not ASCII, so the phone can say It looks like dana@acme.com.", "type": "string", "minLength": 1, "pattern": "^[\\u0021-\\u007E]+$" },
         "firstLine": { "description": "Send Asks only: first non-empty line of the message, trimmed; never empty (a send whose message has no non-blank line is refused, no Ask is opened). At most 80 Unicode code points: a longer line is cut to 79 code points plus \u2026. Shield R5-5: each hidden character in the line (the recipient's list above; a tab shows as a space) is shown as a visible marker \u27e6U+XXXX\u27e7, for example \u27e6U+2028\u27e7, before the cut.", "type": "string", "minLength": 1, "maxLength": 80 },
         "kind": { "description": "Display only, not in digest8, set by the daemon, never by the asking caller. safety_verification: a safety check step on a locked_ask, from the template (safety_verification list) or a trusted tool manifest entry (safetyVerification: true, stamped by the daemon's loader). practice (PM Q52, v3.3): the daemon's first-run practice Ask; action is exactly \"Practice Ask\", tier ask, and it never carries an amount, a recipient, a tool or a detail (a request that tries is refused). Settling it executes nothing and never touches the running totals; short holds never close it (no hold_limit). More values may be added.", "enum": ["safety_verification", "practice"] }
       },
@@ -112,6 +119,11 @@
           "description": "v3.3: lookalikeOf is present only with the lookalike flag.",
           "if": { "required": ["lookalikeOf"] },
           "then": { "required": ["recipientFlags"], "properties": { "recipientFlags": { "type": "array", "contains": { "const": "lookalike" } } } }
+        },
+        {
+          "description": "App R7: the lookalike flag requires lookalikeOf.",
+          "if": { "properties": { "recipientFlags": { "type": "array", "contains": { "const": "lookalike" } } }, "required": ["recipientFlags"] },
+          "then": { "required": ["lookalikeOf"] }
         }
       ]
     },
@@ -151,7 +163,7 @@
     },
 
     "AskRejectionReason": {
-      "description": "v3.3 adds busy and no_authority. busy: another answer to the same open request is being settled at this moment (device and phone in the same tick); exactly one settles, this one is refused, the request is not spent by it. no_authority: the connection may not answer at all (the daemon's local socket, an observer, or a connection the daemon does not know); refused before any check, nothing is recorded (not even the answerId), the request is untouched. wrong_channel is different: an authenticated answering surface (the device bridge, or a phone key) answered on a channel it may not answer on; its answerId is recorded.",
+      "description": "v3.3 adds busy and no_authority. busy: another answer to the same open request is being settled at this moment (device and phone in the same tick); exactly one settles, this one is refused, the request is not spent by it. no_authority: the connection may not answer at all (the daemon's local socket, an observer, or a connection the daemon does not know); refused before any check, nothing is recorded (not even the answerId), the request is untouched. wrong_channel is different: an authenticated answering surface (the device bridge, or a phone key) answered on a channel it may not answer on; its answerId is recorded. Shield R7-1: a device-role connection that has not proven the enrolled device key (ildra.device.proof) is no_authority too. unpaired_phone (Shield R7-10): a phone answer to a phone request not authenticated by the paired phone's key; refused before any other check, nothing is recorded (not the answerId, no ildra.ask.attempt), nothing is spent, the request stays open for the paired phone; only an aggregate count reaches the paired phone (ildra.ask.unpaired).",
       "enum": ["malformed", "unknown_id", "replayed", "expired", "digest_mismatch", "challenge_mismatch", "verifier_rejected", "shared_machine", "unpaired_phone", "hold_too_short", "stale_channel", "wrong_channel", "hold_limit", "busy", "no_authority"]
     },
 
@@ -187,7 +199,7 @@
     },
 
     "AskAttempt": {
-      "description": "Daemon to phone, and kept in the Ask journal (activity log): a rejected answer. From the device (channel touch or voice) only hold_too_short or stale_channel, and the request stays open until expiresAt. hold_too_short: a device approval held under 1500 ms. A short hold is a rejected gesture (an attempt), not an answer: the request stays open, and the fifth on one request spends it (hold_limit, Shield R5-4; never on a practice Ask). stale_channel: an answer (approve or deny) from the device channel the request left by ildra.ask.handoff. v3.3, channel phone: every rejected answer from the phone to a known request (for example digest_mismatch, malformed, busy, replayed, expired, unpaired_phone, shared_machine, or wrong_channel on a touch-only or practice Ask); when that rejection spent the request, ildra.ask.outcome follows. Not logged: unknown_id (no request to log it on), an answer whose id or answerId is not well formed, and no_authority. channel is the channel the answer came from. holdMs is what the device reported (absent when it sent none; never on phone attempts).",
+      "description": "Daemon to phone, and kept in the Ask journal (activity log): a rejected answer. From the device (channel touch or voice) only hold_too_short or stale_channel, and the request stays open until expiresAt. hold_too_short: a device approval held under 1500 ms. A short hold is a rejected gesture (an attempt), not an answer: the request stays open, and the fifth on one request spends it (hold_limit, Shield R5-4; never on a practice Ask). stale_channel: an answer (approve or deny) from the device channel the request left by ildra.ask.handoff. v3.3, channel phone: every rejected answer from the phone to a known request (for example digest_mismatch, malformed, busy, replayed, expired, shared_machine, or wrong_channel on a touch-only or practice Ask); when that rejection spent the request, ildra.ask.outcome follows. Not logged: unpaired_phone (Shield R7-10; aggregate only, ildra.ask.unpaired), unknown_id (no request to log it on), an answer whose id or answerId is not well formed, and no_authority. channel is the channel the answer came from. holdMs is what the device reported (absent when it sent none; never on phone attempts).",
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "answerId", "channel", "reason", "at"],
@@ -324,6 +336,85 @@
         { "type": "object", "additionalProperties": false, "required": ["state", "reason"], "properties": { "state": { "const": "refused" }, "reason": { "$ref": "#/$defs/PairingRefusalReason" } } },
         { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "unknown" } } }
       ]
+    },
+
+    "DevicePub": {
+      "description": "Shield R7-1: the Ildra device's Ed25519 public key, raw 32 bytes, base64.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+/]{43}=$"
+    },
+
+    "DeviceFingerprint": {
+      "description": "First 16 lowercase hex characters of SHA-256 over the raw device public key; the device and the phone both show it so the user can compare.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+
+    "AskUnpaired": {
+      "description": "Daemon to the paired phone (Shield R7-10): phone answers not authenticated by the paired phone's key were refused (unpaired_phone). Aggregate only, no request id or answerId: sent at most once per 10-minute window, when the count in that window reaches 3. since is the window start.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "since", "at"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "since": { "$ref": "#/$defs/EpochMs" },
+        "at": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+
+    "DeviceEnroll": {
+      "description": "Daemon to the paired phone (Shield R7-1): an Ildra device asked to enroll its Ed25519 key (from the daemon owner's local socket or a device-role connection). Pending only: the key gets no touch authority until the paired phone confirms it with ildra.device.enroll.confirm before expiresAt (10 minutes after the request). The device shows the same fingerprint. Gateway pairing (harness pair, loopback or not) never enrolls a device.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["devicePub", "fingerprint", "expiresAt"],
+      "properties": {
+        "devicePub": { "$ref": "#/$defs/DevicePub" },
+        "fingerprint": { "$ref": "#/$defs/DeviceFingerprint" },
+        "expiresAt": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+
+    "DeviceEnrollConfirm": {
+      "description": "Phone to daemon (Shield R7-1): approved true confirms the pending device key, approved false refuses it; approved false on the enrolled key revokes it. Accepted only from the paired phone, authenticated by the key it paired with; anything else is unpaired_phone. The daemon answers with ildra.device.enroll.status.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["devicePub", "approved"],
+      "properties": {
+        "devicePub": { "$ref": "#/$defs/DevicePub" },
+        "approved": { "type": "boolean" }
+      }
+    },
+
+    "DeviceEnrollStatus": {
+      "description": "Daemon to the paired phone and the device (Shield R7-1). enrolled: this key is now the one Ildra device (it replaces any earlier key). refused: the phone refused the pending key. revoked: the phone revoked the enrolled key; no device answers until another key enrolls. expired: the pending key was not confirmed in time.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "fingerprint", "at"],
+      "properties": {
+        "state": { "enum": ["enrolled", "refused", "revoked", "expired"] },
+        "fingerprint": { "$ref": "#/$defs/DeviceFingerprint" },
+        "at": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+
+    "DeviceChallenge": {
+      "description": "Daemon to the device over its bridge connection (Shield R7-1): a fresh nonce, 32 random bytes as base64url, valid for 60 s and once. Only a device-role connection that is not loopback gets one, and only while a device key is enrolled.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nonce"],
+      "properties": {
+        "nonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" }
+      }
+    },
+
+    "DeviceProof": {
+      "description": "Device to daemon (Shield R7-1): the enrolled device key's Ed25519 signature over the UTF-8 bytes of ildra-device-proof:v1:<nonce>, base64. A valid proof binds that connection to the enrolled key; only such a connection answers on touch or voice. Any other device-role connection (no proof, another key, a reused or stale nonce) is no_authority. The private key stays on the device.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signature"],
+      "properties": {
+        "signature": { "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
+      }
     }
   }
 }

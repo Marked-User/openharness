@@ -25,7 +25,10 @@ import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path'
-import { isLookalike, isNewRecipient, lookalikeOf, nonAsciiDomain, recipientAscii, recipientKey, type RecipientKnowledge } from './recipient.js'
+import { HIDDEN_DATA } from './unicode/hidden.js'
+import { deviceFingerprint, rawDeviceKey, stampedChannel } from '../core/api.js'
+export { deviceFingerprint, deviceProofMessage, verifyDeviceProof } from '../core/api.js'
+import { isLookalike, isNewRecipient, lookalikeOf, recipientAscii, recipientKey, type RecipientKnowledge } from './recipient.js'
 
 export type Tier = 'auto' | 'ask' | 'locked_ask' | 'never'
 export type AskChannel = 'voice' | 'touch' | 'phone'
@@ -270,10 +273,16 @@ export function isSendTool(manifest: readonly ToolManifestEntry[] | null | undef
   return !trustedEntry(e)
 }
 
-/** A tool is a read only when the manifest lists it (once) as read-only. Unknown or duplicate tools are writes. */
+/**
+ * A tool is a read only when a trusted manifest entry (first_party or bridge, stamped; R7-4) lists it, once, as
+ * read-only. Unknown, duplicate and third-party tools are writes, whatever hints they carry.
+ */
 export function classifyTool(manifest: readonly ToolManifestEntry[] | null | undefined, toolName: string): 'read' | 'write' {
   const entry = lookupTool(manifest, toolName)
   if (typeof entry === 'string') return 'write'
+  // Shield R7-4: a read-only claim (readOnly or the MCP readOnlyHint) is believed only from a first-party or
+  // bridge entry stamped by the loader. A third-party tool is a write (Ask) whatever it says about itself.
+  if (!trustedEntry(entry)) return 'write'
   if (entry.readOnly === true || entry.annotations?.readOnlyHint === true) return 'read'
   return 'write'
 }
@@ -605,8 +614,9 @@ export const ANSWER_ID = /^[A-Za-z0-9-]{16,64}$/
 /**
  * ildra.ask.attempt: an answer that was rejected. From the device (touch, voice): hold_too_short or stale_channel
  * only, and the Ask stays open. v3.3, channel phone: every rejected answer from the phone to a known Ask
- * (digest_mismatch, malformed, busy, replayed, expired, wrong_channel, unpaired_phone, shared_machine, ...), so the
- * activity log shows it; when that rejection spent the Ask an ildra.ask.outcome follows. Not logged: unknown_id
+ * (digest_mismatch, malformed, busy, replayed, expired, wrong_channel, shared_machine, ...), so the
+ * activity log shows it; when that rejection spent the Ask an ildra.ask.outcome follows. Not logged: unpaired_phone
+ * (R7-10: only an aggregate count, onUnpaired), unknown_id
  * (no Ask to log it on), an answer whose id or answerId is not well formed, and no_authority (never reaches it).
  */
 export interface AskAttempt { id: string; answerId: string; channel: AskChannel; reason: SettleReason; holdMs?: number; at: number }
@@ -615,6 +625,9 @@ const ASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export const MAX_ATTEMPTS = 200
 /** Shield R5-4: short holds allowed on one Ask; the last one spends it with reason hold_limit. */
 export const MAX_SHORT_HOLDS = 5
+/** Shield R7-10: unpaired phone answers counted per window; the paired phone hears once a window at the threshold. */
+export const UNPAIRED_WINDOW_MS = 10 * 60_000
+export const UNPAIRED_NOTIFY = 3
 
 /**
  * ildra.ask.handoff (v3.3): the open request moves from the device (touch or voice) to the paired phone. cause
@@ -664,13 +677,39 @@ export class AskLedger {
   onAttempt?: (a: AskAttempt) => void
   /** Called with each ildra.ask.handoff as it happens (the daemon forwards it, withdraws the device prompt). */
   onHandoff?: (h: AskHandoff) => void
+  /**
+   * Shield R7-10: called once per UNPAIRED_WINDOW_MS when unpaired phone answers reach UNPAIRED_NOTIFY in that
+   * window (the daemon tells the paired phone, ildra.ask.unpaired). Aggregate only: no Ask, id or answerId.
+   */
+  onUnpaired?: (u: { count: number; since: number; at: number }) => void
+  private unpaired_ = { since: 0, count: 0, notified: false }
+  private noteUnpaired(): void {
+    const t = this.now()
+    if (t - this.unpaired_.since >= UNPAIRED_WINDOW_MS) this.unpaired_ = { since: t, count: 0, notified: false }
+    this.unpaired_.count++
+    if (this.unpaired_.count >= UNPAIRED_NOTIFY && !this.unpaired_.notified) {
+      this.unpaired_.notified = true
+      try { this.onUnpaired?.({ count: this.unpaired_.count, since: this.unpaired_.since, at: t }) } catch { /* a listener never changes the result */ }
+    }
+  }
+  /** Shield R7-10: unpaired phone answers in the current window. */
+  unpairedCount(): { count: number; since: number } { return { count: this.unpaired_.count, since: this.unpaired_.since } }
 
+  /**
+   * Shield R7 (ledger via rule): a production ledger (the Ask service's journal, createIldraAsk) settles only answers the core stamped with
+   * their channel (core/ildraChannel.ts) and takes the channel from that stamp; anything else is no_authority and
+   * records nothing. Plain ledgers (tests, reference mode) keep reading `via` from the answer.
+   */
+  private readonly requireStamp: boolean
   /** `ttlMs` overrides the decided expiry; tests only. */
-  constructor(opts: { now?: () => number; ttlMs?: number; verifier?: AnswerVerifier } = {}) {
+  constructor(opts: { now?: () => number; ttlMs?: number; verifier?: AnswerVerifier; requireChannelStamp?: boolean } = {}) {
     this.now = opts.now ?? Date.now
     this.ttlMs = opts.ttlMs
     this.verifier = opts.verifier
+    this.requireStamp = opts.requireChannelStamp === true
   }
+  /** True for a production ledger (only core-stamped answers settle). */
+  requiresChannelStamp(): boolean { return this.requireStamp }
 
   /** Recipients this daemon has sent to (approved), as recipientKey. */
   knownRecipients(): string[] { return [...this.known_] }
@@ -805,8 +844,14 @@ export class AskLedger {
 
   /** `isPaired` is consulted for phone answers; `extra` runs after the ledger's own verifier. */
   settle(ans: AskAnswer, ctx: SettleContext = {}): SettleResult {
+    if (this.requireStamp && ans !== null && typeof ans === 'object') {
+      const via = stampedChannel(ans)
+      if (via === undefined) return { ok: false, reason: 'no_authority' }
+      ans = { ...ans, via }
+      ctx = { ...ctx, via }
+    }
     const r = this.check(ans, ctx)
-    if (!r.ok) this.phoneAttempt(ans, r.reason, ctx)
+    if (!r.ok) this.logPhoneAttempt(ans, r.reason, ctx)
     this.onChange?.()
     return r
   }
@@ -817,7 +862,17 @@ export class AskLedger {
    * Also called by the runtime for busy.
    */
   phoneAttempt(ans: AskAnswer, reason: SettleReason, ctx: SettleContext = {}): void {
-    if (!ans || typeof ans !== 'object' || reason === 'hold_too_short' || reason === 'stale_channel' || reason === 'unknown_id' || reason === 'no_authority') return
+    if (this.requireStamp) {
+      const via = stampedChannel(ans)
+      if (via === undefined) return
+      ans = { ...ans, via }
+      ctx = { ...ctx, via }
+    }
+    this.logPhoneAttempt(ans, reason, ctx)
+  }
+
+  private logPhoneAttempt(ans: AskAnswer, reason: SettleReason, ctx: SettleContext): void {
+    if (!ans || typeof ans !== 'object' || reason === 'hold_too_short' || reason === 'stale_channel' || reason === 'unknown_id' || reason === 'no_authority' || reason === 'unpaired_phone') return
     if (typeof ans.id !== 'string' || !ASK_ID.test(ans.id) || typeof ans.answerId !== 'string' || !ANSWER_ID.test(ans.answerId)) return
     if (answerChannel(ans, ctx) !== 'phone') return
     if (!this.open_.has(ans.id) && !this.spent.has(ans.id)) return
@@ -847,8 +902,16 @@ export class AskLedger {
   private check(ans: AskAnswer, ctx: SettleContext): SettleResult {
     if (!ans || typeof ans !== 'object' || typeof ans.id !== 'string' || typeof ans.digest8 !== 'string'
       || typeof ans.answerId !== 'string' || !ANSWER_ID.test(ans.answerId)) return { ok: false, reason: 'malformed' }
-    const answerSeen = this.spentAnswers.has(ans.answerId)
     let req = this.open_.get(ans.id)
+    // Shield R7-10: on a phone Ask (money, locked_ask, a flagged recipient, or one handed off) an answer not from
+    // the paired phone's key is refused before anything else: nothing is recorded (not its answerId, no per-Ask
+    // attempt), nothing is spent, the Ask stays open for the real phone. Only an aggregate, rate-limited count
+    // reaches the paired phone (onUnpaired). (A phone answer to a device Ask is wrong_channel and spends nothing.)
+    if (req && req.channel === 'phone' && answerChannel(ans, ctx) === 'phone' && !this.phonePaired(ans, ctx)) {
+      this.noteUnpaired()
+      return { ok: false, reason: 'unpaired_phone' }
+    }
+    const answerSeen = this.spentAnswers.has(ans.answerId)
     this.spentAnswers.set(ans.answerId, Math.max(this.now(), req?.expiresAt ?? 0))
     // v3.1 (decided order) and v3.3: after a handoff, any answer from the device channel the Ask left (approve or
     // deny, even with a reused answerId, and even after the phone settled it) is stale_channel, checked before
@@ -896,7 +959,8 @@ export class AskLedger {
     // R5-1: the phone id is a claim. An answer that came through the daemon's runtime (via set by
     // core/ildraAsk.ts, the only production path) or that names a key must come from the key that phone
     // paired with. Only a direct in-process ledger caller (tests, reference mode) is checked by id alone.
-    if (req.channel === 'phone' && !this.phonePaired(ans, ctx)) return spend('unpaired_phone')
+    // R7-10: only the paired phone's key can spend a phone Ask; anything else here leaves it open.
+    if (req.channel === 'phone' && !this.phonePaired(ans, ctx)) { this.noteUnpaired(); return { ok: false, reason: 'unpaired_phone' } }
     if (req.channel === 'touch' && ans.approved === true) {
       const h = ans.holdMs
       // DECISIONS ad47477: a short hold is a rejected gesture (an attempt), not an answer; the Ask stays open.
@@ -1198,15 +1262,31 @@ export function firstLine(message: string): string {
 }
 
 /**
- * Shield R5-5: characters that change what a line looks like without showing themselves: bidi embeddings,
- * overrides and isolates (U+202A–202E, U+2066–2069), the marks U+200E/U+200F/U+061C, zero-width characters
- * (U+200B–200D, U+2060, U+FEFF), the line and paragraph separators U+2028/U+2029, and every C0/C1 control
- * (CR, LF and tab included).
+ * Shield R5-5, R7-2: characters that change what a line looks like without showing themselves. A category rule
+ * over pinned Unicode 16.0.0 data (unicode/hidden.ts, scripts/ildra/gen-hidden.ts), not a hand list: General
+ * Category Cc, Cf, Zl and Zp, Default_Ignorable_Code_Point, Bidi_Control, the variation selectors and the tag
+ * characters (bidi controls, zero-width characters, soft hyphen, U+034F, invisible operators, U+FE0F, tags and
+ * U+2028/2029 among them; CR, LF and tab included).
  */
-const HIDDEN_CHAR = /[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u2028-\u202E\u2060\u2066-\u2069\uFEFF]/u
-const HIDDEN_CHARS = new RegExp(HIDDEN_CHAR.source, 'gu')
+export const HIDDEN_RANGES: readonly (readonly [number, number])[] = HIDDEN_DATA.split(';').map((r) => {
+  const [a, b] = r.split('-')
+  return [parseInt(a!, 16), parseInt(b ?? a!, 16)] as const
+})
+const rx = (c: number): string => `\\u{${c.toString(16)}}`
+const HIDDEN_CLASS = HIDDEN_RANGES.map(([a, b]) => (a === b ? rx(a) : `${rx(a)}-${rx(b)}`)).join('')
+const HIDDEN_CHAR = new RegExp(`[${HIDDEN_CLASS}]`, 'u')
+const HIDDEN_CHARS = new RegExp(`[${HIDDEN_CLASS}]`, 'gu')
+/**
+ * The protocol schema's AskRequest.recipient pattern, generated from the same table (a spec checks they are
+ * equal): BMP code points as \\uXXXX escapes, astral ones as the characters themselves (the schema file holds
+ * them as JSON surrogate escapes), so it reads the same in ECMAScript with the u flag (ajv's default) and in Python re.
+ */
+export const HIDDEN_SCHEMA_PATTERN = `^[^${HIDDEN_RANGES.map(([a, b]) => {
+  const one = (c: number): string => (c <= 0xFFFF ? `\\u${c.toString(16).toUpperCase().padStart(4, '0')}` : String.fromCodePoint(c))
+  return a === b ? one(a) : `${one(a)}-${one(b)}`
+}).join('')}]+$`
 
-/** True when `s` holds a character from HIDDEN_CHAR. A recipient with one is refused (malformed). */
+/** True when `s` holds a hidden character (HIDDEN_RANGES). A recipient with one is refused (malformed). */
 export function hasHiddenChar(s: string): boolean { return HIDDEN_CHAR.test(s) }
 
 /**
@@ -1220,7 +1300,7 @@ export function markHidden(s: string): string {
 /**
  * Flags on a recipient (Shield R5-5, v3.3), display and routing only (the recipient itself is in digest8):
  * mixed_script, lookalike (UTS #39 skeleton of a known contact or domain, different text), non_ascii (any
- * non-ASCII in the domain), new_recipient (first send to it; informational). The first three are phone only
+ * non-ASCII character in the address, local part or domain; R7-3), new_recipient (first send to it; informational). The first three are phone only
  * and no Auto rule covers them (PHONE_ONLY_FLAGS).
  */
 export type RecipientFlag = 'mixed_script' | 'lookalike' | 'non_ascii' | 'new_recipient'
@@ -1244,8 +1324,9 @@ function scriptsOf(s: string): Set<string> {
 }
 
 /**
- * Shield R5-5: 'mixed_script' when the recipient's domain mixes letter scripts (as a whole or within one
- * label, e.g. Cyrillic а in "pаypal.com"), or its local part does. Shown, never refused: the digest still
+ * Shield R5-5, R7-3: 'mixed_script' when the recipient's domain mixes letter scripts (as a whole or within one
+ * label, e.g. Cyrillic а in "pаypal.com"), or its local part does, or the address as a whole does (a Cyrillic
+ * local part at a Latin domain). Shown, never refused: the digest still
  * binds the exact text, so the device approves what it showed.
  */
 export function recipientFlags(recipient: string, known?: RecipientKnowledge): RecipientFlag[] {
@@ -1254,14 +1335,19 @@ export function recipientFlags(recipient: string, known?: RecipientKnowledge): R
   const local = at >= 0 ? r.slice(0, at) : ''
   const domain = at >= 0 ? r.slice(at + 1) : r
   const out: RecipientFlag[] = []
-  if (scriptsOf(domain).size > 1 || scriptsOf(local).size > 1) out.push('mixed_script')
+  // R7-3: the local part, the domain (and so each label), and the whole address are each checked; a Cyrillic
+  // local part at a Latin domain mixes scripts across the address.
+  if (scriptsOf(local).size > 1 || scriptsOf(domain).size > 1 || scriptsOf(`${local}${domain}`).size > 1) out.push('mixed_script')
   if (known && isLookalike(r, known)) out.push('lookalike')
-  if (nonAsciiDomain(r)) out.push('non_ascii')
+  // R7-3: any non-ASCII character anywhere in the address (local part or domain).
+  if (NON_ASCII_CHAR.test(r)) out.push('non_ascii')
   if (known && isNewRecipient(r, known)) out.push('new_recipient')
   return out
 }
 
-const FLAG_LABEL: Record<RecipientFlag, string> = { mixed_script: 'mixed script', lookalike: 'looks like a contact', non_ascii: 'non-ASCII domain', new_recipient: 'new recipient' }
+const FLAG_LABEL: Record<RecipientFlag, string> = { mixed_script: 'mixed script', lookalike: 'looks like a contact', non_ascii: 'non-ASCII', new_recipient: 'new recipient' }
+// eslint-disable-next-line no-control-regex
+const NON_ASCII_CHAR = /[^\u0000-\u007F]/
 
 /**
  * Display form of a recipient: as is (punycode domain when non_ascii, v3.3), with a visible marker per flag,
@@ -1269,9 +1355,11 @@ const FLAG_LABEL: Record<RecipientFlag, string> = { mixed_script: 'mixed script'
  */
 export function recipientDisplay(recipient: string, flags: readonly RecipientFlag[] = recipientFlags(recipient), ascii?: string | null): string {
   const a = ascii === undefined ? recipientAscii(recipient) : ascii
-  const shown = flags.includes('non_ascii') && a ? `${a} (${recipient})` : recipient
+  const shown = flags.includes('non_ascii') && a && a !== recipient ? `${a} (${recipient})` : recipient
   // new_recipient is informational: the phone shows it from recipientFlags; the prompt text stays as it was.
-  const warn = flags.filter((f) => f !== 'new_recipient').map((f) => FLAG_LABEL[f])
+  const domainPart = recipient.slice(recipient.lastIndexOf('@') + 1)
+  const warn = flags.filter((f) => f !== 'new_recipient')
+    .map((f) => (f === 'non_ascii' ? (NON_ASCII_CHAR.test(domainPart) ? 'non-ASCII domain' : 'non-ASCII address') : FLAG_LABEL[f]))
   return warn.length ? `${shown} [⚠ ${warn.join(', ')}]` : shown
 }
 
@@ -1365,7 +1453,8 @@ function parseJournal(text: string) {
   if (p.log !== undefined && (!Array.isArray(p.log) || !p.log.every(isLog))) throw new Error('bad pairing log')
   if (p.refused !== undefined && (!p.refused || typeof p.refused !== 'object' || Array.isArray(p.refused) || !Object.values(p.refused).every((x) => typeof x === 'string'))) throw new Error('bad pairing refused')
   if (d.settings !== undefined && (!d.settings || typeof d.settings !== 'object')) throw new Error('bad settings')
-  return { window: w, ledger: l, pairing: p, settings: d.settings }
+  if (d.device !== undefined && d.device !== null && (typeof d.device !== 'object' || (d.device.pub !== null && typeof d.device.pub !== 'string'))) throw new Error('bad device')
+  return { window: w, ledger: l, pairing: p, settings: d.settings, device: d.device }
 }
 
 /** v3.3: ask.deviceWindowSec, seconds an Ask stays on the device before it hands off to the phone. */
@@ -1395,12 +1484,77 @@ export class AskSettings {
   }
 }
 
+/** Shield R7-1: how long a device enrollment waits for the paired phone's confirm. */
+export const DEVICE_ENROLL_TTL_MS = 10 * 60_000
+const rawKey = (pub: unknown): Buffer | null => rawDeviceKey(pub)
+
+/**
+ * Shield R7-1: the one Ildra device whose bridge may answer touch and voice Asks, by its Ed25519 public key
+ * (kept in the journal like the phone keys). A gateway pairing (`harness pair`, any device-role identity) grants
+ * no touch authority. Enrollment: begin(pub) records a pending request (the device and the phone show the same
+ * fingerprint); only the paired phone's key confirms it (`ildra.device.enroll.confirm`, checked by the service);
+ * nothing else makes a key the device. A connection then answers touch only after signing a fresh core nonce with
+ * that key (core/ildraAsk.ts challenge and prove). confirm(pub, false) on the enrolled key revokes it.
+ */
+export class AskDeviceEnrollment {
+  private pub_: string | null = null
+  private at_ = 0
+  private pending_: { pub: string; at: number; expiresAt: number } | null = null
+  onChange?: () => void
+  constructor(private readonly now: () => number = Date.now) {}
+  /** Record a pending enrollment for `pub`; returns its fingerprint and expiry, or null for a malformed key. */
+  begin(pub: unknown): { devicePub: string; fingerprint: string; expiresAt: number } | null {
+    if (!rawKey(pub)) return null
+    const at = this.now()
+    this.pending_ = { pub: pub as string, at, expiresAt: at + DEVICE_ENROLL_TTL_MS }
+    this.onChange?.()
+    return { devicePub: pub as string, fingerprint: deviceFingerprint(pub as string), expiresAt: this.pending_.expiresAt }
+  }
+  pending(): { devicePub: string; fingerprint: string; expiresAt: number } | null {
+    const p = this.pending_
+    if (!p || this.now() >= p.expiresAt) return null
+    return { devicePub: p.pub, fingerprint: deviceFingerprint(p.pub), expiresAt: p.expiresAt }
+  }
+  /**
+   * The paired phone's answer (the caller has checked the phone key). approved on the pending key enrolls it,
+   * replacing any earlier device; not approved refuses the pending key, or revokes `pub` when it is the
+   * enrolled one. Returns the resulting state, or null when there is nothing for that key.
+   */
+  confirm(pub: unknown, approved: boolean): 'enrolled' | 'refused' | 'revoked' | 'expired' | null {
+    const p = this.pending_
+    if (p && p.pub === pub) {
+      this.pending_ = null
+      if (this.now() >= p.expiresAt) { this.onChange?.(); return 'expired' }
+      if (approved) { this.pub_ = p.pub; this.at_ = this.now() }
+      this.onChange?.()
+      return approved ? 'enrolled' : 'refused'
+    }
+    if (!approved && this.pub_ !== null && pub === this.pub_) { this.revoke(); return 'revoked' }
+    return null
+  }
+  revoke(): void { this.pub_ = null; this.at_ = 0; this.onChange?.() }
+  /** The enrolled device key, or null. */
+  device(): string | null { return this.pub_ }
+  toJSON(): { pub: string | null; at: number; pending: { pub: string; at: number; expiresAt: number } | null } {
+    return { pub: this.pub_, at: this.at_, pending: this.pending_ }
+  }
+  restore(d: unknown): void {
+    const x = d as { pub?: unknown; at?: unknown; pending?: { pub?: unknown; at?: unknown; expiresAt?: unknown } | null } | null
+    if (!x || typeof x !== 'object') return
+    if (rawKey(x.pub)) { this.pub_ = x.pub as string; this.at_ = typeof x.at === 'number' ? x.at : 0 }
+    const p = x.pending
+    if (p && rawKey(p.pub) && typeof p.at === 'number' && typeof p.expiresAt === 'number') this.pending_ = { pub: p.pub as string, at: p.at, expiresAt: p.expiresAt }
+  }
+}
+
 export interface ApprovalJournal {
   window: ApprovalWindow
   ledger: AskLedger
   pairing: PhonePairing
   /** v3.3 daemon Ask settings (ask.deviceWindowSec). */
   settings: AskSettings
+  /** Shield R7-1: the enrolled Ildra device (its bridge alone answers touch and voice Asks). */
+  device: AskDeviceEnrollment
   /** True when the file existed but could not be trusted; voice is off for one window. */
   recovered: boolean
   save(): void
@@ -1449,6 +1603,8 @@ export function openJournal(
   path: string,
   opts: {
     now?: () => number; windowMs?: number; ttlMs?: number; verifier?: AnswerVerifier; voiceMoneyLimitMinor?: number; bulkCount?: number
+    /** Shield R7: the Ask service's journal (createIldraAsk) settles only core-stamped answers. */
+    requireChannelStamp?: boolean
     /**
      * F5: install marker, written once. Marker present and journal missing fails closed. Defaults to
      * defaultMarkerPath(path). A marker in the journal's folder, or below it, is refused (Shield pilot review).
@@ -1458,9 +1614,10 @@ export function openJournal(
 ): ApprovalJournal {
   const now = opts.now ?? Date.now
   const window = new ApprovalWindow({ now, windowMs: opts.windowMs, voiceMoneyLimitMinor: opts.voiceMoneyLimitMinor, bulkCount: opts.bulkCount })
-  const ledger = new AskLedger({ now, ttlMs: opts.ttlMs, verifier: opts.verifier })
+  const ledger = new AskLedger({ now, ttlMs: opts.ttlMs, verifier: opts.verifier, requireChannelStamp: opts.requireChannelStamp === true })
   const pairing = new PhonePairing({ now })
   const settings = new AskSettings()
+  const device = new AskDeviceEnrollment(now)
   let recovered = false
   const marker = resolvePath(opts.markerPath ?? defaultMarkerPath(path))
   if (foldersOverlap(dirname(marker), dirname(resolvePath(path)))) {
@@ -1477,13 +1634,14 @@ export function openJournal(
       ledger.restore(d.ledger)
       pairing.restore(d.pairing)
       settings.restore(d.settings)
+      device.restore(d.device)
     } catch {
       recovered = true
       window.lockedUntil = now() + window.windowMs
     }
   }
   const save = () => {
-    const body = JSON.stringify({ v: JOURNAL_VERSION, window: window.toJSON(), ledger: ledger.toJSON(), pairing: pairing.toJSON(), settings: settings.toJSON() })
+    const body = JSON.stringify({ v: JOURNAL_VERSION, window: window.toJSON(), ledger: ledger.toJSON(), pairing: pairing.toJSON(), settings: settings.toJSON(), device: device.toJSON() })
     mkdirSync(dirname(path), { recursive: true })
     const tmp = `${path}.${process.pid}.tmp`
     writeFileSync(tmp, body, { mode: 0o600 })
@@ -1493,12 +1651,13 @@ export function openJournal(
   ledger.onChange = save
   pairing.onChange = save
   settings.onChange = save
+  device.onChange = save
   save()
   if (!existsSync(marker)) {
     mkdirSync(dirname(marker), { recursive: true })
     writeFileSync(marker, `${now()}\n`, { mode: 0o600 })
   }
-  return { window, ledger, pairing, settings, recovered, save }
+  return { window, ledger, pairing, settings, device, recovered, save }
 }
 
 // ---- ask ----
@@ -1561,7 +1720,8 @@ export type AskOutcome = AskResult & { reason: AskOutcomeReason; request?: AskRe
 /** ask(): re-prompts after hold_too_short before it gives up on a runaway answerer (the Ask stays open). */
 export const MAX_REPROMPTS = 100
 /** Rejections that leave the Ask open, so ask() waits for another answer. */
-const KEEPS_ASK_OPEN: ReadonlySet<SettleReason> = new Set(['hold_too_short', 'stale_channel', 'wrong_channel'])
+// Shield R7-10: unpaired_phone too (the paired phone may still answer); like wrong_channel it counts toward MAX_REPROMPTS.
+const KEEPS_ASK_OPEN: ReadonlySet<SettleReason> = new Set(['hold_too_short', 'stale_channel', 'wrong_channel', 'unpaired_phone'])
 
 export function neverOutcome(): AskOutcome { return { approved: false, channel: null, tier: 'never', reason: 'never' } }
 
@@ -1625,6 +1785,8 @@ export async function ask(
   }) : []
   // v3.3 (Shield): no Auto rule covers a send to a flagged recipient (mixed_script, lookalike, non_ascii).
   if (tier === 'auto' && phoneOnlyRecipient(flags)) tier = 'ask'
+  // Shield R7-4: a send is never Auto, whatever a manifest, a hint or a template rule says.
+  if (tier === 'auto' && isSend) tier = 'ask'
   if (tier === 'auto') return { approved: true, channel: null, tier, reason: 'approved' }
 
   let suffix = ''
