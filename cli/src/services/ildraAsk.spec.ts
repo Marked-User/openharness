@@ -150,7 +150,8 @@ describe('ildra_ask_answer', () => {
     const a = answerFor(sent[0]!.req)
     await rt.requests.ildra_ask_answer(a, { local: false, owner: false, connection: 'dev' })
     await p
-    expect(await rt.requests.ildra_ask_answer(a, { local: false, owner: false, connection: 'dev' })).toEqual({ ok: false, reason: 'unknown_id' })
+    // v3.3: an answer nothing waits for is still recorded by the ledger (it never approves): here a reuse, replayed.
+    expect(await rt.requests.ildra_ask_answer(a, { local: false, owner: false, connection: 'dev' })).toEqual({ ok: false, reason: 'replayed' })
     expect(rt.journal().ledger.settle({ ...a, from: {} })).toEqual({ ok: false, reason: 'replayed' })
     expect(await rt.requests.ildra_ask_answer('junk' as never, { local: false, owner: false, connection: 'dev' })).toEqual({ ok: false, reason: 'malformed' })
   })

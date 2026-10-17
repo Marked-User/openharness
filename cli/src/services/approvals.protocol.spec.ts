@@ -58,7 +58,9 @@ describe('ildra.ask.attempt, ildra.ask.handoff and outcome reasons from the daem
     expect(seen[1]).not.toHaveProperty('holdMs')
     expect(l.toJSON().attempts).toEqual(seen)
     expect(env('ildra.ask.attempt', { ...(seen[0] as object), reason: 'expired' }).length).toBeGreaterThan(0)
-    expect(env('ildra.ask.attempt', { ...(seen[0] as object), channel: 'phone' }).length).toBeGreaterThan(0)
+    // v3.3: channel is voice, touch or phone (the channel the rejected answer came from); nothing else.
+    expect(env('ildra.ask.attempt', { ...(seen[0] as object), channel: 'phone' })).toEqual([])
+    expect(env('ildra.ask.attempt', { ...(seen[0] as object), channel: 'device' }).length).toBeGreaterThan(0)
   })
   it('attempts survive a journal round trip', () => {
     const l = new AskLedger()
@@ -82,8 +84,11 @@ describe('ildra.ask.attempt, ildra.ask.handoff and outcome reasons from the daem
   it('handoff output validates; only touch to phone', () => {
     const l = new AskLedger()
     const r = l.open({ action: 'a', tier: 'ask', channel: 'touch' })
-    expect(env('ildra.ask.handoff', l.handoff(r.id, 'phone'))).toEqual([])
+    const h = l.handoff(r.id, 'phone')
+    expect(h).toMatchObject({ id: r.id, from: 'device', to: 'phone', channel: 'touch', cause: 'timer' })
+    expect(env('ildra.ask.handoff', h)).toEqual([])
     expect(env('ildra.ask.handoff', { id: r.id, from: 'phone', to: 'touch', at: 1 }).length).toBeGreaterThan(0)
+    expect(env('ildra.ask.handoff', { id: r.id, from: 'touch', to: 'phone', at: 1 }).length).toBeGreaterThan(0) // v3 shape
   })
   it('AskOutcome: reason always; approved exactly when approved; denied, expired, no_channel, never, malformed otherwise', () => {
     expect(env('ildra.ask.outcome', { approved: true, channel: 'touch', tier: 'ask', reason: 'approved' })).toEqual([])

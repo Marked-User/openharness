@@ -125,20 +125,22 @@ describe('R5-5: recipient Unicode', () => {
     expect(Array.from(firstLine('\u200B'.repeat(100))).length).toBe(80)
   })
   it('mixed-script domains (and local parts) are flagged and marked; a single script is not', async () => {
-    expect(recipientFlags('bob@p\u0430ypal.com')).toEqual(['mixed_script']) // Cyrillic а in a Latin label
-    expect(recipientFlags('bob@\u043f\u0440\u0438\u043c\u0435\u0440.com')).toEqual(['mixed_script']) // Cyrillic label, Latin TLD
+    expect(recipientFlags('bob@p\u0430ypal.com')).toEqual(['mixed_script', 'non_ascii']) // Cyrillic а in a Latin label
+    expect(recipientFlags('bob@\u043f\u0440\u0438\u043c\u0435\u0440.com')).toEqual(['mixed_script', 'non_ascii']) // Cyrillic label, Latin TLD
     expect(recipientFlags('\u0430lice@x.com')).toEqual(['mixed_script'])
     expect(recipientFlags('alice@example.com')).toEqual([])
-    expect(recipientFlags('\u0438\u0432\u0430\u043d@\u043f\u0440\u0438\u043c\u0435\u0440.\u0440\u0444')).toEqual([])
+    expect(recipientFlags('\u0438\u0432\u0430\u043d@\u043f\u0440\u0438\u043c\u0435\u0440.\u0440\u0444')).toEqual(['non_ascii'])
     expect(recipientFlags('+1 555 0100')).toEqual([])
-    const { req, prompt } = await run('bob@p\u0430ypal.com')
-    expect(req!.recipientFlags).toEqual(['mixed_script'])
-    expect(req!.recipient).toBe('bob@p\u0430ypal.com')
-    expect(prompt).toContain('bob@p\u0430ypal.com [⚠ mixed script]')
-    expect((toDeviceMessage(req!, req!.openedAt) as { text: string }).text).toBe('Send an email\nTo bob@p\u0430ypal.com [⚠ mixed script]: hi')
+    // v3.3: flagged recipients are phone only, so a touch-only Ask has no channel and opens nothing.
+    expect((await run('bob@p\u0430ypal.com')).out).toMatchObject({ approved: false, channel: null, reason: 'no_channel' })
+    const req = new AskLedger().open({ action: 'Send an email', tier: 'ask', channel: 'phone', recipient: 'bob@p\u0430ypal.com', firstLine: 'hi' })
+    expect(req.recipientFlags).toEqual(['mixed_script', 'non_ascii', 'new_recipient'])
+    expect(req.recipient).toBe('bob@p\u0430ypal.com')
+    expect(req.recipientAscii).toMatch(/^bob@xn--/)
+    expect((toDeviceMessage(req, req.openedAt) as { body: string }).body).toBe('Use your phone')
     const plain = await run('bob@paypal.com')
-    expect(plain.req!.recipientFlags).toBeUndefined()
-    expect(plain.req!.digest8).not.toBe(req!.digest8)
+    expect(plain.req!.recipientFlags).toEqual(['new_recipient'])
+    expect(plain.prompt).toContain('to bob@paypal.com: "hi"')
   })
   it('the wire schema refuses a hidden character in recipient and accepts recipientFlags', async () => {
     const schema = JSON.parse(readFileSync(new URL('./ildra-messages.schema.json', import.meta.url), 'utf8'))
@@ -146,8 +148,9 @@ describe('R5-5: recipient Unicode', () => {
     const ajv = new (Ajv2020 as unknown as new (o: object) => import('ajv').default)({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true })
     ajv.addSchema(schema)
     const v = ajv.getSchema(`${schema.$id}#/$defs/AskRequest`)!
-    const { req } = await run('bob@p\u0430ypal.com')
+    const req = new AskLedger().open({ action: 'Send an email', tier: 'ask', channel: 'phone', recipient: 'bob@p\u0430ypal.com', firstLine: 'hi' })
     expect(v(req), JSON.stringify(v.errors)).toBe(true)
+    expect(v({ ...req, channel: 'touch' })).toBe(false) // v3.3: flagged recipients are phone only
     for (const c of HIDDEN) expect(v({ ...req, recipient: `a${c}b@x.com` }), JSON.stringify(c)).toBe(false)
     expect(v({ ...req, recipientFlags: ['other'] })).toBe(false)
     const { recipient: _r, firstLine: _f, ...noSend } = req!

@@ -68,4 +68,6 @@ set('ask-answer-touch-short.json', invoice)
 // out of digest8.json so the vector set App pins (9) is unchanged.
 set('ask-request-send-mixed-script.json', actionDigest8('Send an invoice',
   { agentId: 'bookkeeper-1', tier: 'ask', recipient: 'dana@ex\u0430mple.com', messageSha256: sha(INVOICE_MESSAGE) }))
+// PM Q52: the practice Ask's digest (fixed action, tier ask, nothing else).
+set('ask-request-practice.json', actionDigest8('Practice Ask', { tier: 'ask' }))
 console.log(vectors.map((v) => `${v.digest8 ?? 'refused '}  ${v.name}`).join('\n'))

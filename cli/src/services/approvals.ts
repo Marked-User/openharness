@@ -25,6 +25,7 @@ import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path'
+import { isLookalike, isNewRecipient, nonAsciiDomain, recipientAscii, recipientKey, type RecipientKnowledge } from './recipient.js'
 
 export type Tier = 'auto' | 'ask' | 'locked_ask' | 'never'
 export type AskChannel = 'voice' | 'touch' | 'phone'
@@ -45,8 +46,12 @@ export interface ApprovalTemplate {
   safety_verification?: readonly unknown[] | null
 }
 
-/** AskRequest.kind: display only, never in digest8, only on locked_ask; set by the daemon, never the caller. */
-export type AskKind = 'safety_verification'
+/**
+ * AskRequest.kind: display only, never in digest8; set by the daemon, never the caller. safety_verification only
+ * on locked_ask; practice (PM Q52) only on the daemon's own first-run practice Ask (practiceAsk), which carries
+ * no real action.
+ */
+export type AskKind = 'safety_verification' | 'practice'
 
 export interface ApprovalProfile {
   approval_strictness?: unknown
@@ -104,8 +109,8 @@ export function voiceAllowed(tier: Tier, amountMinor?: number | null, limitMinor
  * Shield pilot review A1: locked_ask and money Asks are answered on the paired phone only, never on the
  * device (touch) or by voice. Production ask() and AskLedger.open enforce it; reference mode does not.
  */
-export function phoneOnly(tier: Tier, amountMinor?: number | null): boolean {
-  return tier === 'locked_ask' || amountMinor != null
+export function phoneOnly(tier: Tier, amountMinor?: number | null, flags?: readonly RecipientFlag[] | null): boolean {
+  return tier === 'locked_ask' || amountMinor != null || phoneOnlyRecipient(flags)
 }
 
 /**
@@ -487,8 +492,10 @@ export interface AskRequest {
   recipient?: string
   /** Send Asks: first non-empty line of the message, trimmed, at most 80 chars, hidden characters marked (R5-5). Display only. */
   firstLine?: string
-  /** Send Asks: display warnings about the recipient (R5-5), e.g. mixed_script. Daemon-set, not in digest8. */
+  /** Send Asks: display and routing flags about the recipient (R5-5, v3.3). Daemon-set, not in digest8. */
   recipientFlags?: RecipientFlag[]
+  /** Send Asks: the recipient with its domain in ASCII (punycode), local part as is (v3.3). Display only. */
+  recipientAscii?: string
   /** Display only, not in digest8; locked_ask only; daemon-set (askKindFor). */
   kind?: AskKind
   /** Daemon-drawn 2-word spoken challenge, voice Asks only. */
@@ -569,11 +576,29 @@ export const ANSWER_ID = /^[A-Za-z0-9-]{16,64}$/
  * ildra.ask.attempt: a device approval held too briefly (DECISIONS ad47477). The Ask stays open; the daemon
  * emits one of these per short hold and keeps it in the journal so the phone can show the attempts.
  */
+/** v3.3: channel is the channel the rejected answer came from (touch, voice or phone). A short hold is a rejected gesture, not an answer. */
 export interface AskAttempt { id: string; answerId: string; channel: AskChannel; reason: 'hold_too_short' | 'stale_channel'; holdMs?: number; at: number }
 /** Attempts kept per journal (oldest dropped first). */
 export const MAX_ATTEMPTS = 200
 /** Shield R5-4: short holds allowed on one Ask; the last one spends it with reason hold_limit. */
 export const MAX_SHORT_HOLDS = 5
+
+/**
+ * ildra.ask.handoff (v3.3): the open request moves from the device (touch or voice) to the paired phone. cause
+ * timer: the device window (ask.deviceWindowSec) ran out; phone_answer: the paired phone answered while the Ask
+ * was still on the device (early handoff), and that answer then settles it. Same id, digest8 and expiresAt.
+ */
+export interface AskHandoff { id: string; from: 'device'; to: 'phone'; channel: 'touch' | 'voice'; cause: 'timer' | 'phone_answer'; at: number }
+
+/** The fixed action of the daemon's first-run practice Ask (PM Q52). It names nothing real. */
+export const PRACTICE_ACTION = 'Practice Ask'
+/** Recipients remembered as known (approved sends), oldest dropped first. */
+export const MAX_KNOWN_RECIPIENTS = 1000
+
+/** PM Q52: a practice Ask that would carry a real action, tool, amount, recipient or detail. */
+export class PracticeRefused extends ApprovalDenied {
+  constructor(what: string) { super(`a practice Ask carries no real action (${what} refused)`) }
+}
 
 /**
  * Open Asks, spent request ids and spent answer ids (DECISIONS ad47477). Every answerId is accepted at most
@@ -589,13 +614,23 @@ export class AskLedger {
   /** Answer ids seen, with the time they may be forgotten. */
   private readonly spentAnswers = new Map<string, number>()
   private attempts_: AskAttempt[] = []
-  /** Asks moved by handoff: id to the channel they left (answers from it are stale_channel). */
-  private readonly handedOff = new Map<string, AskChannel>()
+  /**
+   * Asks moved by handoff: id to the device channel they left and their expiry. Kept after the Ask settles
+   * (until it expires), so a late device answer is stale_channel and never double-settles (v3.3).
+   */
+  private readonly handedOff = new Map<string, { from: AskChannel; until: number }>()
+  private handoffLog_: AskHandoff[] = []
+  /** Asks whose policy lets the phone answer (early or timed handoff); v3.3. */
+  private readonly phoneOk = new Map<string, boolean>()
   /** Short holds per open Ask (Shield R5-4). */
   private readonly shortHolds = new Map<string, number>()
+  /** recipientKey of every recipient an approved send went to (new_recipient, lookalike). */
+  private known_: string[] = []
   onChange?: () => void
   /** Called with each ildra.ask.attempt as it is recorded (the daemon forwards it to the phone). */
   onAttempt?: (a: AskAttempt) => void
+  /** Called with each ildra.ask.handoff as it happens (the daemon forwards it, withdraws the device prompt). */
+  onHandoff?: (h: AskHandoff) => void
 
   /** `ttlMs` overrides the decided expiry; tests only. */
   constructor(opts: { now?: () => number; ttlMs?: number; verifier?: AnswerVerifier } = {}) {
@@ -604,27 +639,52 @@ export class AskLedger {
     this.verifier = opts.verifier
   }
 
+  /** Recipients this daemon has sent to (approved), as recipientKey. */
+  knownRecipients(): string[] { return [...this.known_] }
+
   open(o: {
     action: string; tier: Tier; channel: AskChannel; amountMinor?: number; details?: Record<string, unknown>
     agentId?: string; templateId?: string; recipient?: string; firstLine?: string; kind?: AskKind
+    /** v3.3: may the phone take this Ask over (timer or early handoff)? Default true; ask() always sets it. */
+    phoneAllowed?: boolean
+    /** Known contacts and domains beyond the ledger's own sent-to list (lookalike, new_recipient). */
+    known?: RecipientKnowledge
+    /** @internal practiceAsk only. */
+    tool?: unknown
   }): AskRequest {
-    if (o.kind !== undefined && (o.kind !== 'safety_verification' || o.tier !== 'locked_ask')) throw new ApprovalDenied('AskRequest.kind is safety_verification on a locked_ask only')
-    if (phoneOnly(o.tier, o.amountMinor) && o.channel !== 'phone') {
-      throw new ApprovalDenied('locked_ask and money Asks are answered on the paired phone only')
+    if (o.kind === 'practice') {
+      if (o.action !== PRACTICE_ACTION) throw new PracticeRefused('action')
+      if (o.tool !== undefined) throw new PracticeRefused('tool')
+      if (o.amountMinor !== undefined) throw new PracticeRefused('amount')
+      if (o.recipient !== undefined || o.firstLine !== undefined) throw new PracticeRefused('recipient')
+      if (o.details && Object.keys(o.details).length) throw new PracticeRefused('details')
+      if (o.tier !== 'ask') throw new PracticeRefused('tier')
+    } else if (o.kind !== undefined && (o.kind !== 'safety_verification' || o.tier !== 'locked_ask')) {
+      throw new ApprovalDenied('AskRequest.kind is safety_verification on a locked_ask only, or practice from practiceAsk')
     }
     for (const k of DIGEST_RESERVED) if (o.details && k in o.details) throw new ApprovalDenied(`a detail may not be named ${k}`)
     if (o.firstLine !== undefined && (typeof o.firstLine !== 'string' || o.firstLine === '')) throw new ApprovalDenied('a send Ask needs a non-empty first line')
     if (o.recipient !== undefined && (typeof o.recipient !== 'string' || hasHiddenChar(o.recipient))) throw new UnsafeRecipient()
-    const flags = o.recipient !== undefined ? recipientFlags(o.recipient) : []
+    const recipient = o.recipient?.normalize('NFC')
+    const ascii = recipient !== undefined ? recipientAscii(recipient) : undefined
+    if (ascii === null) throw new UnsafeRecipient()
+    const known: RecipientKnowledge = { contacts: [...this.known_, ...(o.known?.contacts ?? [])], domains: [...(o.known?.domains ?? [])] }
+    const flags = recipient !== undefined ? recipientFlags(recipient, known) : []
+    if (phoneOnly(o.tier, o.amountMinor, flags) && o.channel !== 'phone') {
+      throw new ApprovalDenied('locked_ask, money and flagged-recipient Asks are answered on the paired phone only')
+    }
     const openedAt = this.now()
     const currency = o.amountMinor !== undefined ? ('USD' as const) : undefined
+    const details = o.details && recipient !== undefined && typeof o.details.recipient === 'string'
+      ? { ...o.details, recipient: o.details.recipient.normalize('NFC') } : o.details
     const req: AskRequest = {
       id: randomUUID(),
-      digest8: actionDigest8(o.action, { ...o.details, agentId: o.agentId, tier: o.tier, amountMinor: o.amountMinor, currency }),
+      digest8: actionDigest8(o.action, { ...details, agentId: o.agentId, tier: o.tier, amountMinor: o.amountMinor, currency }),
       action: o.action,
       ...(o.agentId !== undefined ? { agentId: o.agentId } : {}),
       ...(o.templateId !== undefined ? { templateId: o.templateId } : {}),
-      ...(o.recipient !== undefined ? { recipient: o.recipient } : {}),
+      ...(recipient !== undefined ? { recipient } : {}),
+      ...(ascii !== undefined ? { recipientAscii: ascii } : {}),
       ...(o.firstLine !== undefined ? { firstLine: o.firstLine } : {}),
       ...(flags.length ? { recipientFlags: flags } : {}),
       ...(o.kind !== undefined ? { kind: o.kind } : {}),
@@ -637,6 +697,7 @@ export class AskLedger {
       ...(o.channel === 'voice' ? { challenge: drawChallenge() } : {}),
     }
     this.open_.set(req.id, req)
+    this.phoneOk.set(req.id, o.phoneAllowed !== false)
     this.onChange?.()
     return req
   }
@@ -644,8 +705,9 @@ export class AskLedger {
   private prune(): void {
     const t = this.now()
     for (const [id, r] of this.open_) if (t >= r.expiresAt) { this.open_.delete(id); this.spent.set(id, r.expiresAt) }
-    for (const id of this.handedOff.keys()) if (!this.open_.has(id)) this.handedOff.delete(id)
+    for (const [id, h] of this.handedOff) if (t >= h.until) this.handedOff.delete(id)
     for (const id of this.shortHolds.keys()) if (!this.open_.has(id)) this.shortHolds.delete(id)
+    for (const id of this.phoneOk.keys()) if (!this.open_.has(id)) this.phoneOk.delete(id)
     // Spent ids are kept until a further day past expiry so a late replay reads as replayed.
     for (const [id, at] of this.spent) if (at + OTHER_ASK_EXPIRY_MS < t) this.spent.delete(id)
     for (const [id, at] of this.spentAnswers) if (at + OTHER_ASK_EXPIRY_MS < t) this.spentAnswers.delete(id)
@@ -656,25 +718,54 @@ export class AskLedger {
     return this.attempts_.map((a) => ({ ...a }))
   }
 
+  /** Recorded ildra.ask.handoff events, oldest first (copies); journaled. */
+  handoffs(): AskHandoff[] {
+    return this.handoffLog_.map((h) => ({ ...h }))
+  }
+
   pending(): number {
     this.prune()
     return this.open_.size
   }
 
+  /** The open request (a copy), or null. */
+  get(id: string): AskRequest | null {
+    const r = this.open_.get(id)
+    return r && this.now() < r.expiresAt ? { ...r } : null
+  }
+
+  /** May the phone take this open Ask over (its policy permits the phone channel)? */
+  phoneAllowed(id: string): boolean {
+    return this.open_.has(id) && this.phoneOk.get(id) === true
+  }
+
+  /** The device channel an Ask was handed off from (also after it settled, until it expires), or null. */
+  handedOffFrom(id: string): AskChannel | null {
+    const h = this.handedOff.get(id)
+    return h && this.now() < h.until ? h.from : null
+  }
+
   /**
-   * DECISIONS (60 s device-to-phone handoff, protocol ildra.ask.handoff): move an open Ask to another channel.
-   * Same id and digest8 (channel is not in the digest), expiresAt unchanged. Only touch to phone. Answers on
-   * the old channel are rejected after it (a device answer carries no paired phone id). Null when the Ask is
-   * not open, has expired, or the move is not touch to phone.
+   * Move an open device Ask (touch or voice) to the paired phone: ildra.ask.handoff. Same id and digest8
+   * (channel is not in the digest), expiresAt unchanged; journaled. Device answers after it are stale_channel.
+   * Null when the Ask is not open, has expired, is not on the device, its policy does not permit the phone, or
+   * `to` is not phone. Never upgrades a touch-only Ask.
    */
-  handoff(id: string, to: AskChannel): { id: string; from: AskChannel; to: AskChannel; at: number } | null {
+  handoff(id: string, to: AskChannel, cause: AskHandoff['cause'] = 'timer'): AskHandoff | null {
     const req = this.open_.get(id)
     const at = this.now()
-    if (!req || at >= req.expiresAt || req.channel !== 'touch' || to !== 'phone') return null
-    this.open_.set(id, { ...req, channel: to })
-    this.handedOff.set(id, req.channel)
+    if (!req || at >= req.expiresAt || (req.channel !== 'touch' && req.channel !== 'voice') || to !== 'phone') return null
+    if (this.phoneOk.get(id) !== true) return null
+    const { challenge: _c, ...rest } = req
+    this.open_.set(id, { ...rest, channel: 'phone' })
+    this.handedOff.set(id, { from: req.channel, until: req.expiresAt })
+    this.shortHolds.delete(id)
+    const h: AskHandoff = { id, from: 'device', to: 'phone', channel: req.channel, cause, at }
+    this.handoffLog_.push(h)
+    if (this.handoffLog_.length > MAX_ATTEMPTS) this.handoffLog_ = this.handoffLog_.slice(-MAX_ATTEMPTS)
     this.onChange?.()
-    return { id, from: req.channel, to, at }
+    try { this.onHandoff?.({ ...h }) } catch { /* a listener never changes the result */ }
+    return { ...h }
   }
 
   /** `isPaired` is consulted for phone answers; `extra` runs after the ledger's own verifier. */
@@ -684,10 +775,10 @@ export class AskLedger {
     return r
   }
 
-  private attempt(req: AskRequest, ans: AskAnswer, channel: AskChannel, reason: AskAttempt['reason']): SettleResult {
+  private attempt(id: string, ans: AskAnswer, channel: AskChannel, reason: AskAttempt['reason']): SettleResult {
     const h = ans.holdMs
     const a: AskAttempt = {
-      id: req.id, answerId: ans.answerId, channel, reason,
+      id, answerId: ans.answerId, channel, reason,
       ...(typeof h === 'number' && Number.isFinite(h) && h >= 0 ? { holdMs: h } : {}), at: this.now(),
     }
     this.attempts_.push(a)
@@ -696,59 +787,81 @@ export class AskLedger {
     return { ok: false, reason }
   }
 
+  /** R5-1: the phone's claim checked against its paired key (strict when the answer came through the runtime). */
+  private phonePaired(ans: AskAnswer, ctx: SettleContext): boolean {
+    const id = ans.from?.phoneId
+    const strict = ans.via !== undefined || ans.from?.machinePub !== undefined
+    const key = strict ? (typeof ans.from?.machinePub === 'string' ? ans.from.machinePub : '') : undefined
+    return typeof id === 'string' && !!ctx.isPaired && ctx.isPaired(id, key)
+  }
+
   private check(ans: AskAnswer, ctx: SettleContext): SettleResult {
     if (!ans || typeof ans !== 'object' || typeof ans.id !== 'string' || typeof ans.digest8 !== 'string'
       || typeof ans.answerId !== 'string' || !ANSWER_ID.test(ans.answerId)) return { ok: false, reason: 'malformed' }
     const answerSeen = this.spentAnswers.has(ans.answerId)
-    const req = this.open_.get(ans.id)
+    let req = this.open_.get(ans.id)
     this.spentAnswers.set(ans.answerId, Math.max(this.now(), req?.expiresAt ?? 0))
+    // v3.1 (decided order) and v3.3: after a handoff, any answer from the device channel the Ask left (approve or
+    // deny, even with a reused answerId, and even after the phone settled it) is stale_channel, checked before
+    // replayed: logged as an attempt, never approves, never spends.
+    const left = this.handedOff.get(ans.id)
+    if (left !== undefined && this.now() < left.until) {
+      const via = ctx.via ?? ans.via
+      const fromDevice = via !== undefined ? via === 'touch' || via === 'voice' : answerChannel(ans, ctx) === left.from
+      if (fromDevice) return this.attempt(ans.id, ans, left.from, 'stale_channel')
+    }
     if (!req) {
       this.prune()
       return { ok: false, reason: answerSeen || this.spent.has(ans.id) ? 'replayed' : 'unknown_id' }
     }
     const spend = (reason: SettleReason): SettleResult => {
       this.open_.delete(ans.id)
-      this.handedOff.delete(ans.id)
-      this.spent.set(ans.id, req.expiresAt)
+      this.spent.set(ans.id, req!.expiresAt)
       return { ok: false, reason }
     }
-    // v3.1 (decided order): after a handoff, any answer (approve or deny, even with a reused answerId) from the
-    // channel the Ask left is stale_channel, checked before replayed: logged as an attempt, never approves, and
-    // the Ask stays open for its current channel. Replayed still spends the Ask on the current channel.
-    const left = this.handedOff.get(req.id)
-    if (left !== undefined && this.now() < req.expiresAt && answerChannel(ans, ctx) === left) return this.attempt(req, ans, left, 'stale_channel')
-    // R5-1: only the device bridge answers a touch Ask. Any other connection is refused without spending it
-    // (before the replay check, so a client cannot spend the Ask by repeating its own answerId), except a
-    // shared machine, which spends it as before (F12).
-    if (ans.via !== undefined && req.channel === 'touch' && ans.via !== 'touch') {
-      return originShared(ans.from, ctx.isShared) ? spend('shared_machine') : { ok: false, reason: 'wrong_channel' }
+    // R5-1 / v3.3: the connection decides the channel (via, set by core/ildraAsk.ts). Only the device bridge
+    // answers a device Ask (touch or voice) or nothing at all on a phone Ask. Refusals here never spend (checked
+    // before replayed, so a client cannot spend the Ask by repeating its own answerId), except a shared machine,
+    // which spends it as before (F12).
+    if (ans.via !== undefined) {
+      const deviceAsk = req.channel === 'touch' || req.channel === 'voice'
+      const fromDevice = ans.via === 'touch' || ans.via === 'voice'
+      if (deviceAsk && !fromDevice) {
+        if (originShared(ans.from, ctx.isShared)) return spend('shared_machine')
+        if (this.now() >= req.expiresAt) return spend('expired')
+        // v3.3 early handoff: the paired phone (by key) answers an Ask still on the device. Only when the Ask's
+        // policy permits the phone, and only for a fresh answerId that matches the open id and digest8 in time;
+        // anything else is wrong_channel and the Ask stays on the device.
+        const eligible = ans.via === 'phone' && this.phoneOk.get(req.id) === true && !answerSeen
+          && this.now() < req.expiresAt && ans.digest8 === req.digest8 && this.phonePaired(ans, ctx)
+        if (!eligible || !this.handoff(req.id, 'phone', 'phone_answer')) return { ok: false, reason: 'wrong_channel' }
+        req = this.open_.get(req.id)!
+      } else if (!deviceAsk && fromDevice) {
+        return originShared(ans.from, ctx.isShared) ? spend('shared_machine') : { ok: false, reason: 'wrong_channel' }
+      }
     }
     if (answerSeen) return spend('replayed')
     if (this.now() >= req.expiresAt) return spend('expired')
     if (ans.digest8 !== req.digest8) return spend('digest_mismatch')
     if (originShared(ans.from, ctx.isShared)) return spend('shared_machine')
-    if (req.channel === 'phone') {
-      const id = ans.from?.phoneId
-      // R5-1: the phone id is a claim. An answer that came through the daemon's runtime (via set by
-      // core/ildraAsk.ts, the only production path) or that names a key must come from the key that phone
-      // paired with. Only a direct in-process ledger caller (tests, reference mode) is checked by id alone.
-      const strict = ans.via !== undefined || ans.from?.machinePub !== undefined
-      const key = strict ? (typeof ans.from?.machinePub === 'string' ? ans.from.machinePub : '') : undefined
-      if (typeof id !== 'string' || !ctx.isPaired || !ctx.isPaired(id, key)) return spend('unpaired_phone')
-    }
+    // R5-1: the phone id is a claim. An answer that came through the daemon's runtime (via set by
+    // core/ildraAsk.ts, the only production path) or that names a key must come from the key that phone
+    // paired with. Only a direct in-process ledger caller (tests, reference mode) is checked by id alone.
+    if (req.channel === 'phone' && !this.phonePaired(ans, ctx)) return spend('unpaired_phone')
     if (req.channel === 'touch' && ans.approved === true) {
       const h = ans.holdMs
-      // DECISIONS ad47477: a short hold leaves the Ask open for a proper one; its answerId is spent.
+      // DECISIONS ad47477: a short hold is a rejected gesture (an attempt), not an answer; the Ask stays open.
       if (typeof h !== 'number' || !Number.isFinite(h) || h < DEVICE_HOLD_MIN_MS) {
-        // Shield R5-4: the MAX_SHORT_HOLDS-th short hold on one Ask spends it (hold_limit); each is still logged.
+        const r = this.attempt(req.id, ans, req.channel, 'hold_too_short')
+        // Shield R5-4: the MAX_SHORT_HOLDS-th short hold on one Ask spends it (hold_limit). PM Q52: not the
+        // practice Ask, which stays open for as many tries as it takes.
+        if (req.kind === 'practice') return r
         const n = (this.shortHolds.get(req.id) ?? 0) + 1
         this.shortHolds.set(req.id, n)
-        const r = this.attempt(req, ans, req.channel, 'hold_too_short')
         return n >= MAX_SHORT_HOLDS ? spend('hold_limit') : r
       }
     }
     this.open_.delete(ans.id)
-    this.handedOff.delete(ans.id)
     this.spent.set(ans.id, req.expiresAt)
     if (req.challenge && ans.approved === true && !transcriptMatches(req.challenge, ans.transcript)) return { ok: false, reason: 'challenge_mismatch' }
     for (const v of [this.verifier, ctx.extra]) {
@@ -757,31 +870,54 @@ export class AskLedger {
       try { ok = v(req, ans) === true } catch { ok = false }
       if (!ok) return { ok: false, reason: 'verifier_rejected' }
     }
+    if (ans.approved === true && req.recipient !== undefined && req.kind !== 'practice') {
+      const k = recipientKey(req.recipient)
+      if (!this.known_.includes(k)) {
+        this.known_.push(k)
+        if (this.known_.length > MAX_KNOWN_RECIPIENTS) this.known_ = this.known_.slice(-MAX_KNOWN_RECIPIENTS)
+      }
+    }
     return { ok: true }
   }
 
-  toJSON(): { open: AskRequest[]; spent: [string, number][]; spentAnswers: [string, number][]; attempts: AskAttempt[]; handoffs: [string, AskChannel][]; shortHolds: [string, number][] } {
+  toJSON(): {
+    open: AskRequest[]; spent: [string, number][]; spentAnswers: [string, number][]; attempts: AskAttempt[]
+    handoffs: [string, AskChannel, number][]; handoffLog: AskHandoff[]; phoneAllowed: string[]; shortHolds: [string, number][]; knownRecipients: string[]
+  } {
     this.prune()
     return {
       open: [...this.open_.values()].map((r) => ({ ...r })), spent: [...this.spent], spentAnswers: [...this.spentAnswers],
-      attempts: this.attempts(), handoffs: [...this.handedOff], shortHolds: [...this.shortHolds],
+      attempts: this.attempts(), handoffs: [...this.handedOff].map(([id, h]) => [id, h.from, h.until]), handoffLog: this.handoffs(),
+      phoneAllowed: [...this.phoneOk].filter(([, ok]) => ok).map(([id]) => id), shortHolds: [...this.shortHolds], knownRecipients: [...this.known_],
     }
   }
 
   /** @internal journal restore. */
-  restore(data: { open: AskRequest[]; spent: [string, number][]; spentAnswers?: [string, number][]; attempts?: AskAttempt[]; handoffs?: [string, AskChannel][]; shortHolds?: [string, number][] }): void {
+  restore(data: {
+    open: AskRequest[]; spent: [string, number][]; spentAnswers?: [string, number][]; attempts?: AskAttempt[]
+    handoffs?: [string, AskChannel, number?][]; handoffLog?: AskHandoff[]; phoneAllowed?: string[]; shortHolds?: [string, number][]; knownRecipients?: string[]
+  }): void {
     for (const [id, at] of data.spentAnswers ?? []) this.spentAnswers.set(id, at)
     this.attempts_ = (data.attempts ?? []).filter((a) => a && typeof a.id === 'string' && (a.reason === 'hold_too_short' || a.reason === 'stale_channel'))
       .slice(-MAX_ATTEMPTS).map((a) => ({ ...a }))
+    this.handoffLog_ = (data.handoffLog ?? []).filter((h) => h && typeof h.id === 'string' && h.from === 'device' && h.to === 'phone')
+      .slice(-MAX_ATTEMPTS).map((h) => ({ ...h }))
     for (const r of data.open) {
-      // Pilot review A1: a locked_ask or money Ask opened on the device or voice before the phone-only rule
-      // is denied on restore (spent), never answerable.
-      if (phoneOnly(r.tier, r.amountMinor) && r.channel !== 'phone') this.spent.set(r.id, r.expiresAt)
+      // Pilot review A1: a locked_ask, money or flagged-recipient Ask opened on the device or voice before the
+      // phone-only rule is denied on restore (spent), never answerable.
+      if (phoneOnly(r.tier, r.amountMinor, r.recipientFlags) && r.channel !== 'phone') this.spent.set(r.id, r.expiresAt)
       else this.open_.set(r.id, { ...r })
     }
     for (const [id, at] of data.spent) this.spent.set(id, at)
-    for (const [id, from] of data.handoffs ?? []) if (this.open_.has(id) && KNOWN_CHANNELS.has(from)) this.handedOff.set(id, from)
+    // Journals from before v3.3 have no phoneAllowed list: their open Asks keep today's rule (phone permitted).
+    const allowed = data.phoneAllowed === undefined ? null : new Set(data.phoneAllowed)
+    for (const id of this.open_.keys()) this.phoneOk.set(id, allowed === null || allowed.has(id))
+    for (const [id, from, until] of data.handoffs ?? []) {
+      const u = Number.isFinite(until) ? until! : this.open_.get(id)?.expiresAt
+      if (u !== undefined && KNOWN_CHANNELS.has(from)) this.handedOff.set(id, { from, until: u })
+    }
     for (const [id, n] of data.shortHolds ?? []) if (this.open_.has(id) && Number.isInteger(n) && n > 0) this.shortHolds.set(id, n)
+    this.known_ = (data.knownRecipients ?? []).filter((x) => typeof x === 'string').slice(-MAX_KNOWN_RECIPIENTS)
   }
 }
 
@@ -1031,8 +1167,18 @@ export function markHidden(s: string): string {
   return s.replace(HIDDEN_CHARS, (c) => c === '\t' ? ' ' : `⟦U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟧`)
 }
 
-/** Shield R5-5: flags on a recipient, display only (the recipient itself is in digest8). */
-export type RecipientFlag = 'mixed_script'
+/**
+ * Flags on a recipient (Shield R5-5, v3.3), display and routing only (the recipient itself is in digest8):
+ * mixed_script, lookalike (UTS #39 skeleton of a known contact or domain, different text), non_ascii (any
+ * non-ASCII in the domain), new_recipient (first send to it; informational). The first three are phone only
+ * and no Auto rule covers them (PHONE_ONLY_FLAGS).
+ */
+export type RecipientFlag = 'mixed_script' | 'lookalike' | 'non_ascii' | 'new_recipient'
+export const RECIPIENT_FLAGS: readonly RecipientFlag[] = ['mixed_script', 'lookalike', 'non_ascii', 'new_recipient']
+export const PHONE_ONLY_FLAGS: ReadonlySet<RecipientFlag> = new Set(['mixed_script', 'lookalike', 'non_ascii'])
+export function phoneOnlyRecipient(flags: readonly RecipientFlag[] | null | undefined): boolean {
+  return !!flags && flags.some((f) => PHONE_ONLY_FLAGS.has(f))
+}
 const SCRIPTS = ['Latin', 'Cyrillic', 'Greek', 'Armenian', 'Georgian', 'Hebrew', 'Arabic', 'Cherokee', 'Han', 'Hiragana', 'Katakana', 'Hangul', 'Thai', 'Devanagari']
   .map((n) => [n, new RegExp(`\\p{Script=${n}}`, 'u')] as const)
 const LETTER = /\p{L}/u
@@ -1052,17 +1198,31 @@ function scriptsOf(s: string): Set<string> {
  * label, e.g. Cyrillic а in "pаypal.com"), or its local part does. Shown, never refused: the digest still
  * binds the exact text, so the device approves what it showed.
  */
-export function recipientFlags(recipient: string): RecipientFlag[] {
-  const at = recipient.lastIndexOf('@')
-  const local = at >= 0 ? recipient.slice(0, at) : ''
-  const domain = at >= 0 ? recipient.slice(at + 1) : recipient
-  const mixed = scriptsOf(domain).size > 1 || scriptsOf(local).size > 1
-  return mixed ? ['mixed_script'] : []
+export function recipientFlags(recipient: string, known?: RecipientKnowledge): RecipientFlag[] {
+  const r = recipient.normalize('NFC')
+  const at = r.lastIndexOf('@')
+  const local = at >= 0 ? r.slice(0, at) : ''
+  const domain = at >= 0 ? r.slice(at + 1) : r
+  const out: RecipientFlag[] = []
+  if (scriptsOf(domain).size > 1 || scriptsOf(local).size > 1) out.push('mixed_script')
+  if (known && isLookalike(r, known)) out.push('lookalike')
+  if (nonAsciiDomain(r)) out.push('non_ascii')
+  if (known && isNewRecipient(r, known)) out.push('new_recipient')
+  return out
 }
 
-/** Display form of a recipient: as is, with a visible marker when it is flagged. */
-export function recipientDisplay(recipient: string, flags: readonly RecipientFlag[] = recipientFlags(recipient)): string {
-  return flags.includes('mixed_script') ? `${recipient} [⚠ mixed script]` : recipient
+const FLAG_LABEL: Record<RecipientFlag, string> = { mixed_script: 'mixed script', lookalike: 'looks like a contact', non_ascii: 'non-ASCII domain', new_recipient: 'new recipient' }
+
+/**
+ * Display form of a recipient: as is (punycode domain when non_ascii, v3.3), with a visible marker per flag,
+ * e.g. "bob@xn--pypal-4ve.com (bob@pаypal.com) [⚠ mixed script, non-ASCII domain]".
+ */
+export function recipientDisplay(recipient: string, flags: readonly RecipientFlag[] = recipientFlags(recipient), ascii?: string | null): string {
+  const a = ascii === undefined ? recipientAscii(recipient) : ascii
+  const shown = flags.includes('non_ascii') && a ? `${a} (${recipient})` : recipient
+  // new_recipient is informational: the phone shows it from recipientFlags; the prompt text stays as it was.
+  const warn = flags.filter((f) => f !== 'new_recipient').map((f) => FLAG_LABEL[f])
+  return warn.length ? `${shown} [⚠ ${warn.join(', ')}]` : shown
 }
 
 /** Shield R5-5: a recipient carrying a hidden character; the Ask is refused as malformed. */
@@ -1104,7 +1264,9 @@ export type DeviceMessage =
 export function toDeviceMessage(req: AskRequest, now: number): DeviceMessage {
   const ttl_s = Math.max(0, Math.floor((req.expiresAt - now) / 1000))
   if (req.channel === 'touch') {
-    const text = req.recipient !== undefined ? `${req.action}\nTo ${recipientDisplay(req.recipient, req.recipientFlags ?? [])}: ${req.firstLine ?? ''}` : req.action
+    // v3.3: a phone-only Ask (flagged recipient among them) never reaches the device prompt.
+    if (phoneOnly(req.tier, req.amountMinor, req.recipientFlags)) return { type: 'display', title: 'Ask', body: USE_YOUR_PHONE, ttl_s }
+    const text = req.recipient !== undefined ? `${req.action}\nTo ${recipientDisplay(req.recipient, req.recipientFlags ?? [], req.recipientAscii ?? null)}: ${req.firstLine ?? ''}` : req.action
     return { type: 'prompt', id: req.id, title: 'Ask', text, ttl_s, digest8: req.digest8 }
   }
   if (req.channel === 'phone') return { type: 'display', title: 'Ask', body: USE_YOUR_PHONE, ttl_s }
@@ -1126,9 +1288,9 @@ function isRequest(r: unknown): r is AskRequest {
     && KNOWN_CHANNELS.has(x.channel) && x.tier in TIER_RANK && (x.challenge === undefined || typeof x.challenge === 'string')
     && (x.amountMinor === undefined || (Number.isInteger(x.amountMinor) && x.amountMinor >= 0))
     && typeof x.action === 'string' && (x.currency === undefined ? x.amountMinor === undefined : x.currency === 'USD' && x.amountMinor !== undefined)
-    && ['agentId', 'templateId', 'recipient', 'firstLine'].every((k) => (x as unknown as Record<string, unknown>)[k] === undefined || typeof (x as unknown as Record<string, unknown>)[k] === 'string')
-    && (x.kind === undefined || (x.kind === 'safety_verification' && x.tier === 'locked_ask'))
-    && (x.recipientFlags === undefined || (Array.isArray(x.recipientFlags) && x.recipientFlags.every((f) => f === 'mixed_script')))
+    && ['agentId', 'templateId', 'recipient', 'firstLine', 'recipientAscii'].every((k) => (x as unknown as Record<string, unknown>)[k] === undefined || typeof (x as unknown as Record<string, unknown>)[k] === 'string')
+    && (x.kind === undefined || (x.kind === 'safety_verification' && x.tier === 'locked_ask') || (x.kind === 'practice' && x.action === PRACTICE_ACTION && x.amountMinor === undefined && x.recipient === undefined))
+    && (x.recipientFlags === undefined || (Array.isArray(x.recipientFlags) && x.recipientFlags.every((f) => RECIPIENT_FLAGS.includes(f))))
 }
 
 function isLog(e: unknown): boolean {
@@ -1152,13 +1314,43 @@ function parseJournal(text: string) {
   if (!p || !Array.isArray(p.phones) || !p.phones.every((x: unknown) => typeof x === 'string')) throw new Error('bad pairing')
   if (p.log !== undefined && (!Array.isArray(p.log) || !p.log.every(isLog))) throw new Error('bad pairing log')
   if (p.refused !== undefined && (!p.refused || typeof p.refused !== 'object' || Array.isArray(p.refused) || !Object.values(p.refused).every((x) => typeof x === 'string'))) throw new Error('bad pairing refused')
-  return { window: w, ledger: l, pairing: p }
+  if (d.settings !== undefined && (!d.settings || typeof d.settings !== 'object')) throw new Error('bad settings')
+  return { window: w, ledger: l, pairing: p, settings: d.settings }
+}
+
+/** v3.3: ask.deviceWindowSec, seconds an Ask stays on the device before it hands off to the phone. */
+export const DEVICE_WINDOW_SEC = { min: 30, max: 300, default: 60 } as const
+export const ASK_SETTING_KEYS = ['ask.deviceWindowSec'] as const
+export type AskSettingKey = typeof ASK_SETTING_KEYS[number]
+
+/**
+ * Daemon Ask settings (v3.3), journaled. Set only through `ildra.settings.set` from the paired phone's key
+ * (services/ildraAsk.ts); the stored (clamped) value is echoed back as `ildra.settings.value`.
+ */
+export class AskSettings {
+  deviceWindowSec: number = DEVICE_WINDOW_SEC.default
+  onChange?: () => void
+  /** Store a setting; the value is clamped to its range and rounded. Null for an unknown key or a non-number. */
+  set(key: unknown, value: unknown): { key: AskSettingKey; value: number } | null {
+    if (key !== 'ask.deviceWindowSec' || typeof value !== 'number' || !Number.isFinite(value)) return null
+    this.deviceWindowSec = Math.min(DEVICE_WINDOW_SEC.max, Math.max(DEVICE_WINDOW_SEC.min, Math.round(value)))
+    this.onChange?.()
+    return { key, value: this.deviceWindowSec }
+  }
+  get(key: AskSettingKey): number { return key === 'ask.deviceWindowSec' ? this.deviceWindowSec : NaN }
+  toJSON(): { deviceWindowSec: number } { return { deviceWindowSec: this.deviceWindowSec } }
+  restore(d: unknown): void {
+    const v = (d as { deviceWindowSec?: unknown } | null)?.deviceWindowSec
+    if (typeof v === 'number' && Number.isFinite(v)) this.deviceWindowSec = Math.min(DEVICE_WINDOW_SEC.max, Math.max(DEVICE_WINDOW_SEC.min, Math.round(v)))
+  }
 }
 
 export interface ApprovalJournal {
   window: ApprovalWindow
   ledger: AskLedger
   pairing: PhonePairing
+  /** v3.3 daemon Ask settings (ask.deviceWindowSec). */
+  settings: AskSettings
   /** True when the file existed but could not be trusted; voice is off for one window. */
   recovered: boolean
   save(): void
@@ -1218,6 +1410,7 @@ export function openJournal(
   const window = new ApprovalWindow({ now, windowMs: opts.windowMs, voiceMoneyLimitMinor: opts.voiceMoneyLimitMinor, bulkCount: opts.bulkCount })
   const ledger = new AskLedger({ now, ttlMs: opts.ttlMs, verifier: opts.verifier })
   const pairing = new PhonePairing({ now })
+  const settings = new AskSettings()
   let recovered = false
   const marker = resolvePath(opts.markerPath ?? defaultMarkerPath(path))
   if (foldersOverlap(dirname(marker), dirname(resolvePath(path)))) {
@@ -1233,13 +1426,14 @@ export function openJournal(
       window.restore(d.window)
       ledger.restore(d.ledger)
       pairing.restore(d.pairing)
+      settings.restore(d.settings)
     } catch {
       recovered = true
       window.lockedUntil = now() + window.windowMs
     }
   }
   const save = () => {
-    const body = JSON.stringify({ v: JOURNAL_VERSION, window: window.toJSON(), ledger: ledger.toJSON(), pairing: pairing.toJSON() })
+    const body = JSON.stringify({ v: JOURNAL_VERSION, window: window.toJSON(), ledger: ledger.toJSON(), pairing: pairing.toJSON(), settings: settings.toJSON() })
     mkdirSync(dirname(path), { recursive: true })
     const tmp = `${path}.${process.pid}.tmp`
     writeFileSync(tmp, body, { mode: 0o600 })
@@ -1248,12 +1442,13 @@ export function openJournal(
   window.onChange = save
   ledger.onChange = save
   pairing.onChange = save
+  settings.onChange = save
   save()
   if (!existsSync(marker)) {
     mkdirSync(dirname(marker), { recursive: true })
     writeFileSync(marker, `${now()}\n`, { mode: 0o600 })
   }
-  return { window, ledger, pairing, recovered, save }
+  return { window, ledger, pairing, settings, recovered, save }
 }
 
 // ---- ask ----
@@ -1298,6 +1493,9 @@ export interface AskOptions {
   templateId?: string
   /** The agent's own approval mode. 'auto' never loosens a template's Ask or locked_ask. */
   agentMode?: 'auto' | 'ask' | string
+  /** v3.3: the person's known contacts and domains (lookalike, new_recipient), beyond the ledger's sent-to list. */
+  contacts?: readonly string[]
+  knownDomains?: readonly string[]
 }
 
 /**
@@ -1348,7 +1546,6 @@ export async function ask(
     throw new ApprovalDenied('a send Ask needs the recipient and the message')
   }
   if (isSend && firstLine(opts.send!.message) === '') throw new ApprovalDenied('a send Ask needs a non-empty first line')
-  const malformed = (t: Tier): AskOutcome => ({ approved: false, channel: null, tier: t, reason: 'malformed' })
   if (prod) {
     if (!opts.ledger) throw new ApprovalDenied('production Asks need a ledger (F2)')
     if (!opts.kind) throw new ApprovalDenied('production Asks need the tool manifest (F4)')
@@ -1364,8 +1561,20 @@ export async function ask(
     else if (opts.kind) isWrite = opts.isWrite ?? false
   }
   // agentMode is deliberately not an input to resolve(): Auto never loosens a template rule.
-  const tier = resolve(template, action, profile, isWrite)
+  let tier = resolve(template, action, profile, isWrite)
   if (tier === 'never') throw new ApprovalDenied(`never item: ${action}`)
+  const malformed = (t: Tier): AskOutcome => ({ approved: false, channel: null, tier: t, reason: 'malformed' })
+  // v3: a lone surrogate in the message (hashed as messageSha256) or any digest input refuses the Ask.
+  // R5-5: a recipient that hides characters (bidi, zero-width, line breaks, controls) is refused the same way,
+  // and so is one whose domain has no ASCII (IDNA) form (v3.3).
+  const send = opts.send ? { ...opts.send, recipient: opts.send.recipient.normalize('NFC') } : undefined
+  if (send && (hasLoneSurrogate(opts.send!.message) || hasLoneSurrogate(opts.send!.recipient))) return malformed(tier)
+  if (send && (hasHiddenChar(send.recipient) || recipientAscii(send.recipient) === null)) return malformed(tier)
+  const flags = send ? recipientFlags(send.recipient, {
+    contacts: [...(opts.ledger?.knownRecipients() ?? []), ...(opts.contacts ?? [])], domains: opts.knownDomains ?? [],
+  }) : []
+  // v3.3 (Shield): no Auto rule covers a send to a flagged recipient (mixed_script, lookalike, non_ascii).
+  if (tier === 'auto' && phoneOnlyRecipient(flags)) tier = 'ask'
   if (tier === 'auto') return { approved: true, channel: null, tier, reason: 'approved' }
 
   let suffix = ''
@@ -1383,15 +1592,13 @@ export async function ask(
     const legacy = opts.isPaired
     isPaired = (c) => !!pairing?.isPaired() && (!legacy || legacy(c))
   }
-  const channel = askChannelFor(tier, profile, opts.available, opts.amountMinor, { allowVoice, isPaired, phoneOnly: prod && phoneOnly(tier, opts.amountMinor) })
+  // v3.3: phone-only also for a flagged recipient; the phone may take over a device Ask only when this
+  // Ask's policy would also route it to the phone (early or timed handoff never upgrades a touch-only Ask).
+  const channel = askChannelFor(tier, profile, opts.available, opts.amountMinor, { allowVoice, isPaired, phoneOnly: prod && phoneOnly(tier, opts.amountMinor, flags) })
   if (channel === null) return { approved: false, channel: null, tier, reason: 'no_channel' }
+  const phoneAllowed = channel === 'phone' || askChannelFor(tier, profile, opts.available, opts.amountMinor, { allowVoice, isPaired, phoneOnly: true }) === 'phone'
 
-  const send = opts.send
-  // v3: a lone surrogate in the message (hashed as messageSha256) or any digest input refuses the Ask.
-  if (send && (hasLoneSurrogate(send.message) || hasLoneSurrogate(send.recipient))) return malformed(tier)
-  // R5-5: a recipient that hides characters (bidi, zero-width, line breaks, controls) is refused the same way.
-  if (send && hasHiddenChar(send.recipient)) return malformed(tier)
-  const what = send ? `${action} to ${recipientDisplay(send.recipient)}: "${firstLine(send.message)}"` : action
+  const what = send ? `${action} to ${recipientDisplay(send.recipient, flags)}: "${firstLine(send.message)}"` : action
   const details = { ...opts.details, ...(send ? { recipient: send.recipient, messageSha256: createHash('sha256').update(send.message).digest('hex') } : {}) }
   const amount = opts.amountMinor !== undefined ? ` ${money(opts.amountMinor)}` : ''
   let prompt = `${tier.toUpperCase()}: ${what}${send ? amount : ''}${suffix}`
@@ -1406,6 +1613,7 @@ export async function ask(
         action, tier, channel, amountMinor: opts.amountMinor, details, agentId: opts.agentId, templateId: opts.templateId,
         ...(askKindFor(template, action, tier, opts.kind) ? { kind: askKindFor(template, action, tier, opts.kind)! } : {}),
         ...(send ? { recipient: send.recipient, firstLine: firstLine(send.message) } : {}),
+        phoneAllowed, known: { contacts: opts.contacts ?? [], domains: opts.knownDomains ?? [] },
       })
     } catch (e) {
       if (e instanceof InvalidUnicode || e instanceof UnsafeRecipient) return malformed(tier)
@@ -1437,7 +1645,41 @@ export async function ask(
     reason = approved ? 'approved' : 'denied'
   }
   if (approved && opts.window && opts.agentId) opts.window.record(opts.agentId, { amountMinor: opts.amountMinor, count: opts.count })
-  return bound ? { approved, channel, tier, reason, request } : { approved, channel, tier, reason }
+  // v3.3: an Ask handed off (timer or early) ended on the phone.
+  const ended: AskChannel = bound && request && bound.handedOffFrom(request.id) !== null ? 'phone' : channel
+  return bound ? { approved, channel: ended, tier, reason, request } : { approved, channel, tier, reason }
+}
+
+/**
+ * PM Q52: the daemon's first-run practice Ask. kind 'practice', action PRACTICE_ACTION, tier ask; it carries
+ * no action, tool, amount, recipient or detail (any of those refuses it: PracticeRefused), executes nothing and
+ * never touches the approval window's totals. Short holds never close it (no hold_limit). Answered like any
+ * Ask (same ledger, same channel rules), so the person learns the real gesture.
+ */
+export async function practiceAsk(
+  answerFn: AnswerFn,
+  opts: { ledger: AskLedger; pairing?: PhonePairing; available?: readonly string[] | null; profile?: ApprovalProfile | null; mic?: MicGuard; isShared?: SharedOriginLookup; agentId?: string } & Record<string, unknown>,
+): Promise<AskOutcome & { practice: true }> {
+  for (const k of ['action', 'tool', 'kind', 'amountMinor', 'currency', 'send', 'recipient', 'message', 'details', 'window', 'count', 'isSend', 'verifier']) {
+    if (opts[k] !== undefined) throw new PracticeRefused(k)
+  }
+  if (!(opts.ledger instanceof AskLedger)) throw new ApprovalDenied('a practice Ask needs the ledger')
+  const pairing = opts.pairing
+  const channel = askChannelFor('ask', opts.profile, opts.available, undefined, { allowVoice: !!opts.mic, isPaired: () => !!pairing?.isPaired() })
+  if (channel === null) return { approved: false, channel: null, tier: 'ask', reason: 'no_channel', practice: true }
+  const req = opts.ledger.open({ action: PRACTICE_ACTION, tier: 'ask', channel, kind: 'practice', phoneAllowed: false, ...(opts.agentId ? { agentId: opts.agentId } : {}) })
+  let prompt = `PRACTICE: hold to approve (nothing happens)`
+  if (req.challenge) prompt += `. Say "${req.challenge}" to approve.`
+  let ans: unknown
+  let s: SettleResult
+  for (let prompts = 0; ; prompts++) {
+    if (channel === 'voice') opts.mic!.speaking(true)
+    try { ans = await answerFn(channel, prompt, req) } finally { if (channel === 'voice') opts.mic!.speaking(false) }
+    s = opts.ledger.settle(ans as AskAnswer, { isPaired: pairing ? (id, pub) => (pub === undefined ? pairing.isPaired(id) : pairing.isPairedKey(id, pub)) : undefined, isShared: opts.isShared })
+    if (s.ok || !KEEPS_ASK_OPEN.has(s.reason) || prompts >= MAX_REPROMPTS) break
+  }
+  const approved = s.ok && (ans as AskAnswer).approved === true
+  return { approved, channel, tier: 'ask', reason: s.ok ? (approved ? 'approved' : 'denied') : s.reason, request: req, practice: true }
 }
 
 // ---- Upstream #1340: phone Accept/Decline on MCP elicitations goes through the Ask gate ----

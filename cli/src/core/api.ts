@@ -552,11 +552,22 @@ export interface IldraAskInputs {
   /** F12 lookup for the ledger: true unless the gateway said this identity key is the account's own. */
   isShared(origin: IldraAnswerOrigin): boolean
   cancel(id: string): void
+  /**
+   * v3.3, set by services/ildraAsk.ts: an answer (origin rewritten) that no open Ask waits for. The service
+   * records it (stale_channel after a handoff, replayed) and returns the reason; it never approves anything.
+   * Unset: such answers are unknown_id.
+   */
+  onUnclaimed?: ((answer: Record<string, unknown>) => string | null) | null
+  /**
+   * v3.3, set by services/ildraAsk.ts: `ildra.settings.set {key, value}` with the sender's origin from the
+   * connection; the service accepts it only from the paired phone's key and returns the stored value.
+   */
+  onSettings?: ((msg: { key: unknown; value: unknown }, from: IldraAnswerOrigin) => { ok: true; key: string; value: number } | { ok: false; reason: string }) | null
 }
 
 /** Ildra Asks (services/ildraAsk.ts): an answer from the phone or the device to an open Ask. Its origin is the
  *  connection it came over (Shield F12), never the payload. Always in the core's own process. */
-export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer'] as const
+export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer', 'ildra_settings_set'] as const
 /** Sharing this machine with other accounts, and adding machines shared with this one, in the edge host
  *  (services/sharedMachines.ts). */
 export const SHARED_MACHINES_REQUESTS = ['shared_machines'] as const

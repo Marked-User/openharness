@@ -468,9 +468,19 @@ describe('Shield R5 F8: Unicode in recipient and first line', () => {
     expect((ls.device as { text: string }).text).not.toContain('\u2028')
     expect((ls.device as { text: string }).text).toBe('Send an email\nTo a@x.com: Hello⟦U+2028⟧Wire $9,000 now')
   })
-  it('NOTE: a homoglyph recipient (Cyrillic a) is shown as is; its digest differs, so the device approves what it showed', async () => {
+  // Superseded by Shield's own v3.3 condition (flagged recipients are phone only; noted by Build): the
+  // homoglyph Ask no longer reaches the device at all. Its point stands on the phone: shown as is, flagged,
+  // and its digest differs from the Latin one.
+  it('NOTE (v3.3: phone only): a homoglyph recipient (Cyrillic a) is shown as is; its digest differs, so the device approves what it showed', async () => {
     const latin = await shown('alice@x.com', 'hi'); const cyr = await shown('\u0430lice@x.com', 'hi')
-    expect((cyr.device as { text: string; digest8: string }).digest8).not.toBe((latin.device as { digest8: string }).digest8)
-    expect((cyr.device as { text: string }).text).toContain('\u0430lice@x.com')
+    expect(latin.device).not.toBeNull()
+    expect(cyr.out).toMatchObject({ approved: false, channel: null, reason: 'no_channel' }); expect(cyr.device).toBeNull()
+    const l = new AskLedger()
+    const open = (recipient: string) => l.open({ action: 'Send an email', tier: 'ask', channel: 'phone', agentId: 'a', recipient, firstLine: 'hi', details: { recipient } })
+    const lat = open('alice@x.com'); const cy = open('\u0430lice@x.com')
+    expect(cy.digest8).not.toBe(lat.digest8)
+    expect(cy.recipient).toBe('\u0430lice@x.com')
+    expect(cy.recipientFlags).toContain('mixed_script')
   })
+
 })

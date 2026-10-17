@@ -234,7 +234,7 @@ describe('device messages (v2 DeviceMessageTests)', () => {
     const l = new AskLedger({ now: c.now })
     const r = l.open({ action: 'Rename a file', tier: 'ask', channel: 'touch' })
     c.set(NOW + 60_000)
-    expect(l.handoff(r.id, 'phone')).toEqual({ id: r.id, from: 'touch', to: 'phone', at: NOW + 60_000 })
+    expect(l.handoff(r.id, 'phone')).toEqual({ id: r.id, from: 'device', to: 'phone', channel: 'touch', cause: 'timer', at: NOW + 60_000 })
     const after = l.toJSON().open.find((x) => x.id === r.id)!
     expect(after).toMatchObject({ id: r.id, digest8: r.digest8, expiresAt: r.expiresAt, channel: 'phone' })
     expect(toDeviceMessage(after, c.now())).toMatchObject({ type: 'display', body: USE_YOUR_PHONE })

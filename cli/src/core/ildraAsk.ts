@@ -27,10 +27,14 @@ class PaneGuard implements IldraPaneGuard {
   filterInput(paneId: string, from: 'local' | 'remote'): 'pass' | 'block' { return from === 'remote' && this.open_.has(paneId) ? 'block' : 'pass' }
 }
 
-export type IldraAnswerReply = { ok: true } | { ok: false; reason: 'malformed' | 'no_connection' | 'unknown_id' | 'no_authority' }
+export type IldraAnswerReply = { ok: true } | { ok: false; reason: 'malformed' | 'no_connection' | 'unknown_id' | 'no_authority' | 'stale_channel' | 'replayed' | 'busy' }
+export type IldraSettingsReply = { ok: true; key: string; value: number } | { ok: false; reason: string }
 
 export interface IldraAskCore extends IldraAskInputs {
-  readonly requests: { ildra_ask_answer: (payload: Record<string, unknown>, asker: Asker) => Promise<IldraAnswerReply> } & Record<string, ServiceRequest>
+  readonly requests: {
+    ildra_ask_answer: (payload: Record<string, unknown>, asker: Asker) => Promise<IldraAnswerReply>
+    ildra_settings_set: (payload: Record<string, unknown>, asker: Asker) => Promise<IldraSettingsReply>
+  } & Record<string, ServiceRequest>
   /** Audit and test hook: the answer as handed to the gate, origin already rewritten. */
   onAnswer?: (id: string, answer: Record<string, unknown>) => void
 }
@@ -99,11 +103,25 @@ export function createIldraAskCore(deps: {
           ...(typeof payload.signature === 'string' ? { signature: payload.signature } : {}),
         }
         const finish = waiting.get(payload.id)
-        // No open Ask waits for it: nothing to approve. The ledger never sees it, so it cannot spend one either.
-        if (!finish) return { ok: false, reason: 'unknown_id' }
+        // No open Ask waits for it: nothing to approve. v3.3: the service may still record it (a device answer
+        // after a handoff is stale_channel); that path never approves and never spends an open Ask.
+        if (!finish) {
+          const why = core.onUnclaimed?.(answer) ?? null
+          return { ok: false, reason: why === 'stale_channel' || why === 'replayed' || why === 'busy' ? why : 'unknown_id' }
+        }
         core.onAnswer?.(payload.id, answer)
         finish(answer)
         return { ok: true }
+      },
+      // v3.3: `ildra.settings.set {key, value}`. Same origin rules as answers; the service accepts it only from
+      // the paired phone's key (R5-1), so the device, the local socket and observers can never change a setting.
+      ildra_settings_set: async (payload, asker) => {
+        if (!payload || typeof payload !== 'object' || typeof payload.key !== 'string') return { ok: false, reason: 'malformed' }
+        const origin = originOf(asker.connection, payload.from)
+        if (typeof origin === 'string') return { ok: false, reason: origin }
+        if (origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
+        if (!core.onSettings) return { ok: false, reason: 'unavailable' }
+        return core.onSettings({ key: payload.key, value: payload.value }, origin.from)
       },
     },
   }
