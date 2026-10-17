@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { createIldraAsk } from './ildraAsk.js'
+import { deviceKeyPair, enrollBridge, proveBridge } from './ildraAsk.testkit.js'
 import {
   ApprovalWindow, AskLedger, PhonePairing, ask, askKindFor, classifyTool, isSendTool, resolveTool, stampManifest, toDeviceMessage,
   type AskAnswer, type AskRequest, type ApprovalTemplate,
@@ -73,7 +74,7 @@ describe('Shield R6: the two Build edits to Shield tests do not weaken them', ()
 })
 
 describe('Shield R6 R5-1: who may answer, end to end through the runtime', () => {
-  it('phone key pinning: after a re-pair with a new key the old key is refused; after unpair both are', async () => {
+  it('phone key pinning: after a re-pair with a new key the old key is refused (Ask stays open) and the new key approves; after unpair nothing', async () => {
     const r = rig({ old: { identity: PHONE, role: 'web' }, neu: { identity: PHONE2, role: 'web' } })
     r.pair(PHONE)
     r.svc.journal().pairing.unpair('p1')
@@ -81,20 +82,23 @@ describe('Shield R6 R5-1: who may answer, end to end through the runtime', () =>
     const p1 = r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
     await tick()
     await r.answer(r.sent[0]!, 'old', { from: { phoneId: 'p1' } })
-    expect(await p1).toMatchObject({ approved: false, reason: 'unpaired_phone' })
-    const p2 = r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
     await tick()
-    await r.answer(r.sent[1]!, 'neu', { from: { phoneId: 'p1' } })
-    expect(await p2).toMatchObject({ approved: true, channel: 'phone' })
+    expect(r.svc.journal().ledger.pending()).toBe(1) // R7-10: refused first, nothing spent
+    await r.answer(r.sent[r.sent.length - 1]!, 'neu', { from: { phoneId: 'p1' } })
+    expect(await p1).toMatchObject({ approved: true, channel: 'phone' })
     r.svc.journal().pairing.unpair('p1')
     const p3 = r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
     expect(await p3).toMatchObject({ approved: false, channel: null, reason: 'no_channel' })
   })
-  it('GAP R7-1: any device-role connection answers a touch Ask, not only the enrolled Ildra device (key E approves; no device key is checked)', async () => {
+  it('FIXED R7-1: a device-role connection that has not proved the enrolled device key answers nothing; the enrolled one does', async () => {
     const r = rig({ ildra: { identity: DEV, role: 'device' }, other: { identity: DEV2, role: 'device' } })
+    const cred = enrollBridge(r.core, r.svc, { ildra: { role: 'device', identity: DEV } })!
     const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
     await tick()
-    await r.answer(r.sent[0]!, 'other')
+    expect(await r.answer(r.sent[0]!, 'other')).toEqual({ ok: false, reason: 'no_authority' })
+    expect(proveBridge(r.core, 'other', deviceKeyPair().key)).toBe(false) // its own key is not the device
+    expect(await r.answer(r.sent[0]!, 'other')).toEqual({ ok: false, reason: 'no_authority' })
+    await r.answer(r.sent[0]!, 'ildra')
     expect(await p).toMatchObject({ approved: true, channel: 'touch' })
   })
   it("Build's ildraAsk.shield.spec.ts:80 edit: an unknown connection gets no_authority, approves nothing, records nothing, spends nothing", async () => {
@@ -158,30 +162,34 @@ describe('Shield R6 R5-5: what the device shows', () => {
     const { device } = await show('\u0441\u043E\u0441\u043E@gmail.com', ['coco@gmail.com'])
     expect(device).toBeNull()
   })
-  it('GAP R7-3: whole-script Cyrillic local parts with an ASCII domain reach the device unflagged: with no contact list, and when UTS #39 does not map the look-alike (palochka U+04CF skeletons to i, so it misses apple@)', async () => {
+  it('FIXED R7-3: whole-script Cyrillic local parts with an ASCII domain never reach the device (with or without a contact list)', async () => {
     for (const contacts of [[], ['apple@gmail.com']]) {
       const { device } = await show('\u0430\u0440\u0440\u04CF\u0435@gmail.com', contacts)
-      expect(device!.text).toContain('\u0430\u0440\u0440\u04CF\u0435@gmail.com')
-      expect(device!.text).not.toContain('\u26A0')
+      expect(device).toBeNull()
     }
   })
-  it('GAP R7-2: default-ignorable characters outside the hidden list reach the device unmarked in the recipient', async () => {
-    for (const c of ['\u00AD', '\u034F', '\u2063', '\uFE0F', '\u{E0041}']) {
-      const { device } = await show(`bo${c}b@x.com`)
-      expect(device, JSON.stringify(c)).not.toBeNull()
-      expect(device!.text, JSON.stringify(c)).toContain(`bo${c}b@x.com`)
+  it('FIXED R7-2: default-ignorable characters in the recipient refuse the Ask as malformed (never shown)', async () => {
+    for (const c of ['\u00AD', '\u034F', '\u2063', '\uFE0F', '\u{E0041}', '\u{E0001}', '\u180E', '\u2061', '\u{1D173}', '\uFFA0']) {
+      let req: AskRequest | undefined
+      const out = await ask(T, 'Send an email', null, (_c, _p, q) => { req = q!; return null },
+        { kind, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch'], send: { recipient: `bo${c}b@x.com`, message: 'hi' } })
+      expect(out, JSON.stringify(c)).toMatchObject({ approved: false, reason: 'malformed' })
+      expect(req, JSON.stringify(c)).toBeUndefined()
     }
   })
 })
 
 describe('Shield R6 F4: who may call a tool a read', () => {
-  it('GAP R7-4: a third-party readOnlyHint makes an unlisted tool Auto, so even a send runs with no Ask; send:false needs a trusted owner, readOnly does not', async () => {
+  it('FIXED R7-4: a third-party readOnlyHint is not believed, and a send is never Auto even from a trusted read-only entry', async () => {
     const tp = stampManifest([{ name: 'evil.wipe', annotations: { readOnlyHint: true } }], 'third_party', 'evil')
-    expect(classifyTool(tp, 'evil.wipe')).toBe('read')
-    expect(resolveTool(T, 'evil.wipe', tp)).toBe('auto')
-    let prompted = 0
-    const out = await ask(T, 'Wipe the drive', null, () => { prompted++; return null },
-      { kind: { manifest: tp, tool: 'evil.wipe' }, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch'], send: { recipient: 'boss@company.com', message: 'Wire $9,000 now' } })
-    expect(out).toMatchObject({ approved: true, tier: 'auto' }); expect(prompted).toBe(0)
+    expect(classifyTool(tp, 'evil.wipe')).toBe('write')
+    expect(resolveTool(T, 'evil.wipe', tp)).toBe('ask')
+    for (const m of [tp, stampManifest([{ name: 'evil.wipe', readOnly: true, annotations: { readOnlyHint: true } }], 'bridge'),
+                     stampManifest([{ name: 'evil.wipe', readOnly: true, send: false }], 'first_party')]) {
+      let prompted = 0
+      const out = await ask(T, 'Wipe the drive', null, () => { prompted++; return null },
+        { kind: { manifest: m, tool: 'evil.wipe' }, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch'], send: { recipient: 'boss@company.com', message: 'Wire $9,000 now' } })
+      expect(out.tier).not.toBe('auto'); expect(out.approved).toBe(false); expect(prompted).toBeGreaterThan(0)
+    }
   })
 })
