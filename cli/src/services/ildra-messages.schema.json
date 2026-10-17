@@ -20,7 +20,8 @@
             "ildra.device.enroll", "ildra.device.enroll.confirm", "ildra.device.enroll.status", "ildra.device.enroll.replaced", "ildra.device.challenge", "ildra.device.proof",
             "ildra.phone.open", "ildra.phone.deny_summary",
             "ildra.pairing.ledger.get", "ildra.pairing.ledger", "ildra.pairing.unpair", "ildra.pairing.unpair_requested", "ildra.pairing.unpaired", "ildra.pairing.unpair_refused", "ildra.ask.answered_by", "ildra.ask.answered_by.get",
-            "ildra.pairing.ledger_reset", "ildra.pairing.ledger_ack", "ildra.ledger.confirm.request", "ildra.ledger.confirmed", "ildra.ledger.confirm_refused"
+            "ildra.pairing.ledger_reset", "ildra.pairing.ledger_ack", "ildra.ledger.confirm.request", "ildra.ledger.confirmed", "ildra.ledger.confirm_refused",
+            "ildra.phone.deny_summary.ack", "ildra.presence.challenge", "ildra.device.presence", "ildra.presence.abort"
           ]
         },
         "proto": { "const": 1 },
@@ -61,7 +62,11 @@
         { "if": { "properties": { "type": { "const": "ildra.pairing.ledger_ack" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingLedgerAck" } } } },
         { "if": { "properties": { "type": { "const": "ildra.ledger.confirm.request" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/LedgerConfirmRequest" } } } },
         { "if": { "properties": { "type": { "const": "ildra.ledger.confirmed" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/LedgerConfirmed" } } } },
-        { "if": { "properties": { "type": { "const": "ildra.ledger.confirm_refused" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/LedgerConfirmRefused" } } } }
+        { "if": { "properties": { "type": { "const": "ildra.ledger.confirm_refused" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/LedgerConfirmRefused" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.phone.deny_summary.ack" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PhoneDenySummaryAck" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.presence.challenge" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PresenceChallenge" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.device.presence" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DevicePresence" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.presence.abort" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PresenceAbort" } } } }
       ]
     },
 
@@ -413,25 +418,27 @@
       "description": "Daemon to the paired phone (Shield R7-1): an Ildra device asked to enroll its Ed25519 key (from the daemon owner's local socket or a device-role connection, see source). Pending only: the key gets no touch authority until the paired phone confirms it with a signed ildra.device.enroll.confirm carrying this nonce before expiresAt (10 minutes after the request). The device shows the same fingerprint. One pending enrollment at a time: a later request replaces it (ildra.device.enroll.replaced, then a new ildra.device.enroll with a new nonce). Gateway pairing (harness pair, loopback or not) never enrolls a device.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["devicePub", "fingerprint", "nonce", "expiresAt", "source"],
+      "required": ["devicePub", "fingerprint", "nonce", "expiresAt", "source", "inputs"],
       "properties": {
         "devicePub": { "$ref": "#/$defs/DevicePub" },
         "fingerprint": { "$ref": "#/$defs/DeviceFingerprint" },
         "nonce": { "$ref": "#/$defs/EnrollNonce" },
         "expiresAt": { "$ref": "#/$defs/EpochMs" },
-        "source": { "$ref": "#/$defs/EnrollSource" }
+        "source": { "$ref": "#/$defs/EnrollSource" },
+        "inputs": { "description": "(i): as the device reported them (never empty here: no_physical_input is refused before).", "$ref": "#/$defs/DeviceInputs" },
+        "form": { "$ref": "#/$defs/DeviceForm" }
       }
     },
 
     "PairingLedgerKind": {
-      "description": "Batch B pairing ledger entry kinds. Phones: phone_paired, phone_rotated (re-paired with another main key), phone_unpaired, pair_refused. Devices: device_enroll_requested, device_enroll_replaced, device_enrolled, device_refused, device_revoked, device_expired. Deny key: deny_key_set, deny_key_revoked, deny_key_deny (a Deny the deny key settled; source deny_key), deny_burst (more than 3 of those in 60 s), verifier_rejected (a deny-key signature on another verb), phone_open (clears the deny summary). Unpair API: unpair_requested (verb touch_proof and since = the proof's at when a device touch proof was spent; single use), unpair_refused. Shield B5: ledger_reset (the ledger could not be trusted at load: reason chain_broken, mac_mismatch, ledger_key_missing, journal_unreadable or journal_missing; oldHead = the untrusted head; count 3 for the unpair rate limit; the untrusted ledger is kept aside, never restarted empty), ledger_ack (the paired phone's main key acknowledged it, or a touch pairing with no phone paired; since = the reset's seq). Kept state after a reset is recorded as phone_paired / deny_key_set with via ledger_reset. Shield B6: pair_refused or deny_key_revoked with reason not_in_ledger, and phone_unpaired with reason missing_from_state, when the state did not match the trusted ledger at load. (h): ledger_confirmed (the device confirmed the phone and device list: prev = the confirmed head, since = its seq, askId = the hold prompt), ledger_confirm_refused.",
-      "enum": ["phone_paired", "phone_rotated", "phone_unpaired", "pair_refused", "device_enroll_requested", "device_enroll_replaced", "device_enrolled", "device_refused", "device_revoked", "device_expired", "deny_key_set", "deny_key_revoked", "deny_key_deny", "deny_burst", "verifier_rejected", "phone_open", "unpair_requested", "unpair_refused", "ledger_reset", "ledger_ack", "ledger_confirmed", "ledger_confirm_refused"]
+      "description": "Batch B pairing ledger entry kinds. Phones: phone_paired, phone_rotated (re-paired with another main key), phone_unpaired, pair_refused. Devices: device_enroll_requested, device_enroll_replaced, device_enrolled, device_refused, device_revoked, device_expired. Deny key: deny_key_set, deny_key_revoked, deny_key_deny (a Deny the deny key settled; source deny_key), deny_burst (more than 3 of those in 60 s), verifier_rejected (a deny-key signature on another verb), phone_open (clears the deny summary). Unpair API: unpair_requested (verb touch_proof and since = the proof's at when a device touch proof was spent; single use), unpair_refused. Shield B5: ledger_reset (the ledger could not be trusted at load: reason chain_broken, mac_mismatch, ledger_key_missing, journal_unreadable or journal_missing; oldHead = the untrusted head; count 3 for the unpair rate limit; the untrusted ledger is kept aside, never restarted empty), ledger_ack (the paired phone's main key acknowledged it, or a touch pairing with no phone paired; since = the reset's seq). Kept state after a reset is recorded as phone_paired / deny_key_set with via ledger_reset. Shield B6: pair_refused or deny_key_revoked with reason not_in_ledger, and phone_unpaired with reason missing_from_state, when the state did not match the trusted ledger at load. (h): ledger_confirmed (the device confirmed the phone and device list: prev = the confirmed head, since = its seq, askId = the hold prompt or the presence requestId), ledger_confirm_refused. Shield S1 (k): deny_summary_ack (the phone acknowledged the deny summary; since = the burst's since). (i): device_presence (a presence hold accepted: askId = requestId, reason = ledger_confirm or unpair_last, verb = button_hold or screen_hold), presence_refused, presence_aborted (the phone aborted the challenge), device_reset (a new device key replaced the enrolled one on the phone's confirm: fingerprint = new, oldFingerprint = old).",
+      "enum": ["phone_paired", "phone_rotated", "phone_unpaired", "pair_refused", "device_enroll_requested", "device_enroll_replaced", "device_enrolled", "device_refused", "device_revoked", "device_expired", "deny_key_set", "deny_key_revoked", "deny_key_deny", "deny_burst", "verifier_rejected", "phone_open", "unpair_requested", "unpair_refused", "ledger_reset", "ledger_ack", "ledger_confirmed", "ledger_confirm_refused", "deny_summary_ack", "device_presence", "presence_refused", "presence_aborted", "device_reset"]
     },
 
     "LedgerHash": { "description": "SHA-256, 64 lowercase hex.", "type": "string", "pattern": "^[0-9a-f]{64}$" },
 
     "PairingLedgerEntry": {
-      "description": "Batch B: one entry of the daemon's authoritative pairing ledger (phones and devices), append-only and journaled with the state it records. Chained: prev is the previous entry's hash (64 zeros for seq 1) and hash = SHA-256 over the UTF-8 bytes of ildra-pairing-ledger:v1|<prev>|<JSON of the entry without prev and hash, keys in the order seq, at, kind, phoneId, fingerprint, oldFingerprint, by, via, reason, askId, verb, uv, count, since, source, keyAlg, oldHead, absent keys omitted>, lowercase hex. Shield B1 to B4: the journal also stores pairingLedgerMac = HMAC-SHA256 over ildra-pairing-ledger-mac:v1|<seq>|<head hash> with a 32-byte key held by the host next to the install marker, outside the journal folder. A chain that does not verify, a MAC that does not match, or a missing key with pairings present fails closed (ledger_reset; pairing changes are refused with ledger_locked until the phone acknowledges with ildra.pairing.ledger_ack). Shield B9: the ledger holds at most 10,000 entries (the last 1,000 reserved for state changes; past 9,998 pairing changes are refused with ledger_full); noisy refusals (verifier_rejected, pair_refused, unpair_refused, device_enroll_requested, device_enroll_replaced, device_refused, device_expired, ledger_confirm_refused) are kept at most 5 per minute per kind, and the next one kept carries count = 1 + the number dropped. Strings are at most 64 characters.",
+      "description": "Batch B: one entry of the daemon's authoritative pairing ledger (phones and devices), append-only and journaled with the state it records. Chained: prev is the previous entry's hash (64 zeros for seq 1) and hash = SHA-256 over the UTF-8 bytes of ildra-pairing-ledger:v1|<prev>|<JSON of the entry without prev and hash, keys in the order seq, at, kind, phoneId, fingerprint, oldFingerprint, by, via, reason, askId, verb, uv, count, since, source, keyAlg, oldHead, absent keys omitted>, lowercase hex. Shield B1 to B4: the journal also stores pairingLedgerMac = HMAC-SHA256 over ildra-pairing-ledger-mac:v1|<seq>|<head hash> with a 32-byte key held by the host next to the install marker, outside the journal folder. A chain that does not verify, a MAC that does not match, or a missing key with pairings present fails closed (ledger_reset; pairing changes are refused with ledger_locked until the phone acknowledges with ildra.pairing.ledger_ack). Shield B9: the ledger holds at most 10,000 entries (the last 1,000 reserved for state changes; past 9,998 pairing changes are refused with ledger_full); noisy refusals (verifier_rejected, pair_refused, unpair_refused, device_enroll_requested, device_enroll_replaced, device_refused, device_expired, ledger_confirm_refused, presence_refused) are kept at most 5 per minute per kind, and the next one kept carries count = 1 + the number dropped. Strings are at most 64 characters.",
       "type": "object",
       "additionalProperties": false,
       "required": ["seq", "at", "kind", "prev", "hash"],
@@ -466,12 +473,15 @@
     },
 
     "PairingLedgerPage": {
-      "description": "Daemon to the paired phone (batch B): ledger entries after since, oldest first, and the current head (seq and hash of the last entry; seq 0 and 64 zeros when empty). Ask again from the last seq for more.",
+      "description": "Daemon to the paired phone (batch B, Shield S3): one page of ledger entries after since, oldest first (at most 500). pageHead: the hash of the last entry on this page (with no entries, the hash of the entry at seq since, or 64 zeros for since 0). more: entries remain after this page; nextSeq (only when more) is the since for the next read. head (seq and hash of the ledger's last entry) is for information only: the phone verifies the chain page by page (each page's first prev equals the previous pageHead) and checks pageHead, not head, until more is false; on the last page pageHead equals head.hash.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["entries", "head"],
+      "required": ["entries", "pageHead", "more", "head"],
       "properties": {
         "entries": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/PairingLedgerEntry" } },
+        "pageHead": { "$ref": "#/$defs/LedgerHash" },
+        "more": { "type": "boolean" },
+        "nextSeq": { "type": "integer", "minimum": 1 },
         "head": { "type": "object", "additionalProperties": false, "required": ["seq", "hash"], "properties": { "seq": { "type": "integer", "minimum": 0 }, "hash": { "$ref": "#/$defs/LedgerHash" } } }
       }
     },
@@ -485,7 +495,8 @@
         "phoneId": { "type": "string", "minLength": 1, "maxLength": 64 },
         "at": { "$ref": "#/$defs/EpochMs" },
         "signature": { "description": "The requesting phone's main key, a PhoneSignature.", "$ref": "#/$defs/PhoneSignature" },
-        "touchProof": { "description": "The enrolled device key's Ed25519 signature (64 bytes, base64) after a physical touch.", "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
+        "touchProof": { "description": "The enrolled device key's Ed25519 signature (64 bytes, base64) after a physical touch.", "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" },
+        "presence": { "description": "(i): instead of touchProof (never both), ask the daemon for device presence: it issues ildra.presence.challenge (60 s) and a valid ildra.device.presence fills the touch proof slot. Only for removing the last owner phone (otherwise presence_not_allowed).", "const": true }
       }
     },
 
@@ -506,13 +517,13 @@
     },
 
     "PairingUnpairRefused": {
-      "description": "Daemon to the requesting phone (batch B). unpaired_phone, malformed, bad_signature, verifier_rejected (signed by the deny key, journaled), expired (at more than 60 s off), unknown_phone, rate_limited, last_owner_channel (the last paired phone without a valid device touch proof), not_approved (the locked_ask was denied or expired), unpair_pending (Shield B7: another unpair's locked_ask is open; one at a time), ledger_locked (Shield B5: an unacknowledged ledger_reset), ledger_full (Shield B9). The last-owner check is made again, atomically, right before the unpair. Every refusal after the signature check is a ledger unpair_refused entry.",
+      "description": "Daemon to the requesting phone (batch B). unpaired_phone, malformed, bad_signature, verifier_rejected (signed by the deny key, journaled), expired (at more than 60 s off), unknown_phone, rate_limited, last_owner_channel (the last paired phone without a valid device touch proof), not_approved (the locked_ask was denied or expired), unpair_pending (Shield B7: another unpair's locked_ask is open; one at a time), ledger_locked (Shield B5: an unacknowledged ledger_reset), ledger_full (Shield B9), presence_not_allowed (presence asked while another phone is paired), presence_missing (no valid hold before the challenge expired), aborted (the phone aborted the challenge). The last-owner check is made again, atomically, right before the unpair. Every refusal after the signature check is a ledger unpair_refused entry.",
       "type": "object",
       "additionalProperties": false,
       "required": ["phoneId", "reason"],
       "properties": {
         "phoneId": { "type": "string" },
-        "reason": { "enum": ["unpaired_phone", "malformed", "bad_signature", "verifier_rejected", "expired", "unknown_phone", "rate_limited", "last_owner_channel", "not_approved", "unpair_pending", "ledger_locked", "ledger_full"] }
+        "reason": { "enum": ["unpaired_phone", "malformed", "bad_signature", "verifier_rejected", "expired", "unknown_phone", "rate_limited", "last_owner_channel", "not_approved", "unpair_pending", "ledger_locked", "ledger_full", "presence_not_allowed", "presence_missing", "aborted"] }
       }
     },
 
@@ -543,7 +554,7 @@
     },
 
     "LedgerConfirmRequest": {
-      "description": "(h), phone to daemon: ask the device to confirm the phone and device list at the head the phone read (head = hash and seq from ildra.pairing.ledger). phoneSignature: the paired phone's main key, a PhoneSignature over ildra-ledger-confirm:v1|<head>|<seq>|<at> (verb ledger.confirm; the deny key is verifier_rejected). The daemon checks head and seq equal its current head (else stale_head), allows one open confirm (else busy), then opens a device hold prompt 'Confirm your phone and device list?' (touch only, hold to confirm, 60 s, the same hold rules and device authority proof as any touch answer). Held: ildra.ledger.confirmed and a ledger_confirmed entry. Otherwise ildra.ledger.confirm_refused. The daemon keeps no per-phone head; pausing on a mismatch is the phone's.",
+      "description": "(h), phone to daemon: ask the device to confirm the phone and device list at the head the phone read (head = hash and seq from ildra.pairing.ledger). phoneSignature: the paired phone's main key, a PhoneSignature over ildra-ledger-confirm:v1|<head>|<seq>|<at> (verb ledger.confirm; the deny key is verifier_rejected). The daemon checks head and seq equal its current head (else stale_head), allows one open confirm (else busy), then, on a device with touch, opens a device hold prompt 'Confirm your phone and device list?' (touch only, hold to confirm, 60 s, the same hold rules and device authority proof as any touch answer); (i) on a device without touch it issues ildra.presence.challenge (blink_button) and waits for a valid ildra.device.presence instead. Held: ildra.ledger.confirmed and a ledger_confirmed entry. Otherwise ildra.ledger.confirm_refused. The daemon keeps no per-phone head; pausing on a mismatch is the phone's.",
       "type": "object",
       "additionalProperties": false,
       "required": ["head", "seq", "at", "phoneSignature"],
@@ -564,11 +575,11 @@
     },
 
     "LedgerConfirmRefused": {
-      "description": "(h), daemon to the phone. timeout (not held within 60 s, a device Deny, or the hold limit), bad_signature, verifier_rejected (the deny key, journaled), stale_head (not the current head, or the head moved while the prompt was up), unpaired_phone, busy (another confirm is open), malformed. Every refusal is a ledger_confirm_refused entry (coalesced like other noisy refusals).",
+      "description": "(h), daemon to the phone. timeout (not held within 60 s, a device Deny, or the hold limit), bad_signature, verifier_rejected (the deny key, journaled), stale_head (not the current head, or the head moved while the prompt was up), unpaired_phone, busy (another confirm is open), malformed; on a device without touch (presence, blink_button): presence_missing (no valid hold before expiry), aborted (the phone aborted the challenge). stale_head after the prompt means a phone, device or deny key entry came after seq. Every refusal is a ledger_confirm_refused entry (coalesced like other noisy refusals).",
       "type": "object",
       "additionalProperties": false,
       "required": ["reason"],
-      "properties": { "reason": { "enum": ["timeout", "bad_signature", "verifier_rejected", "stale_head", "unpaired_phone", "busy", "malformed"] } }
+      "properties": { "reason": { "enum": ["timeout", "bad_signature", "verifier_rejected", "stale_head", "unpaired_phone", "busy", "malformed", "presence_missing", "aborted"] } }
     },
 
     "AskAnsweredBy": {
@@ -605,8 +616,63 @@
       "properties": {}
     },
 
+    "PhoneDenySummaryAck": {
+      "description": "Shield S1 (k), phone to daemon: the phone showed the deny summary whose since is since. phoneSignature: the paired phone's main or deny-only key, a PhoneSignature over ildra-deny-summary-ack:v1|<since>|<at> (verb deny_summary.ack). Reply ok (the flag clears, ledger deny_summary_ack), or unpaired_phone, malformed, bad_signature, unknown_id (no summary with that since).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["since", "at", "phoneSignature"],
+      "properties": { "since": { "$ref": "#/$defs/EpochMs" }, "at": { "$ref": "#/$defs/EpochMs" }, "phoneSignature": { "$ref": "#/$defs/PhoneSignature" } }
+    },
+
+    "DeviceInputs": {
+      "description": "(i): the device's physical inputs as it reports them at enroll and the daemon records them (empty: none). touch: a touch screen (presence method hold_screen); button: a physical button (presence method blink_button). The daemon refuses an enroll that would leave the household's only device with no physical input (no_physical_input). The device reports them in its enroll request (ildra_device_enroll {devicePub, inputs, form}); a device that sends none is recorded as [touch].",
+      "type": "array", "maxItems": 2, "uniqueItems": true, "items": { "enum": ["touch", "button"] }
+    },
+    "DeviceForm": { "description": "(g): the device form factor, as reported at enroll (display only).", "enum": ["core", "sphere", "clip", "rugged_camera", "lamp", "pocket", "tablet", "other"] },
+
+    "PresenceChallenge": {
+      "description": "(i), daemon to the paired phone and the enrolled device: prove physical presence on the device for requestId. The daemon issues it for ledger.confirm on a device without touch, and for removing the last owner phone (ildra.pairing.unpair with presence true); nothing else. method follows the recorded inputs: touch means hold_screen (hold the screen), otherwise blink_button (the device blinks the pattern; the person checks it matches the phone, then holds the button). nonce: 32 random bytes base64url, single use; expiresAt: 60 s after the challenge is issued. For blink_button, groups and pattern: b = the first byte of SHA-256 over the raw UTF-8 bytes of the ASCII string ildra-presence-v1, then requestId (the lowercase UUID text), then nonce (the 43-character base64url text), concatenated in that order with no separator; groups = [((b >> 2) & 3) + 1, (b & 3) + 1]; pattern = groups[0] blinks, then groups[1] blinks, each {on_ms: 300, off_ms: 300} except the last blink of each group, which is {on_ms: 300, off_ms: 1200} (the gap, also before the pattern repeats). Derived on the daemon from the nonce, never from the phone. Vectors: protocol/examples/vectors/presence-pattern.json. The phone may abort with ildra.presence.abort. The flow ends with the usual replies (ildra.ledger.confirmed / ildra.ledger.confirm_refused, or the unpair result).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestId", "method", "nonce", "expiresAt"],
+      "properties": {
+        "requestId": { "$ref": "#/$defs/AskId" },
+        "method": { "enum": ["hold_screen", "blink_button"] },
+        "groups": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer", "minimum": 1, "maximum": 4 } },
+        "pattern": { "type": "array", "minItems": 2, "maxItems": 8, "items": { "type": "object", "additionalProperties": false, "required": ["on_ms", "off_ms"], "properties": { "on_ms": { "type": "integer", "minimum": 1 }, "off_ms": { "type": "integer", "minimum": 0 } } } },
+        "nonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+        "expiresAt": { "$ref": "#/$defs/EpochMs" }
+      },
+      "if": { "properties": { "method": { "const": "blink_button" } } },
+      "then": { "required": ["groups", "pattern"] },
+      "else": { "not": { "anyOf": [{ "required": ["groups"] }, { "required": ["pattern"] }] } }
+    },
+
+    "DevicePresence": {
+      "description": "(i), device to daemon (a device-role connection): the person held for heldMs ms after the challenge requestId. kind: button_hold for blink_button, screen_hold for hold_screen. signature: the enrolled device key's Ed25519 signature (64 bytes, standard base64) over the UTF-8 bytes of ildra-device-presence:v1|<requestId>|<nonce>|<heldMs> (heldMs in decimal, no time field: the nonce is single use and the 60 s TTL covers freshness). Accepted only as presence for its challenge; as an Ask answer (or against an open Ask id) it is no_authority. Refusals (PresenceRefusalReason): presence_missing (no hold in the request, or none before expiry), presence_expired, presence_wrong_request (unknown requestId, other nonce or kind), presence_too_short (heldMs under 3000), presence_replayed (already used), bad_signature, presence_not_allowed, aborted (the phone aborted it).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestId", "kind", "heldMs", "nonce", "signature"],
+      "properties": {
+        "requestId": { "$ref": "#/$defs/AskId" },
+        "kind": { "enum": ["button_hold", "screen_hold"] },
+        "heldMs": { "type": "integer", "minimum": 0 },
+        "nonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+        "signature": { "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
+      }
+    },
+    "PresenceRefusalReason": { "enum": ["presence_missing", "presence_expired", "presence_wrong_request", "presence_too_short", "presence_replayed", "bad_signature", "presence_not_allowed", "aborted", "no_authority"] },
+
+    "PresenceAbort": {
+      "description": "(i), phone to daemon ('It doesn't match'): abort the presence challenge requestId. phoneSignature: the paired phone's main or deny-only key, a PhoneSignature over ildra-presence-abort:v1|<requestId>|<at> (verb presence.abort). Aborting only refuses: the daemon cancels the challenge, writes presence_aborted, the flow ends refused with reason aborted, and any later hold for that requestId is refused aborted. Reply ok, or unpaired_phone, malformed, bad_signature, unknown_id (no open challenge).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestId", "at", "phoneSignature"],
+      "properties": { "requestId": { "$ref": "#/$defs/AskId" }, "at": { "$ref": "#/$defs/EpochMs" }, "phoneSignature": { "$ref": "#/$defs/PhoneSignature" } }
+    },
+
     "PhoneDenySummary": {
-      "description": "Daemon to the paired phone (Shield deny key condition 6), on the next ildra.phone.open after more than 3 Denies signed by the phone's deny-only key landed within 60 s: the phone shows a 'denied from this phone' summary. Sent once; the flag clears when sent. count: deny-key Denies in that 60 s window (at least 4); since: the first of them; at: the one that set the flag.",
+      "description": "Daemon to the paired phone (Shield deny key condition 6), on ildra.phone.open after more than 3 Denies signed by the phone's deny-only key landed within 60 s: the phone shows a 'denied from this phone' summary. Shield S1 (k): sent on every phone open until the phone acknowledges it with ildra.phone.deny_summary.ack; sending it does not clear it. (l): range-checked before it is sent: count at least 4 and since no later than at; a summary that fails it is never sent. count: deny-key Denies in that 60 s window (at least 4); since: the first of them; at: the one that set the flag.",
       "type": "object",
       "additionalProperties": false,
       "required": ["count", "since", "at"],
@@ -646,7 +712,7 @@
     },
 
     "DeviceEnrollStatus": {
-      "description": "Daemon to the paired phone and the device (Shield R7-1). enrolled: this key is now the one Ildra device (it replaces any earlier key). refused: the phone refused the pending key. revoked: the phone revoked the enrolled key; no device answers until another key enrolls. expired: the pending key was not confirmed in time.",
+      "description": "Daemon to the paired phone and the device (Shield R7-1). enrolled: this key is now the one Ildra device (it replaces any earlier key; (i) a replaced key, for example after a physical reset, is marked device_reset in the ledger and none of its trust carries over). refused: the phone refused the pending key. revoked: the phone revoked the enrolled key; no device answers until another key enrolls. expired: the pending key was not confirmed in time.",
       "type": "object",
       "additionalProperties": false,
       "required": ["state", "fingerprint", "at"],
@@ -654,7 +720,9 @@
         "state": { "enum": ["enrolled", "refused", "revoked", "expired"] },
         "fingerprint": { "$ref": "#/$defs/DeviceFingerprint" },
         "at": { "$ref": "#/$defs/EpochMs" },
-        "uv": { "description": "On enrolled only: the uv from the phone's signed confirm, as journaled.", "$ref": "#/$defs/UserVerification" }
+        "uv": { "description": "On enrolled only: the uv from the phone's signed confirm, as journaled.", "$ref": "#/$defs/UserVerification" },
+        "inputs": { "description": "(i), on enrolled only: the recorded inputs.", "$ref": "#/$defs/DeviceInputs" },
+        "form": { "description": "(g), on enrolled only, when reported.", "$ref": "#/$defs/DeviceForm" }
       }
     },
 

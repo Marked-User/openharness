@@ -234,8 +234,9 @@ describe('Batch B: wire', () => {
     const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true }); ajv.addSchema(schema)
     const env = (type: string, body: unknown): boolean => ajv.getSchema(schema.$id)!({ type, proto: 1, body }) as boolean
     const r = rig(); r.pair('p1', r.K.P1.pub); await r.enrollDevice(r.K.D1.pub); r.pair('p2', r.K.P2.pub)
-    const page = await r.ledger() as { ok: true; entries: unknown[]; head: unknown }
-    expect(env('ildra.pairing.ledger', { entries: page.entries, head: page.head })).toBe(true)
+    const { ok: _ok, ...page } = await r.ledger() as { ok: true; entries: unknown[]; pageHead: string; more: boolean; head: unknown }
+    expect(env('ildra.pairing.ledger', page)).toBe(true)
+    expect(env('ildra.pairing.ledger', { entries: page.entries, head: page.head })).toBe(false) // Shield S3: pageHead and more are required
     expect(env('ildra.pairing.ledger.get', { since: 2 })).toBe(true)
     expect(env('ildra.pairing.unpair', { phoneId: 'p2', at: 1, signature: Buffer.alloc(64, 1).toString('base64') })).toBe(true)
     expect(env('ildra.pairing.unpair', { phoneId: 'p2', at: 1 })).toBe(false)

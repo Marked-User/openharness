@@ -9,7 +9,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
-import { ledgerConfirmMessage, presenceAbortMessage, presenceMessage, presencePattern, unpairMessage } from '../core/ildraDeviceProof.js'
+import { denySummaryAckMessage, ledgerConfirmMessage, presenceAbortMessage, presenceMessage, presencePattern, unpairMessage, verifyEd25519, verifyPhoneSignature } from '../core/ildraDeviceProof.js'
+import Ajv2020Module from 'ajv/dist/2020.js'
 import { createIldraAsk } from './ildraAsk.js'
 import { deviceKeyPair, phoneKeyPair, proveBridge, signedConfirm } from './ildraAsk.testkit.js'
 import { stampManifest, type ApprovalTemplate, type AskRequest } from './approvals.js'
@@ -226,5 +227,46 @@ describe('(i) a reset device enrolls as new: old trust never carries over; devic
     expect(await p).toMatchObject({ ok: true })
     if (q) r.core.cancel(q.id)
     await a
+  })
+})
+
+describe('(i)/(g)/(k) wire: emitted presence messages validate; the Ildra examples verify', () => {
+  const schema = JSON.parse(readFileSync(new URL('./ildra-messages.schema.json', import.meta.url), 'utf8'))
+  const Ajv2020 = (Ajv2020Module as unknown as { default: typeof Ajv2020Module }).default ?? Ajv2020Module
+  const ajv = new (Ajv2020 as unknown as new (o: object) => import('ajv').default)({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true })
+  ajv.addSchema(schema)
+  const env = (type: string, body: unknown): string[] => { const f = ajv.getSchema(schema.$id)!; return f({ type, proto: 1, body }) ? [] : (f.errors ?? []).map((e: { instancePath: string; message?: string }) => `${e.instancePath} ${e.message}`) }
+  it('challenge (both methods), presence, abort, enroll and enroll.status bodies match the schema', async () => {
+    const r = rig(); await r.enroll()
+    expect(env('ildra.device.enroll', r.events.find((e) => e.type === 'ildra.device.enroll')!.body)).toEqual([])
+    expect(env('ildra.device.enroll.status', r.events.find((e) => e.type === 'ildra.device.enroll.status')!.body)).toEqual([])
+    const p = r.confirm(); await tick()
+    const c = r.challenge()!
+    expect(env('ildra.presence.challenge', c)).toEqual([])
+    const heldMs = 3000
+    expect(env('ildra.device.presence', { requestId: c.requestId, kind: 'button_hold', heldMs, nonce: c.nonce, signature: sig(r.K.DEVK.key, presenceMessage(c.requestId, c.nonce, heldMs)) })).toEqual([])
+    expect(env('ildra.presence.abort', { requestId: c.requestId, at: r.clock.t, phoneSignature: sig(r.K.P1.key, presenceAbortMessage(c.requestId, r.clock.t)) })).toEqual([])
+    await r.abort(c); await p
+    expect(env('ildra.ledger.confirm_refused', r.events.filter((e) => e.type === 'ildra.ledger.confirm_refused').at(-1)!.body)).toEqual([])
+    const t = rig({ inputs: ['touch'] }); await t.enroll()
+    const u = t.core.requests.ildra_pairing_unpair({ phoneId: 'p1', at: t.clock.t, signature: sig(t.K.P1.key, unpairMessage('p1', t.clock.t)), presence: true, from: { phoneId: 'p1' } }, t.remote('ph1')); await tick()
+    expect(env('ildra.presence.challenge', t.challenge())).toEqual([])
+    await t.abort(t.challenge()!); await u
+    expect(env('ildra.presence.challenge', { ...c, method: 'hold_screen' }).length).toBeGreaterThan(0) // groups only with blink_button
+  })
+  const PROTOCOL = process.env.ILDRA_PROTOCOL_DIR ?? join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', '..', 'protocol')
+  it.skipIf(!existsSync(join(PROTOCOL, 'examples', 'device-presence.json')))('examples: the presence signature verifies with the example device key; abort and deny summary ack with the example phone key; the challenge pattern matches', () => {
+    const R = (f: string) => JSON.parse(readFileSync(join(PROTOCOL, 'examples', f), 'utf8'))
+    const dev = R('device-enroll.json').body.devicePub as string
+    const main = R('pairing-offer.json').body.phonePub as string
+    const pr = R('device-presence.json').body
+    expect(verifyEd25519(dev, presenceMessage(pr.requestId, pr.nonce, pr.heldMs), pr.signature)).toBe(true)
+    const ch = R('presence-challenge-blink.json').body
+    expect({ groups: ch.groups, pattern: ch.pattern }).toEqual((({ groups, pattern }) => ({ groups, pattern }))(presencePattern(ch.requestId, ch.nonce)))
+    expect(pr.requestId).toBe(ch.requestId)
+    const ab = R('presence-abort.json').body
+    expect(verifyPhoneSignature(main, presenceAbortMessage(ab.requestId, ab.at), ab.phoneSignature)).toBe(true)
+    const ds = R('phone-deny-summary-ack.json').body
+    expect(verifyPhoneSignature(main, denySummaryAckMessage(ds.since, ds.at), ds.phoneSignature)).toBe(true)
   })
 })

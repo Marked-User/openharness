@@ -152,8 +152,9 @@ describe('R7-1: only the phone-confirmed, proven Ildra device answers on touch',
     const fp = deviceFingerprint(pub)
     const nonce = randomBytes(32).toString('base64url')
     const signature = Buffer.alloc(64, 1).toString('base64')
-    expect(env('ildra.device.enroll', { devicePub: pub, fingerprint: fp, nonce, expiresAt: 1, source: 'device' })).toBe(true)
-    expect(env('ildra.device.enroll', { devicePub: pub, fingerprint: '0123456789abcdef', nonce, expiresAt: 1, source: 'device' })).toBe(false)
+    expect(env('ildra.device.enroll', { devicePub: pub, fingerprint: fp, nonce, expiresAt: 1, source: 'device', inputs: ['touch'] })).toBe(true)
+    expect(env('ildra.device.enroll', { devicePub: pub, fingerprint: fp, nonce, expiresAt: 1, source: 'device' })).toBe(false) // (i): inputs required
+    expect(env('ildra.device.enroll', { devicePub: pub, fingerprint: '0123456789abcdef', nonce, expiresAt: 1, source: 'device', inputs: ['touch'] })).toBe(false)
     expect(env('ildra.device.enroll.confirm', { devicePub: pub, nonce, approved: true, uv: 'biometric', signature })).toBe(true)
     expect(env('ildra.device.enroll.confirm', { devicePub: pub, nonce, approved: true, uv: 'passcode', signature })).toBe(true)
     expect(env('ildra.device.enroll.confirm', { devicePub: pub, nonce, approved: true, signature })).toBe(false) // uv required
