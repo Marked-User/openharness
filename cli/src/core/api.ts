@@ -57,7 +57,7 @@ export { FAIL, later, readFallback, ServiceUnavailableError, type PortFallbacks 
  * and the Ildra device key helpers (Ed25519 proof of the enrolled device).
  */
 export { stampedChannel } from './ildraChannel.js'
-export { ENROLL_UV, PHONE_VERBS, askAnswerMessage, deviceFingerprint, deviceProofMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, unpairMessage, unpairTouchMessage, verifyDeviceProof, verifyEd25519, rawPhoneKey, normalizePhoneSignature, verifyPhoneSignature, type EnrollUv, type PhoneVerb } from './ildraDeviceProof.js'
+export { ENROLL_UV, PHONE_VERBS, askAnswerMessage, deviceFingerprint, deviceProofMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, unpairMessage, unpairTouchMessage, verifyDeviceProof, verifyEd25519, rawPhoneKey, normalizePhoneSignature, verifyP256, verifyPhoneSignature, type EnrollUv, type PhoneVerb } from './ildraDeviceProof.js'
 
 /** A service may open a terminal with a literal argv, never shell source. */
 export interface TerminalOpen {

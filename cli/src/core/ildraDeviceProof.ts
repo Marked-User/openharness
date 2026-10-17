@@ -85,11 +85,22 @@ const b64any = (s: string): Buffer | null => {
 export function rawPhoneKey(pub: unknown): Buffer | null {
   if (typeof pub !== 'string' || pub.length !== 87) return null
   const b = b64url(pub)
-  if (!b || b.length !== 65 || b[0] !== 0x04) return null
+  return b ? phonePoint(b) : null
+}
+/** The 65-byte uncompressed point check shared by rawPhoneKey and verifyP256. */
+function phonePoint(b: Buffer): Buffer | null {
+  if (b.length !== 65 || b[0] !== 0x04) return null
   const x = toBig(b.subarray(1, 33)); const y = toBig(b.subarray(33, 65))
   if (x >= P256_P || y >= P256_P) return null
   if (modP(y * y) !== modP(x * x * x - 3n * x + P256_B)) return null
   return b
+}
+/** Strict DER ECDSA signature (no raw form): the shared parser behind normalizePhoneSignature. */
+function parseDerSig(b: Buffer): { r: bigint; s: bigint } | null {
+  if (b.length < 8 || b[0] !== 0x30 || b[1]! >= 0x80 || b[1] !== b.length - 2) return null
+  const ri = derInt(b, 2); if (!ri) return null
+  const si = derInt(b, ri.next); if (!si || si.next !== b.length) return null
+  return { r: ri.v, s: si.v }
 }
 /** Strict DER INTEGER at `at`: short-form length 1..33, non-negative, no superfluous leading zero. */
 function derInt(b: Buffer, at: number): { v: bigint; next: number } | null {
@@ -113,20 +124,28 @@ export function normalizePhoneSignature(signature: unknown): Buffer | null {
   if (!b) return null
   let r: bigint; let s: bigint
   if (b.length === 64) { r = toBig(b.subarray(0, 32)); s = toBig(b.subarray(32)) }
-  else {
-    if (b.length < 8 || b[0] !== 0x30 || b[1]! >= 0x80 || b[1] !== b.length - 2) return null
-    const ri = derInt(b, 2); if (!ri) return null
-    const si = derInt(b, ri.next); if (!si || si.next !== b.length) return null
-    r = ri.v; s = si.v
-  }
+  else { const d = parseDerSig(b); if (!d) return null; r = d.r; s = d.s }
   if (r <= 0n || r >= P256_N || s <= 0n || s >= P256_N) return null
   if (s > P256_HALF_N) s = P256_N - s
   return Buffer.concat([toBuf32(r), toBuf32(s)])
 }
 /** True when `signature` is the stored phone key `pub`'s ECDSA P-256 / SHA-256 signature over the UTF-8 bytes of `message`. */
 export function verifyPhoneSignature(pub: unknown, message: string, signature: unknown): boolean {
-  const raw = rawPhoneKey(pub)
-  const sig = normalizePhoneSignature(signature)
+  return p256Verify(rawPhoneKey(pub), message, normalizePhoneSignature(signature))
+}
+/**
+ * Shield's P-256 primitive: `pub` a 65-byte uncompressed point in canonical base64 or base64url (checked on the
+ * curve like rawPhoneKey), `signature` strict DER only (base64 or base64url), r and s in [1, n-1], high S
+ * normalized. The daemon's phone path (verifyPhoneSignature) also accepts raw r||s (Shield rule 4); stored keys
+ * are always the base64url form.
+ */
+export function verifyP256(pub: unknown, message: string, signature: unknown): boolean {
+  const pb = typeof pub === 'string' && pub.length <= 88 ? b64any(pub) : null
+  const sb = typeof signature === 'string' && signature.length <= 100 ? b64any(signature) : null
+  if (!pb || !sb || sb.length === 64) return false
+  return p256Verify(phonePoint(pb), message, normalizePhoneSignature(sb.toString('base64')))
+}
+function p256Verify(raw: Buffer | null, message: string, sig: Buffer | null): boolean {
   if (!raw || !sig) return false
   try {
     const key = createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: raw.subarray(1, 33).toString('base64url'), y: raw.subarray(33).toString('base64url') }, format: 'jwk' })
