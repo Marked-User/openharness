@@ -16,7 +16,7 @@ import {
 const T: ApprovalTemplate = { permissions: { ask: ['Send an email', 'Pay a bill', 'Rename a file'], locked_ask: ['Brakes step'] } }
 const MIC = { speaking: () => {} }
 const dir = () => mkdtempSync(join(tmpdir(), 'pilot-'))
-const notSend = (tool: string): ToolManifestEntry[] => [{ name: tool, send: false }]
+const notSend = (tool: string): ToolManifestEntry[] => [{ name: tool, send: false, owner: 'bridge' }]
 function paired() {
   const p = new PhonePairing()
   const { code } = p.begin('touch'); p.offer('p1', 'pub1', code); p.confirm('p1', 'touch', true)
@@ -27,7 +27,7 @@ const yes = (extra: Partial<AskAnswer> = {}) => (_c: unknown, _p: unknown, req?:
 
 describe('(a) unknown tools can send', () => {
   it('only an explicit send:false entry is not a send', () => {
-    expect(isSendTool([{ name: 't', send: false }], 't')).toBe(false)
+    expect(isSendTool([{ name: 't', send: false, owner: 'bridge' }], 't')).toBe(false)
     expect(isSendTool([{ name: 't', send: true }], 't')).toBe(true)
     expect(isSendTool([], 't')).toBe(true) // missing from the list
     expect(isSendTool(null, 't')).toBe(true)
@@ -54,7 +54,7 @@ describe('(a) unknown tools can send', () => {
 
 describe('(a) MCP elicitations from unknown tools', () => {
   it('an elicitation whose tool is unlisted or missing declines (it would need send details)', async () => {
-    const base = { ledger: new AskLedger(), pairing: paired(), manifest: [{ name: 'db.query', send: false }], available: ['phone'] }
+    const base = { ledger: new AskLedger(), pairing: paired(), manifest: [{ name: 'db.query', send: false, owner: 'bridge' }], available: ['phone'] }
     for (const tool of ['mystery', undefined]) {
       const r = await answerMcpElicitation(T, { server: 'db', message: 'Drop table?', ...(tool ? { tool } : {}) }, null, yes(), base)
       expect(r.action, String(tool)).toBe('decline')

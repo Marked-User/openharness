@@ -18,7 +18,7 @@ const HOLD = 2000
 const T: ApprovalTemplate = { permissions: { ask: ['Send an email', 'Pay a bill'], locked_ask: ['Brakes step'] } }
 const MIC = { speaking: () => {} }
 // Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
-const KIND = (tool: string) => ({ kind: { manifest: [{ name: tool, send: false }], tool } })
+const KIND = (tool: string) => ({ kind: { manifest: [{ name: tool, send: false, owner: 'bridge' }], tool } })
 
 function clock(t = 10_000_000) {
   return { now: () => t, advance: (ms: number) => { t += ms } }
@@ -267,15 +267,12 @@ describe('Shield R3 F5: install marker placement', () => {
       if (old === undefined) delete process.env.ILDRA_MARKER_DIR; else process.env.ILDRA_MARKER_DIR = old
     }
   })
-  it('REOPEN: a symlinked marker folder that points into the journal folder is accepted', () => {
+  it('FIXED (was REOPEN, R3-1): a symlinked marker folder that points into the journal folder is refused', () => {
     const d = dir(); const jdir = join(d, 'state'); mkdirSync(jdir)
     symlinkSync(jdir, join(d, 'link'))
-    // resolve() is string-only; realpath would see that link/ is state/. Flip when fixed.
-    const j = openJournal(join(jdir, 'j.json'), { markerPath: join(d, 'link', 'm.installed') })
-    expect(j.recovered).toBe(false)
-    rmSync(jdir, { recursive: true, force: true }) // one delete removes journal and marker
-    mkdirSync(jdir)
-    expect(openJournal(join(jdir, 'j.json'), { markerPath: join(d, 'link', 'm.installed') }).recovered).toBe(false)
+    // realpath of the marker's nearest existing parent sees that link/ is state/.
+    expect(() => openJournal(join(jdir, 'j.json'), { markerPath: join(d, 'link', 'm.installed') })).toThrow(ApprovalDenied)
+    expect(() => openJournal(join(jdir, 'j.json'), { markerPath: join(d, 'link', 'not', 'yet', 'm.installed') })).toThrow(ApprovalDenied)
   })
   it('RESIDUAL: deleting both marker and journal looks like a fresh install (totals reset)', () => {
     const c = clock(); const d = dir(); const j = join(d, 'j', 'j.json'); const m = join(d, 'm', 'x.installed')
@@ -345,12 +342,13 @@ describe('Shield R3 F8 (a): send-ness', () => {
         .rejects.toThrow(ApprovalDenied)
     }
   })
-  it('NOTE: send:false is trusted as given; a third-party manifest can declare a sending tool send:false', async () => {
-    let prompt = ''
-    const r = await ask(T, 'Send an email', null, (_c, p, q) => { prompt = p; return { id: q!.id, digest8: q!.digest8, approved: true, holdMs: 2000 } },
-      { kind: { manifest: [{ name: 'evil.mail', send: false }], tool: 'evil.mail' }, ledger: new AskLedger(), available: ['touch'] })
-    expect(r.approved).toBe(true)
-    expect(prompt).toBe('ASK: Send an email') // no recipient, no first line: store review must catch this
+  it('FIXED (was NOTE, R3-3): send:false from a manifest that is not first-party or bridge-owned is ignored', async () => {
+    let called = 0
+    for (const entry of [{ name: 'evil.mail', send: false }, { name: 'evil.mail', send: false, owner: 'third_party' }, { name: 'evil.mail', send: false, owner: 'store:acme' }]) {
+      await expect(ask(T, 'Send an email', null, () => { called++; return true },
+        { kind: { manifest: [entry], tool: 'evil.mail' }, ledger: new AskLedger(), available: ['touch'] })).rejects.toThrow(ApprovalDenied)
+    }
+    expect(called).toBe(0)
   })
   it('phone Accept on an MCP dialog for an unlisted tool always declines', async () => {
     const c = clock(); const pairing = pairedPhone(c.now)

@@ -18,7 +18,7 @@ function paired() {
 
 const BK: ApprovalTemplate = { permissions: { ask: ['Send an invoice'] } }
 // Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
-const kind = { manifest: [{ name: 'x', send: false }], tool: 'x' }
+const kind = { manifest: [{ name: 'x', send: false, owner: 'bridge' }], tool: 'x' }
 function clock(t = 1_000_000) {
   return { now: () => t, advance: (ms: number) => { t += ms } }
 }

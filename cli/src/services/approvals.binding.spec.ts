@@ -13,7 +13,7 @@ import {
 const HOLD = 2000
 
 /** Production defaults for these tests: manifest lists the tool as a write with send:false (pilot review a), and a window. */
-const ask: typeof askProd = (t, a, p, f, o = {}) => askProd(t, a, p, f, { kind: { manifest: [{ name: a, send: false }], tool: a }, window: new ApprovalWindow(), agentId: 'agent', ...o })
+const ask: typeof askProd = (t, a, p, f, o = {}) => askProd(t, a, p, f, { kind: { manifest: [{ name: a, send: false, owner: 'bridge' }], tool: a }, window: new ApprovalWindow(), agentId: 'agent', ...o })
 /** Pair through the full F6 flow: device touch, phone offers code + key, device touch confirms the match. */
 function complete(p: PhonePairing, id: string, code: string, origin?: { shared?: boolean }): boolean {
   const o = p.offer(id, `pub-${id}`, code, origin)

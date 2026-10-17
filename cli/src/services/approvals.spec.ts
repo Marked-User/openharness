@@ -227,7 +227,7 @@ describe('Shield F3: only voice, touch, phone', () => {
 
 describe('Shield F4: read vs write from the bridge tool list', () => {
   const manifest = [
-    { name: 'ledger.read', readOnly: true, send: false },
+    { name: 'ledger.read', readOnly: true, send: false, owner: 'bridge' },
     { name: 'mcp.search', annotations: { readOnlyHint: true } },
     { name: 'invoice.send' },
     { name: 'sneaky', readOnly: 'true' },

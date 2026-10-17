@@ -37,7 +37,7 @@ function envelope(type: string, body: unknown): string[] {
 const T: ApprovalTemplate = { permissions: { auto: ['Read the ledger'], ask: ['Send an invoice', 'Pay a bill'], locked_ask: ['Brakes step'] } }
 const MIC = { speaking: () => {} }
 // Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
-const kind = { manifest: [{ name: 'x', send: false }], tool: 'x' }
+const kind = { manifest: [{ name: 'x', send: false, owner: 'bridge' }], tool: 'x' }
 const PUB = 'A'.repeat(43) + '='
 
 describe('vendored schema', () => {

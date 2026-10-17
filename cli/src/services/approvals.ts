@@ -22,9 +22,9 @@
  */
 
 import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve as resolvePath, sep } from 'node:path'
+import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path'
 
 export type Tier = 'auto' | 'ask' | 'locked_ask' | 'never'
 export type AskChannel = 'voice' | 'touch' | 'phone'
@@ -103,7 +103,12 @@ export function phoneOnly(tier: Tier, amountMinor?: number | null): boolean {
   return tier === 'locked_ask' || amountMinor != null
 }
 
-/** Shield pilot review A1: a device (touch) approval is a deliberate hold of at least this long. */
+/**
+ * Shield pilot review A1: a device (touch) approval is a deliberate hold of at least this long.
+ * R3-2: `holdMs` is client-claimed. For M1 the device link is daemon-owned (only the daemon's own device
+ * bridge can answer on the touch channel), so the claim is as trustworthy as that link. GA needs the
+ * firmware to measure the hold and sign it over (id, digest8, holdMs, counter): see signedHoldVerifier (D5 b).
+ */
 export const DEVICE_HOLD_MIN_MS = 1500
 
 /** F6 hook (not enforced by default): may this channel answer? Pairing itself must be locked_ask on touch. */
@@ -131,23 +136,70 @@ export function askChannelFor(
   return null
 }
 
+// ---- R3-2 (GA, D5 b): signed device hold. Hook only; not wired for M1 ----
+
+/** Canonical bytes the device firmware signs for a hold: version, request id, digest8, holdMs, counter. */
+export function signedHoldPayload(id: string, digest8: string, holdMs: number, counter: number): string {
+  return `ildra-hold-v1|${id}|${digest8}|${holdMs}|${counter}`
+}
+
+/**
+ * GA stub (Volt, D5 b): an AnswerVerifier that requires a touch answer's `signature` to verify over
+ * signedHoldPayload with the device's next monotonic counter (daemon-held, so a replayed signature fails).
+ * Phone and voice answers pass through. `verify` is the device-key check (Ed25519 or HMAC, Volt's choice).
+ * Not passed to any ledger in M1.
+ */
+export function signedHoldVerifier(deps: { nextCounter: () => number; verify: (payload: string, signature: string) => boolean }): AnswerVerifier {
+  return (req, ans) => {
+    if (req.channel !== 'touch') return true
+    if (typeof ans.signature !== 'string' || typeof ans.holdMs !== 'number') return false
+    try {
+      return deps.verify(signedHoldPayload(req.id, ans.digest8, ans.holdMs, deps.nextCounter()), ans.signature) === true
+    } catch {
+      return false
+    }
+  }
+}
+
 // ---- F4: read vs write comes from the bridge tool manifest, never from the caller ----
 
 export interface ToolManifestEntry {
   name: string
   readOnly?: unknown
   annotations?: { readOnlyHint?: unknown } | null
-  /** F8: the tool sends a message to someone. Only literal true counts. */
+  /** F8: the tool sends a message to someone. Only literal false opts out, and only from a trusted owner (R3-3). */
   send?: unknown
+  /**
+   * Shield R3-3: where this entry came from, stamped by the daemon's manifest loader (stampManifest),
+   * never taken from the manifest itself. Only 'first_party' or 'bridge' entries may declare send:false.
+   */
+  owner?: unknown
+}
+
+/** Manifest sources whose send:false is believed (R3-3). */
+export const TRUSTED_MANIFEST_OWNERS: ReadonlySet<string> = new Set(['first_party', 'bridge'])
+export type ManifestSource = 'first_party' | 'bridge' | 'third_party'
+
+/**
+ * Shield R3-3: copy a manifest with `owner` set from where the daemon loaded it. Any owner the manifest
+ * claims for itself is overwritten, so a third-party (store) manifest cannot pose as bridge-owned. An
+ * unknown source is stamped third_party.
+ */
+export function stampManifest(entries: readonly ToolManifestEntry[] | null | undefined, source: ManifestSource): ToolManifestEntry[] {
+  const owner: ManifestSource = source === 'first_party' || source === 'bridge' ? source : 'third_party'
+  return (entries ?? []).map((e) => ({ ...e, owner }))
 }
 
 /**
- * F8 + Shield pilot review (a): a tool can send unless the manifest lists it with literal `send: false`.
+ * F8 + Shield pilot review (a): a tool can send unless the manifest lists it with literal `send: false`
+ * from a first-party or bridge-owned entry (R3-3; see stampManifest).
  * Missing from the manifest, no manifest, or any other value means it gets the recipient and first-line
  * checks. The caller can tighten (isSend, send details), never loosen.
  */
 export function isSendTool(manifest: readonly ToolManifestEntry[] | null | undefined, toolName: string): boolean {
-  return manifest?.find((e) => e.name === toolName)?.send !== false
+  const e = manifest?.find((x) => x.name === toolName)
+  if (!e || e.send !== false) return true
+  return !(typeof e.owner === 'string' && TRUSTED_MANIFEST_OWNERS.has(e.owner))
 }
 
 /** A tool is a read only when the manifest lists it as read-only. Unknown tools are writes. */
@@ -737,6 +789,30 @@ export interface ApprovalJournal {
   save(): void
 }
 
+/** realpath of the nearest existing ancestor, with the parts that do not exist yet put back (R3-1). */
+function realpathNearest(p: string): string {
+  const rest: string[] = []
+  let cur = resolvePath(p)
+  for (;;) {
+    try {
+      return join(realpathSync(cur), ...rest.reverse())
+    } catch {
+      const up = dirname(cur)
+      if (up === cur) return join(cur, ...rest.reverse())
+      rest.push(basename(cur))
+      cur = up
+    }
+  }
+}
+
+/** Shield R3-1: two folders overlap when, after following symlinks, one is the other or lies inside it. */
+function foldersOverlap(a: string, b: string): boolean {
+  const ra = realpathNearest(a)
+  const rb = realpathNearest(b)
+  const inside = (x: string, y: string) => x === y || x.startsWith(y.endsWith(sep) ? y : y + sep)
+  return inside(ra, rb) || inside(rb, ra)
+}
+
 /**
  * Default install marker for a journal: `$ILDRA_MARKER_DIR` (or `~/.ildra/install-markers`), named by a
  * hash of the journal's absolute path, so it never shares the journal's folder.
@@ -769,9 +845,8 @@ export function openJournal(
   const pairing = new PhonePairing({ now })
   let recovered = false
   const marker = resolvePath(opts.markerPath ?? defaultMarkerPath(path))
-  const jdir = dirname(resolvePath(path))
-  if (dirname(marker) === jdir || marker.startsWith(jdir + sep)) {
-    throw new ApprovalDenied('the install marker must not be in the journal\'s folder: deleting that folder would delete both')
+  if (foldersOverlap(dirname(marker), dirname(resolvePath(path)))) {
+    throw new ApprovalDenied('the install marker must not be in the journal\'s folder (or link into it): deleting that folder would delete both')
   }
   if (!existsSync(path) && existsSync(marker)) {
     // The journal was deleted after install: totals cannot be trusted.
