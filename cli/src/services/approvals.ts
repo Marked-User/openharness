@@ -783,7 +783,7 @@ export class AskLedger {
     for (const id of this.shortHolds.keys()) if (!this.open_.has(id)) this.shortHolds.delete(id)
     for (const id of this.phoneOk.keys()) if (!this.open_.has(id)) this.phoneOk.delete(id)
     // Spent ids are kept until a further day past expiry so a late replay reads as replayed.
-    for (const [id, at] of this.spent) if (at + OTHER_ASK_EXPIRY_MS < t) this.spent.delete(id)
+    for (const [id, at] of this.spent) if (at + OTHER_ASK_EXPIRY_MS < t) { this.spent.delete(id); this.ended_.delete(id) }
     for (const [id, at] of this.spentAnswers) if (at + OTHER_ASK_EXPIRY_MS < t) this.spentAnswers.delete(id)
   }
 
@@ -807,6 +807,32 @@ export class AskLedger {
     const r = this.open_.get(id)
     return r && this.now() < r.expiresAt ? { ...r } : null
   }
+
+  /**
+   * Shield R7 ruling: the last paired phone was unpaired, so no one can answer an open Ask on the phone channel
+   * (phone-only from the start, or handed off). End each one now with no_paired_phone: spent, never approves.
+   * Returns the ended ids; onEnded fires for each so the runtime wakes the waiting ask().
+   */
+  endPhoneAsks(reason: 'no_paired_phone' = 'no_paired_phone'): string[] {
+    const t = this.now()
+    const ids: string[] = []
+    for (const [id, r] of this.open_) {
+      if (r.channel !== 'phone' || t >= r.expiresAt) continue
+      this.open_.delete(id)
+      this.spent.set(id, r.expiresAt)
+      this.ended_.set(id, reason)
+      ids.push(id)
+    }
+    if (ids.length > 0) {
+      this.onChange?.()
+      for (const id of ids) { try { this.onEnded?.(id, reason) } catch { /* a listener never changes the result */ } }
+    }
+    return ids
+  }
+  /** Why an Ask was ended by state rather than by an answer (no_paired_phone), or null. */
+  endedReason(id: string): 'no_paired_phone' | null { return this.ended_.get(id) ?? null }
+  onEnded?: (id: string, reason: 'no_paired_phone') => void
+  private ended_ = new Map<string, 'no_paired_phone'>()
 
   /** May the phone take this open Ask over (its policy permits the phone channel)? */
   phoneAllowed(id: string): boolean {
@@ -1195,9 +1221,14 @@ export class PhonePairing {
   }
 
   unpair(phoneId: string): void {
-    if (this.phones.delete(phoneId)) this.log.push({ at: this.now(), event: 'unpair', phoneId })
+    const was = this.phones.delete(phoneId)
+    if (was) this.log.push({ at: this.now(), event: 'unpair', phoneId })
     this.onChange?.()
+    // Shield R7 ruling: the last phone gone ends the open phone Asks (no_paired_phone), by pairing state alone.
+    if (was && this.phones.size === 0) { try { this.onLastUnpaired?.() } catch { /* a listener never changes the result */ } }
   }
+  /** Called when an unpair leaves no paired phone (the journal ends open phone Asks with no_paired_phone). */
+  onLastUnpaired?: () => void
 
   /** paired > pending (not expired) > last refusal > unknown. */
   pairingStatus(phoneId: string): PairingStatus {
@@ -1650,6 +1681,7 @@ export function openJournal(
   window.onChange = save
   ledger.onChange = save
   pairing.onChange = save
+  pairing.onLastUnpaired = () => { ledger.endPhoneAsks('no_paired_phone') }
   settings.onChange = save
   device.onChange = save
   save()
@@ -1709,10 +1741,11 @@ export interface AskOptions {
 
 /**
  * Why an Ask ended: `approved` (only when approved is true); `denied` a person said no; `no_channel` no usable
- * channel (nothing was asked); `never` the template forbids it; otherwise the rejection reason of the answer
+ * channel (nothing was asked); `never` the template forbids it; `no_paired_phone` (Shield R7 ruling) the last
+ * phone was unpaired while the Ask was open on the phone channel; otherwise the rejection reason of the answer
  * (expired among them). Wire: AskOutcomeReason.
  */
-export type AskOutcomeReason = 'approved' | 'denied' | 'no_channel' | 'never' | SettleReason
+export type AskOutcomeReason = 'approved' | 'denied' | 'no_channel' | 'never' | 'no_paired_phone' | SettleReason
 /** PM spec (v3): reason is always present; 'approved' exactly when approved is true. */
 export type AskOutcome = AskResult & { reason: AskOutcomeReason; request?: AskRequest }
 
@@ -1733,15 +1766,12 @@ const UNCOUNTED_REFUSALS: ReadonlySet<SettleReason> = new Set(['unpaired_phone',
 
 /**
  * One settle step of ask()/practiceAsk(): 'again' (counted), 'free' (uncounted, Ask still live), 'expired', or
- * 'done'. An uncounted refusal ends the Ask only when no phone could ever answer it: no phone is paired (or this
- * ask() was given no pairing), so there is no real phone to keep it open for.
+ * 'done'. An unpaired answer never ends an Ask (Shield R7 ruling), even with no phone paired; the pairing state
+ * does (the last unpair ends open phone Asks with no_paired_phone: AskLedger.endPhoneAsks).
  */
-function nextStep(ledger: AskLedger, id: string, ans: unknown, s: SettleResult, prompts: number, phonePaired: boolean): 'again' | 'free' | 'done' | 'expired' {
+function nextStep(ledger: AskLedger, id: string, ans: unknown, s: SettleResult, prompts: number): 'again' | 'free' | 'done' | 'expired' {
   if (s.ok) return 'done'
-  if (UNCOUNTED_REFUSALS.has(s.reason) && stampedChannel(ans) !== undefined) {
-    if (s.reason === 'unpaired_phone' && !phonePaired) return 'done'
-    return ledger.get(id) === null ? 'expired' : 'free'
-  }
+  if (UNCOUNTED_REFUSALS.has(s.reason) && stampedChannel(ans) !== undefined) return ledger.get(id) === null ? 'expired' : 'free'
   return (KEEPS_ASK_OPEN.has(s.reason) || UNCOUNTED_REFUSALS.has(s.reason)) && prompts < MAX_REPROMPTS ? 'again' : 'done'
 }
 
@@ -1859,6 +1889,7 @@ export async function ask(
     const pairing = opts.pairing
     let ans: unknown
     let s: SettleResult
+    let stateEnd: 'no_paired_phone' | null = null
     // DECISIONS ad47477: a short hold leaves the Ask open, so the person may hold again (until it expires).
     // The bound only stops a runaway answerer from pinning the daemon; the ledger itself counts nothing.
     for (let prompts = 0; ; ) {
@@ -1868,16 +1899,18 @@ export async function ask(
       } finally {
         if (voice) opts.mic!.speaking(false)
       }
+      const endedBy = bound.endedReason(req.id)
+      if (endedBy !== null) { stateEnd = endedBy; s = { ok: false, reason: 'expired' }; break }
       s = bound.settle(ans as AskAnswer, { isPaired: pairing ? (id, pub) => (pub === undefined ? pairing.isPaired(id) : pairing.isPairedKey(id, pub)) : undefined, extra: opts.verifier, isShared: opts.isShared })
       // hold_too_short and stale_channel leave the Ask open: ask again on its (current) channel. R7-10:
       // unpaired_phone and no_authority leave it open too and are not counted (UNCOUNTED_REFUSALS).
-      const step = nextStep(bound, req.id, ans, s, prompts, !!pairing?.isPaired())
+      const step = nextStep(bound, req.id, ans, s, prompts)
       if (step === 'expired') { s = { ok: false, reason: 'expired' }; break }
       if (step === 'done') break
       if (step === 'again') prompts++
     }
-    approved = s.ok && (ans as AskAnswer).approved === true
-    reason = s.ok ? (approved ? 'approved' : 'denied') : s.reason
+    approved = stateEnd === null && s.ok && (ans as AskAnswer).approved === true
+    reason = stateEnd ?? (s.ok ? (approved ? 'approved' : 'denied') : s.reason)
   } else {
     approved = (await answerFn(channel, prompt)) === true
     reason = approved ? 'approved' : 'denied'
@@ -1913,8 +1946,10 @@ export async function practiceAsk(
   for (let prompts = 0; ; ) {
     if (channel === 'voice') opts.mic!.speaking(true)
     try { ans = await answerFn(channel, prompt, req) } finally { if (channel === 'voice') opts.mic!.speaking(false) }
+    const endedBy = opts.ledger.endedReason(req.id)
+    if (endedBy !== null) return { approved: false, channel, tier: 'ask', reason: endedBy, request: req, practice: true }
     s = opts.ledger.settle(ans as AskAnswer, { isPaired: pairing ? (id, pub) => (pub === undefined ? pairing.isPaired(id) : pairing.isPairedKey(id, pub)) : undefined, isShared: opts.isShared })
-    const step = nextStep(opts.ledger, req.id, ans, s, prompts, !!pairing?.isPaired())
+    const step = nextStep(opts.ledger, req.id, ans, s, prompts)
     if (step === 'expired') { s = { ok: false, reason: 'expired' }; break }
     if (step === 'done') break
     if (step === 'again') prompts++

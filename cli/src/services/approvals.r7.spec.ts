@@ -357,6 +357,52 @@ describe('R7-10: an unpaired phone answer is refused first and spends nothing', 
   })
 })
 
+describe('Shield R7 ruling: pairing state, not an unpaired answer, ends a phone Ask (no_paired_phone)', () => {
+  it('with no phone paired, an unpaired answer is refused (unpaired_phone) and the Ask stays open', () => {
+    const l = new AskLedger({ requireChannelStamp: true })
+    const req = l.open({ action: 'Brakes step', tier: 'locked_ask', channel: 'phone' })
+    const a = stampForTest({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, from: { phoneId: 'p1', machinePub: OTHER } } as AskAnswer, 'phone')
+    expect(l.settle(a, { isPaired: () => false })).toEqual({ ok: false, reason: 'unpaired_phone' })
+    expect(l.pending()).toBe(1)
+    expect(l.endedReason(req.id)).toBeNull()
+  })
+  it('runtime: an unpaired answer leaves it open; unpairing the last phone ends it with no_paired_phone, and the outcome is on the wire', async () => {
+    const r = rig({ ph: { identity: PHONE, role: 'web' }, x: { identity: OTHER, role: 'web' } }); r.pair(PHONE)
+    const p = r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
+    await tick()
+    await r.answer(r.sent[0]!, 'x', { from: { phoneId: 'p1' } })
+    await tick()
+    expect(r.svc.journal().ledger.pending()).toBe(1)
+    r.svc.journal().pairing.unpair('p1')
+    const out = await p
+    expect(out).toMatchObject({ approved: false, channel: 'phone', reason: 'no_paired_phone' })
+    expect(r.svc.journal().ledger.pending()).toBe(0)
+    const ev = r.events.find((e) => e.type === 'ildra.ask.outcome')
+    expect(ev?.body).toMatchObject({ reason: 'no_paired_phone' })
+    expect(env('ildra.ask.outcome', ev!.body)).toBe(true)
+    // A late answer from the re-paired phone cannot revive it.
+    r.pair(PHONE)
+    expect(await r.answer(r.sent[r.sent.length - 1]!, 'ph', { from: { phoneId: 'p1' } })).toMatchObject({ ok: false })
+  })
+  it('direct ask() on a journal: the unpair ends the waiting Ask; a device Ask is untouched; opening with no phone is no_channel', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'build-r7n-'))
+    const j = openJournal(join(d, 'j', 'j.json'), { markerPath: join(d, 'm', 'x') })
+    const { code } = j.pairing.begin('touch'); j.pairing.offer('p1', PHONE, code); j.pairing.confirm('p1', 'touch', true)
+    const dev = j.ledger.open({ action: 'Rename a file', tier: 'ask', channel: 'touch' })
+    let n = 0
+    const out = await ask(T, 'Brakes step', null, (_c, _p, q) => {
+      n++
+      if (n === 2) j.pairing.unpair('p1')
+      return stampForTest({ id: q!.id, digest8: q!.digest8, answerId: aid(), approved: true, from: { phoneId: 'p1', machinePub: OTHER } }, 'phone')
+    }, { kind, ledger: j.ledger, window: j.window, agentId: 'a', available: ['phone'], pairing: j.pairing })
+    expect(out).toMatchObject({ approved: false, reason: 'no_paired_phone' })
+    expect(n).toBe(2)
+    expect(j.ledger.get(dev.id)).not.toBeNull()
+    expect(await ask(T, 'Brakes step', null, () => null, { kind, ledger: j.ledger, window: j.window, agentId: 'a', available: ['phone'], pairing: j.pairing }))
+      .toMatchObject({ approved: false, channel: null, reason: 'no_channel' })
+  })
+})
+
 describe('R7-10 bound: only channel-stamped refusals are uncounted', () => {
   it('an unstamped in-process unpaired answerFn (no remote sender) keeps the MAX_REPROMPTS bound and ends with unpaired_phone', async () => {
     const pp = new PhonePairing(); const { code } = pp.begin('touch'); pp.offer('p1', PHONE, code); pp.confirm('p1', 'touch', true)

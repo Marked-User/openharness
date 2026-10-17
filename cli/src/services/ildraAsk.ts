@@ -79,6 +79,8 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     journal.ledger.onAttempt = (a) => emit('ildra.ask.attempt', a)
     journal.ledger.onHandoff = onHandoff
     journal.ledger.onUnpaired = (u) => emit('ildra.ask.unpaired', u)
+    // Shield R7 ruling: the last unpair ended this phone Ask (no_paired_phone); wake its waiting ask().
+    journal.ledger.onEnded = (id) => { deps.inputs.cancel(id) }
     return journal
   }
   const pairedKey = (j: ApprovalJournal) => (id: string, pub?: string) => (pub === undefined ? j.pairing.isPaired(id) : j.pairing.isPairedKey(id, pub))
