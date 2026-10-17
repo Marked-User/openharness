@@ -259,3 +259,26 @@ describe('Batch B: wire', () => {
     for (const e of r.events) expect(env(e.type, e.body), e.type).toBe(true)
   })
 })
+
+describe('Shield B7: concurrent unpairs', () => {
+  it('two concurrent unpair requests with two phones: the second is unpair_pending; once the first settles (denied) the next may open', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); r.pair('p2', r.K.P2.pub)
+    const a = r.unpair('p2', r.K.P1.key); await tick()
+    expect(await r.unpair('p1', r.K.P2.key, { conn: 'ph2', phoneId: 'p2' })).toEqual({ ok: false, reason: 'unpair_pending' })
+    expect(r.svc.journal().pairingLedger.all().at(-1)).toMatchObject({ kind: 'unpair_refused', reason: 'unpair_pending' })
+    await r.answer(r.sent.at(-1)!, 'ph1', 'p1', false); expect(await a).toMatchObject({ ok: false, reason: 'not_approved' })
+    const b = r.unpair('p1', r.K.P2.key, { conn: 'ph2', phoneId: 'p2' }); await tick()
+    expect(r.sent.at(-1)).toMatchObject({ tier: 'locked_ask' })
+    await r.answer(r.sent.at(-1)!, 'ph1', 'p1', true); expect(await b).toMatchObject({ ok: true })
+    expect(r.svc.journal().pairing.pairedCount()).toBe(1)
+  })
+  it('the recheck after approval: if the other phone went away while the Ask was open, removing the last one without a touch proof is refused', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); r.pair('p2', r.K.P2.pub)
+    const a = r.unpair('p1', r.K.P2.key, { conn: 'ph2', phoneId: 'p2' }); await tick()
+    const q = r.sent.at(-1)!
+    r.svc.journal().pairing.unpair('p2') // the other channel goes (local owner) while the Ask is open
+    await r.answer(q, 'ph1', 'p1', true)
+    expect(await a).toMatchObject({ ok: false, reason: 'last_owner_channel' })
+    expect(r.svc.journal().pairing.isPaired('p1')).toBe(true)
+  })
+})

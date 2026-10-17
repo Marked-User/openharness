@@ -208,6 +208,8 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
   // Batch B (2): unpair through a locked_ask. Signed by the requesting phone's main key (the deny key is
   // verifier_rejected), rate limited from the ledger, the last paired phone only with a device touch proof; the other
   // paired phones and the device are told when it is asked and when it is done; every step is a ledger entry.
+  /** Shield B7: at most one unpair open at a time (its locked_ask is pending). */
+  let unpairOpen: string | null = null
   deps.inputs.onPairingUnpair = async (msg, from) => {
     const j = open()
     if (!pairedFrom(j, from)) return { ok: false, reason: 'unpaired_phone' }
@@ -225,17 +227,28 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     // Each request that opened a locked_ask counts (refusals before that open no Ask and need a valid signature).
     const recent = j.pairingLedger.all().filter((e) => now - e.at < UNPAIR_WINDOW_MS && e.kind === 'unpair_requested').length
     if (recent >= UNPAIR_RATE) return refuse('rate_limited', target)
+    // Shield B7: one open unpair at a time, so two requests can never both pass the last-owner check below.
+    if (unpairOpen !== null) return refuse('unpair_pending', target)
     // The last owner channel: removing the only paired phone needs the enrolled device's signed touch.
+    let touched = false
     if (j.pairing.pairedCount() <= 1) {
       const dev = j.device.device()
       if (!dev || !verifyEd25519(dev, unpairTouchMessage(target, at), msg.touchProof)) return refuse('last_owner_channel', target)
+      touched = true
     }
     j.pairingLedger.append({ kind: 'unpair_requested', phoneId: target, by: from.phoneId, via: 'phone' })
     emit('ildra.pairing.unpair_requested', { phoneId: target, by: from.phoneId, at: now })
-    const outcome = await rt.ask(UNPAIR_TEMPLATE, UNPAIR_ACTION, null, { agentId: 'ildra', kind: { tool: 'ildra.pairing.unpair', manifest: UNPAIR_MANIFEST }, available: ['phone'] })
+    unpairOpen = target
+    let outcome: Awaited<ReturnType<typeof rt.ask>>
+    try {
+      outcome = await rt.ask(UNPAIR_TEMPLATE, UNPAIR_ACTION, null, { agentId: 'ildra', kind: { tool: 'ildra.pairing.unpair', manifest: UNPAIR_MANIFEST }, available: ['phone'] })
+    } finally { unpairOpen = null }
     const askId = outcome.request?.id ?? ''
     if (!outcome.approved) return refuse('not_approved', target, askId || undefined)
-    if (!j.pairing.isPaired(target)) return refuse('unknown_phone', target)
+    // Shield B7: check again right before the unpair, in the same synchronous step (nothing can run between the
+    // check and the change): if it would leave no paired phone, only a touch proof given for this request allows it.
+    if (!j.pairing.isPaired(target)) return refuse('unknown_phone', target, askId || undefined)
+    if (j.pairing.pairedCount() <= 1 && !touched) return refuse('last_owner_channel', target, askId || undefined)
     j.pairing.unpair(target, { by: from.phoneId, via: 'locked_ask', askId })
     emit('ildra.pairing.unpaired', { phoneId: target, by: from.phoneId, askId, at: (deps.now ?? Date.now)(), remaining: j.pairing.pairedCount() })
     return { ok: true, state: 'unpaired', askId }

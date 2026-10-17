@@ -295,15 +295,16 @@ describe('Shield batch B: pairing ledger attacks (52977f9ac)', () => {
     expect(await r2.unpair('p1', r.K.P2.key, { conn: 'ph2', phoneId: 'p2' })).toEqual({ ok: false, reason: 'rate_limited' })
   })
 
-  it('GAP B7 (Medium): two unpairs opened while two phones are paired both pass the last-owner check, so approving both leaves no phone and no touch proof was ever given', async () => {
+  it('FIXED B7 (Medium): one unpair open at a time, and the last-owner check runs again right before the unpair, so two phones never end at zero without a touch proof', async () => {
     const r = rig(); r.pair('p1', r.K.P1.pub); r.pair('p2', r.K.P2.pub); await r.enrollDevice()
     const a = r.unpair('p2', r.K.P1.key); await tick(); const qa = r.sent.at(-1)!
-    const b = r.unpair('p1', r.K.P1.key); await tick(); const qb = r.sent.at(-1)!
-    expect(qa.id).not.toBe(qb.id)
-    await r.answer(qa, 'ph1', 'p1', true); const ra = await a
-    await r.answer(qb, 'ph1', 'p1', true); const rb = await b
-    expect(ra).toMatchObject({ ok: true }); expect(rb).toMatchObject({ ok: true })
-    expect(r.svc.journal().pairing.pairedCount()).toBe(0)
+    const n = r.sent.length
+    expect(await r.unpair('p1', r.K.P1.key)).toEqual({ ok: false, reason: 'unpair_pending' })
+    expect(r.sent.length).toBe(n) // no second locked_ask
+    await r.answer(qa, 'ph1', 'p1', true); expect(await a).toMatchObject({ ok: true })
+    // Now the last phone: without a touch proof it is refused before any Ask.
+    expect(await r.unpair('p1', r.K.P1.key)).toEqual({ ok: false, reason: 'last_owner_channel' })
+    expect(r.svc.journal().pairing.pairedCount()).toBe(1)
   })
 
   it('last owner: no device, a phone-made proof, a proof for another target or a stale at are refused; GAP B8: a valid touch proof is not single-use within 60 s', async () => {
