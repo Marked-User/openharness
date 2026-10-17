@@ -306,20 +306,19 @@ describe('Shield batch B: pairing ledger attacks (52977f9ac)', () => {
     expect(r.svc.journal().pairing.pairedCount()).toBe(1)
   })
 
-  it('last owner: no device, a phone-made proof, a proof for another target or a stale at are refused; GAP B8: a valid touch proof is not single-use within 60 s', async () => {
+  it('last owner: no device, a phone-made proof, a proof for another target or a stale at are refused; FIXED B8: a valid touch proof is single use', async () => {
     const r = rig(); r.pair('p1', r.K.P1.pub); await r.enrollDevice()
     const at = r.clock.t
     const proofTouch = sig(r.K.DEVK.key, unpairTouchMessage('p1', at))
     expect(await r.unpair('p1', r.K.P1.key, { at: at - 61_000, touchProof: sig(r.K.DEVK.key, unpairTouchMessage('p1', at - 61_000)) })).toEqual({ ok: false, reason: 'expired' })
     const p = r.unpair('p1', r.K.P1.key, { at, touchProof: proofTouch }); await tick()
     await r.answer(r.sent.at(-1)!, 'ph1', 'p1', true); expect(await p).toMatchObject({ ok: true })
-    // Re-paired within the minute: the same captured proof opens another last-owner unpair.
+    // FIXED B8: re-paired within the minute, the same captured proof is spent: refused, no Ask opened.
     r.pair('p1', r.K.P1.pub)
     r.clock.t += 10_000
     const n = r.sent.length
-    const q = r.unpair('p1', r.K.P1.key, { at, touchProof: proofTouch }); await tick()
-    expect(r.sent.length).toBe(n + 1)
-    await r.answer(r.sent.at(-1)!, 'ph1', 'p1', false); await q
+    expect(await r.unpair('p1', r.K.P1.key, { at, touchProof: proofTouch })).toEqual({ ok: false, reason: 'last_owner_channel' })
+    expect(r.sent.length).toBe(n)
   })
 
   it('only the paired phone reads the ledger and answered_by, or asks to unpair: observer, device, local socket, unknown connection refused', async () => {

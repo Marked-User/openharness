@@ -255,9 +255,14 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     if (j.pairing.pairedCount() <= 1) {
       const dev = j.device.device()
       if (!dev || !verifyEd25519(dev, unpairTouchMessage(target, at), msg.touchProof)) return refuse('last_owner_channel', target)
+      // Shield B8: a touch proof is single use. Its (target, at) is spent in the ledger (journaled, so also across a
+      // restart); one signed before the latest ledger reset or acknowledgement is not accepted either.
+      const spent = j.pairingLedger.all().some((e) => (e.kind === 'unpair_requested' && e.verb === 'touch_proof' && e.phoneId === target && e.since === at)
+        || ((e.kind === 'ledger_reset' || e.kind === 'ledger_ack') && at <= e.at))
+      if (spent) return refuse('last_owner_channel', target)
       touched = true
     }
-    j.pairingLedger.append({ kind: 'unpair_requested', phoneId: target, by: from.phoneId, via: 'phone' })
+    j.pairingLedger.append({ kind: 'unpair_requested', phoneId: target, by: from.phoneId, via: 'phone', ...(touched ? { verb: 'touch_proof', since: at } : {}) })
     emit('ildra.pairing.unpair_requested', { phoneId: target, by: from.phoneId, at: now })
     unpairOpen = target
     let outcome: Awaited<ReturnType<typeof rt.ask>>

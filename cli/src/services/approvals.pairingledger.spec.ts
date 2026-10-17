@@ -350,3 +350,23 @@ describe('Shield B5: a ledger that cannot be trusted fails closed', () => {
     expect(j3.pairing.changesLocked()).toBe(false)
   })
 })
+
+describe('Shield B8: a device touch proof is single use', () => {
+  it('a proof spent on a denied unpair cannot open another, also after a restart; a fresh proof (new at) works', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); await r.enrollDevice()
+    const at = r.clock.t
+    const proof = sig(r.K.DEVK.key, unpairTouchMessage('p1', at))
+    const p = r.unpair('p1', r.K.P1.key, { at, touchProof: proof }); await tick()
+    expect(r.svc.journal().pairingLedger.all().at(-1)).toMatchObject({ kind: 'unpair_requested', verb: 'touch_proof', since: at })
+    await r.answer(r.sent.at(-1)!, 'ph1', 'p1', false); expect(await p).toMatchObject({ ok: false, reason: 'not_approved' })
+    r.clock.t += 5_000
+    expect(await r.unpair('p1', r.K.P1.key, { at, touchProof: proof })).toEqual({ ok: false, reason: 'last_owner_channel' })
+    const r2 = rig(r.dir, r.clock, r.K)
+    expect(await r2.unpair('p1', r.K.P1.key, { at, touchProof: proof })).toEqual({ ok: false, reason: 'last_owner_channel' })
+    const at2 = r.clock.t
+    const q = r2.unpair('p1', r.K.P1.key, { at: at2, touchProof: sig(r.K.DEVK.key, unpairTouchMessage('p1', at2)) }); await tick()
+    expect(r2.sent.at(-1)).toMatchObject({ tier: 'locked_ask' })
+    await r2.answer(r2.sent.at(-1)!, 'ph1', 'p1', true); expect(await q).toMatchObject({ ok: true })
+    expect(r2.svc.journal().pairing.pairedCount()).toBe(0)
+  })
+})
