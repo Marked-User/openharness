@@ -82,7 +82,11 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
   // so of two answers in the same tick exactly one settles.
   deps.inputs.onUnclaimed = (a) => {
     const j = open()
-    if (typeof a.id === 'string' && j.ledger.get(a.id)) return 'busy'
+    if (typeof a.id === 'string' && j.ledger.get(a.id)) {
+      // v3.3: a phone answer refused as busy is logged as an attempt (channel phone), like its other rejections.
+      j.ledger.phoneAttempt(a as unknown as AskAnswer, 'busy')
+      return 'busy'
+    }
     const r = j.ledger.settle(a as unknown as AskAnswer, { isPaired: pairedKey(j), isShared: (o) => deps.inputs.isShared(o) })
     return r.ok ? null : r.reason
   }

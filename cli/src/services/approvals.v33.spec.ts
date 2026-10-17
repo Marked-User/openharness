@@ -13,11 +13,11 @@ import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { createIldraAsk, type IldraAskEvent } from './ildraAsk.js'
 import {
   ApprovalDenied, ApprovalWindow, AskLedger, DEVICE_WINDOW_SEC, MAX_SHORT_HOLDS, PRACTICE_ACTION, PhonePairing, PracticeRefused,
-  ask, openJournal, practiceAsk, stampManifest, toDeviceMessage,
+  ASK_REJECTION_REASONS, actionDigest8, digestInput, ask, openJournal, practiceAsk, stampManifest, toDeviceMessage,
   type AskAnswer, type AskHandoff, type AskRequest, type ApprovalTemplate,
 } from './approvals.js'
 import { CONFUSABLES_COUNT, CONFUSABLES_SHA256, CONFUSABLES_VERSION } from './unicode/confusables.js'
-import { recipientAscii, skeleton } from './recipient.js'
+import { lookalikeOf, recipientAscii, skeleton } from './recipient.js'
 
 const aid = (): string => randomBytes(16).toString('hex')
 const KEY = 'P'.repeat(43) + '='
@@ -367,5 +367,139 @@ describe('v3.3 wire schema', () => {
     expect(env('ildra.ask.request', { ...flagged, channel: 'touch' })).toBe(false)
     expect(env('ildra.ask.request', { ...flagged, recipientFlags: ['new_recipient'], channel: 'touch' })).toBe(true)
     expect(createHash('sha256').update('x').digest('hex')).toHaveLength(64)
+  })
+})
+
+describe('v3.3 schema gaps: busy, no_authority, phone attempts, lookalikeOf, NFD vector', () => {
+  const schema = JSON.parse(readFileSync(new URL('./ildra-messages.schema.json', import.meta.url), 'utf8'))
+  const Ajv2020 = (Ajv2020Module as unknown as { default: typeof Ajv2020Module }).default ?? Ajv2020Module
+  const ajv = new (Ajv2020 as unknown as new (o: object) => import('ajv').default)({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true })
+  ajv.addSchema(schema)
+  const env = (type: string, body: unknown) => ajv.getSchema(schema.$id)!({ type, proto: 1, body })
+
+  it('the daemon and the schema have one rejection-reason list, busy and no_authority included', () => {
+    expect(schema.$defs.AskRejectionReason.enum).toEqual([...ASK_REJECTION_REASONS])
+    expect(ASK_REJECTION_REASONS).toContain('busy')
+    expect(ASK_REJECTION_REASONS).toContain('no_authority')
+  })
+
+  it('no_authority: the local socket, an observer, an unknown connection; nothing recorded, the Ask stays open', async () => {
+    const r = rig(CLIENTS)
+    r.pairPhone()
+    const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch', 'phone'] })
+    await tick()
+    const req = r.shown[0]!.req
+    const answerId = aid()
+    for (const conn of ['local:1', 'obs', 'ghost']) expect(await r.send(req, conn, { answerId })).toEqual({ ok: false, reason: 'no_authority' })
+    expect(r.svc.journal().ledger.attempts()).toHaveLength(0)
+    // The same answerId still works: no_authority records nothing.
+    expect(await r.send(req, 'dev', { answerId })).toEqual({ ok: true })
+    expect(await p).toMatchObject({ approved: true, channel: 'touch' })
+  })
+
+  it('busy: a phone answer while another answer settles the same Ask; logged as a phone attempt', async () => {
+    const r = rig(CLIENTS)
+    r.pairPhone()
+    const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch', 'phone'] })
+    await tick()
+    const req = r.shown[0]!.req
+    const [a, b] = await Promise.all([r.send(req, 'dev'), r.send(req, 'ph')])
+    expect(a).toEqual({ ok: true }); expect(b).toEqual({ ok: false, reason: 'busy' })
+    await p
+    const att = r.events.filter((e) => e.type === 'ildra.ask.attempt').map((e) => e.body as Record<string, unknown>)
+    expect(att).toEqual([expect.objectContaining({ id: req.id, channel: 'phone', reason: 'busy' })])
+    expect(env('ildra.ask.attempt', att[0])).toBe(true)
+    expect(env('ildra.ask.rejection', { ok: false, reason: 'busy' })).toBe(true)
+  })
+
+  it('every rejected phone answer to a known Ask is an attempt with channel phone; device rejections other than short hold and stale are not', () => {
+    const p = paired()
+    const l = new AskLedger()
+    const seen: Record<string, unknown>[] = []
+    l.onAttempt = (a) => { seen.push(a as unknown as Record<string, unknown>) }
+    const ctx = ctxFor(p)
+    // digest_mismatch (spends), then replayed and expired on later Asks
+    const r1 = l.open({ action: 'Rename a file', tier: 'ask', channel: 'phone', agentId: 'a' })
+    expect(l.settle(phone(r1, { digest8: '00000000' }), ctx)).toEqual({ ok: false, reason: 'digest_mismatch' })
+    const again = phone(r1)
+    expect(l.settle(again, ctx)).toEqual({ ok: false, reason: 'replayed' })
+    // wrong_channel on a touch-only Ask
+    const r2 = l.open({ action: 'Rename a file', tier: 'ask', channel: 'touch', agentId: 'a', phoneAllowed: false } as never)
+    expect(l.settle(phone(r2), ctx)).toEqual({ ok: false, reason: 'wrong_channel' })
+    // malformed with a well-formed id and answerId (digest8 not a string)
+    expect(l.settle(phone(r2, { digest8: 5 as never }), ctx)).toEqual({ ok: false, reason: 'malformed' })
+    // unpaired key
+    const r3 = l.open({ action: 'Rename a file', tier: 'ask', channel: 'phone', agentId: 'a' })
+    expect(l.settle(phone(r3, { from: { phoneId: 'p1', machinePub: OTHER } }), ctx)).toEqual({ ok: false, reason: 'unpaired_phone' })
+    // not logged: unknown_id, a bad answerId, a device wrong_channel
+    expect(l.settle(phone({ ...r3, id: '00000000-0000-4000-8000-000000000000' }), ctx)).toEqual({ ok: false, reason: 'unknown_id' })
+    expect(l.settle(phone(r2, { answerId: 'short' }), ctx)).toEqual({ ok: false, reason: 'malformed' })
+    const r4 = l.open({ action: 'Rename a file', tier: 'ask', channel: 'phone', agentId: 'a' })
+    expect(l.settle(touch(r4), ctx)).toEqual({ ok: false, reason: 'wrong_channel' })
+    expect(seen.map((a) => [a.channel, a.reason])).toEqual([
+      ['phone', 'digest_mismatch'], ['phone', 'replayed'], ['phone', 'wrong_channel'], ['phone', 'malformed'], ['phone', 'unpaired_phone'],
+    ])
+    for (const a of seen) { expect(a.holdMs).toBeUndefined(); expect(env('ildra.ask.attempt', a)).toBe(true) }
+    // the journal keeps them across a restart
+    const l2 = new AskLedger(); l2.restore(l.toJSON())
+    expect(l2.attempts().map((a) => a.reason)).toEqual(seen.map((a) => a.reason))
+  })
+
+  it('expired phone answer is a phone attempt; the practice Ask refuses the phone with wrong_channel, logged', async () => {
+    let t = 1_000
+    const l = new AskLedger({ now: () => t })
+    const seen: string[] = []
+    l.onAttempt = (a) => { seen.push(`${a.channel}:${a.reason}`) }
+    const p = paired(() => t)
+    const r = l.open({ action: 'Rename a file', tier: 'ask', channel: 'phone', agentId: 'a' })
+    t = r.expiresAt + 1
+    expect(l.settle(phone(r), ctxFor(p))).toEqual({ ok: false, reason: 'expired' })
+    const pr = l.open({ action: PRACTICE_ACTION, tier: 'ask', channel: 'touch', kind: 'practice', phoneAllowed: false } as never)
+    expect(l.settle(phone(pr), ctxFor(p))).toEqual({ ok: false, reason: 'wrong_channel' })
+    expect(seen).toEqual(['phone:expired', 'phone:wrong_channel'])
+  })
+
+  it('the schema: phone attempts carry no holdMs and never hold_too_short / stale_channel / unknown_id / no_authority; device attempts only those two', () => {
+    const base = { id: '7b2e4c1d-0a9f-4e3b-9c2d-1e2f3a4b5c6d', answerId: aid(), at: 1 }
+    expect(env('ildra.ask.attempt', { ...base, channel: 'phone', reason: 'digest_mismatch' })).toBe(true)
+    for (const reason of ['hold_too_short', 'stale_channel', 'unknown_id', 'no_authority']) expect(env('ildra.ask.attempt', { ...base, channel: 'phone', reason })).toBe(false)
+    expect(env('ildra.ask.attempt', { ...base, channel: 'phone', reason: 'busy', holdMs: 3 })).toBe(false)
+    expect(env('ildra.ask.attempt', { ...base, channel: 'touch', reason: 'digest_mismatch' })).toBe(false)
+    expect(env('ildra.ask.attempt', { ...base, channel: 'voice', reason: 'stale_channel' })).toBe(true)
+  })
+
+  it('lookalikeOf: the matched contact or domain in ASCII form, only with the lookalike flag, not in digest8', () => {
+    const l = new AskLedger()
+    const open = (recipient: string, known?: { contacts?: string[]; domains?: string[] }) =>
+      l.open({ action: 'Send an email', tier: 'ask', channel: 'phone', agentId: 'a', recipient, firstLine: 'hi', details: { recipient }, known } as never)
+    const a = open('dana@\u0430cme.com', { contacts: ['dana@acme.com'] })
+    expect(a.recipientFlags).toContain('lookalike'); expect(a.lookalikeOf).toBe('dana@acme.com')
+    const b = open('bob@\u0430cme.com', { domains: ['acme.com'] })
+    expect(b.lookalikeOf).toBe('acme.com')
+    const c = open('dana@b\u00fccher.de', { domains: ['bucher.de', 'b\u00fccher.example'] })
+    expect(c.lookalikeOf).toBeUndefined()
+    expect(lookalikeOf('x@r\u0430ilway.com', { domains: ['railway.com'] })).toBe('railway.com')
+    expect(lookalikeOf('dana@acme.com', { contacts: ['dana@acme.com'] })).toBeNull()
+    const plain = open('dana@\u0430cme.com')
+    expect(plain.lookalikeOf).toBeUndefined()
+    expect(plain.digest8).toBe(a.digest8)
+    expect(env('ildra.ask.request', a)).toBe(true)
+    expect(env('ildra.ask.request', { ...plain, lookalikeOf: 'dana@acme.com' })).toBe(false)
+  })
+
+  it('NFD recipient: same digest8 as the NFC form, in the vectors (10) and at open', () => {
+    const vec = JSON.parse(readFileSync(join(process.env.ILDRA_PROTOCOL_DIR ?? join(import.meta.dirname, '..', '..', '..', '..', 'protocol'), 'examples', 'vectors', 'digest8.json'), 'utf8')) as { vectors: { name: string; action: string; fields: Record<string, unknown>; jcs: string | null; digest8: string | null }[] }
+    expect(vec.vectors).toHaveLength(10)
+    const nfd = vec.vectors.find((v) => v.name.startsWith('NFD'))!
+    expect(nfd.fields.recipient).toBe('jose\u0301@example.com')
+    const nfcFields = { ...nfd.fields, recipient: 'jos\u00e9@example.com' }
+    expect(actionDigest8(nfd.action, nfd.fields)).toBe(nfd.digest8)
+    expect(actionDigest8(nfd.action, nfcFields)).toBe(nfd.digest8)
+    expect(digestInput(nfd.action, nfd.fields)).toBe(nfd.jcs)
+    expect(nfd.jcs).toContain('jos\u00e9@example.com')
+    const l = new AskLedger()
+    const msg = { messageSha256: nfd.fields.messageSha256 }
+    const a = l.open({ action: nfd.action, tier: 'ask', channel: 'phone', agentId: 'bookkeeper-1', recipient: 'jose\u0301@example.com', firstLine: 'hi', details: { recipient: 'jose\u0301@example.com', ...msg } })
+    expect(a.digest8).toBe(nfd.digest8); expect(a.recipient).toBe('jos\u00e9@example.com')
   })
 })

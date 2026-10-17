@@ -68,7 +68,8 @@
         "templateId": { "type": "string", "minLength": 1 },
         "recipient": { "description": "Send Asks only. Shield R5-5: never carries a bidi control (U+202A-202E, U+2066-2069, U+200E, U+200F, U+061C), a zero-width character (U+200B-200D, U+2060, U+FEFF), U+2028, U+2029 or any C0/C1 control (CR and LF included); a send whose recipient has one is refused as malformed and no Ask is opened. v3.3: the daemon puts the recipient in Unicode NFC before it is shown or hashed, so digest8 covers the NFC form.", "type": "string", "minLength": 1, "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F\\u061C\\u200B-\\u200F\\u2028-\\u202E\\u2060\\u2066-\\u2069\\uFEFF]+$" },
         "recipientFlags": { "description": "Send Asks only, set by the daemon, not in digest8 (the recipient itself is). mixed_script (Shield R5-5): the domain, one of its labels, or the local part mixes letter scripts (for example Cyrillic \u0430 in p\u0430ypal.com). lookalike (v3.3): the UTS #39 skeleton (Unicode confusables.txt 16.0.0, pinned) of the recipient, local part and domain, equals that of a known contact, or the domain's skeleton equals a known domain's, while the text differs. non_ascii (v3.3): the domain has any non-ASCII character; surfaces show recipientAscii (punycode). new_recipient (v3.3): no approved send has gone to this recipient and it is not a known contact; informational only, it does not change routing. mixed_script, lookalike and non_ascii make the Ask phone only (as locked_ask; device touch and voice answers are wrong_channel, the device shows Use your phone) and no Auto or standing rule ever covers it.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["mixed_script", "lookalike", "non_ascii", "new_recipient"] } },
-        "recipientAscii": { "description": "Send Asks only (v3.3), display only: the recipient with its domain in ASCII (IDNA, punycode, lowercased) and the local part as is. Always set by the daemon with recipient. A recipient whose domain has no ASCII form is refused as malformed.", "type": "string", "minLength": 1, "pattern": "^[\\u0020-\\u007E]+@[\\u0021-\\u007E]+$|^[^@]+$" },
+        "recipientAscii": { "description": "Send Asks only (v3.3), display only: the recipient with its domain in ASCII (IDNA, punycode, lowercased) and the local part as is (it may be non-ASCII, for example jos\u00e9@example.com; only the domain is converted). Always set by the daemon with recipient. A recipient whose domain has no ASCII form is refused as malformed.", "type": "string", "minLength": 1, "pattern": "^[^@]+@[\\u0021-\\u003F\\u0041-\\u007E]+$|^[^@]+$" },
+        "lookalikeOf": { "description": "Send Asks with the lookalike flag only (v3.3), set by the daemon, display only, not in digest8: the known contact or known domain the recipient's skeleton matched, in ASCII form (domain in punycode, local part as is), so the phone can say It looks like dana@acme.com.", "type": "string", "minLength": 1 },
         "firstLine": { "description": "Send Asks only: first non-empty line of the message, trimmed; never empty (a send whose message has no non-blank line is refused, no Ask is opened). At most 80 Unicode code points: a longer line is cut to 79 code points plus \u2026. Shield R5-5: each hidden character in the line (the recipient's list above; a tab shows as a space) is shown as a visible marker \u27e6U+XXXX\u27e7, for example \u27e6U+2028\u27e7, before the cut.", "type": "string", "minLength": 1, "maxLength": 80 },
         "kind": { "description": "Display only, not in digest8, set by the daemon, never by the asking caller. safety_verification: a safety check step on a locked_ask, from the template (safety_verification list) or a trusted tool manifest entry (safetyVerification: true, stamped by the daemon's loader). practice (PM Q52, v3.3): the daemon's first-run practice Ask; action is exactly \"Practice Ask\", tier ask, and it never carries an amount, a recipient, a tool or a detail (a request that tries is refused). Settling it executes nothing and never touches the running totals; short holds never close it (no hold_limit). More values may be added.", "enum": ["safety_verification", "practice"] }
       },
@@ -106,6 +107,11 @@
           "description": "v3.3 (Shield, Design): a send to a flagged recipient (mixed_script, lookalike or non_ascii in recipientFlags) is phone only, like locked_ask.",
           "if": { "properties": { "recipientFlags": { "type": "array", "contains": { "enum": ["mixed_script", "lookalike", "non_ascii"] } } }, "required": ["recipientFlags"] },
           "then": { "properties": { "channel": { "const": "phone" } } }
+        },
+        {
+          "description": "v3.3: lookalikeOf is present only with the lookalike flag.",
+          "if": { "required": ["lookalikeOf"] },
+          "then": { "required": ["recipientFlags"], "properties": { "recipientFlags": { "type": "array", "contains": { "const": "lookalike" } } } }
         }
       ]
     },
@@ -145,11 +151,12 @@
     },
 
     "AskRejectionReason": {
-      "enum": ["malformed", "unknown_id", "replayed", "expired", "digest_mismatch", "challenge_mismatch", "verifier_rejected", "shared_machine", "unpaired_phone", "hold_too_short", "stale_channel", "wrong_channel", "hold_limit"]
+      "description": "v3.3 adds busy and no_authority. busy: another answer to the same open request is being settled at this moment (device and phone in the same tick); exactly one settles, this one is refused, the request is not spent by it. no_authority: the connection may not answer at all (the daemon's local socket, an observer, or a connection the daemon does not know); refused before any check, nothing is recorded (not even the answerId), the request is untouched. wrong_channel is different: an authenticated answering surface (the device bridge, or a phone key) answered on a channel it may not answer on; its answerId is recorded.",
+      "enum": ["malformed", "unknown_id", "replayed", "expired", "digest_mismatch", "challenge_mismatch", "verifier_rejected", "shared_machine", "unpaired_phone", "hold_too_short", "stale_channel", "wrong_channel", "hold_limit", "busy", "no_authority"]
     },
 
     "AskRejection": {
-      "description": "Daemon to answering surface when an answer is not accepted (approvals.ts SettleResult with ok false). The request is spent by the rejection (it can no longer be answered), with three exceptions that leave an unexpired request open until expiresAt: hold_too_short and stale_channel (the daemon emits ildra.ask.attempt), and wrong_channel (Shield R5-1, v3.3: an answer from a connection that may not answer on the request's channel: a device answer to a phone Ask, a non-device answer to a device Ask that is not an early handoff, or any answer to a phone-only Ask from the device; not logged, the request not spent (its answerId is recorded), checked before replayed). hold_limit (Shield R5-4): the fifth hold_too_short on one request spends it; that attempt is still logged and the daemon sends ildra.ask.outcome with reason hold_limit. A malformed answer changes nothing; otherwise the rejected answerId is spent too.",
+      "description": "Daemon to answering surface when an answer is not accepted (approvals.ts SettleResult with ok false). The request is spent by the rejection (it can no longer be answered), with exceptions that leave an unexpired request open until expiresAt: hold_too_short and stale_channel (the daemon emits ildra.ask.attempt), busy and no_authority (v3.3, see AskRejectionReason), and wrong_channel (Shield R5-1, v3.3: an answer from a connection that may not answer on the request's channel: a device answer to a phone Ask, a non-device answer to a device Ask that is not an early handoff, or any answer to a phone-only Ask from the device; not logged, the request not spent (its answerId is recorded), checked before replayed). hold_limit (Shield R5-4): the fifth hold_too_short on one request spends it; that attempt is still logged and the daemon sends ildra.ask.outcome with reason hold_limit. A malformed answer changes nothing; otherwise the rejected answerId is spent too.",
       "type": "object",
       "additionalProperties": false,
       "required": ["ok", "reason"],
@@ -180,7 +187,7 @@
     },
 
     "AskAttempt": {
-      "description": "Daemon to phone, and kept in the Ask journal (activity log): an answer that did not settle the request and left it open until expiresAt. hold_too_short: a device approval held under 1500 ms. A short hold is a rejected gesture (an attempt), not an answer: the request stays open, and the fifth on one request spends it (hold_limit, Shield R5-4; never on a practice Ask). stale_channel: an answer (approve or deny) from the device channel the request left by ildra.ask.handoff. channel is the channel the answer came from. holdMs is what the device reported (absent when it sent none).",
+      "description": "Daemon to phone, and kept in the Ask journal (activity log): a rejected answer. From the device (channel touch or voice) only hold_too_short or stale_channel, and the request stays open until expiresAt. hold_too_short: a device approval held under 1500 ms. A short hold is a rejected gesture (an attempt), not an answer: the request stays open, and the fifth on one request spends it (hold_limit, Shield R5-4; never on a practice Ask). stale_channel: an answer (approve or deny) from the device channel the request left by ildra.ask.handoff. v3.3, channel phone: every rejected answer from the phone to a known request (for example digest_mismatch, malformed, busy, replayed, expired, unpaired_phone, shared_machine, or wrong_channel on a touch-only or practice Ask); when that rejection spent the request, ildra.ask.outcome follows. Not logged: unknown_id (no request to log it on), an answer whose id or answerId is not well formed, and no_authority. channel is the channel the answer came from. holdMs is what the device reported (absent when it sent none; never on phone attempts).",
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "answerId", "channel", "reason", "at"],
@@ -188,10 +195,13 @@
         "id": { "$ref": "#/$defs/AskId" },
         "answerId": { "$ref": "#/$defs/AnswerId" },
         "channel": { "description": "v3.3: the channel the rejected answer came from.", "enum": ["voice", "touch", "phone"] },
-        "reason": { "enum": ["hold_too_short", "stale_channel"] },
+        "reason": { "$ref": "#/$defs/AskRejectionReason" },
         "holdMs": { "type": "number", "minimum": 0 },
         "at": { "$ref": "#/$defs/EpochMs" }
-      }
+      },
+      "if": { "properties": { "channel": { "const": "phone" } }, "required": ["channel"] },
+      "then": { "properties": { "reason": { "not": { "enum": ["hold_too_short", "stale_channel", "unknown_id", "no_authority"] } } }, "not": { "required": ["holdMs"] } },
+      "else": { "properties": { "reason": { "enum": ["hold_too_short", "stale_channel"] } } }
     },
 
     "AskOutcome": {

@@ -77,7 +77,7 @@ describe('Shield R5 runtime: who may answer an Ask', () => {
     const r = rig({ sh: { identity: OTHER, role: 'web', shared: true } })
     const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
     await tick()
-    expect(await r.core.requests.ildra_ask_answer({ id: r.sent[0]!.id, digest8: r.sent[0]!.digest8, answerId: aid(), approved: true, holdMs: 2000 }, { local: false, owner: true, connection: 'ghost' })).toEqual({ ok: false, reason: 'no_connection' })
+    expect(await r.core.requests.ildra_ask_answer({ id: r.sent[0]!.id, digest8: r.sent[0]!.digest8, answerId: aid(), approved: true, holdMs: 2000 }, { local: false, owner: true, connection: 'ghost' })).toEqual({ ok: false, reason: 'no_authority' }) // v3.3: was no_connection; one wire name (AskRejectionReason no_authority), noted by Build
     await r.answer(r.sent[0]!, 'sh', { from: { machinePub: DEV, shared: false } })
     expect(await p).toMatchObject({ approved: false, reason: 'shared_machine' })
   })

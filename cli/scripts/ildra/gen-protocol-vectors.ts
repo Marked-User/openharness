@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { InvalidUnicode, actionDigest8, canonicalJson } from '../../src/services/approvals.js'
+import { InvalidUnicode, actionDigest8, digestInput } from '../../src/services/approvals.js'
 
 const PROTOCOL = join(import.meta.dirname, '..', '..', '..', '..', 'protocol')
 const sha = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex')
@@ -23,6 +23,10 @@ const cases: { name: string; action: string; fields: Record<string, unknown> }[]
     fields: { agentId: 'x', tier: 'locked_ask', amountMinor: 5, currency: 'USD', memo: null, list: [1, 'x', { z: 1, a: 2 }] } },
   { name: 'key order by UTF-16 code units, numbers in ES form', action: 'Rename a file',
     fields: { agentId: 'a', tier: 'ask', '\u{1F600}': 1, '\u00e9': 2, Z: 3, a: 4, n: [1e21, 0.1, -0, 1.5e-7, 100] } },
+  // v3.3 (Shield): an un-normalized (NFD) recipient: e + U+0301 in the local part. The recipient is NFC-normalized
+  // before JCS, so jcs, sha256 and digest8 equal those of the NFC form (jos\u00e9@example.com).
+  { name: 'NFD recipient hashes as its NFC form', action: 'Send an invoice',
+    fields: { agentId: 'bookkeeper-1', tier: 'ask', recipient: 'jose\u0301@example.com', messageSha256: sha(INVOICE_MESSAGE) } },
 ]
 /** Refused: a lone UTF-16 surrogate anywhere in the digest input. No digest; the Ask outcome is reason malformed. */
 const refused: { name: string; action: string; fields: Record<string, unknown> }[] = [
@@ -33,7 +37,7 @@ const refused: { name: string; action: string; fields: Record<string, unknown> }
 
 const vectors = [
   ...cases.map((c) => {
-    const jcs = canonicalJson({ ...c.fields, action: c.action })
+    const jcs = digestInput(c.action, c.fields)
     return { name: c.name, action: c.action, fields: c.fields, jcs, sha256: sha(jcs), digest8: actionDigest8(c.action, c.fields) }
   }),
   ...refused.map((c) => {
@@ -44,7 +48,7 @@ const vectors = [
   }),
 ]
 writeFileSync(join(PROTOCOL, 'examples', 'vectors', 'digest8.json'), `${JSON.stringify({
-  rule: 'digest8 = first 8 lowercase hex of SHA-256(UTF-8(JCS({action, ...fields}))); fields absent are omitted; messageSha256 = hex SHA-256 of the full UTF-8 message. A lone UTF-16 surrogate anywhere in the input refuses the Ask (refused: malformed, digest8 null; AskOutcome reason malformed). See protocol/README.md "Digest".',
+  rule: 'digest8 = first 8 lowercase hex of SHA-256(UTF-8(JCS({action, ...fields}))); fields absent are omitted; messageSha256 = hex SHA-256 of the full UTF-8 message. A string recipient is NFC-normalized before JCS (v3.3; the NFD vector has the digest of its NFC form). A lone UTF-16 surrogate anywhere in the input refuses the Ask (refused: malformed, digest8 null; AskOutcome reason malformed). See protocol/README.md "Digest".',
   invoiceMessage: INVOICE_MESSAGE,
   vectors,
 }, null, 2)}\n`)
@@ -65,9 +69,12 @@ set('ask-request-send-voice.json', invoice)
 set('ask-answer-touch-hold.json', invoice)
 set('ask-answer-touch-short.json', invoice)
 // Shield R5-5: the recipient is hashed exactly as given (Cyrillic \u0430); recipientFlags is display only. Kept
-// out of digest8.json so the vector set App pins (9) is unchanged.
+// out of digest8.json (the vector set is the 10 above).
 set('ask-request-send-mixed-script.json', actionDigest8('Send an invoice',
   { agentId: 'bookkeeper-1', tier: 'ask', recipient: 'dana@ex\u0430mple.com', messageSha256: sha(INVOICE_MESSAGE) }))
 // PM Q52: the practice Ask's digest (fixed action, tier ask, nothing else).
 set('ask-request-practice.json', actionDigest8('Practice Ask', { tier: 'ask' }))
+// v3.3: the NFD recipient example (same digest8 as the NFC form).
+set('ask-request-send-nfd.json', actionDigest8('Send an invoice',
+  { agentId: 'bookkeeper-1', tier: 'ask', recipient: 'jose\u0301@example.com', messageSha256: sha(INVOICE_MESSAGE) }))
 console.log(vectors.map((v) => `${v.digest8 ?? 'refused '}  ${v.name}`).join('\n'))

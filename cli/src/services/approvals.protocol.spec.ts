@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import Ajv2020Module from 'ajv/dist/2020.js'
 import { describe, expect, it } from 'vitest'
 import {
-  ANSWER_ID, ApprovalDenied, AskLedger, InvalidUnicode, PhonePairing, actionDigest8, ask, askKindFor, canonicalJson, fromDeviceReply, neverOutcome, stampManifest,
+  ANSWER_ID, ApprovalDenied, AskLedger, InvalidUnicode, PhonePairing, actionDigest8, ask, askKindFor, canonicalJson, digestInput, fromDeviceReply, neverOutcome, stampManifest,
   type ApprovalTemplate, type AskRequest, type ToolManifestEntry,
 } from './approvals.js'
 
@@ -59,7 +59,10 @@ describe('ildra.ask.attempt, ildra.ask.handoff and outcome reasons from the daem
     expect(l.toJSON().attempts).toEqual(seen)
     expect(env('ildra.ask.attempt', { ...(seen[0] as object), reason: 'expired' }).length).toBeGreaterThan(0)
     // v3.3: channel is voice, touch or phone (the channel the rejected answer came from); nothing else.
-    expect(env('ildra.ask.attempt', { ...(seen[0] as object), channel: 'phone' })).toEqual([])
+    // v3.3 (schema gaps): a phone attempt is a rejected phone answer, never a short hold, and has no holdMs.
+    expect(env('ildra.ask.attempt', { ...(seen[0] as object), channel: 'phone' }).length).toBeGreaterThan(0)
+    const { holdMs: _h, ...noHold } = seen[0] as Record<string, unknown>
+    expect(env('ildra.ask.attempt', { ...noHold, channel: 'phone', reason: 'digest_mismatch' })).toEqual([])
     expect(env('ildra.ask.attempt', { ...(seen[0] as object), channel: 'device' }).length).toBeGreaterThan(0)
   })
   it('attempts survive a journal round trip', () => {
@@ -119,7 +122,7 @@ describe.runIf(hasProtocol)('Ildra protocol files', () => {
     expect(v.vectors.filter((x) => x.refused === 'malformed').length).toBeGreaterThanOrEqual(1)
     for (const x of v.vectors) {
       if (x.refused) { expect(() => actionDigest8(x.action, x.fields), x.name).toThrow(InvalidUnicode); continue }
-      expect(canonicalJson({ ...x.fields, action: x.action }), x.name).toBe(x.jcs)
+      expect(digestInput(x.action, x.fields), x.name).toBe(x.jcs)
       expect(actionDigest8(x.action, x.fields), x.name).toBe(x.digest8)
     }
   })

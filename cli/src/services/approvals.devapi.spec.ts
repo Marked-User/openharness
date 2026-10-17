@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   ApprovalDenied, ApprovalWindow, AskLedger, DEVICE_HOLD_MIN_MS, MONEY_ASK_EXPIRY_MS, OTHER_ASK_EXPIRY_MS, PhonePairing,
-  InvalidUnicode, USE_YOUR_PHONE, actionDigest8, ask, canonicalJson, firstLine, neverOutcome, fromDeviceReply, toDeviceMessage,
+  InvalidUnicode, USE_YOUR_PHONE, actionDigest8, ask, canonicalJson, digestInput, firstLine, neverOutcome, fromDeviceReply, toDeviceMessage,
   type AskAnswer, type AskRequest, type ApprovalTemplate,
   stampManifest,
 } from './approvals.js'
@@ -249,7 +249,7 @@ describe('v3 digest (JCS) and firstLine', () => {
       if (v.refused) {
         expect(() => actionDigest8(v.action, v.fields), v.name).toThrow(InvalidUnicode)
       } else {
-        expect(canonicalJson({ ...v.fields, action: v.action }), v.name).toBe(v.jcs)
+        expect(digestInput(v.action, v.fields), v.name).toBe(v.jcs)
         expect(actionDigest8(v.action, v.fields), v.name).toBe(v.digest8)
       }
     }

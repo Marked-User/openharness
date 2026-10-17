@@ -1,5 +1,5 @@
 {
-  "rule": "digest8 = first 8 lowercase hex of SHA-256(UTF-8(JCS({action, ...fields}))); fields absent are omitted; messageSha256 = hex SHA-256 of the full UTF-8 message. A lone UTF-16 surrogate anywhere in the input refuses the Ask (refused: malformed, digest8 null; AskOutcome reason malformed). See protocol/README.md \"Digest\".",
+  "rule": "digest8 = first 8 lowercase hex of SHA-256(UTF-8(JCS({action, ...fields}))); fields absent are omitted; messageSha256 = hex SHA-256 of the full UTF-8 message. A string recipient is NFC-normalized before JCS (v3.3; the NFD vector has the digest of its NFC form). A lone UTF-16 surrogate anywhere in the input refuses the Ask (refused: malformed, digest8 null; AskOutcome reason malformed). See protocol/README.md \"Digest\".",
   "invoiceMessage": "Hi Dana, invoice attached.\nThe total is $120.00.",
   "vectors": [
     {
@@ -91,6 +91,19 @@
       "jcs": "{\"Z\":3,\"a\":4,\"action\":\"Rename a file\",\"agentId\":\"a\",\"n\":[1e+21,0.1,0,1.5e-7,100],\"tier\":\"ask\",\"é\":2,\"😀\":1}",
       "sha256": "b7183a17cdcd26873598d14617318404ee8e0ea2e0da38ef9aac37e33f04d49f",
       "digest8": "b7183a17"
+    },
+    {
+      "name": "NFD recipient hashes as its NFC form",
+      "action": "Send an invoice",
+      "fields": {
+        "agentId": "bookkeeper-1",
+        "tier": "ask",
+        "recipient": "josé@example.com",
+        "messageSha256": "4ea3ca17cda49947573a8b42e52c0a89c4a31526b35de889596278403f6e5119"
+      },
+      "jcs": "{\"action\":\"Send an invoice\",\"agentId\":\"bookkeeper-1\",\"messageSha256\":\"4ea3ca17cda49947573a8b42e52c0a89c4a31526b35de889596278403f6e5119\",\"recipient\":\"josé@example.com\",\"tier\":\"ask\"}",
+      "sha256": "cf9d9af6fb3aea620086b32cca3c50c6ba2cf28884b4222f9f01e3d55cd2d306",
+      "digest8": "cf9d9af6"
     },
     {
       "name": "refused: lone high surrogate in a detail value",

@@ -70,18 +70,20 @@ export interface RecipientKnowledge {
 }
 
 /**
+ * lookalikeOf (v3.3): the known contact or domain a lookalike recipient matches, in ASCII form (domain punycode),
+ * for display only ("It looks like dana@acme.com"); null when it is not a lookalike.
  * lookalike: the recipient's skeleton (local part and domain) equals a known contact's skeleton, or its
  * domain's skeleton equals a known domain's, while the text itself differs (after NFC and domain lowercasing).
  */
-export function isLookalike(recipient: string, known: RecipientKnowledge): boolean {
+export function lookalikeOf(recipient: string, known: RecipientKnowledge): string | null {
   const key = recipientKey(recipient)
   const sk = recipientSkeleton(recipient)
   for (const c of known.contacts ?? []) {
     if (typeof c !== 'string') continue
-    if (recipientKey(c) !== key && recipientSkeleton(c) === sk) return true
+    if (recipientKey(c) !== key && recipientSkeleton(c) === sk) return asciiForm(c)
   }
   const { domain } = splitRecipient(recipient)
-  if (domain === null) return false
+  if (domain === null) return null
   const d = domain.toLowerCase()
   const dsk = skeleton(d)
   const domains = new Set<string>()
@@ -89,10 +91,19 @@ export function isLookalike(recipient: string, known: RecipientKnowledge): boole
   for (const c of known.contacts ?? []) {
     if (typeof c !== 'string') continue
     const cd = splitRecipient(c).domain
-    if (cd !== null) domains.add(cd.toLowerCase())
+    if (cd !== null) domains.add(cd.normalize('NFC').toLowerCase())
   }
-  for (const x of domains) if (x !== d && skeleton(x) === dsk) return true
-  return false
+  for (const x of domains) if (x !== d && skeleton(x) === dsk) return domainToASCII(x) || x
+  return null
+}
+
+/** The ASCII form of a known contact for display (lookalikeOf): domain in punycode, local part as is. */
+function asciiForm(contact: string): string {
+  return recipientAscii(contact) ?? recipientKey(contact)
+}
+
+export function isLookalike(recipient: string, known: RecipientKnowledge): boolean {
+  return lookalikeOf(recipient, known) !== null
 }
 
 /** new_recipient: not a known contact (compared by recipientKey). */

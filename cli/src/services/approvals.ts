@@ -25,7 +25,7 @@ import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path'
-import { isLookalike, isNewRecipient, nonAsciiDomain, recipientAscii, recipientKey, type RecipientKnowledge } from './recipient.js'
+import { isLookalike, isNewRecipient, lookalikeOf, nonAsciiDomain, recipientAscii, recipientKey, type RecipientKnowledge } from './recipient.js'
 
 export type Tier = 'auto' | 'ask' | 'locked_ask' | 'never'
 export type AskChannel = 'voice' | 'touch' | 'phone'
@@ -409,11 +409,21 @@ const DIGEST_RESERVED = ['action', 'agentId', 'tier', 'amountMinor', 'currency']
  * digest8 (protocol/README.md "Digest"): the first 8 lowercase hex characters of sha256 over the JCS canonical
  * JSON of one flat object {action, agentId, tier, amountMinor, currency, recipient, messageSha256, ...details},
  * undefined members dropped. messageSha256 is the hex sha256 of the full UTF-8 message. channel, ids, times
- * and display-only fields are not covered (so a device-to-phone handoff keeps the digest).
+ * and display-only fields are not covered (so a device-to-phone handoff keeps the digest). A string recipient is
+ * NFC-normalized before hashing (v3.3).
  */
 export function actionDigest8(action: string, fields: Record<string, unknown> = {}): string {
+  return createHash('sha256').update(digestInput(action, fields), 'utf8').digest('hex').slice(0, 8)
+}
+
+/**
+ * The JCS text digest8 hashes. v3.3 (Shield): a string `recipient` is NFC-normalized first, so an un-normalized
+ * (NFD) recipient gives the same digest8 as its NFC form (protocol/examples/vectors/digest8.json).
+ */
+export function digestInput(action: string, fields: Record<string, unknown> = {}): string {
   if ('action' in fields) throw new ApprovalDenied('a digest field may not be named action')
-  return createHash('sha256').update(canonicalJson({ ...fields, action }), 'utf8').digest('hex').slice(0, 8)
+  const f = typeof fields.recipient === 'string' ? { ...fields, recipient: fields.recipient.normalize('NFC') } : fields
+  return canonicalJson({ ...f, action })
 }
 
 /** Distinct, easy-to-say words. Not a PIN: a fresh pair is drawn per Ask by the daemon. */
@@ -496,6 +506,11 @@ export interface AskRequest {
   recipientFlags?: RecipientFlag[]
   /** Send Asks: the recipient with its domain in ASCII (punycode), local part as is (v3.3). Display only. */
   recipientAscii?: string
+  /**
+   * Send Asks with the lookalike flag (v3.3): the known contact or domain it matched, in ASCII form (domain in
+   * punycode), so the phone can say "It looks like dana@acme.com". Daemon-set, display only, not in digest8.
+   */
+  lookalikeOf?: string
   /** Display only, not in digest8; locked_ask only; daemon-set (askKindFor). */
   kind?: AskKind
   /** Daemon-drawn 2-word spoken challenge, voice Asks only. */
@@ -563,7 +578,17 @@ export type AnswerVerifier = (req: AskRequest, ans: AskAnswer) => boolean
 export type SettleReason =
   | 'malformed' | 'unknown_id' | 'replayed' | 'expired' | 'digest_mismatch' | 'challenge_mismatch'
   | 'verifier_rejected' | 'shared_machine' | 'unpaired_phone' | 'hold_too_short' | 'stale_channel'
-  | 'wrong_channel' | 'hold_limit'
+  | 'wrong_channel' | 'hold_limit' | 'busy' | 'no_authority'
+/**
+ * The wire's AskRejectionReason, in schema order. busy and no_authority come from the runtime, never from the
+ * ledger: busy, another answer to the same open Ask is being settled right now (services/ildraAsk.ts);
+ * no_authority, the connection may not answer at all (local socket, observer, an unknown connection;
+ * core/ildraAsk.ts), refused before the ledger, so its answerId is not recorded.
+ */
+export const ASK_REJECTION_REASONS: readonly SettleReason[] = [
+  'malformed', 'unknown_id', 'replayed', 'expired', 'digest_mismatch', 'challenge_mismatch', 'verifier_rejected',
+  'shared_machine', 'unpaired_phone', 'hold_too_short', 'stale_channel', 'wrong_channel', 'hold_limit', 'busy', 'no_authority',
+]
 export type SettleResult = { ok: true } | { ok: false; reason: SettleReason }
 
 /**
@@ -577,7 +602,15 @@ export const ANSWER_ID = /^[A-Za-z0-9-]{16,64}$/
  * emits one of these per short hold and keeps it in the journal so the phone can show the attempts.
  */
 /** v3.3: channel is the channel the rejected answer came from (touch, voice or phone). A short hold is a rejected gesture, not an answer. */
-export interface AskAttempt { id: string; answerId: string; channel: AskChannel; reason: 'hold_too_short' | 'stale_channel'; holdMs?: number; at: number }
+/**
+ * ildra.ask.attempt: an answer that was rejected. From the device (touch, voice): hold_too_short or stale_channel
+ * only, and the Ask stays open. v3.3, channel phone: every rejected answer from the phone to a known Ask
+ * (digest_mismatch, malformed, busy, replayed, expired, wrong_channel, unpaired_phone, shared_machine, ...), so the
+ * activity log shows it; when that rejection spent the Ask an ildra.ask.outcome follows. Not logged: unknown_id
+ * (no Ask to log it on), an answer whose id or answerId is not well formed, and no_authority (never reaches it).
+ */
+export interface AskAttempt { id: string; answerId: string; channel: AskChannel; reason: SettleReason; holdMs?: number; at: number }
+const ASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** Attempts kept per journal (oldest dropped first). */
 export const MAX_ATTEMPTS = 200
 /** Shield R5-4: short holds allowed on one Ask; the last one spends it with reason hold_limit. */
@@ -670,6 +703,7 @@ export class AskLedger {
     if (ascii === null) throw new UnsafeRecipient()
     const known: RecipientKnowledge = { contacts: [...this.known_, ...(o.known?.contacts ?? [])], domains: [...(o.known?.domains ?? [])] }
     const flags = recipient !== undefined ? recipientFlags(recipient, known) : []
+    const looksLike = recipient !== undefined && flags.includes('lookalike') ? lookalikeOf(recipient, known) : null
     if (phoneOnly(o.tier, o.amountMinor, flags) && o.channel !== 'phone') {
       throw new ApprovalDenied('locked_ask, money and flagged-recipient Asks are answered on the paired phone only')
     }
@@ -687,6 +721,7 @@ export class AskLedger {
       ...(ascii !== undefined ? { recipientAscii: ascii } : {}),
       ...(o.firstLine !== undefined ? { firstLine: o.firstLine } : {}),
       ...(flags.length ? { recipientFlags: flags } : {}),
+      ...(looksLike !== null ? { lookalikeOf: looksLike } : {}),
       ...(o.kind !== undefined ? { kind: o.kind } : {}),
       ...(currency ? { currency } : {}),
       openedAt,
@@ -771,12 +806,26 @@ export class AskLedger {
   /** `isPaired` is consulted for phone answers; `extra` runs after the ledger's own verifier. */
   settle(ans: AskAnswer, ctx: SettleContext = {}): SettleResult {
     const r = this.check(ans, ctx)
+    if (!r.ok) this.phoneAttempt(ans, r.reason, ctx)
     this.onChange?.()
     return r
   }
 
-  private attempt(id: string, ans: AskAnswer, channel: AskChannel, reason: AskAttempt['reason']): SettleResult {
-    const h = ans.holdMs
+  /**
+   * v3.3: log a rejected phone answer as ildra.ask.attempt (channel phone). Only for a known Ask (open or spent)
+   * and a well-formed id and answerId; device rejections other than hold_too_short and stale_channel are not logged.
+   * Also called by the runtime for busy.
+   */
+  phoneAttempt(ans: AskAnswer, reason: SettleReason, ctx: SettleContext = {}): void {
+    if (!ans || typeof ans !== 'object' || reason === 'hold_too_short' || reason === 'stale_channel' || reason === 'unknown_id' || reason === 'no_authority') return
+    if (typeof ans.id !== 'string' || !ASK_ID.test(ans.id) || typeof ans.answerId !== 'string' || !ANSWER_ID.test(ans.answerId)) return
+    if (answerChannel(ans, ctx) !== 'phone') return
+    if (!this.open_.has(ans.id) && !this.spent.has(ans.id)) return
+    this.attempt(ans.id, ans, 'phone', reason)
+  }
+
+  private attempt(id: string, ans: AskAnswer, channel: AskChannel, reason: SettleReason): SettleResult {
+    const h = channel === 'phone' ? undefined : ans.holdMs
     const a: AskAttempt = {
       id, answerId: ans.answerId, channel, reason,
       ...(typeof h === 'number' && Number.isFinite(h) && h >= 0 ? { holdMs: h } : {}), at: this.now(),
@@ -898,7 +947,8 @@ export class AskLedger {
     handoffs?: [string, AskChannel, number?][]; handoffLog?: AskHandoff[]; phoneAllowed?: string[]; shortHolds?: [string, number][]; knownRecipients?: string[]
   }): void {
     for (const [id, at] of data.spentAnswers ?? []) this.spentAnswers.set(id, at)
-    this.attempts_ = (data.attempts ?? []).filter((a) => a && typeof a.id === 'string' && (a.reason === 'hold_too_short' || a.reason === 'stale_channel'))
+    this.attempts_ = (data.attempts ?? []).filter((a) => a && typeof a.id === 'string'
+      && (a.reason === 'hold_too_short' || a.reason === 'stale_channel' || (a.channel === 'phone' && ASK_REJECTION_REASONS.includes(a.reason))))
       .slice(-MAX_ATTEMPTS).map((a) => ({ ...a }))
     this.handoffLog_ = (data.handoffLog ?? []).filter((h) => h && typeof h.id === 'string' && h.from === 'device' && h.to === 'phone')
       .slice(-MAX_ATTEMPTS).map((h) => ({ ...h }))
@@ -1288,7 +1338,7 @@ function isRequest(r: unknown): r is AskRequest {
     && KNOWN_CHANNELS.has(x.channel) && x.tier in TIER_RANK && (x.challenge === undefined || typeof x.challenge === 'string')
     && (x.amountMinor === undefined || (Number.isInteger(x.amountMinor) && x.amountMinor >= 0))
     && typeof x.action === 'string' && (x.currency === undefined ? x.amountMinor === undefined : x.currency === 'USD' && x.amountMinor !== undefined)
-    && ['agentId', 'templateId', 'recipient', 'firstLine', 'recipientAscii'].every((k) => (x as unknown as Record<string, unknown>)[k] === undefined || typeof (x as unknown as Record<string, unknown>)[k] === 'string')
+    && ['agentId', 'templateId', 'recipient', 'firstLine', 'recipientAscii', 'lookalikeOf'].every((k) => (x as unknown as Record<string, unknown>)[k] === undefined || typeof (x as unknown as Record<string, unknown>)[k] === 'string')
     && (x.kind === undefined || (x.kind === 'safety_verification' && x.tier === 'locked_ask') || (x.kind === 'practice' && x.action === PRACTICE_ACTION && x.amountMinor === undefined && x.recipient === undefined))
     && (x.recipientFlags === undefined || (Array.isArray(x.recipientFlags) && x.recipientFlags.every((f) => RECIPIENT_FLAGS.includes(f))))
 }

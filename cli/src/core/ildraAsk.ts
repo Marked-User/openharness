@@ -27,7 +27,13 @@ class PaneGuard implements IldraPaneGuard {
   filterInput(paneId: string, from: 'local' | 'remote'): 'pass' | 'block' { return from === 'remote' && this.open_.has(paneId) ? 'block' : 'pass' }
 }
 
-export type IldraAnswerReply = { ok: true } | { ok: false; reason: 'malformed' | 'no_connection' | 'unknown_id' | 'no_authority' | 'stale_channel' | 'replayed' | 'busy' }
+/**
+ * The reply to the answering connection. Every reason is an AskRejectionReason (protocol schema). no_authority:
+ * the connection may not answer at all (local socket, observer, or a connection the core does not know); refused
+ * here, before the ledger, so nothing is recorded. The ledger's own rejections reach the surface as
+ * ildra.ask.attempt / ildra.ask.outcome events.
+ */
+export type IldraAnswerReply = { ok: true } | { ok: false; reason: 'malformed' | 'unknown_id' | 'no_authority' | 'stale_channel' | 'replayed' | 'busy' }
 export type IldraSettingsReply = { ok: true; key: string; value: number } | { ok: false; reason: string }
 
 export interface IldraAskCore extends IldraAskInputs {
@@ -52,19 +58,20 @@ export function createIldraAskCore(deps: {
 
   /**
    * Shield R5-1: who may answer, from the connection alone.
-   * - The loopback / local socket has no answer authority (the agent itself runs there).
+   * - A connection the core does not know has no answer authority (no_authority, v3.3; was no_connection).
+ * - The loopback / local socket has no answer authority (the agent itself runs there).
    * - Observers never answer.
    * - The device bridge session (role 'device', a key this daemon paired as a device) answers on touch only;
    *   any phone id it claims is dropped.
    * - Any other remote session answers as a phone: the ledger accepts it only when its authenticated key
    *   (machinePub) is the key the claimed phone paired with (PhonePairing.isPairedKey).
    */
-  type Origin = { from: IldraAnswerOrigin; via: 'touch' | 'phone' } | 'no_connection' | 'no_authority'
+  type Origin = { from: IldraAnswerOrigin; via: 'touch' | 'phone' } | 'no_authority'
   const originOf = (connId: string | undefined, claimed: unknown): Origin => {
-    if (!connId) return 'no_connection'
+    if (!connId) return 'no_authority'
     if (deps.isLoopback(connId)) return 'no_authority'
     const client = deps.clientOf(connId)
-    if (!client || typeof client.identity !== 'string' || !client.identity) return 'no_connection'
+    if (!client || typeof client.identity !== 'string' || !client.identity) return 'no_authority'
     sharedByPub.set(client.identity, client.shared === true)
     if (client.role === 'observer') return 'no_authority'
     if (client.role === 'device') return { from: { machinePub: client.identity }, via: 'touch' }
