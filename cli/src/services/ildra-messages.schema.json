@@ -1,0 +1,233 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Marked-User/ildra/protocol/ildra-messages.schema.json",
+  "title": "Ildra pairing and Ask messages",
+  "description": "Wire contract for Ildra Asks and phone pairing, shared by the daemon (openharness cli/src/services/approvals.ts on ildra/ask-gates), the phone companion (app/) and the pilot firmware bridge. Version 1. Field names are camelCase as in approvals.ts. Optional fields are omitted, never null, except AskOutcome.channel. See protocol/README.md for the Gadget SDK mapping.",
+  "oneOf": [{ "$ref": "#/$defs/IldraMessage" }],
+  "$defs": {
+    "IldraMessage": {
+      "description": "Envelope. Uses the Gadget SDK text-frame convention (an object with a type field) with an ildra. prefix so Gadget receivers ignore it as an unknown type. body is one of the $defs below.",
+      "type": "object",
+      "required": ["type", "proto", "body"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "ildra.ask.request", "ildra.ask.answer", "ildra.ask.rejection", "ildra.ask.outcome",
+            "ildra.pairing.begin", "ildra.pairing.offer", "ildra.pairing.offer_result",
+            "ildra.pairing.confirm", "ildra.pairing.status"
+          ]
+        },
+        "proto": { "const": 1 },
+        "body": { "type": "object" }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "ildra.ask.request" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/AskRequest" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.ask.answer" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/AskAnswer" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.ask.rejection" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/AskRejection" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.ask.outcome" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/AskOutcome" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.begin" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingBegin" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.offer" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingOffer" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.offer_result" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingOfferResult" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.confirm" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingConfirm" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.status" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingStatus" } } } }
+      ]
+    },
+
+    "AmountMinor": { "description": "Integer minor units (cents for USD). Present means a money Ask: 1 h expiry and the $50 (5000) voice cap.", "type": "integer", "minimum": 0 },
+    "Currency": { "description": "ISO 4217. Only USD for now.", "const": "USD" },
+    "EpochMs": { "type": "integer", "minimum": 0 },
+    "Channel": { "enum": ["voice", "touch", "phone"] },
+    "Tier": { "enum": ["auto", "ask", "locked_ask", "never"] },
+    "Digest8": { "description": "First 8 lowercase hex of sha256 over the action and its details (amountMinor, currency, recipient, message hash).", "type": "string", "pattern": "^[0-9a-f]{8}$" },
+    "AskId": { "description": "Random UUID chosen by the daemon.", "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "Challenge": { "description": "Daemon-drawn 2-word spoken challenge, lowercase words separated by one space. Not a PIN.", "type": "string", "pattern": "^[a-z]+ [a-z]+$" },
+
+    "AskRequest": {
+      "description": "Daemon to answering surface. Money fields first. expiresAt is openedAt + 3600000 when amountMinor is present, else openedAt + 86400000 (DECISIONS 2026-10-15); the schema cannot compare two fields, so tests check it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "digest8", "openedAt", "expiresAt", "channel", "tier", "action"],
+      "properties": {
+        "amountMinor": { "$ref": "#/$defs/AmountMinor" },
+        "currency": { "$ref": "#/$defs/Currency" },
+        "tier": { "description": "Only Ask tiers open a request; auto and never never reach the wire.", "enum": ["ask", "locked_ask"] },
+        "expiresAt": { "$ref": "#/$defs/EpochMs" },
+        "challenge": { "$ref": "#/$defs/Challenge" },
+        "id": { "$ref": "#/$defs/AskId" },
+        "digest8": { "$ref": "#/$defs/Digest8" },
+        "openedAt": { "$ref": "#/$defs/EpochMs" },
+        "channel": { "$ref": "#/$defs/Channel" },
+        "action": { "type": "string", "minLength": 1 },
+        "agentId": { "type": "string", "minLength": 1 },
+        "templateId": { "type": "string", "minLength": 1 },
+        "recipient": { "description": "Send Asks only.", "type": "string", "minLength": 1 },
+        "firstLine": { "description": "Send Asks only: first non-empty line, trimmed, at most 80 characters.", "type": "string", "minLength": 1, "maxLength": 80 }
+      },
+      "dependentRequired": {
+        "amountMinor": ["currency"],
+        "currency": ["amountMinor"],
+        "recipient": ["firstLine"],
+        "firstLine": ["recipient"]
+      },
+      "allOf": [
+        {
+          "description": "A voice Ask always carries the challenge; other channels never do.",
+          "if": { "properties": { "channel": { "const": "voice" } }, "required": ["channel"] },
+          "then": { "required": ["challenge"] },
+          "else": { "not": { "required": ["challenge"] } }
+        },
+        {
+          "description": "F1: locked_ask is never answered by voice.",
+          "if": { "properties": { "tier": { "const": "locked_ask" } }, "required": ["tier"] },
+          "then": { "properties": { "channel": { "enum": ["touch", "phone"] } } }
+        },
+        {
+          "description": "F1: money over 5000 minor units is never answered by voice.",
+          "if": { "properties": { "amountMinor": { "type": "integer", "exclusiveMinimum": 5000 } }, "required": ["amountMinor"] },
+          "then": { "properties": { "channel": { "enum": ["touch", "phone"] } } }
+        }
+      ]
+    },
+
+    "AnswerOrigin": {
+      "description": "Where an answer came from. shared is an untrusted claim: true rejects, false is ignored; the daemon asks the gateway (F12).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "phoneId": { "description": "Required in practice for phone answers; must be a paired phone.", "type": "string", "minLength": 1 },
+        "machinePub": { "description": "Answering machine public key (base64 32 bytes).", "type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$" },
+        "shared": { "type": "boolean" }
+      }
+    },
+
+    "AskAnswer": {
+      "description": "Answering surface to daemon. Bound to the open request by id and digest8; single use. Only approved true approves.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "digest8", "approved"],
+      "properties": {
+        "id": { "$ref": "#/$defs/AskId" },
+        "digest8": { "$ref": "#/$defs/Digest8" },
+        "approved": { "type": "boolean" },
+        "transcript": { "description": "Voice answers: what speech-to-text heard. Must contain the challenge words, adjacent, in order.", "type": "string" },
+        "from": { "$ref": "#/$defs/AnswerOrigin" },
+        "signature": { "description": "Reserved for D5 (b) signed answers (Volt). Not checked yet.", "type": "string", "minLength": 1 }
+      }
+    },
+
+    "AskRejectionReason": {
+      "enum": ["malformed", "unknown_id", "replayed", "expired", "digest_mismatch", "challenge_mismatch", "verifier_rejected", "shared_machine", "unpaired_phone"]
+    },
+
+    "AskRejection": {
+      "description": "Daemon to answering surface when an answer is not accepted (approvals.ts SettleResult with ok false). The request is spent either way.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "reason"],
+      "properties": {
+        "ok": { "const": false },
+        "reason": { "$ref": "#/$defs/AskRejectionReason" }
+      }
+    },
+
+    "AskOutcome": {
+      "description": "Result of one Ask (approvals.ts AskOutcome). channel is null when no prompt ran (auto, or no usable channel). The answered-by event is not defined yet (waits for Shield sign-off).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approved", "channel", "tier"],
+      "properties": {
+        "approved": { "type": "boolean" },
+        "channel": { "oneOf": [{ "$ref": "#/$defs/Channel" }, { "type": "null" }] },
+        "tier": { "$ref": "#/$defs/Tier" },
+        "reason": { "$ref": "#/$defs/AskRejectionReason" },
+        "request": { "$ref": "#/$defs/AskRequest" }
+      },
+      "allOf": [
+        { "if": { "properties": { "reason": true }, "required": ["reason"] }, "then": { "properties": { "approved": { "const": false } } } },
+        { "if": { "properties": { "tier": { "const": "auto" } }, "required": ["tier"] }, "then": { "properties": { "approved": { "const": true }, "channel": { "type": "null" } } } }
+      ]
+    },
+
+    "PairingCode": { "description": "6-digit single-use code shown on the device.", "type": "string", "pattern": "^[0-9]{6}$" },
+    "PairingCheck": { "description": "F6 short check string, 6 digits: sha256('ildra-pair-v1|' + code + '|' + phonePub + '|' + deviceNonce), first 4 bytes big-endian uint32 mod 1000000, zero-padded.", "type": "string", "pattern": "^[0-9]{6}$" },
+    "DeviceNonce": { "description": "16 random bytes as 32 lowercase hex.", "type": "string", "pattern": "^[0-9a-f]{32}$" },
+
+    "PairingRefusalReason": {
+      "enum": ["unknown_code", "shared_machine", "expired", "no_phone_id", "no_phone_pub", "locked_out", "no_pending", "not_touch", "check_mismatch"]
+    },
+
+    "PairingBegin": {
+      "description": "Device to phone (shown on screen and sent with the session) after a touch on the device: approvals.ts PhonePairing.begin result.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "deviceNonce", "expiresAt"],
+      "properties": {
+        "code": { "$ref": "#/$defs/PairingCode" },
+        "deviceNonce": { "$ref": "#/$defs/DeviceNonce" },
+        "expiresAt": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+
+    "PairingOffer": {
+      "description": "Phone to device: the code the user typed plus the phone's identity. Five wrong codes burn every open code (locked_out) until a new device touch.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phoneId", "phonePub", "code"],
+      "properties": {
+        "phoneId": { "type": "string", "minLength": 1 },
+        "phonePub": { "type": "string", "minLength": 1 },
+        "code": { "$ref": "#/$defs/PairingCode" },
+        "origin": { "$ref": "#/$defs/AnswerOrigin" }
+      }
+    },
+
+    "PairingOfferResult": {
+      "description": "Device to phone. On success both screens show check; the phone recomputes it from code, its phonePub and deviceNonce.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ok", "check", "deviceNonce", "expiresAt"],
+          "properties": {
+            "ok": { "const": true },
+            "check": { "$ref": "#/$defs/PairingCheck" },
+            "deviceNonce": { "$ref": "#/$defs/DeviceNonce" },
+            "expiresAt": { "$ref": "#/$defs/EpochMs" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ok", "reason"],
+          "properties": {
+            "ok": { "const": false },
+            "reason": { "$ref": "#/$defs/PairingRefusalReason" }
+          }
+        }
+      ]
+    },
+
+    "PairingConfirm": {
+      "description": "On the device: the user taps that both check strings match. Only confirmedBy touch with matched true pairs; anything else is refused (not_touch, check_mismatch). Other channels are valid on the wire so the refusal can be logged.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phoneId", "confirmedBy", "matched"],
+      "properties": {
+        "phoneId": { "type": "string", "minLength": 1 },
+        "confirmedBy": { "$ref": "#/$defs/Channel" },
+        "matched": { "type": "boolean" }
+      }
+    },
+
+    "PairingStatus": {
+      "description": "approvals.ts PhonePairing.pairingStatus(phoneId). Precedence: paired, pending, last refusal, unknown.",
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "pending" } } },
+        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "paired" } } },
+        { "type": "object", "additionalProperties": false, "required": ["state", "reason"], "properties": { "state": { "const": "refused" }, "reason": { "$ref": "#/$defs/PairingRefusalReason" } } },
+        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "unknown" } } }
+      ]
+    }
+  }
+}
