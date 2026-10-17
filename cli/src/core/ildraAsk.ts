@@ -49,6 +49,7 @@ export interface IldraAskCore extends IldraAskInputs {
     ildra_pairing_ledger: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; entries: unknown[]; head: { seq: number; hash: string } } | { ok: false; reason: string }>
     ildra_pairing_unpair: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; state: 'unpaired'; askId: string } | { ok: false; reason: string }>
     ildra_ask_answered_by: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; answeredBy: unknown } | { ok: false; reason: string }>
+    ildra_pairing_ledger_ack: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true } | { ok: false; reason: string }>
     ildra_device_challenge: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; nonce: string } | { ok: false; reason: string }>
     ildra_device_prove: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: boolean; reason?: string }>
   } & Record<string, ServiceRequest>
@@ -222,6 +223,13 @@ export function createIldraAskCore(deps: {
         if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
         if (!core.onAnsweredBy) return { ok: false, reason: 'unavailable' }
         return core.onAnsweredBy(payload?.id, origin.from)
+      },
+      // Shield B5: the paired phone acknowledges a ledger_reset (main key only).
+      ildra_pairing_ledger_ack: async (payload, asker) => {
+        const origin = originOf(asker.connection, payload?.from)
+        if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
+        if (!core.onPairingLedgerAck) return { ok: false, reason: 'unavailable' }
+        return core.onPairingLedgerAck({ seq: payload?.seq, hash: payload?.hash, signature: payload?.signature }, origin.from)
       },
       ildra_device_challenge: async (_payload, asker) => {
         const nonce = asker.connection ? core.challengeDevice(asker.connection) : null

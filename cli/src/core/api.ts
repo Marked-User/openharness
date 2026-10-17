@@ -57,7 +57,7 @@ export { FAIL, later, readFallback, ServiceUnavailableError, type PortFallbacks 
  * and the Ildra device key helpers (Ed25519 proof of the enrolled device).
  */
 export { stampedChannel } from './ildraChannel.js'
-export { ENROLL_UV, PHONE_VERBS, askAnswerMessage, deviceFingerprint, deviceProofMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, unpairMessage, unpairTouchMessage, verifyDeviceProof, verifyEd25519, rawPhoneKey, normalizePhoneSignature, verifyP256, verifyPhoneSignature, type EnrollUv, type PhoneVerb } from './ildraDeviceProof.js'
+export { ENROLL_UV, PHONE_VERBS, askAnswerMessage, deviceFingerprint, deviceProofMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, ledgerAckMessage, unpairMessage, unpairTouchMessage, verifyDeviceProof, verifyEd25519, rawPhoneKey, normalizePhoneSignature, verifyP256, verifyPhoneSignature, type EnrollUv, type PhoneVerb } from './ildraDeviceProof.js'
 
 /** A service may open a terminal with a literal argv, never shell source. */
 export interface TerminalOpen {
@@ -600,11 +600,13 @@ export interface IldraAskInputs {
   onPairingUnpair?: ((msg: { phoneId: unknown; at: unknown; signature: unknown; touchProof?: unknown }, from: IldraAnswerOrigin) => Promise<{ ok: true; state: 'unpaired'; askId: string } | { ok: false; reason: string }>) | null
   /** Batch B: `ildra.ask.answered_by.get {id}` from the paired phone: who settled that Ask, or null. */
   onAnsweredBy?: ((id: unknown, from: IldraAnswerOrigin) => { ok: true; answeredBy: unknown } | { ok: false; reason: string }) | null
+  /** Shield B5: `ildra.pairing.ledger_ack {seq, hash, signature}` from the paired phone (main key): acknowledges a ledger_reset. */
+  onPairingLedgerAck?: ((msg: { seq: unknown; hash: unknown; signature: unknown }, from: IldraAnswerOrigin) => { ok: true } | { ok: false; reason: string }) | null
 }
 
 /** Ildra Asks (services/ildraAsk.ts): an answer from the phone or the device to an open Ask. Its origin is the
  *  connection it came over (Shield F12), never the payload. Always in the core's own process. */
-export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer', 'ildra_settings_set', 'ildra_device_enroll', 'ildra_device_enroll_confirm', 'ildra_phone_open', 'ildra_pairing_ledger', 'ildra_pairing_unpair', 'ildra_ask_answered_by', 'ildra_device_challenge', 'ildra_device_prove'] as const
+export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer', 'ildra_settings_set', 'ildra_device_enroll', 'ildra_device_enroll_confirm', 'ildra_phone_open', 'ildra_pairing_ledger', 'ildra_pairing_unpair', 'ildra_ask_answered_by', 'ildra_pairing_ledger_ack', 'ildra_device_challenge', 'ildra_device_prove'] as const
 /** Sharing this machine with other accounts, and adding machines shared with this one, in the edge host
  *  (services/sharedMachines.ts). */
 export const SHARED_MACHINES_REQUESTS = ['shared_machines'] as const

@@ -13,7 +13,7 @@ import {
   ask as askGate, deviceFingerprint, openJournal, practiceAsk, ToolManifestLoader,
   type ApprovalJournal, type ApprovalProfile, type ApprovalTemplate, type AskAnswer, type AskAttempt, type AskChannel,
   type AskHandoff, type AskOptions, type AskOutcome, type AskRequest, type EnrollReplaced, type EnrollSource, type ToolManifestEntry,
-  type AskAnsweredBy, stampManifest,
+  type AskAnsweredBy, stampManifest, UNPAIR_RESET_COUNT,
 } from './approvals.js'
 
 /** Batch B: the unpair API's rate limit (from the pairing ledger, daemon-wide) and clock skew for its signed `at`. */
@@ -23,7 +23,7 @@ export const UNPAIR_SKEW_MS = 60_000
 const UNPAIR_ACTION = 'Unpair a phone'
 const UNPAIR_TEMPLATE: ApprovalTemplate = { permissions: { locked_ask: [UNPAIR_ACTION] } }
 const UNPAIR_MANIFEST = stampManifest([{ name: 'ildra.pairing.unpair', send: false }], 'first_party')
-import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, rawPhoneKey, settingsSetMessage, stampedChannel, unpairMessage, unpairTouchMessage, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
+import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, rawPhoneKey, settingsSetMessage, stampedChannel, ledgerAckMessage, unpairMessage, unpairTouchMessage, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
 
 export type IldraAskEvent =
   | { type: 'ildra.ask.attempt'; body: AskAttempt }
@@ -37,6 +37,7 @@ export type IldraAskEvent =
   | { type: 'ildra.ask.answered_by'; body: AskAnsweredBy }
   | { type: 'ildra.pairing.unpair_requested'; body: { phoneId: string; by: string; at: number } }
   | { type: 'ildra.pairing.unpaired'; body: { phoneId: string; by: string; askId: string; at: number; remaining: number } }
+  | { type: 'ildra.pairing.ledger_reset'; body: { seq: number; hash: string; reason: string; at: number; oldHead?: string } }
   | { type: 'ildra.device.enroll.status'; body: { state: 'enrolled' | 'refused' | 'revoked' | 'expired'; fingerprint: string; at: number; uv?: EnrollUv } }
 
 export interface IldraAsk {
@@ -91,6 +92,8 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     // Shield R7 ledger via rule: this journal's ledger settles only answers the core stamped with their channel.
     journal = openJournal(deps.journalPath, { requireChannelStamp: true, ...(deps.now ? { now: deps.now } : {}), ...(deps.markerPath ? { markerPath: deps.markerPath } : {}) })
     journal.ledger.onAttempt = (a) => emit('ildra.ask.attempt', a)
+    // Shield B5: the ledger could not be trusted at load: tell the phone now (and on every phone open until it acks).
+    { const reset = journal.pairingLedger.pendingReset(); if (reset) emit('ildra.pairing.ledger_reset', resetBody(reset)) }
     journal.ledger.onHandoff = onHandoff
     journal.ledger.onUnpaired = (u) => emit('ildra.ask.unpaired', u)
     // Shield R7 ruling: the last unpair ended this phone Ask (no_paired_phone); wake its waiting ask().
@@ -188,6 +191,8 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     if (typeof from.phoneId !== 'string' || typeof from.machinePub !== 'string' || !j.pairing.isPairedKey(from.phoneId, from.machinePub)) return { ok: false, reason: 'unpaired_phone' }
     const denySummary = j.pairing.takeDenySummary(from.phoneId)
     if (denySummary) emit('ildra.phone.deny_summary', denySummary)
+    const reset = j.pairingLedger.pendingReset()
+    if (reset) emit('ildra.pairing.ledger_reset', resetBody(reset))
     return { ok: true, denySummary }
   }
   const pairedFrom = (j: ApprovalJournal, from: { phoneId?: unknown; machinePub?: unknown }): from is { phoneId: string; machinePub: string } =>
@@ -210,6 +215,18 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
   // Batch B (2): unpair through a locked_ask. Signed by the requesting phone's main key (the deny key is
   // verifier_rejected), rate limited from the ledger, the last paired phone only with a device touch proof; the other
   // paired phones and the device are told when it is asked and when it is done; every step is a ledger entry.
+  /** Shield B5: the ildra.pairing.ledger_reset body for a pending reset entry. */
+  const resetBody = (e: { seq: number; hash: string; at: number; reason?: string; oldHead?: string }) =>
+    ({ seq: e.seq, hash: e.hash, reason: e.reason ?? 'chain_broken', at: e.at, ...(e.oldHead ? { oldHead: e.oldHead } : {}) })
+  deps.inputs.onPairingLedgerAck = (msg, from) => {
+    const j = open()
+    if (!pairedFrom(j, from)) return { ok: false, reason: 'unpaired_phone' }
+    if (typeof msg.seq !== 'number' || !Number.isInteger(msg.seq) || typeof msg.hash !== 'string' || !/^[0-9a-f]{64}$/.test(msg.hash)) return { ok: false, reason: 'malformed' }
+    const v = j.pairing.verifyPhone(from.phoneId, 'pairing.ledger_ack', ledgerAckMessage(msg.seq, msg.hash), msg.signature)
+    if (!v.ok) return { ok: false, reason: v.reason }
+    if (!j.pairing.ackReset(from.phoneId, msg.seq, msg.hash)) return { ok: false, reason: 'unknown_id' }
+    return { ok: true }
+  }
   /** Shield B7: at most one unpair open at a time (its locked_ask is pending). */
   let unpairOpen: string | null = null
   deps.inputs.onPairingUnpair = async (msg, from) => {
@@ -227,7 +244,9 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     if (Math.abs(now - at) > UNPAIR_SKEW_MS) return refuse('expired', target)
     if (!j.pairing.isPaired(target)) return refuse('unknown_phone', target)
     // Each request that opened a locked_ask counts (refusals before that open no Ask and need a valid signature).
-    const recent = j.pairingLedger.all().filter((e) => now - e.at < UNPAIR_WINDOW_MS && e.kind === 'unpair_requested').length
+    // Shield B5: a ledger_reset counts as UNPAIR_RESET_COUNT requests, so a broken ledger never resets the limit.
+    const recent = j.pairingLedger.all().reduce((n, e) => n + (now - e.at >= UNPAIR_WINDOW_MS ? 0 : e.kind === 'unpair_requested' ? 1 : e.kind === 'ledger_reset' ? (e.count ?? UNPAIR_RESET_COUNT) : 0), 0)
+    if (j.pairing.changesLocked()) return refuse('ledger_locked', target)
     if (recent >= UNPAIR_RATE) return refuse('rate_limited', target)
     // Shield B7: one open unpair at a time, so two requests can never both pass the last-owner check below.
     if (unpairOpen !== null) return refuse('unpair_pending', target)
@@ -251,7 +270,7 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     // check and the change): if it would leave no paired phone, only a touch proof given for this request allows it.
     if (!j.pairing.isPaired(target)) return refuse('unknown_phone', target, askId || undefined)
     if (j.pairing.pairedCount() <= 1 && !touched) return refuse('last_owner_channel', target, askId || undefined)
-    j.pairing.unpair(target, { by: from.phoneId, via: 'locked_ask', askId })
+    if (!j.pairing.unpair(target, { by: from.phoneId, via: 'locked_ask', askId })) return refuse('ledger_locked', target, askId || undefined)
     emit('ildra.pairing.unpaired', { phoneId: target, by: from.phoneId, askId, at: (deps.now ?? Date.now)(), remaining: j.pairing.pairedCount() })
     return { ok: true, state: 'unpaired', askId }
   }

@@ -4,12 +4,12 @@
  * (3) the real ildra.ask.answered_by event and read.
  */
 import { randomBytes, sign, type KeyObject } from 'node:crypto'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
-import { askAnswerMessage, deviceFingerprint, unpairMessage, unpairTouchMessage } from '../core/ildraDeviceProof.js'
+import { askAnswerMessage, deviceFingerprint, ledgerAckMessage, unpairMessage, unpairTouchMessage } from '../core/ildraDeviceProof.js'
 import { createIldraAsk, UNPAIR_RATE } from './ildraAsk.js'
 import { deviceKeyPair, phoneKeyPair, proveBridge, signedConfirm } from './ildraAsk.testkit.js'
 import { PairingLedger, stampManifest, type ApprovalTemplate, type AskRequest, type PairingLedgerEntry } from './approvals.js'
@@ -280,5 +280,73 @@ describe('Shield B7: concurrent unpairs', () => {
     await r.answer(q, 'ph1', 'p1', true)
     expect(await a).toMatchObject({ ok: false, reason: 'last_owner_channel' })
     expect(r.svc.journal().pairing.isPaired('p1')).toBe(true)
+  })
+})
+
+describe('Shield B5: a ledger that cannot be trusted fails closed', () => {
+  const broken = async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); r.pair('p2', r.K.P2.pub)
+    const path = join(r.dir, 'j', 'a.json')
+    const d = JSON.parse(readFileSync(path, 'utf8')); const oldHead = d.pairingLedger.at(-1).hash
+    d.pairingLedger[0].via = 'local_socket'; writeFileSync(path, JSON.stringify(d))
+    const r2 = rig(r.dir, r.clock, r.K)
+    return { r, r2, oldHead }
+  }
+  it('keeps the untrusted ledger aside, starts a new chain with ledger_reset {reason, oldHead, count 3}, voice off one window, phones stay paired', async () => {
+    const { r, r2, oldHead } = await broken()
+    const j = r2.svc.journal()
+    expect(j.recovered).toBe(true)
+    expect(j.pairing.pairedCount()).toBe(2)
+    expect(j.pairingLedger.all()).toHaveLength(1)
+    expect(j.pairingLedger.all()[0]).toMatchObject({ seq: 1, kind: 'ledger_reset', reason: 'chain_broken', oldHead, count: 3, by: 'daemon' })
+    expect(readdirSync(join(r.dir, 'j')).some((f) => f.startsWith('a.json.ledger-untrusted-'))).toBe(true)
+    expect(r2.events.find((e) => e.type === 'ildra.pairing.ledger_reset')?.body).toMatchObject({ seq: 1, reason: 'chain_broken', oldHead })
+  })
+  it('pairing changes are locked (pair, re-pair, unpair, deny key) and the rate limit counts the reset; every phone open repeats the alert', async () => {
+    const { r2 } = await broken()
+    const p = r2.svc.journal().pairing
+    const { code } = p.begin('touch')
+    expect(p.offer('p3', phoneKeyPair().pub, code)).toEqual({ ok: false, reason: 'ledger_locked' })
+    expect(p.unpair('p2')).toBe(false)
+    expect(p.isPaired('p2')).toBe(true)
+    expect(p.setDenyKey('p1', phoneKeyPair().pub)).toBe(false)
+    expect(await r2.unpair('p2', r2.K.P1.key)).toEqual({ ok: false, reason: 'ledger_locked' })
+    expect(r2.sent).toHaveLength(0)
+    r2.events.length = 0
+    await r2.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r2.remote('ph1'))
+    expect(r2.events.map((e) => e.type)).toContain('ildra.pairing.ledger_reset')
+  })
+  it('only the paired main key acknowledges the exact reset; then changes unlock but the rate limit still counts the reset for 10 minutes', async () => {
+    const { r2 } = await broken()
+    const j = r2.svc.journal(); const reset = j.pairingLedger.all()[0]!
+    const ack = (key: KeyObject, seq = reset.seq, hash = reset.hash) => r2.core.requests.ildra_pairing_ledger_ack({ seq, hash, signature: sig(key, ledgerAckMessage(seq, hash)), from: { phoneId: 'p1' } }, r2.remote('ph1'))
+    expect(await ack(r2.K.P2.key)).toEqual({ ok: false, reason: 'bad_signature' })
+    expect(await ack(r2.K.P1.key, reset.seq, 'f'.repeat(64))).toEqual({ ok: false, reason: 'unknown_id' })
+    expect(await r2.core.requests.ildra_pairing_ledger_ack({ seq: reset.seq, hash: reset.hash, signature: sig(r2.K.P1.key, ledgerAckMessage(reset.seq, reset.hash)), from: { phoneId: 'p1' } }, r2.remote('dev'))).toMatchObject({ ok: false })
+    expect(await ack(r2.K.P1.key)).toEqual({ ok: true })
+    expect(j.pairingLedger.all().at(-1)).toMatchObject({ kind: 'ledger_ack', phoneId: 'p1', by: 'p1', via: 'phone', since: reset.seq })
+    expect(j.pairing.changesLocked()).toBe(false)
+    expect(await ack(r2.K.P1.key)).toEqual({ ok: false, reason: 'unknown_id' })
+    expect(await r2.unpair('p2', r2.K.P1.key)).toEqual({ ok: false, reason: 'rate_limited' })
+    r2.clock.t += 600_001
+    const u = r2.unpair('p2', r2.K.P1.key); await tick()
+    expect(r2.sent.at(-1)).toMatchObject({ tier: 'locked_ask' })
+    await r2.answer(r2.sent.at(-1)!, 'ph1', 'p1', false); await u
+  })
+  it('the deny key cannot acknowledge (verifier_rejected); with no phone paired a touch pairing acknowledges the reset', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); await r.enrollDevice(r.K.D1.pub)
+    const path = join(r.dir, 'j', 'a.json')
+    const d = JSON.parse(readFileSync(path, 'utf8')); d.pairingLedger[0].via = 'x'; writeFileSync(path, JSON.stringify(d))
+    const r2 = rig(r.dir, r.clock, r.K); const j = r2.svc.journal(); const reset = j.pairingLedger.all()[0]!
+    expect(await r2.core.requests.ildra_pairing_ledger_ack({ seq: reset.seq, hash: reset.hash, signature: sig(r2.K.D1.key, ledgerAckMessage(reset.seq, reset.hash)), from: { phoneId: 'p1' } }, r2.remote('ph1'))).toEqual({ ok: false, reason: 'verifier_rejected' })
+    // A journal that cannot be read at all keeps no phone; the next touch pairing is the owner and acks the reset.
+    writeFileSync(path, '{not json')
+    const r3 = rig(r.dir, r.clock, r.K); const j3 = r3.svc.journal()
+    expect(j3.pairingLedger.all()[0]).toMatchObject({ kind: 'ledger_reset', reason: 'journal_unreadable' })
+    expect(j3.pairing.pairedCount()).toBe(0)
+    r3.pair('p1', r3.K.P1.pub)
+    expect(j3.pairing.isPaired('p1')).toBe(true)
+    expect(j3.pairingLedger.all().map((e) => e.kind)).toEqual(['ledger_reset', 'phone_paired', 'ledger_ack'])
+    expect(j3.pairing.changesLocked()).toBe(false)
   })
 })

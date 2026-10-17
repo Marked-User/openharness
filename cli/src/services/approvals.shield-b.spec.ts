@@ -261,7 +261,7 @@ describe('Shield batch B: pairing ledger attacks (52977f9ac)', () => {
     expect(next.entries[0]!.prev).not.toBe(first.head.hash)
   })
 
-  it('GAP B5: a broken chain "fails closed" only for voice: phones stay paired, the ledger restarts empty, and the unpair rate limit resets', async () => {
+  it('FIXED B5: a broken chain fails closed: phones stay paired, the ledger starts with a ledger_reset (never empty), the rate limit holds, pairing changes are locked until the phone acks', async () => {
     const r = await seeded()
     for (let i = 0; i < UNPAIR_RATE; i++) { const p = r.unpair('p2', r.K.P1.key); await tick(); await r.answer(r.sent.at(-1)!, 'ph1', 'p1', false); await p; r.clock.t += 1000 }
     expect(await r.unpair('p2', r.K.P1.key)).toEqual({ ok: false, reason: 'rate_limited' })
@@ -269,10 +269,10 @@ describe('Shield batch B: pairing ledger attacks (52977f9ac)', () => {
     const r2 = reopen(r)
     expect(r2.svc.journal().recovered).toBe(true)
     expect(r2.svc.journal().pairing.pairedCount()).toBe(2)
-    expect(r2.svc.journal().pairingLedger.all().length).toBeLessThan(3)
-    const p = r2.unpair('p2', r.K.P1.key); await tick()
-    expect(r2.sent.at(-1)).toMatchObject({ tier: 'locked_ask' }) // rate limit gone
-    await r2.answer(r2.sent.at(-1)!, 'ph1', 'p1', false); await p
+    expect(r2.svc.journal().pairingLedger.all().map((e) => e.kind)).toEqual(['ledger_reset'])
+    const n = r2.sent.length
+    expect(await r2.unpair('p2', r.K.P1.key)).toMatchObject({ ok: false })
+    expect(r2.sent.length).toBe(n) // no locked_ask: locked and rate limited
   })
 
   it('GAP B6: the ledger is not authoritative for state: a phone key added to the journal without a ledger entry is paired after restart', async () => {

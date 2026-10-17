@@ -1178,6 +1178,8 @@ export const PAIRING_LEDGER_KINDS = [
   'device_enroll_requested', 'device_enroll_replaced', 'device_enrolled', 'device_refused', 'device_revoked', 'device_expired',
   'deny_key_set', 'deny_key_revoked', 'deny_key_deny', 'deny_burst', 'verifier_rejected', 'phone_open',
   'unpair_requested', 'unpair_refused',
+  // Shield B5: the ledger could not be trusted at load (kept aside, never restarted empty) and the phone's acknowledgement.
+  'ledger_reset', 'ledger_ack',
 ] as const
 export type PairingLedgerKind = (typeof PAIRING_LEDGER_KINDS)[number]
 export interface PairingLedgerFields {
@@ -1202,9 +1204,11 @@ export interface PairingLedgerFields {
   source?: 'deny_key'
   /** P-256 move: the key's algorithm, set by the daemon from the key role (never from input): 'p256' for phone keys, 'ed25519' for device keys. Informational. */
   keyAlg?: 'p256' | 'ed25519'
+  /** Shield B5: on ledger_reset, the head hash of the ledger that could not be trusted (when it had one). */
+  oldHead?: string
 }
 export interface PairingLedgerEntry extends PairingLedgerFields { seq: number; at: number; prev: string; hash: string }
-const LEDGER_FIELD_ORDER = ['seq', 'at', 'kind', 'phoneId', 'fingerprint', 'oldFingerprint', 'by', 'via', 'reason', 'askId', 'verb', 'uv', 'count', 'since', 'source', 'keyAlg'] as const
+const LEDGER_FIELD_ORDER = ['seq', 'at', 'kind', 'phoneId', 'fingerprint', 'oldFingerprint', 'by', 'via', 'reason', 'askId', 'verb', 'uv', 'count', 'since', 'source', 'keyAlg', 'oldHead'] as const
 const LEDGER_GENESIS = '0'.repeat(64)
 function ledgerHash(prev: string, e: Omit<PairingLedgerEntry, 'prev' | 'hash'>): string {
   const body: Record<string, unknown> = {}
@@ -1230,6 +1234,15 @@ export class PairingLedger {
     return this.entries_.filter((e) => e.seq > since).slice(0, limit).map((e) => ({ ...e }))
   }
   all(): readonly PairingLedgerEntry[] { return this.entries_ }
+  /** Shield B5: the latest ledger_reset not yet acknowledged (ledger_ack), or null. Pairing changes are locked while set. */
+  pendingReset(): PairingLedgerEntry | null {
+    for (let i = this.entries_.length - 1; i >= 0; i--) {
+      const e = this.entries_[i]!
+      if (e.kind === 'ledger_ack') return null
+      if (e.kind === 'ledger_reset') return { ...e }
+    }
+    return null
+  }
   head(): { seq: number; hash: string } {
     const last = this.entries_.at(-1)
     return { seq: last?.seq ?? 0, hash: last?.hash ?? LEDGER_GENESIS }
@@ -1303,6 +1316,13 @@ export class PhonePairing {
     this.isShared = opts.isShared
   }
 
+  /**
+   * Shield B5: pairing changes (pair, re-pair, unpair, deny key) are refused while the ledger has an unacknowledged
+   * ledger_reset and a phone is paired to acknowledge it. With no phone paired, a touch pairing is the owner and
+   * its confirm acknowledges the reset.
+   */
+  changesLocked(): boolean { return this.ledger.pendingReset() !== null && this.pairedCount() > 0 }
+
   /** True after too many wrong codes, until the next begin('touch'). */
   get lockedOut(): boolean {
     return this.wrongCodes >= PhonePairing.MAX_WRONG_CODES
@@ -1331,6 +1351,7 @@ export class PhonePairing {
   offer(phoneId: string, phonePub: string, code: string, origin: AnswerOrigin = {}): PairingOffer {
     const no = (reason: string): PairingOffer => { this.refuse(phoneId, reason); return { ok: false, reason } }
     if (this.lockedOut) return no('locked_out')
+    if (this.changesLocked()) return no('ledger_locked')
     const c = this.codes.get(code)
     if (!c) {
       this.wrongCodes++
@@ -1368,6 +1389,8 @@ export class PhonePairing {
     this.pendingPairs.delete(phoneId)
     if (this.now() >= pend.expiresAt) return this.refuse(phoneId, 'expired')
     if (matched !== true) return this.refuse(phoneId, 'check_mismatch')
+    if (this.changesLocked()) return this.refuse(phoneId, 'ledger_locked')
+    const reset = this.ledger.pendingReset()
     // Shield deny key condition 4: a main-key rotation (re-pair with another key) revokes the deny key, in this save.
     const before = this.phones.get(phoneId)
     const rotated = before !== undefined && before !== '' && before !== pend.phonePub
@@ -1377,11 +1400,14 @@ export class PhonePairing {
     this.lastRefusal.delete(phoneId)
     this.log.push({ at: this.now(), event: 'pair', phoneId })
     this.ledger.append({ kind: rotated ? 'phone_rotated' : 'phone_paired', phoneId, fingerprint: deviceFingerprint(pend.phonePub), via: 'touch', keyAlg: 'p256' })
+    if (reset) this.ledger.append({ kind: 'ledger_ack', phoneId, by: 'touch', via: 'touch', since: reset.seq })
     this.onChange?.()
     return true
   }
 
-  unpair(phoneId: string, meta: { by?: string; via?: string; askId?: string } = {}): void {
+  unpair(phoneId: string, meta: { by?: string; via?: string; askId?: string } = {}): boolean {
+    // Shield B5: no pairing change while an unacknowledged ledger_reset is pending.
+    if (this.changesLocked()) return false
     const key = this.phones.get(phoneId)
     const was = this.phones.delete(phoneId)
     this.transports.delete(phoneId)
@@ -1398,6 +1424,15 @@ export class PhonePairing {
     this.onChange?.()
     // Shield R7 ruling: the last phone gone ends the open phone Asks (no_paired_phone), by pairing state alone.
     if (was && this.phones.size === 0) { try { this.onLastUnpaired?.() } catch { /* a listener never changes the result */ } }
+    return was
+  }
+  /** Shield B5: the paired phone acknowledges the pending ledger_reset (the caller checked its main-key signature). */
+  ackReset(phoneId: string, seq: number, hash: string): boolean {
+    const r = this.ledger.pendingReset()
+    if (!r || r.seq !== seq || r.hash !== hash || !this.phones.get(phoneId)) return false
+    this.ledger.append({ kind: 'ledger_ack', phoneId, by: phoneId, via: 'phone', since: r.seq })
+    this.onChange?.()
+    return true
   }
   /** Called when an unpair leaves no paired phone (the journal ends open phone Asks with no_paired_phone). */
   onLastUnpaired?: () => void
@@ -1430,7 +1465,7 @@ export class PhonePairing {
   /** Shield deny key condition 2: set (or replace) this paired phone's one deny-only key. The caller checked the main-key signature. */
   /** Shield D2a: would setDenyKey accept this key? Checked before anything changes, so a confirm is all or nothing. */
   canSetDenyKey(phoneId: string, pub: string): boolean {
-    return !!this.phones.get(phoneId) && !!rawPhoneKey(pub) && pub !== this.phones.get(phoneId)
+    return !this.changesLocked() && !!this.phones.get(phoneId) && !!rawPhoneKey(pub) && pub !== this.phones.get(phoneId)
   }
   setDenyKey(phoneId: string, pub: string): boolean {
     if (!this.canSetDenyKey(phoneId, pub)) return false
@@ -1864,6 +1899,9 @@ export class AskDeviceEnrollment {
   }
 }
 
+/** Shield B5: a ledger_reset counts as this many unpair requests in the unpair rate limit (the limit never resets). */
+export const UNPAIR_RESET_COUNT = 3
+
 export interface ApprovalJournal {
   window: ApprovalWindow
   ledger: AskLedger
@@ -1940,6 +1978,20 @@ export function openJournal(
   const device = new AskDeviceEnrollment(now)
   device.ledger = pairingLedger
   let recovered = false
+  /** Shield B5: start the ledger with a ledger_reset (keeping the untrusted one aside in a 0600 file next to the journal). */
+  const ledgerReset = (reason: string, untrusted: unknown): void => {
+    let oldHead: string | undefined
+    if (Array.isArray(untrusted) && untrusted.length > 0) {
+      const h = (untrusted.at(-1) as { hash?: unknown } | null)?.hash
+      if (typeof h === 'string' && /^[0-9a-f]{64}$/.test(h)) oldHead = h
+      try {
+        mkdirSync(dirname(path), { recursive: true })
+        writeFileSync(`${path}.ledger-untrusted-${now()}.json`, JSON.stringify(untrusted), { mode: 0o600 })
+      } catch { /* keeping a copy is best effort; the reset entry still records the old head */ }
+    }
+    pairingLedger.restore([])
+    pairingLedger.append({ kind: 'ledger_reset', reason, by: 'daemon', count: UNPAIR_RESET_COUNT, ...(oldHead ? { oldHead } : {}) })
+  }
   const marker = resolvePath(opts.markerPath ?? defaultMarkerPath(path))
   if (foldersOverlap(dirname(marker), dirname(resolvePath(path)))) {
     throw new ApprovalDenied('the install marker must not be in the journal\'s folder (or link into it): deleting that folder would delete both')
@@ -1948,18 +2000,33 @@ export function openJournal(
     // The journal was deleted after install: totals cannot be trusted.
     recovered = true
     window.lockedUntil = now() + window.windowMs
+    ledgerReset('journal_missing', undefined)
   } else if (existsSync(path)) {
+    let d: ReturnType<typeof parseJournal> | null = null
     try {
-      const d = parseJournal(readFileSync(path, 'utf8'))
+      d = parseJournal(readFileSync(path, 'utf8'))
       window.restore(d.window)
       ledger.restore(d.ledger)
       pairing.restore(d.pairing)
       settings.restore(d.settings)
       device.restore(d.device)
-      pairingLedger.restore(d.pairingLedger)
     } catch {
       recovered = true
       window.lockedUntil = now() + window.windowMs
+      ledgerReset('journal_unreadable', d?.pairingLedger)
+      d = null
+    }
+    if (d) {
+      try {
+        pairingLedger.restore(d.pairingLedger)
+      } catch {
+        // Shield B5: fail closed, never to empty. Voice is off for one window, the untrusted ledger is kept aside,
+        // the new chain starts with a ledger_reset carrying its head (counted as UNPAIR_RESET_COUNT unpair requests
+        // for the rate limit), and pairing changes are locked until the paired phone acknowledges it.
+        recovered = true
+        window.lockedUntil = now() + window.windowMs
+        ledgerReset('chain_broken', d.pairingLedger)
+      }
     }
   }
   const save = () => {

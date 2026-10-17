@@ -54,7 +54,11 @@ export function unpairMessage(phoneId: string, at: number): string {
 export function unpairTouchMessage(phoneId: string, at: number): string {
   return `ildra-unpair-touch:v1|${phoneId}|${at}`
 }
-export const PHONE_VERBS = ['ask.deny', 'ask.approve', 'settings.set', 'pairing.unpair', 'device.enroll.confirm', 'deny_key.set', 'main_key.rotate'] as const
+/** Shield B5: what the paired phone's main key signs to acknowledge a ledger_reset (its seq and hash). */
+export function ledgerAckMessage(seq: number, hash: string): string {
+  return `ildra-pairing-ledger-ack:v1|${seq}|${hash}`
+}
+export const PHONE_VERBS = ['ask.deny', 'ask.approve', 'settings.set', 'pairing.unpair', 'device.enroll.confirm', 'deny_key.set', 'main_key.rotate', 'pairing.ledger_ack'] as const
 export type PhoneVerb = (typeof PHONE_VERBS)[number]
 // ---- P-256 move: phone keys (main and deny) are Secure Enclave ECDSA P-256 with SHA-256 ----
 // The algorithm is pinned to the stored key role, never read from a message: phone keys are P-256 only
