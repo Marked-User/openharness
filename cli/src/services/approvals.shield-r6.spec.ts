@@ -88,7 +88,7 @@ describe('Shield R6 R5-1: who may answer, end to end through the runtime', () =>
     expect(await p1).toMatchObject({ approved: true, channel: 'phone' })
     r.svc.journal().pairing.unpair('p1')
     const p3 = r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
-    expect(await p3).toMatchObject({ approved: false, channel: null, reason: 'no_channel' })
+    expect(await p3).toMatchObject({ approved: false, channel: null, reason: 'no_paired_phone' })
   })
   it('FIXED R7-1: a device-role connection that has not proved the enrolled device key answers nothing; the enrolled one does', async () => {
     const r = rig({ ildra: { identity: DEV, role: 'device' }, other: { identity: DEV2, role: 'device' } })
