@@ -7,6 +7,10 @@
  * Pure policy only. Wiring into the core (CoreApi, ports, bridge tools/call hold and release, ledger)
  * is a separate reviewed change (SCOPE P1).
  *
+ * Shield pilot privacy review (ildra 85eb9f3): unknown tools can send (only manifest send:false opts out),
+ * the install marker never sits in the journal's folder, locked_ask and money Asks are phone-only, and a
+ * device (touch) approval needs holdMs >= DEVICE_HOLD_MIN_MS.
+ *
  * Production is the default: ask() requires a ledger (F2), a tool manifest (F4) and, for money or
  * send Asks, an approval window (F5). That mode adds F2 (id + digest8, single use, expiry, 2-word spoken challenge,
  * AnswerVerifier), the required MicGuard for voice, F6 minimum (PhonePairing: touch on device plus a
@@ -19,7 +23,8 @@
 
 import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, join, resolve as resolvePath, sep } from 'node:path'
 
 export type Tier = 'auto' | 'ask' | 'locked_ask' | 'never'
 export type AskChannel = 'voice' | 'touch' | 'phone'
@@ -90,6 +95,17 @@ export function voiceAllowed(tier: Tier, amountMinor?: number | null, limitMinor
   return true
 }
 
+/**
+ * Shield pilot review A1: locked_ask and money Asks are answered on the paired phone only, never on the
+ * device (touch) or by voice. Production ask() and AskLedger.open enforce it; reference mode does not.
+ */
+export function phoneOnly(tier: Tier, amountMinor?: number | null): boolean {
+  return tier === 'locked_ask' || amountMinor != null
+}
+
+/** Shield pilot review A1: a device (touch) approval is a deliberate hold of at least this long. */
+export const DEVICE_HOLD_MIN_MS = 1500
+
 /** F6 hook (not enforced by default): may this channel answer? Pairing itself must be locked_ask on touch. */
 export type PairingGuard = (channel: AskChannel) => boolean
 
@@ -99,7 +115,7 @@ export function askChannelFor(
   profile?: ApprovalProfile | null,
   available?: readonly string[] | null,
   amountMinor?: number | null,
-  extra: { allowVoice?: boolean; isPaired?: PairingGuard } = {},
+  extra: { allowVoice?: boolean; isPaired?: PairingGuard; phoneOnly?: boolean } = {},
 ): AskChannel | null {
   const configured = profile?.ask_channel
   const order: readonly unknown[] = configured && configured.length > 0 ? configured : DEFAULT_ASK_CHANNEL
@@ -107,6 +123,7 @@ export function askChannelFor(
   for (const c of order) {
     if (typeof c !== 'string' || !KNOWN_CHANNELS.has(c)) continue
     if (c === 'voice' && !allowVoice) continue
+    if (extra.phoneOnly && c !== 'phone') continue
     if (available != null && !available.includes(c)) continue
     if (c === 'phone' && extra.isPaired && !extra.isPaired(c)) continue
     return c as AskChannel
@@ -124,9 +141,13 @@ export interface ToolManifestEntry {
   send?: unknown
 }
 
-/** F8: a send is decided by the manifest (or tightened by the caller), never loosened by the caller. */
+/**
+ * F8 + Shield pilot review (a): a tool can send unless the manifest lists it with literal `send: false`.
+ * Missing from the manifest, no manifest, or any other value means it gets the recipient and first-line
+ * checks. The caller can tighten (isSend, send details), never loosen.
+ */
 export function isSendTool(manifest: readonly ToolManifestEntry[] | null | undefined, toolName: string): boolean {
-  return manifest?.find((e) => e.name === toolName)?.send === true
+  return manifest?.find((e) => e.name === toolName)?.send !== false
 }
 
 /** A tool is a read only when the manifest lists it as read-only. Unknown tools are writes. */
@@ -355,6 +376,11 @@ export interface AskAnswer {
   approved: boolean
   transcript?: string
   from?: AnswerOrigin
+  /**
+   * Device (touch) answers: how long the approve control was held, measured by the firmware (Volt).
+   * An approval on the touch channel without a finite holdMs of DEVICE_HOLD_MIN_MS or more is rejected.
+   */
+  holdMs?: number
   /** D5 (b) hook for Volt: signature over (id, digest, counter). Checked by an AnswerVerifier, not here. */
   signature?: string
 }
@@ -364,7 +390,7 @@ export type AnswerVerifier = (req: AskRequest, ans: AskAnswer) => boolean
 
 export type SettleReason =
   | 'malformed' | 'unknown_id' | 'replayed' | 'expired' | 'digest_mismatch' | 'challenge_mismatch'
-  | 'verifier_rejected' | 'shared_machine' | 'unpaired_phone'
+  | 'verifier_rejected' | 'shared_machine' | 'unpaired_phone' | 'hold_too_short'
 export type SettleResult = { ok: true } | { ok: false; reason: SettleReason }
 
 /** Open Asks and spent ids. Every answer is settled at most once; a bad answer also spends the request. */
@@ -387,6 +413,9 @@ export class AskLedger {
     action: string; tier: Tier; channel: AskChannel; amountMinor?: number; details?: Record<string, unknown>
     agentId?: string; templateId?: string; recipient?: string; firstLine?: string
   }): AskRequest {
+    if (phoneOnly(o.tier, o.amountMinor) && o.channel !== 'phone') {
+      throw new ApprovalDenied('locked_ask and money Asks are answered on the paired phone only')
+    }
     const openedAt = this.now()
     const currency = o.amountMinor !== undefined ? ('USD' as const) : undefined
     const req: AskRequest = {
@@ -445,6 +474,10 @@ export class AskLedger {
       const id = ans.from?.phoneId
       if (typeof id !== 'string' || !ctx.isPaired || !ctx.isPaired(id)) return { ok: false, reason: 'unpaired_phone' }
     }
+    if (req.channel === 'touch' && ans.approved === true) {
+      const h = ans.holdMs
+      if (typeof h !== 'number' || !Number.isFinite(h) || h < DEVICE_HOLD_MIN_MS) return { ok: false, reason: 'hold_too_short' }
+    }
     if (req.challenge && ans.approved === true && !transcriptMatches(req.challenge, ans.transcript)) return { ok: false, reason: 'challenge_mismatch' }
     for (const v of [this.verifier, ctx.extra]) {
       if (!v) continue
@@ -462,7 +495,12 @@ export class AskLedger {
 
   /** @internal journal restore. */
   restore(data: { open: AskRequest[]; spent: [string, number][] }): void {
-    for (const r of data.open) this.open_.set(r.id, { ...r })
+    for (const r of data.open) {
+      // Pilot review A1: a locked_ask or money Ask opened on the device or voice before the phone-only rule
+      // is denied on restore (spent), never answerable.
+      if (phoneOnly(r.tier, r.amountMinor) && r.channel !== 'phone') this.spent.set(r.id, r.expiresAt)
+      else this.open_.set(r.id, { ...r })
+    }
     for (const [id, at] of data.spent) this.spent.set(id, at)
   }
 }
@@ -700,6 +738,16 @@ export interface ApprovalJournal {
 }
 
 /**
+ * Default install marker for a journal: `$ILDRA_MARKER_DIR` (or `~/.ildra/install-markers`), named by a
+ * hash of the journal's absolute path, so it never shares the journal's folder.
+ */
+export function defaultMarkerPath(journalPath: string): string {
+  const base = process.env.ILDRA_MARKER_DIR || join(homedir(), '.ildra', 'install-markers')
+  const tag = createHash('sha256').update(resolvePath(journalPath)).digest('hex').slice(0, 16)
+  return join(resolvePath(base), `${tag}.installed`)
+}
+
+/**
  * Open (or create) the 0600 journal at `path`. Every change to the window, ledger or pairing is written
  * through atomically. A corrupt or tampered file fails closed: totals cannot be trusted, so voice is
  * off for every agent for one full window, pending Asks are dropped (denied) and no phone is paired.
@@ -708,7 +756,10 @@ export function openJournal(
   path: string,
   opts: {
     now?: () => number; windowMs?: number; ttlMs?: number; verifier?: AnswerVerifier; voiceMoneyLimitMinor?: number; bulkCount?: number
-    /** F5: install marker, written once. Marker present and journal missing fails closed. Keep it outside the journal's folder in production. */
+    /**
+     * F5: install marker, written once. Marker present and journal missing fails closed. Defaults to
+     * defaultMarkerPath(path). A marker in the journal's folder, or below it, is refused (Shield pilot review).
+     */
     markerPath?: string
   } = {},
 ): ApprovalJournal {
@@ -717,7 +768,11 @@ export function openJournal(
   const ledger = new AskLedger({ now, ttlMs: opts.ttlMs, verifier: opts.verifier })
   const pairing = new PhonePairing({ now })
   let recovered = false
-  const marker = opts.markerPath ?? `${path}.installed`
+  const marker = resolvePath(opts.markerPath ?? defaultMarkerPath(path))
+  const jdir = dirname(resolvePath(path))
+  if (dirname(marker) === jdir || marker.startsWith(jdir + sep)) {
+    throw new ApprovalDenied('the install marker must not be in the journal\'s folder: deleting that folder would delete both')
+  }
   if (!existsSync(path) && existsSync(marker)) {
     // The journal was deleted after install: totals cannot be trusted.
     recovered = true
@@ -848,7 +903,7 @@ export async function ask(
     const legacy = opts.isPaired
     isPaired = (c) => !!pairing?.isPaired() && (!legacy || legacy(c))
   }
-  const channel = askChannelFor(tier, profile, opts.available, opts.amountMinor, { allowVoice, isPaired })
+  const channel = askChannelFor(tier, profile, opts.available, opts.amountMinor, { allowVoice, isPaired, phoneOnly: prod && phoneOnly(tier, opts.amountMinor) })
   if (channel === null) return { approved: false, channel: null, tier }
 
   const send = opts.send

@@ -11,9 +11,13 @@ import {
   type AskAnswer, type AskRequest, type ApprovalTemplate, type AnswerFn,
 } from './approvals.js'
 
+/** Shield pilot review A1: a device (touch) approval is a hold of 1.5 s or more; phone answers ignore it. */
+const HOLD = 2000
+
 const T: ApprovalTemplate = { permissions: { ask: ['Send an email', 'Pay a bill'], locked_ask: ['Brakes step'] } }
 const MIC = { speaking: () => {} }
-const KIND = (tool: string) => ({ kind: { manifest: [], tool } })
+// Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
+const KIND = (tool: string) => ({ kind: { manifest: [{ name: tool, send: false }], tool } })
 
 function clock(t = 10_000_000) {
   return { now: () => t, advance: (ms: number) => { t += ms } }
@@ -22,7 +26,7 @@ function dir() { return mkdtempSync(join(tmpdir(), 'shield-')) }
 function answerWith(fn: (req: AskRequest) => Partial<AskAnswer> | null): AnswerFn {
   return (_c, _p, req) => {
     const extra = fn(req!)
-    return extra === null ? true : { id: req!.id, digest8: req!.digest8, approved: true, transcript: req!.challenge ? `yes ${req!.challenge}` : undefined, from: { phoneId: 'p1' }, ...extra }
+    return extra === null ? true : { id: req!.id, digest8: req!.digest8, approved: true, holdMs: HOLD, transcript: req!.challenge ? `yes ${req!.challenge}` : undefined, from: { phoneId: 'p1' }, ...extra }
   }
 }
 function pairedPhone(now: () => number) {
@@ -37,7 +41,7 @@ describe('Shield F2: replay, expiry, digest', () => {
   it('replayed answer is rejected the second time', () => {
     const c = clock(); const l = new AskLedger({ now: c.now })
     const req = l.open({ action: 'Send an email', tier: 'ask', channel: 'touch' })
-    const a: AskAnswer = { id: req.id, digest8: req.digest8, approved: true }
+    const a: AskAnswer = { id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD }
     expect(l.settle(a)).toEqual({ ok: true })
     expect(l.settle(a)).toEqual({ ok: false, reason: 'replayed' })
   })
@@ -45,24 +49,24 @@ describe('Shield F2: replay, expiry, digest', () => {
     const c = clock(); const f = join(dir(), 'j.json')
     const j1 = openJournal(f, { now: c.now })
     const req = j1.ledger.open({ action: 'Send an email', tier: 'ask', channel: 'touch' })
-    const a: AskAnswer = { id: req.id, digest8: req.digest8, approved: true }
+    const a: AskAnswer = { id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD }
     expect(j1.ledger.settle(a).ok).toBe(true)
     const j2 = openJournal(f, { now: c.now })
     expect(j2.ledger.settle(a)).toEqual({ ok: false, reason: 'replayed' })
   })
   it('answer at or after expiry is rejected, money 1 h', () => {
     const c = clock(); const l = new AskLedger({ now: c.now })
-    const req = l.open({ action: 'Pay a bill', tier: 'ask', channel: 'touch', amountMinor: 100 })
+    const req = l.open({ action: 'Pay a bill', tier: 'ask', channel: 'phone', amountMinor: 100 })
     expect(req.expiresAt - req.openedAt).toBe(3_600_000)
     c.advance(3_600_000)
-    expect(l.settle({ id: req.id, digest8: req.digest8, approved: true })).toEqual({ ok: false, reason: 'expired' })
+    expect(l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD })).toEqual({ ok: false, reason: 'expired' })
   })
   it('answer for a different digest is rejected and spends the request', () => {
     const c = clock(); const l = new AskLedger({ now: c.now })
-    const req = l.open({ action: 'Pay a bill', tier: 'ask', channel: 'touch', amountMinor: 100 })
+    const req = l.open({ action: 'Pay a bill', tier: 'ask', channel: 'phone', amountMinor: 100 })
     const other = actionDigest8('Pay a bill', { amountMinor: 999999, currency: 'USD' })
-    expect(l.settle({ id: req.id, digest8: other, approved: true })).toEqual({ ok: false, reason: 'digest_mismatch' })
-    expect(l.settle({ id: req.id, digest8: req.digest8, approved: true })).toEqual({ ok: false, reason: 'replayed' })
+    expect(l.settle({ id: req.id, digest8: other, approved: true, holdMs: HOLD })).toEqual({ ok: false, reason: 'digest_mismatch' })
+    expect(l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD })).toEqual({ ok: false, reason: 'replayed' })
   })
   it('bare true (reference style) does not approve in production', async () => {
     const c = clock()
@@ -93,14 +97,18 @@ describe('Shield F2: replay, expiry, digest', () => {
 
 describe('Shield F5: restart mid-window', () => {
   it('$50 voice cap holds across a restart', async () => {
+    // Since the pilot review (A1) money Asks are phone-only, so the cap is checked on the persisted window.
     const c = clock(); const f = join(dir(), 'j.json')
     const j1 = openJournal(f, { now: c.now })
-    const o = { ...KIND('x'), ledger: j1.ledger, window: j1.window, agentId: 'a', mic: MIC, available: ['voice', 'touch'] }
+    const o = { ...KIND('x'), ledger: j1.ledger, window: j1.window, agentId: 'a', mic: MIC, pairing: pairedPhone(c.now), available: ['voice', 'touch', 'phone'] }
     const r1 = await ask(T, 'Pay a bill', null, answerWith(() => ({})), { ...o, amountMinor: 4500 })
-    expect(r1.channel).toBe('voice'); expect(r1.approved).toBe(true)
+    expect(r1.channel).toBe('phone'); expect(r1.approved).toBe(true)
+    expect(j1.window.wouldExceed('a', { amountMinor: 500 }).voiceAllowed).toBe(true)
     const j2 = openJournal(f, { now: c.now })
+    expect(j2.window.wouldExceed('a', { amountMinor: 501 }).voiceAllowed).toBe(false)
+    expect(j2.window.totals('a').amountMinor).toBe(4500)
     const r2 = await ask(T, 'Pay a bill', null, answerWith(() => ({})), { ...o, ledger: j2.ledger, window: j2.window, amountMinor: 4500 })
-    expect(r2.channel).toBe('touch')
+    expect(r2.channel).toBe('phone')
   })
   it('bulk over 20 holds across a restart', async () => {
     const c = clock(); const f = join(dir(), 'j.json')
@@ -209,7 +217,7 @@ describe('Shield F8: send Ask content', () => {
   })
   it('prompt shows recipient and first line; both bound into the digest', async () => {
     let prompt = ''; const seen: AskRequest[] = []
-    const fn: AnswerFn = (_c, p, q) => { prompt = p; seen.push(q!); return { id: q!.id, digest8: q!.digest8, approved: true } }
+    const fn: AnswerFn = (_c, p, q) => { prompt = p; seen.push(q!); return { id: q!.id, digest8: q!.digest8, approved: true, holdMs: HOLD } }
     await ask(T, 'Send an email', null, fn, { ...o(), send: { recipient: 'a@x.com', message: '\n  Hello Bob  \nsecret line 2' } })
     expect(prompt).toContain('a@x.com'); expect(prompt).toContain('"Hello Bob"')
     await ask(T, 'Send an email', null, fn, { ...o(), send: { recipient: 'b@x.com', message: '\n  Hello Bob  \nsecret line 2' } })
@@ -230,7 +238,7 @@ describe('Shield F8: send Ask content', () => {
     await expect(ask(T, 'Send an email', null, () => { called++; return true }, { kind, ledger: new AskLedger(), available: ['touch'], isSend: false, send: { recipient: 'a@x.com', message: 'hi' } })).rejects.toThrow(/window/)
     expect(called).toBe(0)
     let prompt = ''
-    await ask(T, 'Send an email', null, (_c, p, q) => { prompt = p; return { id: q!.id, digest8: q!.digest8, approved: true } },
+    await ask(T, 'Send an email', null, (_c, p, q) => { prompt = p; return { id: q!.id, digest8: q!.digest8, approved: true, holdMs: HOLD } },
       { kind, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch'], isSend: false, send: { recipient: 'a@x.com', message: 'hi' } })
     expect(prompt).toContain('to a@x.com: "hi"')
   })

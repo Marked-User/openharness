@@ -6,41 +6,46 @@ import {
   type AskAnswer, type AskRequest, type ApprovalTemplate,
 } from './approvals.js'
 
+/** Shield pilot review A1: a device (touch) approval is a hold of 1.5 s or more; phone answers ignore it. */
+const HOLD = 2000
+
 const T: ApprovalTemplate = { permissions: { ask: ['Send an email'], locked_ask: ['Brakes step'] } }
-const kind = { manifest: [], tool: 'x' }
+// Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
+const kind = { manifest: [{ name: 'x', send: false }], tool: 'x' }
 const SHARED_PUB = 'S'.repeat(43) + '='
 const OWN_PUB = 'O'.repeat(43) + '='
 const isShared = sharedOriginFromPeers([{ machineId: 'm-shared', pub: SHARED_PUB }])
-const good = (req: AskRequest, from: AskAnswer['from']): AskAnswer => ({ id: req.id, digest8: req.digest8, approved: true, from })
+const good = (req: AskRequest, from: AskAnswer['from']): AskAnswer => ({ id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD, from })
 
 describe('F12: the shared flag comes from the gateway, not the answer', () => {
+  // A plain Ask on the device (touch): locked_ask is phone-only since the pilot review (A1).
   it('lookup from the gateway peers', () => {
     expect(isShared({ machinePub: SHARED_PUB })).toBe(true)
     expect(isShared({ machinePub: OWN_PUB })).toBe(false)
     expect(isShared({})).toBe(false)
   })
   it('answer claiming shared:false from a gateway-shared machine is rejected', async () => {
-    const r = await ask(T, 'Brakes step', null, (_c, _p, req) => good(req!, { machinePub: SHARED_PUB, shared: false }), { ledger: new AskLedger(), kind, isShared })
+    const r = await ask(T, 'Send an email', null, (_c, _p, req) => good(req!, { machinePub: SHARED_PUB, shared: false }), { ledger: new AskLedger(), kind, isShared })
     expect(r).toMatchObject({ approved: false, reason: 'shared_machine' })
   })
   it('answer that omits shared from a gateway-shared machine is rejected', async () => {
-    const r = await ask(T, 'Brakes step', null, (_c, _p, req) => good(req!, { machinePub: SHARED_PUB }), { ledger: new AskLedger(), kind, isShared })
+    const r = await ask(T, 'Send an email', null, (_c, _p, req) => good(req!, { machinePub: SHARED_PUB }), { ledger: new AskLedger(), kind, isShared })
     expect(r.reason).toBe('shared_machine')
   })
   it('own machine passes; a self-declared shared:true still rejects (never clears, only tightens)', async () => {
-    expect((await ask(T, 'Brakes step', null, (_c, _p, req) => good(req!, { machinePub: OWN_PUB, shared: false }), { ledger: new AskLedger(), kind, isShared })).approved).toBe(true)
-    expect((await ask(T, 'Brakes step', null, (_c, _p, req) => good(req!, { machinePub: OWN_PUB, shared: true }), { ledger: new AskLedger(), kind, isShared })).reason).toBe('shared_machine')
+    expect((await ask(T, 'Send an email', null, (_c, _p, req) => good(req!, { machinePub: OWN_PUB, shared: false }), { ledger: new AskLedger(), kind, isShared })).approved).toBe(true)
+    expect((await ask(T, 'Send an email', null, (_c, _p, req) => good(req!, { machinePub: OWN_PUB, shared: true }), { ledger: new AskLedger(), kind, isShared })).reason).toBe('shared_machine')
   })
   it('an answer with no origin is looked up as empty; a non-false lookup result counts as shared', async () => {
     const seen: unknown[] = []
-    const r = await ask(T, 'Brakes step', null, (_c, _p, req) => ({ id: req!.id, digest8: req!.digest8, approved: true }), { ledger: new AskLedger(), kind, isShared: (o) => { seen.push(o); return false } })
+    const r = await ask(T, 'Send an email', null, (_c, _p, req) => ({ id: req!.id, digest8: req!.digest8, approved: true, holdMs: HOLD }), { ledger: new AskLedger(), kind, isShared: (o) => { seen.push(o); return false } })
     expect(r.approved).toBe(true)
     expect(seen).toEqual([{}])
-    const r2 = await ask(T, 'Brakes step', null, (_c, _p, req) => good(req!, {}), { ledger: new AskLedger(), kind, isShared: () => undefined as never })
+    const r2 = await ask(T, 'Send an email', null, (_c, _p, req) => good(req!, {}), { ledger: new AskLedger(), kind, isShared: () => undefined as never })
     expect(r2.reason).toBe('shared_machine')
   })
   it('a throwing gateway lookup fails closed', async () => {
-    const r = await ask(T, 'Brakes step', null, (_c, _p, req) => good(req!, {}), { ledger: new AskLedger(), kind, isShared: () => { throw new Error('down') } })
+    const r = await ask(T, 'Send an email', null, (_c, _p, req) => good(req!, {}), { ledger: new AskLedger(), kind, isShared: () => { throw new Error('down') } })
     expect(r.reason).toBe('shared_machine')
   })
   it('pairing uses the gateway lookup for begin and offer', () => {
@@ -55,8 +60,8 @@ describe('F12: the shared flag comes from the gateway, not the answer', () => {
 describe('F13: phone elicitation handler routed through the Ask gate', () => {
   const pairing = new PhonePairing()
   const s = pairing.begin('touch'); pairing.offer('p1', 'pub1', s.code); pairing.confirm('p1', 'touch', true)
-  const base = () => ({ ledger: new AskLedger(), pairing, manifest: [], available: ['phone'], guard: new AskPaneGuard() })
-  const el = { paneId: 'pane-1', server: 'db', message: 'Drop table users?' }
+  const base = () => ({ ledger: new AskLedger(), pairing, manifest: [{ name: 'db.query', send: false }], available: ['phone'], guard: new AskPaneGuard() })
+  const el = { paneId: 'pane-1', server: 'db', message: 'Drop table users?', tool: 'db.query' }
   it('marker helpers', () => {
     expect(ildraAskTitle({ digest8: 'abcd1234' }, 'ASK: x')).toBe(`${ILDRA_ASK_MARKER}abcd1234] ASK: x`)
     expect(isIldraAskQuestion('[Ildra Ask abcd1234] ASK: x')).toBe(true)

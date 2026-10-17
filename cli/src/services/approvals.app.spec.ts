@@ -9,8 +9,16 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+/** locked_ask and money Asks go to the paired phone only (pilot review A1). */
+function paired() {
+  const p = new PhonePairing()
+  const { code } = p.begin('touch'); p.offer('p1', 'pub1', code); p.confirm('p1', 'touch', true)
+  return p
+}
+
 const BK: ApprovalTemplate = { permissions: { ask: ['Send an invoice'] } }
-const kind = { manifest: [], tool: 'x' }
+// Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
+const kind = { manifest: [{ name: 'x', send: false }], tool: 'x' }
 function clock(t = 1_000_000) {
   return { now: () => t, advance: (ms: number) => { t += ms } }
 }
@@ -20,11 +28,11 @@ describe('AskRequest display fields', () => {
     let req: AskRequest | undefined
     await ask(BK, 'Send an invoice', null, (_c, _p, r) => { req = r; return false }, {
       ledger: new AskLedger(), kind, window: new ApprovalWindow(), agentId: 'bookkeeper-1', templateId: 'owner-bookkeeper',
-      amountMinor: 1250, isSend: true, send: { recipient: 'dana@example.com', message: '\nHi Dana, invoice attached.\nThanks' }, available: ['touch'],
+      amountMinor: 1250, isSend: true, send: { recipient: 'dana@example.com', message: '\nHi Dana, invoice attached.\nThanks' }, available: ['phone'], pairing: paired(),
     })
     expect(req).toMatchObject({
       agentId: 'bookkeeper-1', templateId: 'owner-bookkeeper', action: 'Send an invoice', recipient: 'dana@example.com',
-      firstLine: 'Hi Dana, invoice attached.', amountMinor: 1250, currency: 'USD', channel: 'touch', tier: 'ask',
+      firstLine: 'Hi Dana, invoice attached.', amountMinor: 1250, currency: 'USD', channel: 'phone', tier: 'ask',
     })
   })
   it('no amount: no currency; no send: no recipient or firstLine; ids absent when not given', () => {
@@ -33,12 +41,12 @@ describe('AskRequest display fields', () => {
     for (const k of ['currency', 'amountMinor', 'recipient', 'firstLine', 'agentId', 'templateId']) expect(k in r).toBe(false)
   })
   it('currency is present whenever amountMinor is, including 0', () => {
-    expect(new AskLedger().open({ action: 'a', tier: 'ask', channel: 'touch', amountMinor: 0 }).currency).toBe('USD')
+    expect(new AskLedger().open({ action: 'a', tier: 'ask', channel: 'phone', amountMinor: 0 }).currency).toBe('USD')
   })
   it('display ids are not in the digest; currency and content are', () => {
     const l = new AskLedger()
-    const a = l.open({ action: 'a', tier: 'ask', channel: 'touch', amountMinor: 5, agentId: 'x', templateId: 't' })
-    const b = l.open({ action: 'a', tier: 'ask', channel: 'touch', amountMinor: 5, agentId: 'y', templateId: 'u' })
+    const a = l.open({ action: 'a', tier: 'ask', channel: 'phone', amountMinor: 5, agentId: 'x', templateId: 't' })
+    const b = l.open({ action: 'a', tier: 'ask', channel: 'phone', amountMinor: 5, agentId: 'y', templateId: 'u' })
     expect(a.digest8).toBe(b.digest8)
     expect(a.digest8).toBe(actionDigest8('a', { amountMinor: 5, currency: 'USD' }))
     expect(a.digest8).not.toBe(actionDigest8('a', { amountMinor: 5 }))
@@ -49,7 +57,7 @@ describe('AskRequest display fields', () => {
     const dir = mkdtempSync(join(tmpdir(), 'app-'))
     const p = join(dir, 'j.json')
     const j = openJournal(p)
-    const r = j.ledger.open({ action: 'a', tier: 'ask', channel: 'touch', amountMinor: 5, agentId: 'g', templateId: 't', recipient: 'r', firstLine: 'f' })
+    const r = j.ledger.open({ action: 'a', tier: 'ask', channel: 'phone', amountMinor: 5, agentId: 'g', templateId: 't', recipient: 'r', firstLine: 'f' })
     const j2 = openJournal(p)
     expect(j2.recovered).toBe(false)
     expect(j2.ledger.toJSON().open[0]).toEqual(r)
@@ -194,7 +202,7 @@ describe('prompt text still reaches the answer function', () => {
     await ask(BK, 'Send an invoice', null, (_c, p, r) => { prompts.push(p); return { id: r!.id, digest8: r!.digest8, approved: false } },
       { ledger: new AskLedger(), kind, available: ['touch'] })
     await ask({ permissions: { locked_ask: ['Brakes step'] } }, 'Brakes step', null, (_c, p) => { prompts.push(p); return false },
-      { ledger: new AskLedger(), kind })
+      { ledger: new AskLedger(), kind, pairing: paired(), available: ['phone'] })
     expect(prompts).toEqual(['ASK: Send an invoice', 'LOCKED_ASK: Brakes step'])
   })
 })

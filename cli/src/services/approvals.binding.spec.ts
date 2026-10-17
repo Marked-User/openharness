@@ -9,12 +9,21 @@ import {
   type AskAnswer, type AskChannel, type AskRequest, type ApprovalTemplate,
 } from './approvals.js'
 
-/** Production defaults for these tests: manifest present (tool unknown, so write) and a window. */
-const ask: typeof askProd = (t, a, p, f, o = {}) => askProd(t, a, p, f, { kind: { manifest: [], tool: a }, window: new ApprovalWindow(), agentId: 'agent', ...o })
+/** Shield pilot review A1: a device (touch) approval is a hold of 1.5 s or more; phone answers ignore it. */
+const HOLD = 2000
+
+/** Production defaults for these tests: manifest lists the tool as a write with send:false (pilot review a), and a window. */
+const ask: typeof askProd = (t, a, p, f, o = {}) => askProd(t, a, p, f, { kind: { manifest: [{ name: a, send: false }], tool: a }, window: new ApprovalWindow(), agentId: 'agent', ...o })
 /** Pair through the full F6 flow: device touch, phone offers code + key, device touch confirms the match. */
 function complete(p: PhonePairing, id: string, code: string, origin?: { shared?: boolean }): boolean {
   const o = p.offer(id, `pub-${id}`, code, origin)
   return o.ok && p.confirm(id, 'touch', true)
+}
+/** locked_ask and money Asks are answered on the paired phone only (pilot review A1). */
+function pairedPhone(): PhonePairing {
+  const p = new PhonePairing()
+  complete(p, 'phone-1', p.begin('touch').code)
+  return p
 }
 
 const BK: ApprovalTemplate = { permissions: { auto: ['Read the ledger'], ask: ['Send an invoice'], never: ['Move money out'] } }
@@ -24,7 +33,7 @@ function clock(t = 1_000_000) {
   return { now: () => t, advance: (ms: number) => { t += ms } }
 }
 function good(req: AskRequest, extra: Partial<AskAnswer> = {}): AskAnswer {
-  return { id: req.id, digest8: req.digest8, approved: true, transcript: req.challenge ? `yes ${req.challenge}` : undefined, from: { phoneId: 'phone-1' }, ...extra }
+  return { id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD, transcript: req.challenge ? `yes ${req.challenge}` : undefined, from: { phoneId: 'phone-1' }, ...extra }
 }
 
 describe('F2 digest8', () => {
@@ -77,15 +86,19 @@ describe('F2 AskLedger', () => {
   it('opens a request with id, digest8, expiry, and a challenge only for voice', () => {
     const c = clock()
     const l = new AskLedger({ now: c.now, ttlMs: 1000 })
-    const v = l.open({ action: 'Send an invoice', tier: 'ask', channel: 'voice', amountMinor: 100 })
+    const v = l.open({ action: 'Send an invoice', tier: 'ask', channel: 'voice' })
     expect(v.id).toMatch(/^[0-9a-f-]{36}$/)
-    expect(v.digest8).toBe(actionDigest8('Send an invoice', { amountMinor: 100, currency: 'USD' }))
+    expect(v.digest8).toBe(actionDigest8('Send an invoice', {}))
+    // Money is phone-only (pilot review A1); the amount and currency are in the digest.
+    const m = l.open({ action: 'Send an invoice', tier: 'ask', channel: 'phone', amountMinor: 100 })
+    expect(m.digest8).toBe(actionDigest8('Send an invoice', { amountMinor: 100, currency: 'USD' }))
+    expect(m.challenge).toBeUndefined()
     expect(v.expiresAt).toBe(1_001_000)
     expect(v.challenge?.split(' ')).toHaveLength(2)
     const t = l.open({ action: 'Send an invoice', tier: 'ask', channel: 'touch' })
     expect(t.challenge).toBeUndefined()
     expect(t.id).not.toBe(v.id)
-    expect(l.pending()).toBe(2)
+    expect(l.pending()).toBe(3)
   })
   it('accepts a matching answer once', () => {
     const l = new AskLedger()
@@ -162,9 +175,10 @@ describe('F2 ask with a ledger', () => {
     expect(req.digest8).toBe(actionDigest8('Send an invoice', {}))
   })
   it('touch Ask needs no challenge', async () => {
-    const r = await ask(RG, 'Brakes step', null, (_c, _p, req) => good(req!), { ledger: new AskLedger() })
+    const r = await ask(BK, 'Send an invoice', null, (_c, _p, req) => good(req!), { ledger: new AskLedger(), available: ['touch'] })
     expect(r.approved).toBe(true)
     expect(r.channel).toBe('touch')
+    expect(r.request?.challenge).toBeUndefined()
   })
   it('bare true is not accepted when bound', async () => {
     const r = await ask(BK, 'Send an invoice', null, () => true, { mic: MIC, ledger: new AskLedger() })
@@ -182,7 +196,7 @@ describe('F2 ask with a ledger', () => {
     const c = clock()
     const l = new AskLedger({ now: c.now, ttlMs: 100 })
     const w = new ApprovalWindow({ now: c.now })
-    const r = await ask(BK, 'Send an invoice', null, (_c, _p, req) => { c.advance(101); return good(req!) }, { mic: MIC, ledger: l, window: w, agentId: 'a', amountMinor: 100 })
+    const r = await ask(BK, 'Send an invoice', null, (_c, _p, req) => { c.advance(101); return good(req!) }, { mic: MIC, ledger: l, window: w, agentId: 'a' })
     expect(r).toMatchObject({ approved: false, channel: 'voice', tier: 'ask', reason: 'expired' })
     expect(w.totals('a').count).toBe(0)
   })
@@ -191,7 +205,7 @@ describe('F2 ask with a ledger', () => {
   })
   it('passes details into the digest', async () => {
     let d = ''
-    await ask(BK, 'Send an invoice', null, (_c, _p, req) => { d = req!.digest8; return good(req!) }, { mic: MIC, ledger: new AskLedger(), amountMinor: 700, details: { recipient: 'x' } })
+    await ask(BK, 'Send an invoice', null, (_c, _p, req) => { d = req!.digest8; return good(req!) }, { ledger: new AskLedger(), pairing: pairedPhone(), available: ['phone'], amountMinor: 700, details: { recipient: 'x' } })
     expect(d).toBe(actionDigest8('Send an invoice', { amountMinor: 700, currency: 'USD', recipient: 'x' }))
   })
   it('calls the Volt mic guard around a voice prompt (hook only)', async () => {
@@ -265,10 +279,10 @@ describe('F8: a send Ask shows the recipient and first line', () => {
     let digest = ''
     const message = '\n  Hi Dana, your invoice is attached.  \nSecond line'
     await ask(BK, 'Send an invoice', null, (_c, p, req) => { prompt = p; digest = req!.digest8; return good(req!) },
-      { ledger: new AskLedger(), isSend: true, send: { recipient: 'dana@example.com', message }, amountMinor: 1250 })
+      { ledger: new AskLedger(), pairing: pairedPhone(), available: ['phone'], isSend: true, send: { recipient: 'dana@example.com', message }, amountMinor: 1250 })
     expect(prompt).toBe('ASK: Send an invoice to dana@example.com: "Hi Dana, your invoice is attached." $12.50 (running total today: 1 actions, $12.50)')
     const other = await new Promise<string>((res) => { void ask(BK, 'Send an invoice', null, (_c, _p, req) => { res(req!.digest8); return good(req!) },
-      { ledger: new AskLedger(), isSend: true, send: { recipient: 'eve@example.com', message }, amountMinor: 1250 }) })
+      { ledger: new AskLedger(), pairing: pairedPhone(), available: ['phone'], isSend: true, send: { recipient: 'eve@example.com', message }, amountMinor: 1250 }) })
     expect(other).not.toBe(digest)
   })
   it('long first lines are cut, empty messages are refused', async () => {

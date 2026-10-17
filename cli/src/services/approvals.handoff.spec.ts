@@ -6,6 +6,9 @@ import {
   type AskAnswer, type AskRequest, type ApprovalTemplate, type AskOptions,
 } from './approvals.js'
 
+/** Shield pilot review A1: a device (touch) approval is a hold of 1.5 s or more; phone answers ignore it. */
+const HOLD = 2000
+
 /** Pair through the full F6 flow: device touch, phone offers code + key, device touch confirms the match. */
 function complete(p: PhonePairing, id: string, code: string, origin?: { shared?: boolean }): boolean {
   const o = p.offer(id, `pub-${id}`, code, origin)
@@ -22,8 +25,15 @@ function clock(t = 1_000_000) {
   return { now: () => t, advance: (ms: number) => { t += ms } }
 }
 const good = (req: AskRequest, extra: Partial<AskAnswer> = {}): AskAnswer =>
-  ({ id: req.id, digest8: req.digest8, approved: true, transcript: req.challenge ? `ok ${req.challenge}` : undefined, from: { phoneId: 'p1' }, ...extra })
-const prod = (o: Partial<AskOptions> = {}): AskOptions => ({ ledger: new AskLedger(), kind: { manifest: [], tool: 'x' }, ...o })
+  ({ id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD, transcript: req.challenge ? `ok ${req.challenge}` : undefined, from: { phoneId: 'p1' }, ...extra })
+// Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
+// locked_ask and money Asks are phone-only (pilot review A1), so the default has phone p1 paired.
+const prod = (o: Partial<AskOptions> = {}): AskOptions => ({ ledger: new AskLedger(), kind: { manifest: [{ name: 'x', send: false }], tool: 'x' }, pairing: pairedP1(), ...o })
+function pairedP1(): PhonePairing {
+  const p = new PhonePairing()
+  complete(p, 'p1', p.begin('touch').code)
+  return p
+}
 
 describe('expiry: money 1 h, others 24 h', () => {
   it('constants and helpers match the reference', () => {
@@ -40,14 +50,15 @@ describe('expiry: money 1 h, others 24 h', () => {
   it('money Ask: answer at 59 min works, at 60 min does not', () => {
     const c = clock()
     const l = new AskLedger({ now: c.now })
-    const a = l.open({ action: 'Pay', tier: 'ask', channel: 'touch', amountMinor: 100 })
+    const paired = { isPaired: (id: string) => id === 'p1' }
+    const a = l.open({ action: 'Pay', tier: 'ask', channel: 'phone', amountMinor: 100 })
     expect(a.expiresAt - a.openedAt).toBe(HOUR)
     expect(a.amountMinor).toBe(100)
     c.advance(59 * MIN)
-    expect(l.settle(good(a))).toEqual({ ok: true })
-    const b = l.open({ action: 'Pay', tier: 'ask', channel: 'touch', amountMinor: 100 })
+    expect(l.settle(good(a), paired)).toEqual({ ok: true })
+    const b = l.open({ action: 'Pay', tier: 'ask', channel: 'phone', amountMinor: 100 })
     c.advance(60 * MIN)
-    expect(l.settle(good(b))).toEqual({ ok: false, reason: 'expired' })
+    expect(l.settle(good(b), paired)).toEqual({ ok: false, reason: 'expired' })
   })
   it('non-money Ask works at 23 h 59 min, not at 24 h', () => {
     const c = clock()
@@ -105,9 +116,11 @@ describe('production is the default', () => {
 })
 
 describe('F4 mandatory manifests', () => {
-  const manifest = [{ name: 'ledger.read', readOnly: true }, { name: 'invoice.send' }]
+  const manifest = [{ name: 'ledger.read', readOnly: true, send: false }, { name: 'invoice.send' }]
   const k = (tool: string, m: typeof manifest | null = manifest) => ({ manifest: m, tool })
-  const run = (action: string, o: Partial<AskOptions>) => ask(BK, action, null, (_c, _p, req) => good(req!), prod({ available: ['touch'], ...o }))
+  // Unlisted and send-capable tools (pilot review a) carry send details and a window so the tier is what is tested.
+  const send = { send: { recipient: 'dana@example.com', message: 'Hi' }, window: new ApprovalWindow(), agentId: 'a' }
+  const run = (action: string, o: Partial<AskOptions>) => ask(BK, action, null, (_c, _p, req) => good(req!), prod({ available: ['touch'], ...send, ...o }))
   it('tool not in the manifest is a write, so Ask', async () => {
     expect((await run('unlisted', { kind: k('nope') })).tier).toBe('ask')
   })
@@ -138,14 +151,15 @@ describe('F5 required for money and send', () => {
     await expect(ask(BK, 'Send an invoice', null, (c) => calls.push(c), prod({ amountMinor: 100, window: new ApprovalWindow() }))).rejects.toThrow(/agentId/)
     expect(calls).toEqual([])
   })
-  it('ten $45 approvals: the second cannot use voice; the prompt shows the total', async () => {
+  it('ten $45 approvals: all on the phone (money is phone-only since the pilot review); the prompt shows the total', async () => {
     const w = new ApprovalWindow()
     const prompts: string[] = []
-    const o = prod({ window: w, agentId: 'a', amountMinor: 4500, mic: MIC, available: ['voice', 'touch'] })
+    const o = prod({ window: w, agentId: 'a', amountMinor: 4500, mic: MIC, available: ['voice', 'touch', 'phone'] })
     const chans: (string | null)[] = []
     for (let i = 0; i < 10; i++) chans.push((await ask(BK, 'Send an invoice', null, (_c, p, req) => { prompts.push(p); return good(req!) }, o)).channel)
-    expect(chans[0]).toBe('voice')
-    expect(chans.slice(1).every((c) => c === 'touch')).toBe(true)
+    expect(chans.every((c) => c === 'phone')).toBe(true)
+    // With only voice and touch available, a money Ask fails closed rather than using the device.
+    expect((await ask(BK, 'Send an invoice', null, (_c, _p, req) => good(req!), { ...o, available: ['voice', 'touch'] })).channel).toBeNull()
     expect(prompts[9]).toContain('(running total today: 10 actions, $450.00)')
   })
   it('the 21st send cannot use voice', async () => {
@@ -200,7 +214,7 @@ describe('F6 and #1358 shared machines', () => {
 describe('#1340: phone MCP Accept/Decline goes through the Ask gate', () => {
   const pairing = new PhonePairing()
   complete(pairing, 'p1', pairing.begin('touch').code)
-  const base = { ledger: new AskLedger(), pairing, manifest: [{ name: 'calendar.read', readOnly: true }], available: ['phone'] }
+  const base = { ledger: new AskLedger(), pairing, manifest: [{ name: 'calendar.read', readOnly: true, send: false }], available: ['phone'] }
   const el = { server: 'calendar', message: 'Allow access to your work calendar?', tool: 'calendar.read' }
   it('an approved bound answer accepts and the prompt names the server and message', async () => {
     let prompt = ''

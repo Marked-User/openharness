@@ -78,14 +78,9 @@
           "else": { "not": { "required": ["challenge"] } }
         },
         {
-          "description": "F1: locked_ask is never answered by voice.",
-          "if": { "properties": { "tier": { "const": "locked_ask" } }, "required": ["tier"] },
-          "then": { "properties": { "channel": { "enum": ["touch", "phone"] } } }
-        },
-        {
-          "description": "F1: money over 5000 minor units is never answered by voice.",
-          "if": { "properties": { "amountMinor": { "type": "integer", "exclusiveMinimum": 5000 } }, "required": ["amountMinor"] },
-          "then": { "properties": { "channel": { "enum": ["touch", "phone"] } } }
+          "description": "Shield pilot review A1: locked_ask and money Asks (amountMinor present) are answered on the paired phone only, never on the device (touch) or by voice. Covers F1 (no voice for locked_ask or money over 5000) as well.",
+          "if": { "anyOf": [{ "properties": { "tier": { "const": "locked_ask" } }, "required": ["tier"] }, { "required": ["amountMinor"] }] },
+          "then": { "properties": { "channel": { "const": "phone" } } }
         }
       ]
     },
@@ -102,7 +97,7 @@
     },
 
     "AskAnswer": {
-      "description": "Answering surface to daemon. Bound to the open request by id and digest8; single use. Only approved true approves.",
+      "description": "Answering surface to daemon. Bound to the open request by id and digest8; single use. Only approved true approves. A device (touch) answer carries the digest8 of the text it showed; a device approval also needs holdMs of 1500 or more (Shield pilot review A1). The answer does not name its channel (the open request does), so the daemon checks the hold rule, not the schema.",
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "digest8", "approved"],
@@ -110,6 +105,7 @@
         "id": { "$ref": "#/$defs/AskId" },
         "digest8": { "$ref": "#/$defs/Digest8" },
         "approved": { "type": "boolean" },
+        "holdMs": { "description": "Device (touch) answers: how long the approve control was held, in milliseconds, measured by the firmware. An approval on the touch channel without holdMs of at least 1500 is rejected with hold_too_short. A deny (swipe) needs none; phone and voice answers may omit it.", "type": "number", "minimum": 0 },
         "transcript": { "description": "Voice answers: what speech-to-text heard. Must contain the challenge words, adjacent, in order.", "type": "string" },
         "from": { "$ref": "#/$defs/AnswerOrigin" },
         "signature": { "description": "Reserved for D5 (b) signed answers (Volt). Not checked yet.", "type": "string", "minLength": 1 }
@@ -117,7 +113,7 @@
     },
 
     "AskRejectionReason": {
-      "enum": ["malformed", "unknown_id", "replayed", "expired", "digest_mismatch", "challenge_mismatch", "verifier_rejected", "shared_machine", "unpaired_phone"]
+      "enum": ["malformed", "unknown_id", "replayed", "expired", "digest_mismatch", "challenge_mismatch", "verifier_rejected", "shared_machine", "unpaired_phone", "hold_too_short"]
     },
 
     "AskRejection": {

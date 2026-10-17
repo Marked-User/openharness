@@ -227,7 +227,7 @@ describe('Shield F3: only voice, touch, phone', () => {
 
 describe('Shield F4: read vs write from the bridge tool list', () => {
   const manifest = [
-    { name: 'ledger.read', readOnly: true },
+    { name: 'ledger.read', readOnly: true, send: false },
     { name: 'mcp.search', annotations: { readOnlyHint: true } },
     { name: 'invoice.send' },
     { name: 'sneaky', readOnly: 'true' },
@@ -247,11 +247,12 @@ describe('Shield F4: read vs write from the bridge tool list', () => {
     expect(resolveTool(BK, 'ledger.read', manifest, STRICT)).toBe('ask')
   })
   it('ask with kind: unknown tool asks, read-only tool is auto', async () => {
-    expect((await ask(BK, 'unknown', null, yes, { kind: { manifest, tool: 'unknown' } })).tier).toBe('ask')
+    // Unknown tools can send (pilot review a): send details are required, the tier is still Ask.
+    expect((await ask(BK, 'unknown', null, yes, { kind: { manifest, tool: 'unknown' }, send: { recipient: 'r', message: 'm' } })).tier).toBe('ask')
     expect((await ask(BK, 'ledger.read', null, yes, { kind: { manifest, tool: 'ledger.read' } })).tier).toBe('auto')
   })
   it('caller isWrite:false cannot downgrade a manifest write; caller may tighten a read', async () => {
-    expect((await ask(BK, 'invoice.send', null, yes, { isWrite: false, kind: { manifest, tool: 'invoice.send' } })).tier).toBe('ask')
+    expect((await ask(BK, 'invoice.send', null, yes, { isWrite: false, kind: { manifest, tool: 'invoice.send' }, send: { recipient: 'r', message: 'm' } })).tier).toBe('ask')
     expect((await ask(BK, 'ledger.read', null, yes, { isWrite: true, kind: { manifest, tool: 'ledger.read' } })).tier).toBe('ask')
   })
 })

@@ -12,6 +12,9 @@ import {
   type AskAnswer, type AskRequest, type ApprovalTemplate,
 } from './approvals.js'
 
+/** Shield pilot review A1: a device (touch) approval is a hold of 1.5 s or more; phone answers ignore it. */
+const HOLD = 2000
+
 const schemaText = readFileSync(new URL('./ildra-messages.schema.json', import.meta.url), 'utf8')
 const schema = JSON.parse(schemaText)
 // ajv ships CommonJS; under NodeNext the class is the default export's `default`.
@@ -33,7 +36,8 @@ function envelope(type: string, body: unknown): string[] {
 
 const T: ApprovalTemplate = { permissions: { auto: ['Read the ledger'], ask: ['Send an invoice', 'Pay a bill'], locked_ask: ['Brakes step'] } }
 const MIC = { speaking: () => {} }
-const kind = { manifest: [], tool: 'x' }
+// Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
+const kind = { manifest: [{ name: 'x', send: false }], tool: 'x' }
 const PUB = 'A'.repeat(43) + '='
 
 describe('vendored schema', () => {
@@ -55,25 +59,26 @@ describe('real AskRequest outputs', () => {
     const l = new AskLedger()
     const reqs: AskRequest[] = [
       l.open({ action: 'Pay a bill', tier: 'ask', channel: 'phone', amountMinor: 12_000, agentId: 'bills', templateId: 'home-bills' }),
-      l.open({ action: 'Pay a bill', tier: 'ask', channel: 'voice', amountMinor: 0 }),
-      l.open({ action: 'Brakes step', tier: 'locked_ask', channel: 'touch' }),
+      l.open({ action: 'Pay a bill', tier: 'ask', channel: 'phone', amountMinor: 0 }),
+      l.open({ action: 'Brakes step', tier: 'locked_ask', channel: 'phone' }),
       l.open({ action: 'Send an invoice', tier: 'ask', channel: 'voice' }),
     ]
     await ask(T, 'Send an invoice', null, (_c, _p, r) => { reqs.push(r!); return false }, {
       ledger: l, kind, window: new ApprovalWindow(), agentId: 'bk', templateId: 'owner-bookkeeper', mic: MIC,
-      amountMinor: 4500, isSend: true, send: { recipient: 'dana@example.com', message: 'Hi Dana, invoice attached.' },
+      isSend: true, send: { recipient: 'dana@example.com', message: 'Hi Dana, invoice attached.' },
     })
     for (const r of reqs) {
       valid('AskRequest', r)
       expect(envelope('ildra.ask.request', r)).toEqual([])
       expect(r.expiresAt - r.openedAt).toBe(r.amountMinor !== undefined ? 3_600_000 : 86_400_000)
     }
-    expect(reqs[4]).toMatchObject({ channel: 'voice', recipient: 'dana@example.com', currency: 'USD' })
+    expect(reqs[4]).toMatchObject({ channel: 'voice', recipient: 'dana@example.com', firstLine: 'Hi Dana, invoice attached.' })
   })
 
   it('money cases: amountMinor and currency only together; voice needs the 2-word challenge', () => {
     const base = { id: '00000000-0000-4000-8000-000000000000', digest8: '0011aabb', openedAt: 1, expiresAt: 2, channel: 'touch', tier: 'ask', action: 'a' }
-    valid('AskRequest', { ...base, amountMinor: 5, currency: 'USD' })
+    valid('AskRequest', { ...base, channel: 'phone', amountMinor: 5, currency: 'USD' })
+    valid('AskRequest', { ...base, channel: 'phone', amountMinor: 0, currency: 'USD' })
     invalid('AskRequest', { ...base, amountMinor: 5 })
     invalid('AskRequest', { ...base, currency: 'USD' })
     invalid('AskRequest', { ...base, amountMinor: 5, currency: 'EUR' })
@@ -85,8 +90,12 @@ describe('real AskRequest outputs', () => {
     invalid('AskRequest', { ...base, challenge: 'maple river' })
     valid('AskRequest', { ...base, channel: 'voice', challenge: 'maple river' })
     invalid('AskRequest', { ...base, channel: 'voice', challenge: 'maple river', tier: 'locked_ask' })
+    // Pilot review A1: locked_ask and money are phone-only (no device touch, no voice).
     invalid('AskRequest', { ...base, channel: 'voice', challenge: 'maple river', amountMinor: 5001, currency: 'USD' })
-    valid('AskRequest', { ...base, channel: 'voice', challenge: 'maple river', amountMinor: 5000, currency: 'USD' })
+    invalid('AskRequest', { ...base, channel: 'voice', challenge: 'maple river', amountMinor: 5000, currency: 'USD' })
+    invalid('AskRequest', { ...base, amountMinor: 5, currency: 'USD' })
+    invalid('AskRequest', { ...base, tier: 'locked_ask' })
+    valid('AskRequest', { ...base, channel: 'phone', tier: 'locked_ask' })
     for (const k of ['tier', 'expiresAt', 'id', 'digest8', 'action']) {
       const { [k]: _, ...rest } = base as Record<string, unknown>
       invalid('AskRequest', rest)
@@ -106,7 +115,7 @@ describe('real AskAnswer, AskRejection and AskOutcome outputs', () => {
     const answers: AskAnswer[] = []
     const outcomes = []
     const answer = (extra: Partial<AskAnswer>) => (_c: unknown, _p: unknown, r?: AskRequest) => {
-      const a: AskAnswer = { id: r!.id, digest8: r!.digest8, approved: true, transcript: r!.challenge ? `yes ${r!.challenge}` : undefined, from: { phoneId: 'p1', machinePub: PUB }, ...extra }
+      const a: AskAnswer = { id: r!.id, digest8: r!.digest8, approved: true, holdMs: HOLD, transcript: r!.challenge ? `yes ${r!.challenge}` : undefined, from: { phoneId: 'p1', machinePub: PUB }, ...extra }
       if (a.transcript === undefined) delete a.transcript
       answers.push(a)
       return a
@@ -121,20 +130,27 @@ describe('real AskAnswer, AskRejection and AskOutcome outputs', () => {
     for (const a of answers) { valid('AskAnswer', a); expect(envelope('ildra.ask.answer', a)).toEqual([]) }
     for (const out of outcomes) { valid('AskOutcome', out); expect(envelope('ildra.ask.outcome', out)).toEqual([]) }
     expect(outcomes.map((x) => x.reason)).toEqual([undefined, undefined, 'digest_mismatch', 'unpaired_phone', undefined, undefined])
-    for (const reason of ['malformed', 'unknown_id', 'replayed', 'expired', 'digest_mismatch', 'challenge_mismatch', 'verifier_rejected', 'shared_machine', 'unpaired_phone']) {
+    for (const reason of ['malformed', 'unknown_id', 'replayed', 'expired', 'digest_mismatch', 'challenge_mismatch', 'verifier_rejected', 'shared_machine', 'unpaired_phone', 'hold_too_short']) {
       valid('AskRejection', { ok: false, reason })
     }
     const req = l.open({ action: 'a', tier: 'ask', channel: 'touch' })
-    const rej = l.settle({ id: req.id, digest8: 'deadbeef', approved: true })
+    const rej = l.settle({ id: req.id, digest8: 'deadbeef', approved: true, holdMs: HOLD })
     valid('AskRejection', rej)
-    l.settle({ id: req.id, digest8: req.digest8, approved: true })
-    const replay = l.settle({ id: req.id, digest8: req.digest8, approved: true })
+    l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD })
+    const replay = l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD })
     valid('AskRejection', replay)
+    const req2 = l.open({ action: 'a', tier: 'ask', channel: 'touch' })
+    const short = l.settle({ id: req2.id, digest8: req2.digest8, approved: true, holdMs: 600 })
+    expect(short).toEqual({ ok: false, reason: 'hold_too_short' })
+    valid('AskRejection', short)
   })
   it('rejects malformed answers and outcomes', () => {
-    const a = { id: '00000000-0000-4000-8000-000000000000', digest8: '0011aabb', approved: true }
+    const a = { id: '00000000-0000-4000-8000-000000000000', digest8: '0011aabb', approved: true, holdMs: HOLD }
     valid('AskAnswer', a)
     invalid('AskAnswer', { ...a, approved: 'yes' })
+    valid('AskAnswer', { ...a, holdMs: 1500.5 })
+    invalid('AskAnswer', { ...a, holdMs: -1 })
+    invalid('AskAnswer', { ...a, holdMs: '2000' })
     invalid('AskAnswer', { ...a, answer: 'approve' })
     invalid('AskAnswer', { ...a, from: { shared: 'no' } })
     invalid('AskAnswer', { ...a, from: { machinePub: 'short' } })
