@@ -39,9 +39,9 @@ export function enrollBridge(core: DeviceProver, svc: IldraAsk, clients: Record<
 export const phoneKeyPair = deviceKeyPair
 
 /** Batch A: the signed `ildra.device.enroll.confirm` body for the journal's pending (or enrolled) enrollment. */
-export function signedConfirm(svc: IldraAsk, phoneKey: KeyObject, devicePub: string, approved = true, uv: string = 'biometric'): Record<string, unknown> {
+export function signedConfirm(svc: IldraAsk, phoneKey: KeyObject, devicePub: string, approved = true, uv: string = 'biometric', denyKey?: string): Record<string, unknown> {
   const d = svc.journal().device
   const nonce = d.pending()?.nonce ?? d.enrolled()?.nonce ?? 'none'
-  const signature = sign(null, Buffer.from(enrollConfirmMessage(devicePub, nonce, approved, uv), 'utf8'), phoneKey).toString('base64')
-  return { devicePub, nonce, approved, uv, signature }
+  const signature = sign(null, Buffer.from(enrollConfirmMessage(devicePub, nonce, approved, uv, denyKey), 'utf8'), phoneKey).toString('base64')
+  return { devicePub, nonce, approved, uv, signature, ...(denyKey !== undefined ? { denyKey } : {}) }
 }

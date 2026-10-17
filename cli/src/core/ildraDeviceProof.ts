@@ -26,9 +26,27 @@ export type EnrollUv = (typeof ENROLL_UV)[number]
  * Batch A: what the paired phone signs (Ed25519, its paired key, a key that needs user presence) to confirm or
  * decline a pending device enrollment. Every field is fixed-format, so '|' cannot be ambiguous.
  */
-export function enrollConfirmMessage(devicePub: string, nonce: string, approved: boolean, uv: string): string {
-  return `ildra-enroll-confirm:v1|${devicePub}|${nonce}|${approved ? 'approve' : 'decline'}|${uv}`
+export function enrollConfirmMessage(devicePub: string, nonce: string, approved: boolean, uv: string, denyKey?: string): string {
+  // Shield deny-key condition 2: a deny key is accepted only inside a main-key-signed confirm, so it is signed too.
+  return `ildra-enroll-confirm:v1|${devicePub}|${nonce}|${approved ? 'approve' : 'decline'}|${uv}${denyKey !== undefined ? `|deny=${denyKey}` : ''}`
 }
+/**
+ * Shield deny key: what a phone key signs for an answer to one Ask. Bound to the request id, digest8 and the
+ * single-use answerId (condition 3), so it cannot be replayed or moved to another Ask.
+ */
+export function askAnswerMessage(approved: boolean, id: string, digest8: string, answerId: string): string {
+  return `ildra-ask-answer:v1|${approved ? 'approve' : 'deny'}|${id}|${digest8}|${answerId}`
+}
+/** Shield deny key: what a phone key signs for `ildra.settings.set` (optional today; the deny key never may). */
+export function settingsSetMessage(key: string, value: unknown): string {
+  return `ildra-settings-set:v1|${key}|${JSON.stringify(value)}`
+}
+/**
+ * Shield deny key condition 1: every verb a phone key may sign. A deny-only key is valid for exactly one,
+ * 'ask.deny' (on a pending Ask); every other verb, and any verb not listed here, is verifier_rejected.
+ */
+export const PHONE_VERBS = ['ask.deny', 'ask.approve', 'settings.set', 'pairing.unpair', 'device.enroll.confirm', 'deny_key.set', 'main_key.rotate'] as const
+export type PhoneVerb = (typeof PHONE_VERBS)[number]
 /** True when `signature` (base64) is `pub`'s Ed25519 signature over the UTF-8 bytes of `message`. */
 export function verifyEd25519(pub: unknown, message: string, signature: unknown): boolean {
   const raw = rawDeviceKey(pub)

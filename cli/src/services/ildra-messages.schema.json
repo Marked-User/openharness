@@ -17,7 +17,8 @@
             "ildra.pairing.begin", "ildra.pairing.offer", "ildra.pairing.offer_result",
             "ildra.pairing.confirm", "ildra.pairing.status", "ildra.ask.handoff", "ildra.ask.attempt",
             "ildra.settings.set", "ildra.settings.value", "ildra.ask.unpaired",
-            "ildra.device.enroll", "ildra.device.enroll.confirm", "ildra.device.enroll.status", "ildra.device.enroll.replaced", "ildra.device.challenge", "ildra.device.proof"
+            "ildra.device.enroll", "ildra.device.enroll.confirm", "ildra.device.enroll.status", "ildra.device.enroll.replaced", "ildra.device.challenge", "ildra.device.proof",
+            "ildra.phone.open", "ildra.phone.deny_summary"
           ]
         },
         "proto": { "const": 1 },
@@ -42,6 +43,8 @@
         { "if": { "properties": { "type": { "const": "ildra.device.enroll.confirm" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceEnrollConfirm" } } } },
         { "if": { "properties": { "type": { "const": "ildra.device.enroll.status" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceEnrollStatus" } } } },
         { "if": { "properties": { "type": { "const": "ildra.device.enroll.replaced" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceEnrollReplaced" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.phone.open" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PhoneOpen" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.phone.deny_summary" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PhoneDenySummary" } } } },
         { "if": { "properties": { "type": { "const": "ildra.device.challenge" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceChallenge" } } } },
         { "if": { "properties": { "type": { "const": "ildra.device.proof" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceProof" } } } }
       ]
@@ -153,7 +156,8 @@
         "holdMs": { "description": "Device (touch) answers: how long the approve control was held, in milliseconds, as the device reports it. Client-claimed (Shield R3-2): for M1 the device link is daemon-owned; GA needs a firmware-measured hold signed over id, digest8, holdMs and counter (D5 b). An approval on the touch channel without holdMs of at least 1500 is rejected with hold_too_short. A deny (swipe) needs none; phone and voice answers may omit it.", "type": "number", "minimum": 0 },
         "transcript": { "description": "Voice answers: what speech-to-text heard. Must contain the challenge words, adjacent, in order.", "type": "string" },
         "from": { "$ref": "#/$defs/AnswerOrigin" },
-        "signature": { "description": "Reserved for D5 (b) signed answers (Volt). Not checked yet.", "type": "string", "minLength": 1 }
+        "signature": { "description": "Reserved for D5 (b) signed answers (Volt). Not checked yet.", "type": "string", "minLength": 1 },
+        "phoneSignature": { "description": "Shield deny key (batch A): a phone answer signed by one of the paired phone's keys, Ed25519 base64 over ildra-answer bytes ildra-ask-answer:v1|<approve or deny>|<id>|<digest8>|<answerId> (UTF-8). The verifier is chosen from the stored key role, never from the message: the main (paired) key may sign approve or deny; the deny-only key (installed by DeviceEnrollConfirm.denyKey) is valid only for deny on a pending Ask. A deny-key signature on approve, or on any answer from the device (touch or voice), is verifier_rejected and journaled; a signature by neither key is bad_signature. Bound to id, digest8 and the single-use answerId, with the same expiry as an approve: a replay is replayed, a Deny after the Ask settled changes nothing. Every Deny settled by the deny key is journaled with source deny_key.", "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
       }
     },
 
@@ -164,8 +168,8 @@
     },
 
     "AskRejectionReason": {
-      "description": "v3.3 adds busy and no_authority. busy: another answer to the same open request is being settled at this moment (device and phone in the same tick); exactly one settles, this one is refused, the request is not spent by it. no_authority: the connection may not answer at all (the daemon's local socket, an observer, or a connection the daemon does not know); refused before any check, nothing is recorded (not even the answerId), the request is untouched. wrong_channel is different: an authenticated answering surface (the device bridge, or a phone key) answered on a channel it may not answer on; its answerId is recorded. Shield R7-1: a device-role connection that has not proven the enrolled device key (ildra.device.proof) is no_authority too. unpaired_phone (Shield R7-10): a phone answer to a phone request not authenticated by the paired phone's key; refused before any other check, nothing is recorded (not the answerId, no ildra.ask.attempt), nothing is spent, the request stays open for the paired phone; only an aggregate count reaches the paired phone (ildra.ask.unpaired).",
-      "enum": ["malformed", "unknown_id", "replayed", "expired", "digest_mismatch", "challenge_mismatch", "verifier_rejected", "shared_machine", "unpaired_phone", "hold_too_short", "stale_channel", "wrong_channel", "hold_limit", "busy", "no_authority"]
+      "description": "v3.3 adds busy and no_authority. busy: another answer to the same open request is being settled at this moment (device and phone in the same tick); exactly one settles, this one is refused, the request is not spent by it. no_authority: the connection may not answer at all (the daemon's local socket, an observer, or a connection the daemon does not know); refused before any check, nothing is recorded (not even the answerId), the request is untouched. wrong_channel is different: an authenticated answering surface (the device bridge, or a phone key) answered on a channel it may not answer on; its answerId is recorded. Shield R7-1: a device-role connection that has not proven the enrolled device key (ildra.device.proof) is no_authority too. unpaired_phone (Shield R7-10): a phone answer to a phone request not authenticated by the paired phone's key; refused before any other check, nothing is recorded (not the answerId, no ildra.ask.attempt), nothing is spent, the request stays open for the paired phone; only an aggregate count reaches the paired phone (ildra.ask.unpaired). Shield deny key (batch A): verifier_rejected is also a valid deny-only key signature on anything but a Deny on the phone path (journaled; the request stays open); bad_signature is an AskAnswer.phoneSignature by neither of the paired phone's keys, or not over this id, digest8 and answerId (the request stays open).",
+      "enum": ["malformed", "unknown_id", "replayed", "expired", "digest_mismatch", "challenge_mismatch", "verifier_rejected", "shared_machine", "unpaired_phone", "hold_too_short", "stale_channel", "wrong_channel", "hold_limit", "busy", "no_authority", "bad_signature"]
     },
 
     "AskRejection": {
@@ -243,7 +247,8 @@
       "required": ["key", "value"],
       "properties": {
         "key": { "enum": ["ask.deviceWindowSec"] },
-        "value": { "type": "number" }
+        "value": { "type": "number" },
+        "signature": { "description": "Optional (batch A): the paired main key's Ed25519 signature, base64, over ildra-settings-set:v1|<key>|<JSON of value>. A deny-only key signature is verifier_rejected; any other bad signature is bad_signature.", "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
       }
     },
 
@@ -393,6 +398,25 @@
       }
     },
 
+    "PhoneOpen": {
+      "description": "Phone to daemon (Shield deny key condition 6): the paired phone app opened. Accepted only from the paired phone's key. The daemon answers ildra.phone.deny_summary when the deny key settled more than 3 Denies within 60 s since the last open; otherwise nothing.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+
+    "PhoneDenySummary": {
+      "description": "Daemon to the paired phone (Shield deny key condition 6), on the next ildra.phone.open after more than 3 Denies signed by the phone's deny-only key landed within 60 s: the phone shows a 'denied from this phone' summary. Sent once; the flag clears when sent. count: deny-key Denies in that 60 s window (at least 4); since: the first of them; at: the one that set the flag.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "since", "at"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 4 },
+        "since": { "$ref": "#/$defs/EpochMs" },
+        "at": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+
     "DeviceEnrollReplaced": {
       "description": "Daemon to the paired phone (batch A): a pending enrollment was replaced by a later enroll request (from either source, the local socket included) before the phone answered it. The phone closes the old confirm and warns; the old nonce is dead, so a confirm signed for it is refused. Sent only when a pending (unexpired) enrollment existed.",
       "type": "object",
@@ -416,7 +440,8 @@
         "nonce": { "$ref": "#/$defs/EnrollNonce" },
         "approved": { "type": "boolean" },
         "uv": { "$ref": "#/$defs/UserVerification" },
-        "signature": { "description": "Ed25519 signature, 64 bytes, base64.", "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
+        "signature": { "description": "Ed25519 signature, 64 bytes, base64.", "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" },
+        "denyKey": { "description": "Shield deny key condition 2 (optional): the phone's deny-only Ed25519 key (raw 32 bytes, base64), a key without user presence that may sign only a Deny on a pending Ask. Accepted only inside a confirm signed by the main key; it is then in the signed bytes, appended as |deny=<denyKey> after uv. Unsigned, signed without it, or signed by the deny key (verifier_rejected): refused, nothing installed. One per phone: a new confirm with denyKey replaces it. Unpairing the phone or re-pairing it with another main key revokes it in the same journal write.", "$ref": "#/$defs/DevicePub" }
       }
     },
 

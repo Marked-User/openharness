@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path'
 import { HIDDEN_DATA } from './unicode/hidden.js'
-import { ENROLL_UV, deviceFingerprint, rawDeviceKey, stampedChannel, type EnrollUv } from '../core/api.js'
+import { ENROLL_UV, deviceFingerprint, rawDeviceKey, stampedChannel, verifyEd25519, type EnrollUv } from '../core/api.js'
 export { deviceFingerprint, deviceProofMessage, verifyDeviceProof } from '../core/api.js'
 import { isLookalike, isNewRecipient, lookalikeOf, recipientAscii, recipientKey, type RecipientKnowledge } from './recipient.js'
 
@@ -587,7 +587,7 @@ export type AnswerVerifier = (req: AskRequest, ans: AskAnswer) => boolean
 export type SettleReason =
   | 'malformed' | 'unknown_id' | 'replayed' | 'expired' | 'digest_mismatch' | 'challenge_mismatch'
   | 'verifier_rejected' | 'shared_machine' | 'unpaired_phone' | 'hold_too_short' | 'stale_channel'
-  | 'wrong_channel' | 'hold_limit' | 'busy' | 'no_authority'
+  | 'wrong_channel' | 'hold_limit' | 'busy' | 'no_authority' | 'bad_signature'
 /**
  * The wire's AskRejectionReason, in schema order. busy and no_authority come from the runtime, never from the
  * ledger: busy, another answer to the same open Ask is being settled right now (services/ildraAsk.ts);
@@ -597,6 +597,8 @@ export type SettleReason =
 export const ASK_REJECTION_REASONS: readonly SettleReason[] = [
   'malformed', 'unknown_id', 'replayed', 'expired', 'digest_mismatch', 'challenge_mismatch', 'verifier_rejected',
   'shared_machine', 'unpaired_phone', 'hold_too_short', 'stale_channel', 'wrong_channel', 'hold_limit', 'busy', 'no_authority',
+  // Shield deny key (batch A): an AskAnswer.phoneSignature by neither paired phone key (core/ildraAsk.ts, before the ledger).
+  'bad_signature',
 ]
 export type SettleResult = { ok: true } | { ok: false; reason: SettleReason }
 
@@ -878,9 +880,12 @@ export class AskLedger {
     }
     const r = this.check(ans, ctx)
     if (!r.ok) this.logPhoneAttempt(ans, r.reason, ctx)
+    else { try { this.onSettled?.(ans) } catch { /* a listener never changes the result */ } }
     this.onChange?.()
     return r
   }
+  /** Shield deny key condition 6: called with each answer that settled an Ask (the journal notes deny-key Denies). */
+  onSettled?: (ans: AskAnswer) => void
 
   /**
    * v3.3: log a rejected phone answer as ildra.ask.attempt (channel phone). Only for a known Ask (open or spent)
@@ -1141,6 +1146,19 @@ export class PhonePairing {
   /** Ledger of every pairing, unpairing and refused attempt. */
   readonly log: PairingLogEntry[] = []
   onChange?: () => void
+  /**
+   * Shield deny key: at most one deny-only key per paired phone (condition 2: set only by a main-key-signed
+   * enroll.confirm; a new one replaces it). Revoked with the phone's pairing: unpair or main-key rotation (condition 4).
+   */
+  private readonly denyKeys = new Map<string, { pub: string; at: number }>()
+  /** Condition 1: every deny-key signature refused for a verb other than ask.deny (verifier_rejected). Last 200. */
+  readonly verifierLog: { at: number; phoneId: string; verb: string; reason: 'verifier_rejected' }[] = []
+  /** Condition 6: every Deny settled by a deny-key signature (source deny_key). Last 200. Moves to the pairing ledger in B. */
+  readonly denyLog: { at: number; phoneId: string; id: string; source: 'deny_key' }[] = []
+  /** Condition 6: phones with more than DENY_BURST deny-key Denies within DENY_BURST_WINDOW_MS, until the next phone open. */
+  private readonly denyFlags = new Map<string, { count: number; since: number; at: number }>()
+  static readonly DENY_BURST = 3
+  static readonly DENY_BURST_WINDOW_MS = 60_000
 
   /** F6: wrong codes allowed before every open code is burned and a new device touch is needed. */
   static readonly MAX_WRONG_CODES = 5
@@ -1213,6 +1231,8 @@ export class PhonePairing {
     this.pendingPairs.delete(phoneId)
     if (this.now() >= pend.expiresAt) return this.refuse(phoneId, 'expired')
     if (matched !== true) return this.refuse(phoneId, 'check_mismatch')
+    // Shield deny key condition 4: a main-key rotation (re-pair with another key) revokes the deny key, in this save.
+    if (this.phones.get(phoneId) !== pend.phonePub) this.denyKeys.delete(phoneId)
     this.phones.set(phoneId, pend.phonePub)
     this.lastRefusal.delete(phoneId)
     this.log.push({ at: this.now(), event: 'pair', phoneId })
@@ -1222,6 +1242,8 @@ export class PhonePairing {
 
   unpair(phoneId: string): void {
     const was = this.phones.delete(phoneId)
+    this.denyKeys.delete(phoneId) // Shield deny key condition 4: atomically with the unpair (same save)
+    this.denyFlags.delete(phoneId)
     if (was) this.log.push({ at: this.now(), event: 'unpair', phoneId })
     this.onChange?.()
     // Shield R7 ruling: the last phone gone ends the open phone Asks (no_paired_phone), by pairing state alone.
@@ -1255,10 +1277,69 @@ export class PhonePairing {
     return typeof want === 'string' && want !== '' && typeof pub === 'string' && pub === want
   }
 
-  toJSON(): { phones: string[]; phoneKeys: Record<string, string>; log: PairingLogEntry[]; refused: Record<string, string> } {
+  /** Shield deny key condition 2: set (or replace) this paired phone's one deny-only key. The caller checked the main-key signature. */
+  setDenyKey(phoneId: string, pub: string): boolean {
+    if (!this.phones.get(phoneId) || !rawKey(pub) || pub === this.phones.get(phoneId)) return false
+    this.denyKeys.set(phoneId, { pub, at: this.now() })
+    this.onChange?.()
+    return true
+  }
+  denyKey(phoneId: string): string | null { return this.denyKeys.get(phoneId)?.pub ?? null }
+
+  /**
+   * Shield deny key condition 1: the signer's role comes from the stored keys, never from the message. The paired
+   * main key may sign any verb. A signature by the stored deny-only key is valid only for 'ask.deny'; for every
+   * other verb, listed or not, it is verifier_rejected and logged. Anything else is bad_signature.
+   */
+  verifyPhone(phoneId: string, verb: string, message: string, signature: unknown): { ok: true; role: 'main' | 'deny_only' } | { ok: false; reason: 'unpaired_phone' | 'verifier_rejected' | 'bad_signature' } {
+    const main = this.phones.get(phoneId)
+    if (!main) return { ok: false, reason: 'unpaired_phone' }
+    if (verifyEd25519(main, message, signature)) return { ok: true, role: 'main' }
+    const deny = this.denyKeys.get(phoneId)
+    if (deny && verifyEd25519(deny.pub, message, signature)) {
+      if (verb === 'ask.deny') return { ok: true, role: 'deny_only' }
+      this.rejectVerifier(phoneId, verb)
+      return { ok: false, reason: 'verifier_rejected' }
+    }
+    return { ok: false, reason: 'bad_signature' }
+  }
+  /** Log a verifier_rejected (condition 1); also for a deny-key answer off the phone path (condition 7). */
+  rejectVerifier(phoneId: string, verb: string): void {
+    this.verifierLog.push({ at: this.now(), phoneId, verb, reason: 'verifier_rejected' })
+    if (this.verifierLog.length > 200) this.verifierLog.splice(0, this.verifierLog.length - 200)
+    this.onChange?.()
+  }
+  /** Condition 6: journal a Deny settled by the deny key; more than 3 within 60 s flags the phone. */
+  noteDenyKeyDeny(phoneId: string, id: string): void {
+    const at = this.now()
+    this.denyLog.push({ at, phoneId, id, source: 'deny_key' })
+    if (this.denyLog.length > 200) this.denyLog.splice(0, this.denyLog.length - 200)
+    const recent = this.denyLog.filter((e) => e.phoneId === phoneId && at - e.at < PhonePairing.DENY_BURST_WINDOW_MS)
+    if (recent.length > PhonePairing.DENY_BURST) this.denyFlags.set(phoneId, { count: recent.length, since: recent[0]!.at, at })
+    this.onChange?.()
+  }
+  /** Condition 6: the 'denied from this phone' summary for the next phone open; cleared once read. */
+  takeDenySummary(phoneId: string): { count: number; since: number; at: number } | null {
+    const f = this.denyFlags.get(phoneId)
+    if (!f) return null
+    this.denyFlags.delete(phoneId)
+    this.onChange?.()
+    return { ...f }
+  }
+  peekDenySummary(phoneId: string): { count: number; since: number; at: number } | null {
+    const f = this.denyFlags.get(phoneId)
+    return f ? { ...f } : null
+  }
+
+  toJSON(): {
+    phones: string[]; phoneKeys: Record<string, string>; log: PairingLogEntry[]; refused: Record<string, string>
+    denyKeys: Record<string, { pub: string; at: number }>; verifierLog: PhonePairing['verifierLog']; denyLog: PhonePairing['denyLog']; denyFlags: Record<string, { count: number; since: number; at: number }>
+  } {
     return {
       phones: [...this.phones.keys()], phoneKeys: Object.fromEntries(this.phones),
       log: this.log.map((e) => ({ ...e })), refused: Object.fromEntries(this.lastRefusal),
+      denyKeys: Object.fromEntries(this.denyKeys), verifierLog: this.verifierLog.map((e) => ({ ...e })),
+      denyLog: this.denyLog.map((e) => ({ ...e })), denyFlags: Object.fromEntries(this.denyFlags),
     }
   }
 
@@ -1271,6 +1352,23 @@ export class PhonePairing {
     }
     for (const [id, why] of Object.entries(data.refused ?? {})) this.lastRefusal.set(id, why)
     for (const e of data.log ?? []) this.log.push({ ...e })
+    const d = data as { denyKeys?: unknown; verifierLog?: unknown; denyLog?: unknown; denyFlags?: unknown }
+    const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {})
+    for (const [id, k] of Object.entries(obj(d.denyKeys))) {
+      const x = k as { pub?: unknown; at?: unknown }
+      // Only for a phone still paired with a key (a deny key never outlives its pairing).
+      if (this.phones.get(id) && rawKey(x?.pub) && typeof x.at === 'number') this.denyKeys.set(id, { pub: x.pub as string, at: x.at })
+    }
+    for (const e of Array.isArray(d.verifierLog) ? d.verifierLog : []) {
+      if (e && typeof e.at === 'number' && typeof e.phoneId === 'string' && typeof e.verb === 'string') this.verifierLog.push({ at: e.at, phoneId: e.phoneId, verb: e.verb, reason: 'verifier_rejected' })
+    }
+    for (const e of Array.isArray(d.denyLog) ? d.denyLog : []) {
+      if (e && typeof e.at === 'number' && typeof e.phoneId === 'string' && typeof e.id === 'string') this.denyLog.push({ at: e.at, phoneId: e.phoneId, id: e.id, source: 'deny_key' })
+    }
+    for (const [id, f] of Object.entries(obj(d.denyFlags))) {
+      const x = f as { count?: unknown; since?: unknown; at?: unknown }
+      if (x && typeof x.count === 'number' && typeof x.since === 'number' && typeof x.at === 'number') this.denyFlags.set(id, { count: x.count, since: x.since, at: x.at })
+    }
   }
 }
 

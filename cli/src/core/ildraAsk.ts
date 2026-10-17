@@ -36,7 +36,7 @@ class PaneGuard implements IldraPaneGuard {
  * here, before the ledger, so nothing is recorded. The ledger's own rejections reach the surface as
  * ildra.ask.attempt / ildra.ask.outcome events.
  */
-export type IldraAnswerReply = { ok: true } | { ok: false; reason: 'malformed' | 'unknown_id' | 'no_authority' | 'stale_channel' | 'replayed' | 'busy' }
+export type IldraAnswerReply = { ok: true } | { ok: false; reason: 'malformed' | 'unknown_id' | 'no_authority' | 'stale_channel' | 'replayed' | 'busy' | 'verifier_rejected' | 'bad_signature' }
 export type IldraSettingsReply = { ok: true; key: string; value: number } | { ok: false; reason: string }
 
 export interface IldraAskCore extends IldraAskInputs {
@@ -45,6 +45,7 @@ export interface IldraAskCore extends IldraAskInputs {
     ildra_settings_set: (payload: Record<string, unknown>, asker: Asker) => Promise<IldraSettingsReply>
     ildra_device_enroll: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; devicePub: string; fingerprint: string; nonce: string; expiresAt: number } | { ok: false; reason: string }>
     ildra_device_enroll_confirm: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; state: string } | { ok: false; reason: string }>
+    ildra_phone_open: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; denySummary: { count: number; since: number; at: number } | null } | { ok: false; reason: string }>
     ildra_device_challenge: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; nonce: string } | { ok: false; reason: string }>
     ildra_device_prove: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: boolean; reason?: string }>
   } & Record<string, ServiceRequest>
@@ -148,9 +149,13 @@ export function createIldraAskCore(deps: {
           ...(typeof payload.holdMs === 'number' ? { holdMs: payload.holdMs } : {}),
           ...(typeof payload.transcript === 'string' ? { transcript: payload.transcript } : {}),
           ...(typeof payload.signature === 'string' ? { signature: payload.signature } : {}),
+          ...(payload.phoneSignature !== undefined ? { phoneSignature: payload.phoneSignature } : {}),
         }
         // Shield R7 ledger via rule: the channel layer's stamp, which a production ledger requires.
         stampChannel(answer, origin.via)
+        // Shield deny key: the service checks a phone-key signature (role from the stored key) before anything else.
+        const refused = core.checkAnswer?.(answer) ?? null
+        if (refused !== null) return { ok: false, reason: refused === 'verifier_rejected' ? 'verifier_rejected' : refused === 'bad_signature' ? 'bad_signature' : 'malformed' }
         const finish = waiting.get(payload.id)
         // No open Ask waits for it: nothing to approve. v3.3: the service may still record it (a device answer
         // after a handoff is stale_channel); that path never approves and never spends an open Ask.
@@ -170,7 +175,7 @@ export function createIldraAskCore(deps: {
         if (typeof origin === 'string') return { ok: false, reason: origin }
         if (origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
         if (!core.onSettings) return { ok: false, reason: 'unavailable' }
-        return core.onSettings({ key: payload.key, value: payload.value }, origin.from)
+        return core.onSettings({ key: payload.key, value: payload.value, ...(payload.signature !== undefined ? { signature: payload.signature } : {}) }, origin.from)
       },
       // Shield R7-1: enrolling the Ildra device. Asking only records a pending key (any device-role connection
       // or local owner may ask; it grants nothing). Only the paired phone's key confirms it, by
@@ -185,9 +190,16 @@ export function createIldraAskCore(deps: {
         const origin = originOf(asker.connection, payload?.from)
         if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
         if (!core.onDeviceConfirm) return { ok: false, reason: 'unavailable' }
-        const r = core.onDeviceConfirm({ devicePub: payload?.devicePub, nonce: payload?.nonce, approved: payload?.approved, uv: payload?.uv, signature: payload?.signature }, origin.from)
+        const r = core.onDeviceConfirm({ devicePub: payload?.devicePub, nonce: payload?.nonce, approved: payload?.approved, uv: payload?.uv, signature: payload?.signature, ...(payload?.denyKey !== undefined ? { denyKey: payload.denyKey } : {}) }, origin.from)
         if (r.ok && r.state !== 'enrolled') bridges.clear()
         return r
+      },
+      // Shield deny key condition 6: the paired phone opening the app collects the 'denied from this phone' summary.
+      ildra_phone_open: async (payload, asker) => {
+        const origin = originOf(asker.connection, payload?.from)
+        if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
+        if (!core.onPhoneOpen) return { ok: false, reason: 'unavailable' }
+        return core.onPhoneOpen(origin.from)
       },
       ildra_device_challenge: async (_payload, asker) => {
         const nonce = asker.connection ? core.challengeDevice(asker.connection) : null

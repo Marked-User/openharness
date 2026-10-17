@@ -14,7 +14,7 @@ import {
   type ApprovalJournal, type ApprovalProfile, type ApprovalTemplate, type AskAnswer, type AskAttempt, type AskChannel,
   type AskHandoff, type AskOptions, type AskOutcome, type AskRequest, type EnrollReplaced, type EnrollSource, type ToolManifestEntry,
 } from './approvals.js'
-import { ENROLL_UV, enrollConfirmMessage, rawDeviceKey, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
+import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, type EnrollUv, type IldraAskInputs } from '../core/api.js'
 
 export type IldraAskEvent =
   | { type: 'ildra.ask.attempt'; body: AskAttempt }
@@ -24,6 +24,7 @@ export type IldraAskEvent =
   | { type: 'ildra.ask.unpaired'; body: { count: number; since: number; at: number } }
   | { type: 'ildra.device.enroll'; body: { devicePub: string; fingerprint: string; nonce: string; expiresAt: number; source: EnrollSource } }
   | { type: 'ildra.device.enroll.replaced'; body: EnrollReplaced }
+  | { type: 'ildra.phone.deny_summary'; body: { count: number; since: number; at: number } }
   | { type: 'ildra.device.enroll.status'; body: { state: 'enrolled' | 'refused' | 'revoked' | 'expired'; fingerprint: string; at: number; uv?: EnrollUv } }
 
 export interface IldraAsk {
@@ -82,6 +83,11 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     journal.ledger.onUnpaired = (u) => emit('ildra.ask.unpaired', u)
     // Shield R7 ruling: the last unpair ended this phone Ask (no_paired_phone); wake its waiting ask().
     journal.ledger.onEnded = (id) => { deps.inputs.cancel(id) }
+    // Shield deny key condition 6: every Deny the deny key settled is journaled (source deny_key); a burst flags the phone.
+    journal.ledger.onSettled = (ans) => {
+      const a = ans as AskAnswer & { keyRole?: unknown }
+      if (a.keyRole === 'deny_only' && a.approved === false && typeof a.from?.phoneId === 'string') journal!.pairing.noteDenyKeyDeny(a.from.phoneId, a.id)
+    }
     return journal
   }
   const pairedKey = (j: ApprovalJournal) => (id: string, pub?: string) => (pub === undefined ? j.pairing.isPaired(id) : j.pairing.isPairedKey(id, pub))
@@ -117,16 +123,53 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
       || typeof msg.nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(msg.nonce)
       || !(ENROLL_UV as readonly unknown[]).includes(msg.uv)) return { ok: false, reason: 'malformed' }
     const uv = msg.uv as EnrollUv
-    if (!verifyEd25519(from.machinePub, enrollConfirmMessage(msg.devicePub, msg.nonce, msg.approved, uv), msg.signature)) return { ok: false, reason: 'bad_signature' }
+    if (msg.denyKey !== undefined && !rawDeviceKey(msg.denyKey)) return { ok: false, reason: 'malformed' }
+    const denyKey = msg.denyKey as string | undefined
+    // Shield deny key conditions 1 and 2: only the main key signs a confirm (and a deny key inside it); the deny key
+    // signing one, with or without a deny key, is verifier_rejected (logged).
+    const v = j.pairing.verifyPhone(from.phoneId, denyKey !== undefined ? 'deny_key.set' : 'device.enroll.confirm', enrollConfirmMessage(msg.devicePub, msg.nonce, msg.approved, uv, denyKey), msg.signature)
+    if (!v.ok) return { ok: false, reason: v.reason }
+    if (v.role !== 'main') { j.pairing.rejectVerifier(from.phoneId, 'device.enroll.confirm'); return { ok: false, reason: 'verifier_rejected' } }
     const state = j.device.confirm(msg.devicePub, msg.nonce, msg.approved, { uv, phoneId: from.phoneId })
     if (state === null) return { ok: false, reason: 'unknown_id' }
+    if (denyKey !== undefined && !j.pairing.setDenyKey(from.phoneId, denyKey)) return { ok: false, reason: 'malformed' }
     emit('ildra.device.enroll.status', { state, fingerprint: deviceFingerprint(msg.devicePub), at: (deps.now ?? Date.now)(), ...(state === 'enrolled' ? { uv } : {}) })
     return { ok: true, state }
+  }
+  // Shield deny key: an answer carrying phoneSignature is checked against the stored keys of the paired phone. The
+  // deny-only key can sign a Deny (condition 1) on the phone path only (condition 7); its Deny is bound to id,
+  // digest8 and the single-use answerId (condition 3), and the ledger then settles it like any phone Deny.
+  deps.inputs.checkAnswer = (a) => {
+    if (a.phoneSignature === undefined) return null
+    const j = open()
+    const from = (a.from ?? {}) as { phoneId?: unknown; machinePub?: unknown }
+    if (a.via !== 'phone') { j.pairing.rejectVerifier(typeof from.phoneId === 'string' ? from.phoneId : '', `answer.${String(a.via)}`); return 'verifier_rejected' }
+    // Not the paired phone's key: the ledger refuses it first as unpaired_phone (R7-10), with nothing recorded.
+    if (typeof from.phoneId !== 'string' || typeof from.machinePub !== 'string' || !j.pairing.isPairedKey(from.phoneId, from.machinePub)) return null
+    if (typeof a.id !== 'string' || typeof a.digest8 !== 'string' || typeof a.answerId !== 'string') return 'malformed'
+    const approved = a.approved === true
+    const v = j.pairing.verifyPhone(from.phoneId, approved ? 'ask.approve' : 'ask.deny', askAnswerMessage(approved, a.id, a.digest8, a.answerId), a.phoneSignature)
+    if (!v.ok) return v.reason === 'unpaired_phone' ? null : v.reason
+    if (v.role === 'deny_only') a.keyRole = 'deny_only'
+    return null
+  }
+  // Shield deny key condition 6: the next phone open shows the 'denied from this phone' summary, once.
+  deps.inputs.onPhoneOpen = (from) => {
+    const j = open()
+    if (typeof from.phoneId !== 'string' || typeof from.machinePub !== 'string' || !j.pairing.isPairedKey(from.phoneId, from.machinePub)) return { ok: false, reason: 'unpaired_phone' }
+    const denySummary = j.pairing.takeDenySummary(from.phoneId)
+    if (denySummary) emit('ildra.phone.deny_summary', denySummary)
+    return { ok: true, denySummary }
   }
   deps.inputs.onSettings = (msg, from) => {
     const j = open()
     if (typeof from.phoneId !== 'string' || typeof from.machinePub !== 'string' || !j.pairing.isPairedKey(from.phoneId, from.machinePub)) {
       return { ok: false, reason: 'unpaired_phone' }
+    }
+    // Shield deny key condition 1: a signed settings.set must be by the main key; the deny key is verifier_rejected.
+    if (msg.signature !== undefined) {
+      const v = j.pairing.verifyPhone(from.phoneId, 'settings.set', settingsSetMessage(String(msg.key), msg.value), msg.signature)
+      if (!v.ok) return { ok: false, reason: v.reason }
     }
     const stored = j.settings.set(msg.key, msg.value)
     if (!stored) return { ok: false, reason: 'malformed' }

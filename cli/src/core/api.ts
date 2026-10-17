@@ -57,7 +57,7 @@ export { FAIL, later, readFallback, ServiceUnavailableError, type PortFallbacks 
  * and the Ildra device key helpers (Ed25519 proof of the enrolled device).
  */
 export { stampedChannel } from './ildraChannel.js'
-export { ENROLL_UV, deviceFingerprint, deviceProofMessage, enrollConfirmMessage, rawDeviceKey, verifyDeviceProof, verifyEd25519, type EnrollUv } from './ildraDeviceProof.js'
+export { ENROLL_UV, PHONE_VERBS, askAnswerMessage, deviceFingerprint, deviceProofMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, verifyDeviceProof, verifyEd25519, type EnrollUv, type PhoneVerb } from './ildraDeviceProof.js'
 
 /** A service may open a terminal with a literal argv, never shell source. */
 export interface TerminalOpen {
@@ -568,7 +568,7 @@ export interface IldraAskInputs {
    * v3.3, set by services/ildraAsk.ts: `ildra.settings.set {key, value}` with the sender's origin from the
    * connection; the service accepts it only from the paired phone's key and returns the stored value.
    */
-  onSettings?: ((msg: { key: unknown; value: unknown }, from: IldraAnswerOrigin) => { ok: true; key: string; value: number } | { ok: false; reason: string }) | null
+  onSettings?: ((msg: { key: unknown; value: unknown; signature?: unknown }, from: IldraAnswerOrigin) => { ok: true; key: string; value: number } | { ok: false; reason: string }) | null
   /**
    * Shield R7-1, set by services/ildraAsk.ts: the enrolled Ildra device's Ed25519 key (journal), or null. A
    * device-role connection answers touch only after signing a core nonce with it. Unset: none answers.
@@ -580,12 +580,22 @@ export interface IldraAskInputs {
    * R7-1, batch A: `ildra.device.enroll.confirm {devicePub, nonce, approved, uv, signature}` from the paired phone's
    * key; the service checks the key, uv and the signature (enrollConfirmMessage).
    */
-  onDeviceConfirm?: ((msg: { devicePub: unknown; nonce: unknown; approved: unknown; uv: unknown; signature: unknown }, from: IldraAnswerOrigin) => { ok: true; state: string } | { ok: false; reason: string }) | null
+  onDeviceConfirm?: ((msg: { devicePub: unknown; nonce: unknown; approved: unknown; uv: unknown; signature: unknown; denyKey?: unknown }, from: IldraAnswerOrigin) => { ok: true; state: string } | { ok: false; reason: string }) | null
+  /**
+   * Shield deny key, set by services/ildraAsk.ts: checks an answer (origin rewritten, channel-stamped) before it
+   * reaches an open Ask. A reason refuses it (verifier_rejected, bad_signature); null lets it through.
+   */
+  checkAnswer?: ((answer: Record<string, unknown>) => string | null) | null
+  /**
+   * Shield deny key condition 6: `ildra.phone.open` from the paired phone. Returns, and clears, the
+   * 'denied from this phone' summary when more than 3 deny-key Denies landed within 60 s.
+   */
+  onPhoneOpen?: ((from: IldraAnswerOrigin) => { ok: true; denySummary: { count: number; since: number; at: number } | null } | { ok: false; reason: string }) | null
 }
 
 /** Ildra Asks (services/ildraAsk.ts): an answer from the phone or the device to an open Ask. Its origin is the
  *  connection it came over (Shield F12), never the payload. Always in the core's own process. */
-export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer', 'ildra_settings_set', 'ildra_device_enroll', 'ildra_device_enroll_confirm', 'ildra_device_challenge', 'ildra_device_prove'] as const
+export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer', 'ildra_settings_set', 'ildra_device_enroll', 'ildra_device_enroll_confirm', 'ildra_phone_open', 'ildra_device_challenge', 'ildra_device_prove'] as const
 /** Sharing this machine with other accounts, and adding machines shared with this one, in the edge host
  *  (services/sharedMachines.ts). */
 export const SHARED_MACHINES_REQUESTS = ['shared_machines'] as const
