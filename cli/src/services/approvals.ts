@@ -1428,8 +1428,12 @@ export class PhonePairing {
   }
 
   /** Shield deny key condition 2: set (or replace) this paired phone's one deny-only key. The caller checked the main-key signature. */
+  /** Shield D2a: would setDenyKey accept this key? Checked before anything changes, so a confirm is all or nothing. */
+  canSetDenyKey(phoneId: string, pub: string): boolean {
+    return !!this.phones.get(phoneId) && !!rawPhoneKey(pub) && pub !== this.phones.get(phoneId)
+  }
   setDenyKey(phoneId: string, pub: string): boolean {
-    if (!this.phones.get(phoneId) || !rawPhoneKey(pub) || pub === this.phones.get(phoneId)) return false
+    if (!this.canSetDenyKey(phoneId, pub)) return false
     this.denyKeys.set(phoneId, { pub, at: this.now() })
     this.ledger.append({ kind: 'deny_key_set', phoneId, fingerprint: deviceFingerprint(pub), by: phoneId, via: 'phone', keyAlg: 'p256' })
     this.onChange?.()

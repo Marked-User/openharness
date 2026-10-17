@@ -132,11 +132,10 @@ describe('Shield D: phone deny key (91c70791c)', () => {
     expect(r.kinds().filter((k) => k === 'deny_key_set')).toHaveLength(2)
   })
 
-  it('GAP D2a: a deny key in a confirm that fails setDenyKey (equal to the main key) still enrolls the device but answers malformed', async () => {
+  it('FIXED D2a: a deny key that setDenyKey would refuse (equal to the main key) refuses the whole confirm; nothing is enrolled', async () => {
     const r = rig(); r.pair('p1', r.K.P1.pub)
     expect(await r.enrollDevice(r.K.P1.pub)).toEqual({ ok: false, reason: 'malformed' })
-    // Shield wants: refused before anything changes. Today the device is enrolled anyway.
-    expect(r.svc.journal().device.device()).toBe(r.K.DEVK.pub)
+    expect(r.svc.journal().device.device()).toBeNull()
   })
 
   it('D3: a Deny is bound to id, digest8 and answerId: replay, another Ask, another digest, after settle are refused or no-ops', async () => {

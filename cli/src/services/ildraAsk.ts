@@ -157,6 +157,8 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     const v = j.pairing.verifyPhone(from.phoneId, denyKey !== undefined ? 'deny_key.set' : 'device.enroll.confirm', enrollConfirmMessage(msg.devicePub, msg.nonce, msg.approved, uv, denyKey), msg.signature)
     if (!v.ok) return { ok: false, reason: v.reason }
     if (v.role !== 'main') { j.pairing.rejectVerifier(from.phoneId, 'device.enroll.confirm'); return { ok: false, reason: 'verifier_rejected' } }
+    // Shield D2a: all or nothing. A deny key that would be refused refuses the whole confirm before the device changes.
+    if (denyKey !== undefined && !j.pairing.canSetDenyKey(from.phoneId, denyKey)) return { ok: false, reason: 'malformed' }
     const state = j.device.confirm(msg.devicePub, msg.nonce, msg.approved, { uv, phoneId: from.phoneId })
     if (state === null) return { ok: false, reason: 'unknown_id' }
     if (denyKey !== undefined && !j.pairing.setDenyKey(from.phoneId, denyKey)) return { ok: false, reason: 'malformed' }

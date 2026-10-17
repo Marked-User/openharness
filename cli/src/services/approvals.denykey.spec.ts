@@ -248,3 +248,18 @@ describe('Shield deny key: wire', () => {
     expect(schema.$defs.AskRejectionReason.enum).toEqual(expect.arrayContaining(['verifier_rejected', 'bad_signature']))
   })
 })
+
+describe('Shield D2a: the confirm is all or nothing', () => {
+  it('a refused deny key (the main key itself) leaves the enrollment pending, no device, no deny key, no ledger enrollment; a good confirm then enrolls', async () => {
+    const r = rig(); r.pair()
+    const dev = deviceKeyPair()
+    expect(await r.installDeny(r.MAIN.pub, r.MAIN.key, dev)).toEqual({ ok: false, reason: 'malformed' })
+    const j = r.svc.journal()
+    expect(j.device.device()).toBeNull()
+    expect(j.device.pending()?.devicePub).toBe(dev.pub)
+    expect(j.pairing.denyKey('p1')).toBeNull()
+    expect(j.pairingLedger.all().some((e) => e.kind === 'device_enrolled' || e.kind === 'deny_key_set')).toBe(false)
+    expect(await r.core.requests.ildra_device_enroll_confirm({ ...signedConfirm(r.svc, r.MAIN.key, dev.pub, true, 'biometric', r.DENY.pub), from: { phoneId: 'p1' } }, r.remote('ph'))).toEqual({ ok: true, state: 'enrolled' })
+    expect(j.device.device()).toBe(dev.pub)
+  })
+})
