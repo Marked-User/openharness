@@ -4,7 +4,7 @@
  * (3) the real ildra.ask.answered_by event and read.
  */
 import { randomBytes, sign, type KeyObject } from 'node:crypto'
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -297,7 +297,7 @@ describe('Shield B5: a ledger that cannot be trusted fails closed', () => {
     const j = r2.svc.journal()
     expect(j.recovered).toBe(true)
     expect(j.pairing.pairedCount()).toBe(2)
-    expect(j.pairingLedger.all()).toHaveLength(1)
+    expect(j.pairingLedger.all().map((e) => [e.kind, e.via])).toEqual([['ledger_reset', undefined], ['phone_paired', 'ledger_reset'], ['phone_paired', 'ledger_reset']])
     expect(j.pairingLedger.all()[0]).toMatchObject({ seq: 1, kind: 'ledger_reset', reason: 'chain_broken', oldHead, count: 3, by: 'daemon' })
     expect(readdirSync(join(r.dir, 'j')).some((f) => f.startsWith('a.json.ledger-untrusted-'))).toBe(true)
     expect(r2.events.find((e) => e.type === 'ildra.pairing.ledger_reset')?.body).toMatchObject({ seq: 1, reason: 'chain_broken', oldHead })
@@ -407,5 +407,55 @@ describe('Shield B9: the pairing ledger is bounded', () => {
     expect(p.pairingStatus('y'.repeat(65))).toEqual({ state: 'unknown' })
     const r = rig(); r.pair('p1', r.K.P1.pub)
     expect(await r.unpair('z'.repeat(65), r.K.P1.key)).toEqual({ ok: false, reason: 'malformed' })
+  })
+})
+
+describe('Shield B1 to B4, B6: the ledger is MACed with a host-held key and authoritative for state at load', () => {
+  const jpath = (r: { dir: string }) => join(r.dir, 'j', 'a.json')
+  const keyFile = (r: { dir: string }) => join(r.dir, 'm', 'x.installed.ledger-key')
+  it('keeps a 32-byte key next to the install marker (0600, outside the journal folder) and a MAC of the head in the journal', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub)
+    expect(readFileSync(keyFile(r), 'utf8').trim()).toMatch(/^[0-9a-f]{64}$/)
+    expect(statSync(keyFile(r)).mode & 0o777).toBe(0o600)
+    expect(JSON.parse(readFileSync(jpath(r), 'utf8')).pairingLedgerMac).toMatch(/^[0-9a-f]{64}$/)
+    const r2 = rig(r.dir, r.clock, r.K)
+    expect(r2.svc.journal().recovered).toBe(false)
+    expect(r2.svc.journal().pairing.isPaired('p1')).toBe(true)
+  })
+  it('a deleted key file with pairings present fails closed (ledger_key_missing), keeps the phone, records it via ledger_reset, locks changes', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub)
+    rmSync(keyFile(r))
+    const r2 = rig(r.dir, r.clock, r.K)
+    const j = r2.svc.journal()
+    expect(j.recovered).toBe(true)
+    expect(j.pairingLedger.all().map((e) => [e.kind, e.reason ?? e.via])).toEqual([['ledger_reset', 'ledger_key_missing'], ['phone_paired', 'ledger_reset']])
+    expect(j.pairing.changeRefusal()).toBe('ledger_locked')
+    // The reset chain verifies on the next load (new key, new MAC, state backed by the carried-over entries).
+    const r3 = rig(r.dir, r.clock, r.K)
+    expect(r3.svc.journal().pairingLedger.all()).toHaveLength(2)
+    expect(r3.svc.journal().pairing.isPaired('p1')).toBe(true)
+  })
+  it('an edited MAC fails closed (mac_mismatch)', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub)
+    const d = JSON.parse(readFileSync(jpath(r), 'utf8')); d.pairingLedgerMac = '0'.repeat(64); writeFileSync(jpath(r), JSON.stringify(d))
+    expect(rig(r.dir, r.clock, r.K).svc.journal().pairingLedger.all()[0]).toMatchObject({ kind: 'ledger_reset', reason: 'mac_mismatch' })
+  })
+  it('a swapped deny key is dropped (deny_key_revoked not_in_ledger); a phone the state lost is recorded unpaired (missing_from_state)', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); r.pair('p2', r.K.P2.pub); await r.enrollDevice(r.K.D1.pub)
+    const d = JSON.parse(readFileSync(jpath(r), 'utf8'))
+    const EVIL = phoneKeyPair()
+    const denyHolder = JSON.stringify(d.pairing).includes(r.K.D1.pub)
+    expect(denyHolder).toBe(true)
+    d.pairing = JSON.parse(JSON.stringify(d.pairing).split(r.K.D1.pub).join(EVIL.pub))
+    d.pairing.phones = d.pairing.phones.filter((x: string) => x !== 'p2'); delete d.pairing.phoneKeys.p2
+    writeFileSync(jpath(r), JSON.stringify(d))
+    const r2 = rig(r.dir, r.clock, r.K)
+    const j = r2.svc.journal()
+    expect(j.recovered).toBe(true)
+    expect(j.pairing.toJSON()).not.toMatchObject({ denyKeys: { p1: expect.anything() } })
+    expect(JSON.stringify(j.pairing.toJSON())).not.toContain(EVIL.pub)
+    const tail = j.pairingLedger.all().slice(-2)
+    expect(tail).toEqual([expect.objectContaining({ kind: 'deny_key_revoked', phoneId: 'p1', reason: 'not_in_ledger' }), expect.objectContaining({ kind: 'phone_unpaired', phoneId: 'p2', reason: 'missing_from_state' })])
+    expect(j.pairing.isPaired('p1')).toBe(true)
   })
 })

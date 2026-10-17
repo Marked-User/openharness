@@ -21,7 +21,7 @@
  * Accept/Decline (#1340) goes through answerMcpElicitation. Sync order (F11) is syncOrder.ts.
  */
 
-import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto'
+import { createHash, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path'
@@ -1471,6 +1471,47 @@ export class PhonePairing {
     if (was && this.phones.size === 0) { try { this.onLastUnpaired?.() } catch { /* a listener never changes the result */ } }
     return was
   }
+  /** Shield B5/B6: after a ledger_reset, record the state that was kept (via ledger_reset), so the new chain backs it. */
+  carryOverAfterReset(): void {
+    for (const [id, key] of this.phones) if (key) this.ledger.append({ kind: 'phone_paired', phoneId: id, fingerprint: deviceFingerprint(key), by: 'daemon', via: 'ledger_reset', keyAlg: 'p256' })
+    for (const [id, d] of this.denyKeys) this.ledger.append({ kind: 'deny_key_set', phoneId: id, fingerprint: deviceFingerprint(d.pub), by: 'daemon', via: 'ledger_reset', keyAlg: 'p256' })
+  }
+  /**
+   * Shield B6: with a trusted ledger the ledger is authoritative for state. A paired phone (or deny key) whose key
+   * does not match its latest ledger entry is dropped (pair_refused or deny_key_revoked, reason not_in_ledger), and a
+   * phone the ledger says is paired but the state lost is recorded as unpaired (missing_from_state). True if anything changed.
+   */
+  reconcileWithLedger(): boolean {
+    const all = this.ledger.all()
+    const latest = (id: string, kinds: readonly string[]) => { for (let i = all.length - 1; i >= 0; i--) { const e = all[i]!; if (e.phoneId === id && kinds.includes(e.kind)) return e } return null }
+    const PHONE = ['phone_paired', 'phone_rotated', 'phone_unpaired'] as const
+    let changed = false
+    for (const [id, key] of [...this.phones]) {
+      if (!key) continue
+      const e = latest(id, PHONE)
+      if (!e || e.kind === 'phone_unpaired' || e.fingerprint !== deviceFingerprint(key)) {
+        this.phones.delete(id); this.transports.delete(id); this.denyKeys.delete(id)
+        this.ledger.append({ kind: 'pair_refused', phoneId: id, fingerprint: deviceFingerprint(key), reason: 'not_in_ledger', by: 'daemon', via: 'daemon' })
+        changed = true
+      }
+    }
+    for (const [id, d] of [...this.denyKeys]) {
+      const e = latest(id, ['deny_key_set', 'deny_key_revoked'])
+      if (!e || e.kind === 'deny_key_revoked' || e.fingerprint !== deviceFingerprint(d.pub)) {
+        this.denyKeys.delete(id)
+        this.ledger.append({ kind: 'deny_key_revoked', phoneId: id, reason: 'not_in_ledger', by: 'daemon' })
+        changed = true
+      }
+    }
+    for (const id of new Set(all.map((e) => e.phoneId).filter((x): x is string => typeof x === 'string'))) {
+      const e = latest(id, PHONE)
+      if (e && e.kind !== 'phone_unpaired' && !this.phones.has(id)) {
+        this.ledger.append({ kind: 'phone_unpaired', phoneId: id, ...(e.fingerprint ? { fingerprint: e.fingerprint } : {}), reason: 'missing_from_state', by: 'daemon', via: 'daemon' })
+        changed = true
+      }
+    }
+    return changed
+  }
   /** Shield B5: the paired phone acknowledges the pending ledger_reset (the caller checked its main-key signature). */
   ackReset(phoneId: string, seq: number, hash: string): boolean {
     const r = this.ledger.pendingReset()
@@ -1826,7 +1867,7 @@ function parseJournal(text: string) {
   // not enrolled (the phone confirms the device again), and does not fail the journal.
   if (d.device !== undefined && d.device !== null && (typeof d.device !== 'object' || Array.isArray(d.device)
     || (d.device.device !== undefined && d.device.device !== null && typeof d.device.device !== 'object'))) throw new Error('bad device')
-  return { window: w, ledger: l, pairing: p, settings: d.settings, device: d.device, pairingLedger: d.pairingLedger as unknown }
+  return { window: w, ledger: l, pairing: p, settings: d.settings, device: d.device, pairingLedger: d.pairingLedger as unknown, pairingLedgerMac: d.pairingLedgerMac as unknown }
 }
 
 /** v3.3: ask.deviceWindowSec, seconds an Ask stays on the device before it hands off to the phone. */
@@ -2012,6 +2053,8 @@ export function openJournal(
      * defaultMarkerPath(path). A marker in the journal's folder, or below it, is refused (Shield pilot review).
      */
     markerPath?: string
+    /** Shield B1 to B4: the ledger MAC key file (32 bytes hex, 0600). Defaults to `<markerPath>.ledger-key`. */
+    ledgerKeyPath?: string
   } = {},
 ): ApprovalJournal {
   const now = opts.now ?? Date.now
@@ -2038,6 +2081,13 @@ export function openJournal(
     pairingLedger.append({ kind: 'ledger_reset', reason, by: 'daemon', count: UNPAIR_RESET_COUNT, ...(oldHead ? { oldHead } : {}) })
   }
   const marker = resolvePath(opts.markerPath ?? defaultMarkerPath(path))
+  // Shield B1 to B4: the ledger head is MACed (HMAC-SHA256) with a key held by this host next to the install marker,
+  // outside the journal's folder: an edited, truncated, deleted or re-chained ledger no longer verifies.
+  const keyPath = resolvePath(opts.ledgerKeyPath ?? `${marker}.ledger-key`)
+  let ledgerKey: Buffer | null = null
+  try { const k = readFileSync(keyPath, 'utf8').trim(); if (/^[0-9a-f]{64}$/.test(k)) ledgerKey = Buffer.from(k, 'hex') } catch { /* none yet */ }
+  const keyExisted = ledgerKey !== null
+  const ledgerMac = (key: Buffer): string => { const h = pairingLedger.head(); return createHmac('sha256', key).update(`ildra-pairing-ledger-mac:v1|${h.seq}|${h.hash}`, 'utf8').digest('hex') }
   if (foldersOverlap(dirname(marker), dirname(resolvePath(path)))) {
     throw new ApprovalDenied('the install marker must not be in the journal\'s folder (or link into it): deleting that folder would delete both')
   }
@@ -2062,25 +2112,45 @@ export function openJournal(
       d = null
     }
     if (d) {
-      try {
-        pairingLedger.restore(d.pairingLedger)
-      } catch {
+      let why: string | null = null
+      try { pairingLedger.restore(d.pairingLedger) } catch { why = 'chain_broken' }
+      if (!why) {
+        const mac = d.pairingLedgerMac
+        if (ledgerKey) {
+          const want = Buffer.from(ledgerMac(ledgerKey), 'hex')
+          const got = typeof mac === 'string' && /^[0-9a-f]{64}$/.test(mac) ? Buffer.from(mac, 'hex') : Buffer.alloc(32)
+          if (!timingSafeEqual(want, got)) why = 'mac_mismatch'
+        } else if (pairingLedger.all().length > 0 || pairing.pairedCount() > 0) why = 'ledger_key_missing'
+      }
+      if (why) {
         // Shield B5: fail closed, never to empty. Voice is off for one window, the untrusted ledger is kept aside,
         // the new chain starts with a ledger_reset carrying its head (counted as UNPAIR_RESET_COUNT unpair requests
-        // for the rate limit), and pairing changes are locked until the paired phone acknowledges it.
+        // for the rate limit), the kept state is recorded (via ledger_reset), and pairing changes are locked until
+        // the paired phone acknowledges it.
         recovered = true
         window.lockedUntil = now() + window.windowMs
-        ledgerReset('chain_broken', d.pairingLedger)
+        ledgerReset(why, d.pairingLedger)
+        pairing.carryOverAfterReset()
+      } else if (pairing.reconcileWithLedger()) {
+        // Shield B6: the state did not match the trusted ledger; what the ledger does not back was dropped.
+        recovered = true
+        window.lockedUntil = now() + window.windowMs
       }
     }
   }
   const save = () => {
-    const body = JSON.stringify({ v: JOURNAL_VERSION, window: window.toJSON(), ledger: ledger.toJSON(), pairing: pairing.toJSON(), settings: settings.toJSON(), device: device.toJSON(), pairingLedger: pairingLedger.toJSON() })
+    const body = JSON.stringify({ v: JOURNAL_VERSION, window: window.toJSON(), ledger: ledger.toJSON(), pairing: pairing.toJSON(), settings: settings.toJSON(), device: device.toJSON(), pairingLedger: pairingLedger.toJSON(), pairingLedgerMac: ledgerMac(ledgerKey!) })
     mkdirSync(dirname(path), { recursive: true })
     const tmp = `${path}.${process.pid}.tmp`
     writeFileSync(tmp, body, { mode: 0o600 })
     renameSync(tmp, path)
   }
+  if (!ledgerKey) {
+    ledgerKey = randomBytes(32)
+    mkdirSync(dirname(keyPath), { recursive: true })
+    writeFileSync(keyPath, `${ledgerKey.toString('hex')}\n`, { mode: 0o600 })
+  }
+  void keyExisted
   window.onChange = save
   ledger.onChange = save
   pairing.onChange = save

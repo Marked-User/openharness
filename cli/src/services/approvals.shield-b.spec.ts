@@ -71,7 +71,7 @@ function rig(dir = mkdtempSync(join(tmpdir(), 'shield-b-')), clock = { t: 5_000_
 }
 const reopen = (r: ReturnType<typeof rig>) => rig(r.dir, r.clock, r.K)
 const ledgerHash = (prev: string, e: Record<string, unknown>): string => {
-  const order = ['seq', 'at', 'kind', 'phoneId', 'fingerprint', 'oldFingerprint', 'by', 'via', 'reason', 'askId', 'verb', 'uv', 'count', 'since', 'source']
+  const order = ['seq', 'at', 'kind', 'phoneId', 'fingerprint', 'oldFingerprint', 'by', 'via', 'reason', 'askId', 'verb', 'uv', 'count', 'since', 'source', 'keyAlg', 'oldHead']
   const body: Record<string, unknown> = {}
   for (const k of order) if (e[k] !== undefined) body[k] = e[k]
   return createHash('sha256').update(`ildra-pairing-ledger:v1|${prev}|${JSON.stringify(body)}`, 'utf8').digest('hex')
@@ -218,47 +218,45 @@ describe('Shield batch B: pairing ledger attacks (52977f9ac)', () => {
     return r
   }
 
-  it('GAP B1: truncating the tail (dropping the newest entries) is not detected: same phones, shorter ledger, recovered false', async () => {
+  it('FIXED B1: truncating the tail (dropping the newest entries) breaks the host-keyed MAC: fail closed with ledger_reset, recovered true', async () => {
     const r = await seeded()
     const d = r.readJ(); const n = d.pairingLedger.length
     d.pairingLedger = d.pairingLedger.slice(0, n - 2); r.writeJ(d)
     const r2 = reopen(r)
-    expect(r2.svc.journal().recovered).toBe(false)
-    expect(r2.svc.journal().pairingLedger.all()).toHaveLength(n - 2)
-    expect(r2.svc.journal().pairing.isPaired('p2')).toBe(true) // its phone_paired entry is gone
+    expect(r2.svc.journal().recovered).toBe(true)
+    expect(r2.svc.journal().pairingLedger.all()[0]).toMatchObject({ kind: 'ledger_reset', reason: 'mac_mismatch' })
+    expect(r2.svc.journal().pairing.changeRefusal()).toBe('ledger_locked')
   })
 
-  it('GAP B2: deleting the whole pairingLedger key is accepted silently (empty ledger, phones still paired)', async () => {
+  it('FIXED B2: deleting the whole pairingLedger key is detected (MAC mismatch), never accepted silently', async () => {
     const r = await seeded()
     const d = r.readJ(); delete d.pairingLedger; r.writeJ(d)
     const r2 = reopen(r)
-    expect(r2.svc.journal().recovered).toBe(false)
-    expect(r2.svc.journal().pairingLedger.all()).toHaveLength(0)
+    expect(r2.svc.journal().recovered).toBe(true)
+    expect(r2.svc.journal().pairingLedger.all()[0]).toMatchObject({ kind: 'ledger_reset', reason: 'mac_mismatch' })
     expect(r2.svc.journal().pairing.pairedCount()).toBe(2)
   })
 
-  it('GAP B3: rewriting the tail and re-chaining from genesis needs no key and passes the chain check', async () => {
+  it('FIXED B3: rewriting the tail and re-chaining from genesis fails the MAC (the key lives outside the journal)', async () => {
     const r = await seeded()
     const d = r.readJ()
     d.pairingLedger[d.pairingLedger.length - 1].phoneId = 'p9'
     d.pairingLedger = rechain(d.pairingLedger); r.writeJ(d)
     const r2 = reopen(r)
-    expect(r2.svc.journal().recovered).toBe(false)
-    expect(r2.svc.journal().pairingLedger.all().at(-1)!.phoneId).toBe('p9')
+    expect(r2.svc.journal().recovered).toBe(true)
+    expect(r2.svc.journal().pairingLedger.all()[0]).toMatchObject({ kind: 'ledger_reset', reason: 'mac_mismatch' })
+    expect(r2.svc.journal().pairingLedger.all().some((e) => e.phoneId === 'p9')).toBe(false)
   })
 
-  it('GAP B4 (fork, App check): after a rewrite the phone gets a head that does not extend the head it read before; only the phone can tell', async () => {
+  it('FIXED B4: after a rewrite the daemon flags it itself: a new chain starting with ledger_reset (oldHead = the untrusted head) and an ildra.pairing.ledger_reset alert', async () => {
     const r = await seeded()
     const first = await r.ledger() as { ok: true; head: { seq: number; hash: string } }
     const d = r.readJ(); d.pairingLedger[0].via = 'local_socket'; d.pairingLedger = rechain(d.pairingLedger); r.writeJ(d)
     const r2 = reopen(r)
     const later = await r2.ledger() as { ok: true; entries: PairingLedgerEntry[]; head: { seq: number; hash: string } }
-    expect(later.head.seq).toBe(first.head.seq)
-    expect(later.head.hash).not.toBe(first.head.hash) // same seq, other hash: a fork the daemon does not flag
-    // An append-only reader that keeps (seq, hash) and asks since=seq gets entries whose first prev must equal its hash.
-    r2.svc.journal().pairing.takeDenySummary('p1')
-    const next = await r2.ledger(first.head.seq) as { entries: PairingLedgerEntry[] }
-    expect(next.entries[0]!.prev).not.toBe(first.head.hash)
+    expect(later.head.hash).not.toBe(first.head.hash)
+    expect(later.entries[0]).toMatchObject({ seq: 1, kind: 'ledger_reset', reason: 'mac_mismatch' })
+    expect(r2.events.some((e) => e.type === 'ildra.pairing.ledger_reset')).toBe(true)
   })
 
   it('FIXED B5: a broken chain fails closed: phones stay paired, the ledger starts with a ledger_reset (never empty), the rate limit holds, pairing changes are locked until the phone acks', async () => {
@@ -269,20 +267,24 @@ describe('Shield batch B: pairing ledger attacks (52977f9ac)', () => {
     const r2 = reopen(r)
     expect(r2.svc.journal().recovered).toBe(true)
     expect(r2.svc.journal().pairing.pairedCount()).toBe(2)
-    expect(r2.svc.journal().pairingLedger.all().map((e) => e.kind)).toEqual(['ledger_reset'])
+    const all = r2.svc.journal().pairingLedger.all()
+    expect(all[0]!.kind).toBe('ledger_reset')
+    // The kept state is recorded on the new chain (via ledger_reset), so the next load can check it.
+    expect(all.slice(1).every((e) => e.via === 'ledger_reset')).toBe(true)
     const n = r2.sent.length
     expect(await r2.unpair('p2', r.K.P1.key)).toMatchObject({ ok: false })
     expect(r2.sent.length).toBe(n) // no locked_ask: locked and rate limited
   })
 
-  it('GAP B6: the ledger is not authoritative for state: a phone key added to the journal without a ledger entry is paired after restart', async () => {
+  it('FIXED B6: the ledger is authoritative for state: a phone key added to the journal without a ledger entry is dropped at load, recorded, voice off', async () => {
     const r = await seeded()
     const EVIL = phoneKeyPair()
     const d = r.readJ(); d.pairing.phones.push('p9'); d.pairing.phoneKeys.p9 = EVIL.pub; r.writeJ(d)
     const r2 = reopen(r)
-    expect(r2.svc.journal().recovered).toBe(false)
-    expect(r2.svc.journal().pairing.isPairedKey('p9', EVIL.pub)).toBe(true)
-    expect(r2.svc.journal().pairingLedger.all().some((e) => e.phoneId === 'p9')).toBe(false)
+    expect(r2.svc.journal().recovered).toBe(true)
+    expect(r2.svc.journal().pairing.isPairedKey('p9', EVIL.pub)).toBe(false)
+    expect(r2.svc.journal().pairing.isPaired('p1')).toBe(true)
+    expect(r2.svc.journal().pairingLedger.all().at(-1)).toMatchObject({ kind: 'pair_refused', phoneId: 'p9', reason: 'not_in_ledger', by: 'daemon' })
   })
 
   it('rate limit holds across a restart and counts daemon-wide (p2 cannot add 3 more after p1 used 3)', async () => {
