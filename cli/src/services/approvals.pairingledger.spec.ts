@@ -4,12 +4,14 @@
  * (3) the real ildra.ask.answered_by event and read.
  */
 import { randomBytes, sign, type KeyObject } from 'node:crypto'
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import Ajv2020Module from 'ajv/dist/2020.js'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
-import { askAnswerMessage, deviceFingerprint, ledgerAckMessage, ledgerConfirmMessage, unpairMessage, unpairTouchMessage } from '../core/ildraDeviceProof.js'
+import { askAnswerMessage, deviceFingerprint, ledgerAckMessage, ledgerConfirmMessage, unpairMessage, unpairTouchMessage, verifyPhoneSignature } from '../core/ildraDeviceProof.js'
 import { createIldraAsk, UNPAIR_RATE } from './ildraAsk.js'
 import { deviceKeyPair, phoneKeyPair, proveBridge, signedConfirm } from './ildraAsk.testkit.js'
 import { LEDGER_STATE_RESERVE, MAX_PAIRING_LEDGER, PairingLedger, PhonePairing, stampManifest, type ApprovalTemplate, type AskRequest, type PairingLedgerEntry } from './approvals.js'
@@ -537,5 +539,57 @@ describe('(h) ildra.ledger.confirm.request: the device confirms the phone and de
     await hold(req)
     expect(await p).toEqual({ ok: false, reason: 'stale_head' })
     expect(r.svc.journal().pairingLedger.all().at(-1)).toMatchObject({ kind: 'ledger_confirm_refused', reason: 'stale_head', askId: req.id })
+  })
+})
+
+describe('Wire: B5 to B9 and (h) messages match the vendored schema; the Ildra examples verify', () => {
+  const schema = JSON.parse(readFileSync(new URL('./ildra-messages.schema.json', import.meta.url), 'utf8'))
+  const Ajv2020 = (Ajv2020Module as unknown as { default: typeof Ajv2020Module }).default ?? Ajv2020Module
+  const ajv = new (Ajv2020 as unknown as new (o: object) => import('ajv').default)({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true })
+  ajv.addSchema(schema)
+  const env = (type: string, body: unknown): string[] => { const f = ajv.getSchema(schema.$id)!; return f({ type, proto: 1, body }) ? [] : (f.errors ?? []).map((e: { instancePath: string; message?: string }) => `${e.instancePath} ${e.message}`) }
+  const PROTOCOL = process.env.ILDRA_PROTOCOL_DIR ?? join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', '..', 'protocol')
+  it('emitted ledger_reset, ledger page (reset, ack, confirmed, refused entries), confirmed and confirm_refused validate', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); r.pair('p2', r.K.P2.pub); await r.enrollDevice(r.K.D1.pub)
+    expect(proveBridge(r.core, 'dev', r.K.DEVK.key)).toBe(true)
+    const path = join(r.dir, 'j', 'a.json'); const d = JSON.parse(readFileSync(path, 'utf8')); d.pairingLedgerMac = '0'.repeat(64); writeFileSync(path, JSON.stringify(d))
+    const r2 = rig(r.dir, r.clock, r.K)
+    expect(proveBridge(r2.core, 'dev', r.K.DEVK.key)).toBe(true)
+    const reset = r2.events.find((e) => e.type === 'ildra.pairing.ledger_reset')!
+    expect(env('ildra.pairing.ledger_reset', reset.body)).toEqual([])
+    const rb = reset.body as { seq: number; hash: string }
+    const ack = { seq: rb.seq, hash: rb.hash, signature: sig(r.K.P1.key, ledgerAckMessage(rb.seq, rb.hash)) }
+    expect(env('ildra.pairing.ledger_ack', ack)).toEqual([])
+    expect(await r2.core.requests.ildra_pairing_ledger_ack({ ...ack, from: { phoneId: 'p1' } }, r2.remote('ph1'))).toEqual({ ok: true })
+    const head = (await r2.ledger() as { head: { seq: number; hash: string } }).head
+    const at = r2.clock.t
+    const msg = { head: head.hash, seq: head.seq, at, phoneSignature: sig(r.K.P1.key, ledgerConfirmMessage(head.hash, head.seq, at)) }
+    expect(env('ildra.ledger.confirm.request', msg)).toEqual([])
+    // A refusal first (the deny key), so a ledger_confirm_refused entry and event exist.
+    expect(await r2.core.requests.ildra_ledger_confirm({ ...msg, phoneSignature: sig(r.K.D1.key, ledgerConfirmMessage(head.hash, head.seq, at)), from: { phoneId: 'p1' } }, r2.remote('ph1'))).toEqual({ ok: false, reason: 'verifier_rejected' })
+    const head2 = (await r2.ledger() as { head: { seq: number; hash: string } }).head
+    const msg2 = { head: head2.hash, seq: head2.seq, at, phoneSignature: sig(r.K.P1.key, ledgerConfirmMessage(head2.hash, head2.seq, at)) }
+    const p = r2.core.requests.ildra_ledger_confirm({ ...msg2, from: { phoneId: 'p1' } }, r2.remote('ph1')); await tick()
+    const q = r2.sent.at(-1)!
+    expect(env('ildra.ask.request', q)).toEqual([])
+    await r2.core.requests.ildra_ask_answer({ id: q.id, digest8: q.digest8, answerId: aid(), approved: true, holdMs: 2000 }, r2.remote('dev'))
+    expect(await p).toMatchObject({ ok: true })
+    for (const e of r2.events.filter((x) => x.type === 'ildra.ledger.confirmed' || x.type === 'ildra.ledger.confirm_refused')) expect(env(e.type, e.body), e.type).toEqual([])
+    const page = await r2.ledger() as { ok: true; entries: unknown[]; head: unknown }
+    const { ok: _ok, ...body } = page
+    expect(env('ildra.pairing.ledger', body)).toEqual([])
+    const kinds = (page.entries as PairingLedgerEntry[]).map((e) => e.kind)
+    for (const k of ['ledger_reset', 'ledger_ack', 'ledger_confirm_refused', 'ledger_confirmed'] as const) expect(kinds).toContain(k)
+    expect(env('ildra.pairing.unpair_refused', { phoneId: 'p2', reason: 'unpair_pending' })).toEqual([])
+  })
+  it.skipIf(!existsSync(join(PROTOCOL, 'examples', 'ledger-confirm-request.json')))('the Ildra examples: ledger_ack and ledger confirm signatures verify against the example phone main key', () => {
+    const R = (f: string) => JSON.parse(readFileSync(join(PROTOCOL, 'examples', f), 'utf8'))
+    const main = R('pairing-offer.json').body.phonePub as string
+    const ack = R('pairing-ledger-ack.json').body
+    expect(verifyPhoneSignature(main, ledgerAckMessage(ack.seq, ack.hash), ack.signature)).toBe(true)
+    const c = R('ledger-confirm-request.json').body
+    expect(verifyPhoneSignature(main, ledgerConfirmMessage(c.head, c.seq, c.at), c.phoneSignature)).toBe(true)
+    expect(c.head).toBe(R('pairing-ledger.json').body.head.hash)
+    expect(verifyPhoneSignature(main, ledgerConfirmMessage(c.head, c.seq + 1, c.at), c.phoneSignature)).toBe(false)
   })
 })

@@ -19,7 +19,8 @@
             "ildra.settings.set", "ildra.settings.value", "ildra.ask.unpaired",
             "ildra.device.enroll", "ildra.device.enroll.confirm", "ildra.device.enroll.status", "ildra.device.enroll.replaced", "ildra.device.challenge", "ildra.device.proof",
             "ildra.phone.open", "ildra.phone.deny_summary",
-            "ildra.pairing.ledger.get", "ildra.pairing.ledger", "ildra.pairing.unpair", "ildra.pairing.unpair_requested", "ildra.pairing.unpaired", "ildra.pairing.unpair_refused", "ildra.ask.answered_by", "ildra.ask.answered_by.get"
+            "ildra.pairing.ledger.get", "ildra.pairing.ledger", "ildra.pairing.unpair", "ildra.pairing.unpair_requested", "ildra.pairing.unpaired", "ildra.pairing.unpair_refused", "ildra.ask.answered_by", "ildra.ask.answered_by.get",
+            "ildra.pairing.ledger_reset", "ildra.pairing.ledger_ack", "ildra.ledger.confirm.request", "ildra.ledger.confirmed", "ildra.ledger.confirm_refused"
           ]
         },
         "proto": { "const": 1 },
@@ -55,7 +56,12 @@
         { "if": { "properties": { "type": { "const": "ildra.ask.answered_by.get" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/AskAnsweredByGet" } } } },
         { "if": { "properties": { "type": { "const": "ildra.phone.deny_summary" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PhoneDenySummary" } } } },
         { "if": { "properties": { "type": { "const": "ildra.device.challenge" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceChallenge" } } } },
-        { "if": { "properties": { "type": { "const": "ildra.device.proof" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceProof" } } } }
+        { "if": { "properties": { "type": { "const": "ildra.device.proof" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceProof" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.ledger_reset" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingLedgerReset" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.ledger_ack" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingLedgerAck" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.ledger.confirm.request" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/LedgerConfirmRequest" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.ledger.confirmed" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/LedgerConfirmed" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.ledger.confirm_refused" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/LedgerConfirmRefused" } } } }
       ]
     },
 
@@ -277,7 +283,7 @@
     "DeviceNonce": { "description": "16 random bytes as 32 lowercase hex.", "type": "string", "pattern": "^[0-9a-f]{32}$" },
 
     "PairingRefusalReason": {
-      "enum": ["unknown_code", "shared_machine", "expired", "no_phone_id", "no_phone_pub", "bad_phone_key", "locked_out", "no_pending", "not_touch", "check_mismatch"]
+      "enum": ["unknown_code", "shared_machine", "expired", "no_phone_id", "no_phone_pub", "bad_phone_key", "locked_out", "no_pending", "not_touch", "check_mismatch", "ledger_locked", "ledger_full", "bad_phone_id"]
     },
 
     "PairingBegin": {
@@ -298,7 +304,7 @@
       "additionalProperties": false,
       "required": ["phoneId", "phonePub", "code"],
       "properties": {
-        "phoneId": { "type": "string", "minLength": 1 },
+        "phoneId": { "description": "At most 64 characters (Shield B9: longer is refused as bad_phone_id).", "type": "string", "minLength": 1, "maxLength": 64 },
         "phonePub": { "description": "P-256 move: the phone's main key (Secure Enclave, user presence), a PhonePub. Anything else (an Ed25519 key, a compressed point, SPKI) is refused with bad_phone_key. The daemon binds the authenticated session identity that delivered the offer (AnswerOrigin.machinePub, the connection key) separately; phone answers must come from that session identity (R5-1) and phone signatures verify against this key. There is no keyAlg input: the algorithm follows from the key role.", "$ref": "#/$defs/PhonePub" },
         "code": { "$ref": "#/$defs/PairingCode" },
         "origin": { "$ref": "#/$defs/AnswerOrigin" }
@@ -418,14 +424,14 @@
     },
 
     "PairingLedgerKind": {
-      "description": "Batch B pairing ledger entry kinds. Phones: phone_paired, phone_rotated (re-paired with another main key), phone_unpaired, pair_refused. Devices: device_enroll_requested, device_enroll_replaced, device_enrolled, device_refused, device_revoked, device_expired. Deny key: deny_key_set, deny_key_revoked, deny_key_deny (a Deny the deny key settled; source deny_key), deny_burst (more than 3 of those in 60 s), verifier_rejected (a deny-key signature on another verb), phone_open (clears the deny summary). Unpair API: unpair_requested, unpair_refused.",
-      "enum": ["phone_paired", "phone_rotated", "phone_unpaired", "pair_refused", "device_enroll_requested", "device_enroll_replaced", "device_enrolled", "device_refused", "device_revoked", "device_expired", "deny_key_set", "deny_key_revoked", "deny_key_deny", "deny_burst", "verifier_rejected", "phone_open", "unpair_requested", "unpair_refused"]
+      "description": "Batch B pairing ledger entry kinds. Phones: phone_paired, phone_rotated (re-paired with another main key), phone_unpaired, pair_refused. Devices: device_enroll_requested, device_enroll_replaced, device_enrolled, device_refused, device_revoked, device_expired. Deny key: deny_key_set, deny_key_revoked, deny_key_deny (a Deny the deny key settled; source deny_key), deny_burst (more than 3 of those in 60 s), verifier_rejected (a deny-key signature on another verb), phone_open (clears the deny summary). Unpair API: unpair_requested (verb touch_proof and since = the proof's at when a device touch proof was spent; single use), unpair_refused. Shield B5: ledger_reset (the ledger could not be trusted at load: reason chain_broken, mac_mismatch, ledger_key_missing, journal_unreadable or journal_missing; oldHead = the untrusted head; count 3 for the unpair rate limit; the untrusted ledger is kept aside, never restarted empty), ledger_ack (the paired phone's main key acknowledged it, or a touch pairing with no phone paired; since = the reset's seq). Kept state after a reset is recorded as phone_paired / deny_key_set with via ledger_reset. Shield B6: pair_refused or deny_key_revoked with reason not_in_ledger, and phone_unpaired with reason missing_from_state, when the state did not match the trusted ledger at load. (h): ledger_confirmed (the device confirmed the phone and device list: prev = the confirmed head, since = its seq, askId = the hold prompt), ledger_confirm_refused.",
+      "enum": ["phone_paired", "phone_rotated", "phone_unpaired", "pair_refused", "device_enroll_requested", "device_enroll_replaced", "device_enrolled", "device_refused", "device_revoked", "device_expired", "deny_key_set", "deny_key_revoked", "deny_key_deny", "deny_burst", "verifier_rejected", "phone_open", "unpair_requested", "unpair_refused", "ledger_reset", "ledger_ack", "ledger_confirmed", "ledger_confirm_refused"]
     },
 
     "LedgerHash": { "description": "SHA-256, 64 lowercase hex.", "type": "string", "pattern": "^[0-9a-f]{64}$" },
 
     "PairingLedgerEntry": {
-      "description": "Batch B: one entry of the daemon's authoritative pairing ledger (phones and devices), append-only and journaled with the state it records. Chained: prev is the previous entry's hash (64 zeros for seq 1) and hash = SHA-256 over the UTF-8 bytes of ildra-pairing-ledger:v1|<prev>|<JSON of the entry without prev and hash, keys in the order seq, at, kind, phoneId, fingerprint, oldFingerprint, by, via, reason, askId, verb, uv, count, since, source, keyAlg, absent keys omitted>, lowercase hex. A journal whose chain does not verify fails closed.",
+      "description": "Batch B: one entry of the daemon's authoritative pairing ledger (phones and devices), append-only and journaled with the state it records. Chained: prev is the previous entry's hash (64 zeros for seq 1) and hash = SHA-256 over the UTF-8 bytes of ildra-pairing-ledger:v1|<prev>|<JSON of the entry without prev and hash, keys in the order seq, at, kind, phoneId, fingerprint, oldFingerprint, by, via, reason, askId, verb, uv, count, since, source, keyAlg, oldHead, absent keys omitted>, lowercase hex. Shield B1 to B4: the journal also stores pairingLedgerMac = HMAC-SHA256 over ildra-pairing-ledger-mac:v1|<seq>|<head hash> with a 32-byte key held by the host next to the install marker, outside the journal folder. A chain that does not verify, a MAC that does not match, or a missing key with pairings present fails closed (ledger_reset; pairing changes are refused with ledger_locked until the phone acknowledges with ildra.pairing.ledger_ack). Shield B9: the ledger holds at most 10,000 entries (the last 1,000 reserved for state changes; past 9,998 pairing changes are refused with ledger_full); noisy refusals (verifier_rejected, pair_refused, unpair_refused, device_enroll_requested, device_enroll_replaced, device_refused, device_expired, ledger_confirm_refused) are kept at most 5 per minute per kind, and the next one kept carries count = 1 + the number dropped. Strings are at most 64 characters.",
       "type": "object",
       "additionalProperties": false,
       "required": ["seq", "at", "kind", "prev", "hash"],
@@ -433,19 +439,20 @@
         "seq": { "type": "integer", "minimum": 1 },
         "at": { "$ref": "#/$defs/EpochMs" },
         "kind": { "$ref": "#/$defs/PairingLedgerKind" },
-        "phoneId": { "type": "string", "minLength": 1 },
+        "phoneId": { "type": "string", "minLength": 1, "maxLength": 64 },
         "fingerprint": { "$ref": "#/$defs/DeviceFingerprint" },
         "oldFingerprint": { "$ref": "#/$defs/DeviceFingerprint" },
-        "by": { "description": "Who: a phoneId, local_socket, device or daemon.", "type": "string", "minLength": 1 },
-        "via": { "description": "How: touch, phone, locked_ask, local_socket or device.", "type": "string", "minLength": 1 },
-        "reason": { "type": "string", "minLength": 1 },
+        "by": { "description": "Who: a phoneId, local_socket, device, touch or daemon.", "type": "string", "minLength": 1, "maxLength": 64 },
+        "via": { "description": "How: touch, phone, locked_ask, local_socket, device, daemon or ledger_reset.", "type": "string", "minLength": 1, "maxLength": 64 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 64 },
         "askId": { "$ref": "#/$defs/AskId" },
-        "verb": { "type": "string" },
+        "verb": { "type": "string", "maxLength": 64 },
         "uv": { "$ref": "#/$defs/UserVerification" },
         "count": { "type": "integer", "minimum": 0 },
-        "since": { "$ref": "#/$defs/EpochMs" },
+        "since": { "description": "A time (epoch ms) or, on ledger_ack and ledger_confirmed, a seq; on unpair_requested with verb touch_proof, the spent proof's at.", "$ref": "#/$defs/EpochMs" },
         "source": { "const": "deny_key" },
         "keyAlg": { "description": "P-256 move: the key's algorithm, set by the daemon from the key role (never from input), informational: p256 on phone_paired, phone_rotated and deny_key_set; ed25519 on device_enrolled.", "enum": ["p256", "ed25519"] },
+        "oldHead": { "description": "Shield B5, on ledger_reset: the hash of the last entry of the untrusted ledger, when it could be read.", "$ref": "#/$defs/LedgerHash" },
         "prev": { "$ref": "#/$defs/LedgerHash" },
         "hash": { "$ref": "#/$defs/LedgerHash" }
       }
@@ -475,7 +482,7 @@
       "additionalProperties": false,
       "required": ["phoneId", "at", "signature"],
       "properties": {
-        "phoneId": { "type": "string", "minLength": 1 },
+        "phoneId": { "type": "string", "minLength": 1, "maxLength": 64 },
         "at": { "$ref": "#/$defs/EpochMs" },
         "signature": { "description": "The requesting phone's main key, a PhoneSignature.", "$ref": "#/$defs/PhoneSignature" },
         "touchProof": { "description": "The enrolled device key's Ed25519 signature (64 bytes, base64) after a physical touch.", "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
@@ -499,14 +506,69 @@
     },
 
     "PairingUnpairRefused": {
-      "description": "Daemon to the requesting phone (batch B). unpaired_phone, malformed, bad_signature, verifier_rejected (signed by the deny key, journaled), expired (at more than 60 s off), unknown_phone, rate_limited, last_owner_channel (the last paired phone without a valid device touch proof), not_approved (the locked_ask was denied or expired). Every refusal after the signature check is a ledger unpair_refused entry.",
+      "description": "Daemon to the requesting phone (batch B). unpaired_phone, malformed, bad_signature, verifier_rejected (signed by the deny key, journaled), expired (at more than 60 s off), unknown_phone, rate_limited, last_owner_channel (the last paired phone without a valid device touch proof), not_approved (the locked_ask was denied or expired), unpair_pending (Shield B7: another unpair's locked_ask is open; one at a time), ledger_locked (Shield B5: an unacknowledged ledger_reset), ledger_full (Shield B9). The last-owner check is made again, atomically, right before the unpair. Every refusal after the signature check is a ledger unpair_refused entry.",
       "type": "object",
       "additionalProperties": false,
       "required": ["phoneId", "reason"],
       "properties": {
         "phoneId": { "type": "string" },
-        "reason": { "enum": ["unpaired_phone", "malformed", "bad_signature", "verifier_rejected", "expired", "unknown_phone", "rate_limited", "last_owner_channel", "not_approved"] }
+        "reason": { "enum": ["unpaired_phone", "malformed", "bad_signature", "verifier_rejected", "expired", "unknown_phone", "rate_limited", "last_owner_channel", "not_approved", "unpair_pending", "ledger_locked", "ledger_full"] }
       }
+    },
+
+    "PairingLedgerReset": {
+      "description": "Shield B5, daemon to the paired phone: the pairing ledger could not be trusted at load and a new chain started with the ledger_reset entry seq (hash). Sent when the journal opens and on every phone open until acknowledged. Pairing changes (pair, re-pair, unpair, deny key) are refused with ledger_locked until then; voice was off for one window. The phone should show it and re-check its phones and devices before acknowledging.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "hash", "reason", "at"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "hash": { "$ref": "#/$defs/LedgerHash" },
+        "reason": { "enum": ["chain_broken", "mac_mismatch", "ledger_key_missing", "journal_unreadable", "journal_missing"] },
+        "at": { "$ref": "#/$defs/EpochMs" },
+        "oldHead": { "$ref": "#/$defs/LedgerHash" }
+      }
+    },
+
+    "PairingLedgerAck": {
+      "description": "Shield B5, phone to daemon: acknowledge the pending ledger_reset seq (hash). signature: the paired phone's main key, a PhoneSignature over ildra-pairing-ledger-ack:v1|<seq>|<hash> (verb pairing.ledger_ack; the deny key is verifier_rejected). Reply ok, or a refusal: unpaired_phone, malformed, bad_signature, verifier_rejected, unknown_id (not the pending reset). Accepted: a ledger_ack entry, pairing changes unlocked.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "hash", "signature"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "hash": { "$ref": "#/$defs/LedgerHash" },
+        "signature": { "$ref": "#/$defs/PhoneSignature" }
+      }
+    },
+
+    "LedgerConfirmRequest": {
+      "description": "(h), phone to daemon: ask the device to confirm the phone and device list at the head the phone read (head = hash and seq from ildra.pairing.ledger). phoneSignature: the paired phone's main key, a PhoneSignature over ildra-ledger-confirm:v1|<head>|<seq>|<at> (verb ledger.confirm; the deny key is verifier_rejected). The daemon checks head and seq equal its current head (else stale_head), allows one open confirm (else busy), then opens a device hold prompt 'Confirm your phone and device list?' (touch only, hold to confirm, 60 s, the same hold rules and device authority proof as any touch answer). Held: ildra.ledger.confirmed and a ledger_confirmed entry. Otherwise ildra.ledger.confirm_refused. The daemon keeps no per-phone head; pausing on a mismatch is the phone's.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["head", "seq", "at", "phoneSignature"],
+      "properties": {
+        "head": { "$ref": "#/$defs/LedgerHash" },
+        "seq": { "type": "integer", "minimum": 0 },
+        "at": { "$ref": "#/$defs/EpochMs" },
+        "phoneSignature": { "$ref": "#/$defs/PhoneSignature" }
+      }
+    },
+
+    "LedgerConfirmed": {
+      "description": "(h), daemon to the phone: the device confirmed the list at head (seq), as signed at at. The ledger_confirmed entry that follows has prev = head and since = seq, so the head moves and the same request cannot be replayed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["head", "seq", "at"],
+      "properties": { "head": { "$ref": "#/$defs/LedgerHash" }, "seq": { "type": "integer", "minimum": 0 }, "at": { "$ref": "#/$defs/EpochMs" } }
+    },
+
+    "LedgerConfirmRefused": {
+      "description": "(h), daemon to the phone. timeout (not held within 60 s, a device Deny, or the hold limit), bad_signature, verifier_rejected (the deny key, journaled), stale_head (not the current head, or the head moved while the prompt was up), unpaired_phone, busy (another confirm is open), malformed. Every refusal is a ledger_confirm_refused entry (coalesced like other noisy refusals).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": { "reason": { "enum": ["timeout", "bad_signature", "verifier_rejected", "stale_head", "unpaired_phone", "busy", "malformed"] } }
     },
 
     "AskAnsweredBy": {
@@ -579,7 +641,7 @@
         "approved": { "type": "boolean" },
         "uv": { "$ref": "#/$defs/UserVerification" },
         "signature": { "description": "The paired phone's main key, a PhoneSignature (ECDSA P-256 / SHA-256).", "$ref": "#/$defs/PhoneSignature" },
-        "denyKey": { "description": "Shield deny key condition 2 (optional): the phone's deny-only key, a PhonePub (Secure Enclave P-256, uncompressed point, base64url), a key without user presence that may sign only a Deny on a pending Ask. Accepted only inside a confirm signed by the main key; it is then in the signed bytes, appended as |deny=<denyKey> after uv. Unsigned, signed without it, or signed by the deny key (verifier_rejected): refused, nothing installed. One per phone: a new confirm with denyKey replaces it. Unpairing the phone or re-pairing it with another main key revokes it in the same journal write.", "$ref": "#/$defs/PhonePub" }
+        "denyKey": { "description": "Shield deny key condition 2 (optional): the phone's deny-only key, a PhonePub (Secure Enclave P-256, uncompressed point, base64url), a key without user presence that may sign only a Deny on a pending Ask. Accepted only inside a confirm signed by the main key; it is then in the signed bytes, appended as |deny=<denyKey> after uv. Unsigned, signed without it, or signed by the deny key (verifier_rejected): refused, nothing installed. One per phone: a new confirm with denyKey replaces it. A denyKey that is the main key (the same parsed point) refuses the whole confirm (malformed; nothing enrolled, nothing installed); likewise a pairing offer whose phonePub equals a stored deny key is bad_phone_key. Unpairing the phone or re-pairing it with another main key revokes it in the same journal write.", "$ref": "#/$defs/PhonePub" }
       }
     },
 
