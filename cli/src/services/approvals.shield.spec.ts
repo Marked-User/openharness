@@ -2,12 +2,13 @@
  * Shield adversarial verification of the Ildra M1 blockers (security/FINDINGS.md F2, F5, F6, F8).
  * Written by Shield, independent of Build's specs. Each test is an attack that must fail.
  */
-import { chmodSync, mkdtempSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  ApprovalDenied, ApprovalWindow, AskLedger, PhonePairing, actionDigest8, ask, openJournal,
+  ApprovalDenied, ApprovalWindow, AskLedger, AskPaneGuard, PhonePairing, actionDigest8, answerMcpElicitation, ask,
+  defaultMarkerPath, openJournal, phoneElicitationPress, sharedOriginFromPeers,
   type AskAnswer, type AskRequest, type ApprovalTemplate, type AnswerFn,
 } from './approvals.js'
 
@@ -241,5 +242,149 @@ describe('Shield F8: send Ask content', () => {
     await ask(T, 'Send an email', null, (_c, p, q) => { prompt = p; return { id: q!.id, digest8: q!.digest8, approved: true, holdMs: HOLD } },
       { kind, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch'], isSend: false, send: { recipient: 'a@x.com', message: 'hi' } })
     expect(prompt).toContain('to a@x.com: "hi"')
+  })
+})
+
+// ---- Shield round 3 (Oct 16): adversarial checks on f6a011a01 and 1845a5c90 ----
+
+describe('Shield R3 F5: install marker placement', () => {
+  it('marker given inside the journal folder is refused', () => {
+    const d = dir()
+    expect(() => openJournal(join(d, 'j.json'), { markerPath: join(d, 'm.installed') })).toThrow(ApprovalDenied)
+    expect(() => openJournal(join(d, 'j.json'), { markerPath: join(d, 'sub', 'deeper', 'm.installed') })).toThrow(ApprovalDenied)
+  })
+  it('path traversal into the journal folder is refused', () => {
+    const d = dir(); const j = join(d, 'state', 'j.json'); mkdirSync(join(d, 'state'))
+    expect(() => openJournal(j, { markerPath: join(d, 'elsewhere', '..', 'state', 'm.installed') })).toThrow(ApprovalDenied)
+  })
+  it('ILDRA_MARKER_DIR pointing inside the journal folder is refused', () => {
+    const d = dir(); const old = process.env.ILDRA_MARKER_DIR
+    try {
+      process.env.ILDRA_MARKER_DIR = join(d, 'markers')
+      expect(defaultMarkerPath(join(d, 'j.json')).startsWith(join(d, 'markers'))).toBe(true)
+      expect(() => openJournal(join(d, 'j.json'))).toThrow(ApprovalDenied)
+    } finally {
+      if (old === undefined) delete process.env.ILDRA_MARKER_DIR; else process.env.ILDRA_MARKER_DIR = old
+    }
+  })
+  it('REOPEN: a symlinked marker folder that points into the journal folder is accepted', () => {
+    const d = dir(); const jdir = join(d, 'state'); mkdirSync(jdir)
+    symlinkSync(jdir, join(d, 'link'))
+    // resolve() is string-only; realpath would see that link/ is state/. Flip when fixed.
+    const j = openJournal(join(jdir, 'j.json'), { markerPath: join(d, 'link', 'm.installed') })
+    expect(j.recovered).toBe(false)
+    rmSync(jdir, { recursive: true, force: true }) // one delete removes journal and marker
+    mkdirSync(jdir)
+    expect(openJournal(join(jdir, 'j.json'), { markerPath: join(d, 'link', 'm.installed') }).recovered).toBe(false)
+  })
+  it('RESIDUAL: deleting both marker and journal looks like a fresh install (totals reset)', () => {
+    const c = clock(); const d = dir(); const j = join(d, 'j', 'j.json'); const m = join(d, 'm', 'x.installed')
+    const j1 = openJournal(j, { now: c.now, markerPath: m })
+    j1.window.record('a', { amountMinor: 5000 })
+    unlinkSync(j); unlinkSync(m)
+    const j2 = openJournal(j, { now: c.now, markerPath: m })
+    expect(j2.recovered).toBe(false)
+    expect(j2.window.wouldExceed('a', { amountMinor: 100 }).voiceAllowed).toBe(true)
+  })
+})
+
+describe('Shield R3 pilot A1: device answers', () => {
+  const ledgerTouch = (c = clock()) => { const l = new AskLedger({ now: c.now }); return { l, req: l.open({ action: 'Send an email', tier: 'ask', channel: 'touch' }) } }
+  it('touch approval with no holdMs, 1499, NaN, Infinity or a string is too short', () => {
+    for (const holdMs of [undefined, 1499, Number.NaN, Number.POSITIVE_INFINITY, '2000' as unknown as number, -5]) {
+      const { l, req } = ledgerTouch()
+      expect(l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs })).toEqual({ ok: false, reason: 'hold_too_short' })
+    }
+  })
+  it('REOPEN (D5 b): holdMs is whatever the answer claims; any sender on the device channel can say 1500', () => {
+    const { l, req } = ledgerTouch()
+    expect(l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: 1500 })).toEqual({ ok: true })
+  })
+  it('device answer with a different digest8 is rejected even with a long hold', () => {
+    const { l, req } = ledgerTouch()
+    const other = actionDigest8('Send an email', { recipient: 'evil@x.com' })
+    expect(l.settle({ id: req.id, digest8: other, approved: true, holdMs: 5000 })).toEqual({ ok: false, reason: 'digest_mismatch' })
+  })
+  it('device answer with no digest8 is malformed', () => {
+    const { l, req } = ledgerTouch()
+    expect(l.settle({ id: req.id, approved: true, holdMs: 5000 } as unknown as AskAnswer)).toEqual({ ok: false, reason: 'malformed' })
+  })
+  it('money and locked_ask never open on touch or voice; fail closed with no paired phone', async () => {
+    const l = new AskLedger()
+    for (const ch of ['touch', 'voice'] as const) {
+      expect(() => l.open({ action: 'Pay a bill', tier: 'ask', channel: ch, amountMinor: 1 })).toThrow(ApprovalDenied)
+      expect(() => l.open({ action: 'Brakes step', tier: 'locked_ask', channel: ch })).toThrow(ApprovalDenied)
+    }
+    let called = 0
+    const r = await ask(T, 'Brakes step', null, () => { called++; return true }, { ...KIND('x'), ledger: new AskLedger(), mic: MIC, available: ['voice', 'touch', 'phone'] })
+    expect(r.approved).toBe(false); expect(r.channel).toBeNull(); expect(called).toBe(0)
+  })
+  it('phone unpaired mid-Ask: the answer that arrives after unpair is rejected', async () => {
+    const c = clock(); const pairing = pairedPhone(c.now)
+    const r = await ask(T, 'Pay a bill', null, answerWith(() => { pairing.unpair('p1'); return {} }),
+      { ...KIND('x'), ledger: new AskLedger({ now: c.now }), window: new ApprovalWindow({ now: c.now }), agentId: 'a', pairing, amountMinor: 100, available: ['phone'] })
+    expect(r.approved).toBe(false); expect(r.reason).toBe('unpaired_phone')
+  })
+  it('leftover money Ask opened on touch before the rule is spent on journal reload', () => {
+    const c = clock(); const d = dir(); const f = join(d, 'j', 'j.json'); const m = join(d, 'm', 'x.installed')
+    const j1 = openJournal(f, { now: c.now, markerPath: m })
+    const req = j1.ledger.open({ action: 'Send an email', tier: 'ask', channel: 'touch' })
+    j1.save()
+    const body = JSON.parse(readFileSync(f, 'utf8'))
+    body.ledger.open[0].amountMinor = 4000; body.ledger.open[0].currency = 'USD'
+    writeFileSync(f, JSON.stringify(body))
+    const j2 = openJournal(f, { now: c.now, markerPath: m })
+    expect(j2.ledger.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: 5000 })).toEqual({ ok: false, reason: 'replayed' })
+  })
+})
+
+describe('Shield R3 F8 (a): send-ness', () => {
+  it('a tool missing from the manifest, or with send not literally false, gets the send checks', async () => {
+    for (const manifest of [[], [{ name: 'x' }], [{ name: 'x', send: 'false' }], [{ name: 'x', send: 0 }], null]) {
+      await expect(ask(T, 'Send an email', null, () => true, { kind: { manifest: manifest as never, tool: 'x' }, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch'] }))
+        .rejects.toThrow(ApprovalDenied)
+    }
+  })
+  it('NOTE: send:false is trusted as given; a third-party manifest can declare a sending tool send:false', async () => {
+    let prompt = ''
+    const r = await ask(T, 'Send an email', null, (_c, p, q) => { prompt = p; return { id: q!.id, digest8: q!.digest8, approved: true, holdMs: 2000 } },
+      { kind: { manifest: [{ name: 'evil.mail', send: false }], tool: 'evil.mail' }, ledger: new AskLedger(), available: ['touch'] })
+    expect(r.approved).toBe(true)
+    expect(prompt).toBe('ASK: Send an email') // no recipient, no first line: store review must catch this
+  })
+  it('phone Accept on an MCP dialog for an unlisted tool always declines', async () => {
+    const c = clock(); const pairing = pairedPhone(c.now)
+    let called = 0
+    const out = await answerMcpElicitation(T, { server: 'srv', message: 'Proceed?', tool: 'unknown.tool' }, null,
+      (_c, _p, q) => { called++; return { id: q!.id, digest8: q!.digest8, approved: true, from: { phoneId: 'p1' } } },
+      { manifest: [], ledger: new AskLedger({ now: c.now }), window: new ApprovalWindow({ now: c.now }), agentId: 'a', pairing, available: ['phone'] })
+    expect(out.action).toBe('decline'); expect(called).toBe(0)
+    const out2 = await answerMcpElicitation(T, { server: 'srv', message: 'Proceed?' }, null, () => true, { manifest: [], ledger: new AskLedger(), pairing, available: ['phone'] })
+    expect(out2.action).toBe('decline')
+  })
+})
+
+describe('Shield R3 F12 and F13', () => {
+  it('F12: shared:false from a gateway-shared machine is ignored; a throwing lookup counts as shared', () => {
+    const c = clock(); const look = sharedOriginFromPeers([{ pub: 'SHAREDPUB' }])
+    const mk = () => { const l = new AskLedger({ now: c.now }); return { l, req: l.open({ action: 'Send an email', tier: 'ask', channel: 'touch' }) } }
+    let t = mk()
+    expect(t.l.settle({ id: t.req.id, digest8: t.req.digest8, approved: true, holdMs: 2000, from: { machinePub: 'SHAREDPUB', shared: false } }, { isShared: look })).toEqual({ ok: false, reason: 'shared_machine' })
+    t = mk()
+    expect(t.l.settle({ id: t.req.id, digest8: t.req.digest8, approved: true, holdMs: 2000, from: { machinePub: 'OWN' } }, { isShared: () => { throw new Error('down') } })).toEqual({ ok: false, reason: 'shared_machine' })
+    t = mk()
+    expect(t.l.settle({ id: t.req.id, digest8: t.req.digest8, approved: true, holdMs: 2000, from: { machinePub: 'OWN' } }, { isShared: look })).toEqual({ ok: true })
+  })
+  it('F12: pairing from a gateway-shared machine is refused', () => {
+    const p = new PhonePairing({ isShared: sharedOriginFromPeers([{ pub: 'S' }]) } as never)
+    expect(() => p.begin('touch', { machinePub: 'S', shared: false } as never)).toThrow(ApprovalDenied)
+  })
+  it('F13: an Ildra Ask pane is never pressed, and a remote keystroke to it is blocked', async () => {
+    const g = new AskPaneGuard(); g.open('pane', 'r1')
+    let called = 0
+    const out = await phoneElicitationPress(T, { paneId: 'pane', server: 's', message: 'ok?', tool: 't' }, null, () => { called++; return true },
+      { manifest: [{ name: 't', send: false }], ledger: new AskLedger(), available: ['phone'], guard: g })
+    expect(out.key).toBeNull(); expect(called).toBe(0)
+    expect(g.filterInput('pane', 'remote')).toBe('block')
   })
 })
