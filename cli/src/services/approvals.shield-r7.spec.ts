@@ -195,10 +195,38 @@ describe('Shield R7-10 rulings on ff0f930dd', () => {
     await r.answer(r.sent[r.sent.length - 1]!, 'dev')
     expect(await p).toMatchObject({ approved: true, channel: 'touch' })
   })
-  it('GAP ruling 1: a phone-only Ask with no phone paired ends at once from pairing state, but its reason is no_channel, not no_paired_phone', async () => {
+  it('ruling 1: a phone-only Ask with no phone paired ends at once as no_paired_phone; with no phone channel at all it is no_channel', async () => {
     const r = rig()
-    const out = await r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
-    expect(out).toMatchObject({ approved: false, channel: null, reason: 'no_channel' })
+    expect(await r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })).toMatchObject({ approved: false, channel: null, reason: 'no_paired_phone' })
+    expect(await r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: [] })).toMatchObject({ approved: false, channel: null, reason: 'no_channel' })
+    expect(r.sent).toEqual([])
+  })
+  it('ruling 1: unpairing the last phone during a handed-off v3.3 Ask settles it once with no_paired_phone; the device prompt is gone and a late touch or phone answer changes nothing', async () => {
+    const r = rig()
+    r.pairPhone()
+    const kp = await enrollViaPhone(r)
+    expect(proveBridge(r.core, 'dev', kp.key)).toBe(true)
+    const withdrawn: { channel: string; id: string }[] = []
+    r.svc.withdraw = (channel, req) => { withdrawn.push({ channel, id: req.id }) }
+    let settled = 0
+    const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch', 'phone'] }).then((o) => { settled++; return o })
+    await tick()
+    const req = r.sent[0]!
+    expect(req.channel).toBe('touch')
+    expect(r.svc.journal().ledger.handoff(req.id, 'phone', 'timer')).not.toBeNull()
+    await tick()
+    expect(withdrawn.map((w) => w.id)).toContain(req.id) // device prompt withdrawn at the handoff
+    expect(r.svc.journal().ledger.get(req.id)!.channel).toBe('phone')
+    r.svc.journal().pairing.unpair('p1')
+    const out = await p
+    expect(out).toMatchObject({ approved: false, reason: 'no_paired_phone' })
+    expect(r.svc.journal().ledger.get(req.id)).toBeNull()
+    expect(r.svc.journal().ledger.pending()).toBe(0)
+    await r.answer(req, 'dev')
+    await r.answer(r.sent[r.sent.length - 1]!, 'ph', { from: { phoneId: 'p1' } })
+    await tick()
+    expect(settled).toBe(1)
+    expect(r.svc.journal().ledger.get(req.id)).toBeNull()
   })
   it('ruling 2: an unstamped in-process unpaired answer counts toward MAX_REPROMPTS and ends the Ask', async () => {
     let n = 0
