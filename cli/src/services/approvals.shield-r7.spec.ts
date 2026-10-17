@@ -4,15 +4,16 @@
  * attack that must fail (security/FINDINGS.md, "Final M1 Ask-gate check, round 7").
  */
 import { randomBytes, sign } from 'node:crypto'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { deviceProofMessage } from '../core/api.js'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { createIldraAsk } from './ildraAsk.js'
 import { deviceKeyPair, proveBridge } from './ildraAsk.testkit.js'
-import { AskLedger, openJournal, stampManifest, type ApprovalTemplate, type AskAnswer, type AskRequest } from './approvals.js'
+import { AskLedger, ApprovalWindow, MAX_REPROMPTS, ask, openJournal, stampManifest, type ApprovalTemplate, type AskAnswer, type AskRequest } from './approvals.js'
 
 const aid = (): string => randomBytes(16).toString('hex')
 const T: ApprovalTemplate = { permissions: { ask: ['Rename a file'], locked_ask: ['Brakes step'] } }
@@ -125,12 +126,12 @@ describe('Shield R7-1: device proof', () => {
 })
 
 describe('Shield R7-10: unpaired phone answers', () => {
-  it('a flood of unpaired answers spends nothing, the real phone still approves, and the phone gets one aggregate count with no ids or keys', async () => {
+  it('200 unpaired answers spends nothing, the real phone still approves, and the phone gets one aggregate count with no ids or keys', async () => {
     const r = rig()
     r.pairPhone()
     const p = r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
     await tick()
-    for (let i = 0; i < 40; i++) { await r.answer(r.sent[r.sent.length - 1]!, 'web', { from: { phoneId: 'p1' } }); await tick() }
+    for (let i = 0; i < 200; i++) { await r.answer(r.sent[r.sent.length - 1]!, 'web', { from: { phoneId: 'p1' } }); await tick() }
     expect(r.svc.journal().ledger.pending()).toBe(1)
     expect(r.svc.journal().ledger.toJSON().spent).toEqual([])
     await r.answer(r.sent[r.sent.length - 1]!, 'ph', { from: { phoneId: 'p1' } })
@@ -139,8 +140,8 @@ describe('Shield R7-10: unpaired phone answers', () => {
     expect(agg).toHaveLength(1)
     expect(Object.keys(agg[0]!.body as object).sort()).toEqual(['at', 'count', 'since'])
     expect(JSON.stringify(agg)).not.toContain(OTHER)
-    // NOTE: each refused answer re-delivers the prompt (40 floods, 41 prompts): bounded by the Ask's expiry, not a cap.
-    expect(r.sent.length).toBeGreaterThan(40)
+    // NOTE: each refused answer re-delivers the prompt (200 floods, over 200 prompts): bounded by the Ask's expiry, not a cap.
+    expect(r.sent.length).toBeGreaterThan(200)
   })
 })
 
@@ -177,5 +178,43 @@ describe('Shield R7 harness pair residual', () => {
     expect(r.svc.journal().ledger.pending()).toBe(before)
     r.core.cancel(r.sent[r.sent.length - 1]!.id)
     expect(await pp).toMatchObject({ approved: false })
+  })
+})
+
+describe('Shield R7-10 rulings on ff0f930dd', () => {
+  it('ruling 1: with no phone paired, remote unpaired answers never end an open touch Ask; the device then approves', async () => {
+    const r = rig()
+    const kp = await (async () => { r.pairPhone(); const k = await enrollViaPhone(r); r.svc.journal().pairing.unpair('p1'); return k })()
+    expect(proveBridge(r.core, 'dev', kp.key)).toBe(true)
+    const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch', 'phone'] })
+    await tick()
+    const before = r.svc.journal().ledger.pending()
+    for (let i = 0; i < 20; i++) { await r.answer(r.sent[r.sent.length - 1]!, 'web', { from: { phoneId: 'p1' } }); await tick() }
+    await tick()
+    expect(r.svc.journal().ledger.pending()).toBe(before)
+    await r.answer(r.sent[r.sent.length - 1]!, 'dev')
+    expect(await p).toMatchObject({ approved: true, channel: 'touch' })
+  })
+  it('GAP ruling 1: a phone-only Ask with no phone paired ends at once from pairing state, but its reason is no_channel, not no_paired_phone', async () => {
+    const r = rig()
+    const out = await r.svc.ask(T, 'Brakes step', null, { kind, agentId: 'a', available: ['phone'] })
+    expect(out).toMatchObject({ approved: false, channel: null, reason: 'no_channel' })
+  })
+  it('ruling 2: an unstamped in-process unpaired answer counts toward MAX_REPROMPTS and ends the Ask', async () => {
+    let n = 0
+    const out = await ask(T, 'Rename a file', null, (_c, _p, q) => { n++; return { id: q!.id, digest8: q!.digest8, answerId: aid(), approved: true, from: { phoneId: 'p9', machinePub: OTHER } } as AskAnswer },
+      { kind, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch'] })
+    expect(out.approved).toBe(false)
+    expect(n).toBeLessThanOrEqual(MAX_REPROMPTS + 1)
+  })
+  it('ruling 2 guard: no production module but services/ildraAsk.ts reaches ask() or a ledger, nothing in production builds the Ask service, and only core/ildraAsk.ts stamps', () => {
+    const root = join(fileURLToPath(new URL('.', import.meta.url)), '..')
+    const files: string[] = []
+    const walk = (d: string): void => { for (const e of readdirSync(d)) { const f = join(d, e); if (e === 'node_modules') continue; if (statSync(f).isDirectory()) walk(f); else if (/\.(ts|tsx)$/.test(e) && !/\.(spec|test)\.tsx?$/.test(e)) files.push(f) } }
+    walk(root)
+    const importers = (re: RegExp) => files.filter((f) => re.test(readFileSync(f, 'utf8'))).map((f) => relative(root, f)).sort()
+    expect(importers(/from '[./]*(services\/)?approvals(\.js)?'/)).toEqual(['services/ildraAsk.testkit.ts', 'services/ildraAsk.ts'].filter((f) => files.some((x) => x.endsWith(f) && /approvals/.test(readFileSync(x, 'utf8')))).sort())
+    expect(importers(/from '[./]*services\/ildraAsk(\.js)?'|from '\.\/ildraAsk(\.js)?'/).filter((f) => !f.startsWith('core/'))).toEqual(['services/ildraAsk.testkit.ts'])
+    expect(importers(/\bstampChannel\(/)).toEqual(['core/ildraAsk.ts', 'core/ildraChannel.ts'].filter((f) => /stampChannel\(/.test(readFileSync(join(root, f), 'utf8'))))
   })
 })
