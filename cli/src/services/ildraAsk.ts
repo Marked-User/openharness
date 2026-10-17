@@ -23,7 +23,7 @@ export const UNPAIR_SKEW_MS = 60_000
 const UNPAIR_ACTION = 'Unpair a phone'
 const UNPAIR_TEMPLATE: ApprovalTemplate = { permissions: { locked_ask: [UNPAIR_ACTION] } }
 const UNPAIR_MANIFEST = stampManifest([{ name: 'ildra.pairing.unpair', send: false }], 'first_party')
-import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, rawPhoneKey, settingsSetMessage, stampedChannel, ledgerAckMessage, ledgerConfirmMessage, unpairMessage, unpairTouchMessage, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
+import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, rawPhoneKey, settingsSetMessage, stampedChannel, ledgerAckMessage, ledgerConfirmMessage, denySummaryAckMessage, unpairMessage, unpairTouchMessage, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
 
 export type IldraAskEvent =
   | { type: 'ildra.ask.attempt'; body: AskAttempt }
@@ -197,6 +197,16 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     if (reset) emit('ildra.pairing.ledger_reset', resetBody(reset))
     return { ok: true, denySummary }
   }
+  // (k): only the phone's signed acknowledgement clears the deny summary (main or deny key); it resends until then.
+  deps.inputs.onDenySummaryAck = (msg, from) => {
+    const j = open()
+    if (typeof from.phoneId !== 'string' || typeof from.machinePub !== 'string' || !j.pairing.isPairedKey(from.phoneId, from.machinePub)) return { ok: false, reason: 'unpaired_phone' }
+    if (typeof msg.since !== 'number' || !Number.isInteger(msg.since) || msg.since < 0 || typeof msg.at !== 'number' || !Number.isFinite(msg.at) || typeof msg.phoneSignature !== 'string') return { ok: false, reason: 'malformed' }
+    const v = j.pairing.verifyPhone(from.phoneId, 'deny_summary.ack', denySummaryAckMessage(msg.since, msg.at), msg.phoneSignature)
+    if (!v.ok) return { ok: false, reason: v.reason }
+    if (!j.pairing.ackDenySummary(from.phoneId, msg.since)) return { ok: false, reason: 'unknown_id' }
+    return { ok: true }
+  }
   const pairedFrom = (j: ApprovalJournal, from: { phoneId?: unknown; machinePub?: unknown }): from is { phoneId: string; machinePub: string } =>
     typeof from.phoneId === 'string' && typeof from.machinePub === 'string' && j.pairing.isPairedKey(from.phoneId, from.machinePub)
   // Batch B (1): the pairing ledger read API, for the paired phone only.
@@ -205,7 +215,7 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     if (!pairedFrom(j, from)) return { ok: false, reason: 'unpaired_phone' }
     const s = since === undefined ? 0 : since
     if (typeof s !== 'number' || !Number.isInteger(s) || s < 0) return { ok: false, reason: 'malformed' }
-    return { ok: true, entries: j.pairingLedger.since(s), head: j.pairingLedger.head() }
+    return { ok: true, ...j.pairingLedger.page(s) }
   }
   // Batch B (3): who settled an Ask, for the paired phone.
   deps.inputs.onAnsweredBy = (id, from) => {

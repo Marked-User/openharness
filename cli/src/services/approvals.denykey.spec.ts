@@ -8,10 +8,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
-import { askAnswerMessage, settingsSetMessage, PHONE_VERBS } from '../core/ildraDeviceProof.js'
+import { askAnswerMessage, denySummaryAckMessage, settingsSetMessage, PHONE_VERBS } from '../core/ildraDeviceProof.js'
 import { createIldraAsk } from './ildraAsk.js'
 import { deviceKeyPair, phoneKeyPair, proveBridge, signedConfirm } from './ildraAsk.testkit.js'
-import { PhonePairing, stampManifest, type ApprovalTemplate, type AskRequest } from './approvals.js'
+import { DENY_KEY_VERBS, PhonePairing, stampManifest, type ApprovalTemplate, type AskRequest } from './approvals.js'
 
 const aid = (): string => randomBytes(16).toString('hex')
 const T: ApprovalTemplate = { permissions: { ask: ['Rename a file'], locked_ask: ['Brakes step'] } }
@@ -55,7 +55,7 @@ describe('Shield deny key (1): the verifier comes from the stored key role; deny
     const MAIN = phoneKeyPair(); const DENY = phoneKeyPair(); const STRANGER = phoneKeyPair()
     const p = new PhonePairing(); const { code } = p.begin('touch'); p.offer('p1', MAIN.pub, code); p.confirm('p1', 'touch', true)
     expect(p.setDenyKey('p1', DENY.pub)).toBe(true)
-    const verbs = [...PHONE_VERBS.filter((v) => v !== 'ask.deny'), 'ask.voice', 'device.revoke', 'future.verb.v9', '']
+    const verbs = [...PHONE_VERBS.filter((v) => !DENY_KEY_VERBS.includes(v)), 'ask.voice', 'device.revoke', 'future.verb.v9', '']
     for (const verb of verbs) {
       const m = `msg|${verb}`
       expect(p.verifyPhone('p1', verb, m, sig(DENY.key, m)), verb).toEqual({ ok: false, reason: 'verifier_rejected' })
@@ -194,8 +194,35 @@ describe('Shield deny key (6): every deny-key Deny is journaled with source deny
     const open1 = await r2.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r2.remote('ph'))
     expect(open1).toEqual({ ok: true, denySummary: { count: 4, since: 1_000_000, at: expect.any(Number) } })
     expect(r2.events.find((e) => e.type === 'ildra.phone.deny_summary')).toBeTruthy()
-    expect(await r2.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r2.remote('ph'))).toEqual({ ok: true, denySummary: null })
+    // (k): sending it does not clear it; it is resent on every phone open until the phone acknowledges it.
+    expect(await r2.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r2.remote('ph'))).toEqual(open1)
     expect(await r2.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r2.remote('dev'))).toEqual({ ok: false, reason: 'no_authority' })
+  })
+  it('(k) only a signed ildra.phone.deny_summary.ack {since, at} clears it (main or deny key); a wrong since, a stranger key or no signature does not', async () => {
+    const r = rig(); r.pair(); await r.installDeny()
+    for (let i = 0; i < 4; i++) { const p = r.phoneAsk(); await tick(); await r.keyAnswer(r.sent.at(-1)!, r.DENY.key, false); await p; r.clock.t += 5_000 }
+    const s = r.svc.journal().pairing.peekDenySummary('p1')!
+    expect(s.count).toBe(4)
+    const ack = (since: number, key = r.DENY.key, o: Record<string, unknown> = {}) => r.core.requests.ildra_deny_summary_ack({ since, at: r.clock.t, phoneSignature: sig(key, denySummaryAckMessage(since, r.clock.t)), from: { phoneId: 'p1' }, ...o }, r.remote('ph'))
+    expect(await ack(s.since + 1)).toEqual({ ok: false, reason: 'unknown_id' })
+    expect(await ack(s.since, phoneKeyPair().key)).toEqual({ ok: false, reason: 'bad_signature' })
+    expect(await ack(s.since, r.DENY.key, { phoneSignature: undefined })).toEqual({ ok: false, reason: 'malformed' })
+    expect(r.svc.journal().pairing.peekDenySummary('p1')).not.toBeNull()
+    expect(await ack(s.since)).toEqual({ ok: true }) // the deny key may acknowledge
+    expect(r.svc.journal().pairingLedger.all().at(-1)).toMatchObject({ kind: 'deny_summary_ack', phoneId: 'p1', since: s.since })
+    expect(await r.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r.remote('ph'))).toEqual({ ok: true, denySummary: null })
+    expect(await ack(s.since, r.MAIN.key)).toEqual({ ok: false, reason: 'unknown_id' }) // nothing left to acknowledge
+  })
+  it('(l) range check before sending: a burst entry with count under 4 or since after at is never sent', () => {
+    const MAIN = phoneKeyPair()
+    const p = new PhonePairing(); const { code } = p.begin('touch'); p.offer('p1', MAIN.pub, code); p.confirm('p1', 'touch', true)
+    const L = (p as unknown as { ledger: { append: (e: Record<string, unknown>) => unknown } }).ledger
+    L.append({ kind: 'deny_burst', phoneId: 'p1', count: 3, since: 1 })
+    expect(p.peekDenySummary('p1')).toBeNull()
+    L.append({ kind: 'deny_burst', phoneId: 'p1', count: 5, since: Date.now() + 3_600_000 })
+    expect(p.peekDenySummary('p1')).toBeNull()
+    L.append({ kind: 'deny_burst', phoneId: 'p1', count: 4, since: 1 })
+    expect(p.peekDenySummary('p1')).toMatchObject({ count: 4, since: 1 })
   })
   it('4 spread over more than 60 s set no flag', async () => {
     const r = rig(); r.pair(); await r.installDeny()

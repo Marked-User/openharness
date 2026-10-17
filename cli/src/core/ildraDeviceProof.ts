@@ -62,7 +62,11 @@ export function ledgerAckMessage(seq: number, hash: string): string {
 export function ledgerConfirmMessage(head: string, seq: number, at: number): string {
   return `ildra-ledger-confirm:v1|${head}|${seq}|${at}`
 }
-export const PHONE_VERBS = ['ask.deny', 'ask.approve', 'settings.set', 'pairing.unpair', 'device.enroll.confirm', 'deny_key.set', 'main_key.rotate', 'pairing.ledger_ack', 'ledger.confirm'] as const
+/** (k): what the phone's main or deny key signs to acknowledge the deny summary. */
+export function denySummaryAckMessage(since: number, at: number): string {
+  return `ildra-deny-summary-ack:v1|${since}|${at}`
+}
+export const PHONE_VERBS = ['ask.deny', 'ask.approve', 'settings.set', 'pairing.unpair', 'device.enroll.confirm', 'deny_key.set', 'main_key.rotate', 'pairing.ledger_ack', 'ledger.confirm', 'deny_summary.ack', 'presence.abort'] as const
 export type PhoneVerb = (typeof PHONE_VERBS)[number]
 // ---- P-256 move: phone keys (main and deny) are Secure Enclave ECDSA P-256 with SHA-256 ----
 // The algorithm is pinned to the stored key role, never read from a message: phone keys are P-256 only

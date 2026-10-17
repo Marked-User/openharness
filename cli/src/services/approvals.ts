@@ -1184,6 +1184,8 @@ export const PAIRING_LEDGER_KINDS = [
   'ledger_reset', 'ledger_ack',
   // (h): the device confirmed the phone and device list at a head (prev = that head, since = its seq), or a refusal.
   'ledger_confirmed', 'ledger_confirm_refused',
+  // (k): the phone acknowledged the deny summary (since = the burst's since); only this clears the flag.
+  'deny_summary_ack',
 ] as const
 export type PairingLedgerKind = (typeof PAIRING_LEDGER_KINDS)[number]
 export interface PairingLedgerFields {
@@ -1271,7 +1273,7 @@ export class PairingLedger {
     return { ...e }
   }
   /** Entries with seq greater than `since`, oldest first, at most `limit`. */
-  since(since = 0, limit = 500): PairingLedgerEntry[] {
+  since(since = 0, limit = LEDGER_PAGE): PairingLedgerEntry[] {
     return this.entries_.filter((e) => e.seq > since).slice(0, limit).map((e) => ({ ...e }))
   }
   all(): readonly PairingLedgerEntry[] { return this.entries_ }
@@ -1283,6 +1285,18 @@ export class PairingLedger {
       if (e.kind === 'ledger_reset') return { ...e }
     }
     return null
+  }
+  /**
+   * Shield S3 (j): one page after `since`: pageHead = the hash of the last entry returned (or of the entry at seq
+   * `since` when none are), more = entries remain after it, nextSeq = the since for the next page (when more).
+   */
+  page(since = 0, limit = LEDGER_PAGE): { entries: PairingLedgerEntry[]; pageHead: string; more: boolean; nextSeq?: number; head: { seq: number; hash: string } } {
+    const entries = this.since(since, limit)
+    const head = this.head()
+    const last = entries.at(-1)
+    const pageHead = last?.hash ?? (since <= 0 ? LEDGER_GENESIS : (this.entries_.find((e) => e.seq === since)?.hash ?? head.hash))
+    const more = !!last && last.seq < head.seq
+    return { entries, pageHead, more, ...(more ? { nextSeq: last!.seq } : {}), head }
   }
   head(): { seq: number; hash: string } {
     const last = this.entries_.at(-1)
@@ -1580,7 +1594,8 @@ export class PhonePairing {
 
   /**
    * Shield deny key condition 1: the signer's role comes from the stored keys, never from the message. The paired
-   * main key may sign any verb. A signature by the stored deny-only key is valid only for 'ask.deny'; for every
+   * main key may sign any verb. A signature by the stored deny-only key is valid only for DENY_KEY_VERBS (a Deny, and
+   * the refuse-only acks: deny_summary.ack (k), presence.abort (i)); for every
    * other verb, listed or not, it is verifier_rejected and logged. Anything else is bad_signature.
    */
   verifyPhone(phoneId: string, verb: string, message: string, signature: unknown): { ok: true; role: 'main' | 'deny_only' } | { ok: false; reason: 'unpaired_phone' | 'verifier_rejected' | 'bad_signature' } {
@@ -1590,7 +1605,7 @@ export class PhonePairing {
     if (verifyPhoneSignature(main, message, signature)) return { ok: true, role: 'main' }
     const deny = this.denyKeys.get(phoneId)
     if (deny && verifyPhoneSignature(deny.pub, message, signature)) {
-      if (verb === 'ask.deny') return { ok: true, role: 'deny_only' }
+      if (DENY_KEY_VERBS.includes(verb)) return { ok: true, role: 'deny_only' }
       this.rejectVerifier(phoneId, verb)
       return { ok: false, reason: 'verifier_rejected' }
     }
@@ -1609,23 +1624,38 @@ export class PhonePairing {
     if (recent.length > PhonePairing.DENY_BURST) this.ledger.append({ kind: 'deny_burst', phoneId, count: recent.length, since: recent[0]!.at })
     this.onChange?.()
   }
-  /** Condition 6: the summary flag lives in the ledger: the last deny_burst for this phone after its last phone_open. */
+  /**
+   * Condition 6 and Shield S1 (k): the summary flag lives in the ledger: the last deny_burst for this phone after its
+   * last deny_summary_ack. (l): range-checked before it is ever sent: count at least DENY_BURST + 1 (4) and since no
+   * later than at; a burst that fails it is never shown.
+   */
   peekDenySummary(phoneId: string): { count: number; since: number; at: number } | null {
     const all = this.ledger.all()
     for (let i = all.length - 1; i >= 0; i--) {
       const e = all[i]!
       if (e.phoneId !== phoneId) continue
-      if (e.kind === 'phone_open') return null
-      if (e.kind === 'deny_burst') return { count: e.count ?? 0, since: e.since ?? e.at, at: e.at }
+      if (e.kind === 'deny_summary_ack') return null
+      if (e.kind === 'deny_burst') {
+        const s = { count: e.count ?? 0, since: e.since ?? e.at, at: e.at }
+        return Number.isInteger(s.count) && s.count >= PhonePairing.DENY_BURST + 1 && Number.isFinite(s.since) && s.since <= s.at ? s : null
+      }
     }
     return null
   }
-  /** Condition 6: the 'denied from this phone' summary for this phone open (ledger phone_open clears it). */
+  /** Condition 6: the 'denied from this phone' summary for this phone open. (k): sending it does not clear it. */
   takeDenySummary(phoneId: string): { count: number; since: number; at: number } | null {
     const f = this.peekDenySummary(phoneId)
     this.ledger.append({ kind: 'phone_open', phoneId, by: phoneId, via: 'phone' })
     this.onChange?.()
     return f
+  }
+  /** (k): the phone acknowledged the summary whose since is `since` (the caller checked its signature). */
+  ackDenySummary(phoneId: string, since: number): boolean {
+    const f = this.peekDenySummary(phoneId)
+    if (!f || f.since !== since) return false
+    this.ledger.append({ kind: 'deny_summary_ack', phoneId, by: phoneId, via: 'phone', since })
+    this.onChange?.()
+    return true
   }
   /** Batch B: the number of paired phones (owner channels on the phone side). */
   pairedCount(): number { return [...this.phones.values()].filter((k) => k !== '').length }
@@ -2003,6 +2033,10 @@ export class AskDeviceEnrollment {
 
 /** Shield B5: a ledger_reset counts as this many unpair requests in the unpair rate limit (the limit never resets). */
 export const UNPAIR_RESET_COUNT = 3
+/** Shield S3 (j): ledger entries per ildra.pairing.ledger page. */
+export const LEDGER_PAGE = 500
+/** The verbs the deny-only key may sign: a Deny, and refuse-only acknowledgements. */
+export const DENY_KEY_VERBS: readonly string[] = ['ask.deny', 'deny_summary.ack', 'presence.abort']
 
 export interface ApprovalJournal {
   window: ApprovalWindow

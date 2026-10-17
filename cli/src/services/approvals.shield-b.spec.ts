@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import * as proof from '../core/ildraDeviceProof.js'
-import { askAnswerMessage, deviceFingerprint, settingsSetMessage, unpairMessage, unpairTouchMessage } from '../core/ildraDeviceProof.js'
+import { askAnswerMessage, denySummaryAckMessage, deviceFingerprint, settingsSetMessage, unpairMessage, unpairTouchMessage } from '../core/ildraDeviceProof.js'
 import { createIldraAsk, UNPAIR_RATE } from './ildraAsk.js'
 import { deviceKeyPair, phoneKeyPair, proveBridge, signedConfirm } from './ildraAsk.testkit.js'
 import { stampManifest, type ApprovalTemplate, type AskRequest, type PairingLedgerEntry } from './approvals.js'
@@ -179,16 +179,20 @@ describe('Shield D: phone deny key (91c70791c)', () => {
     expect(reopen(r2).svc.journal().pairing.denyKey('p2')).toBeNull()
   })
 
-  it('D5: every deny-key Deny is a ledger entry with source deny_key; more than 3 in 60 s gives one summary on the next phone open, then clears', async () => {
+  it('D5: every deny-key Deny is a ledger entry with source deny_key; more than 3 in 60 s gives the summary on each phone open until the phone acknowledges it (Shield S1)', async () => {
     const r = rig(); r.pair('p1', r.K.P1.pub); await r.enrollDevice(r.K.D1.pub)
     for (let i = 0; i < 5; i++) { const { p, req } = await r.phoneAsk(); expect(await r.signed(req, r.K.D1.key, false)).toEqual({ ok: true }); await p; r.clock.t += 1000 }
     const denies = r.svc.journal().pairingLedger.all().filter((e) => e.kind === 'deny_key_deny')
     expect(denies).toHaveLength(5)
     for (const e of denies) expect(e).toMatchObject({ source: 'deny_key', phoneId: 'p1', via: 'phone' })
-    const open1 = await r.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r.remote('ph1')) as { ok: true; denySummary: { count: number } | null }
+    const open1 = await r.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r.remote('ph1')) as { ok: true; denySummary: { count: number; since: number } | null }
     expect(open1.ok).toBe(true)
     expect(open1.denySummary!.count).toBeGreaterThan(3)
     expect(r.events.filter((e) => e.type === 'ildra.phone.deny_summary')).toHaveLength(1)
+    // Shield S1 (k): sending it no longer clears it; it is resent on each phone open until the phone's signed ack.
+    expect(await r.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r.remote('ph1'))).toEqual(open1)
+    const ackAt = r.clock.t; const since = open1.denySummary!.since
+    expect(await r.core.requests.ildra_deny_summary_ack({ since, at: ackAt, phoneSignature: sig(r.K.D1.key, denySummaryAckMessage(since, ackAt)), from: { phoneId: 'p1' } }, r.remote('ph1'))).toEqual({ ok: true })
     expect(await r.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r.remote('ph1'))).toEqual({ ok: true, denySummary: null })
     // Only the paired phone collects it.
     expect(await r.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r.remote('ph2'))).toMatchObject({ ok: false })

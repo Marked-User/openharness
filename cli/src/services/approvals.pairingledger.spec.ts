@@ -593,3 +593,26 @@ describe('Wire: B5 to B9 and (h) messages match the vendored schema; the Ildra e
     expect(verifyPhoneSignature(main, ledgerConfirmMessage(c.head, c.seq + 1, c.at), c.phoneSignature)).toBe(false)
   })
 })
+
+describe('Shield S3 (j): the ledger read is paged: {entries, pageHead, more, nextSeq?, head}; the phone chains by pageHead', () => {
+  it('600 entries come as 500 + 100; each page chains from the previous pageHead; more and nextSeq drive the next read; head is informational', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub)
+    const L = r.svc.journal().pairingLedger
+    while (L.all().length < 600) L.append({ kind: 'phone_open', phoneId: 'p1', by: 'p1', via: 'phone' })
+    type Page = { ok: true; entries: PairingLedgerEntry[]; pageHead: string; more: boolean; nextSeq?: number; head: { seq: number; hash: string } }
+    const p1 = await r.ledger() as Page
+    expect(p1.entries).toHaveLength(500)
+    expect(p1).toMatchObject({ more: true, nextSeq: 500, pageHead: p1.entries.at(-1)!.hash })
+    expect(p1.head.seq).toBeGreaterThanOrEqual(600)
+    expect(p1.pageHead).not.toBe(p1.head.hash)
+    const p2 = await r.ledger(p1.nextSeq) as Page
+    expect(p2.entries[0]!.prev).toBe(p1.pageHead) // chains page to page
+    expect(p2.more).toBe(false)
+    expect(p2.nextSeq).toBeUndefined()
+    expect(p2.pageHead).toBe(p2.head.hash) // the last page ends at the head
+    // An empty page (since = head) still names the hash it ends at.
+    const p3 = await r.ledger(p2.head.seq) as Page
+    expect(p3).toMatchObject({ entries: [], more: false, pageHead: p2.head.hash })
+    expect((await r.ledger(0) as Page).entries[0]!.prev).toBe('0'.repeat(64))
+  })
+})
