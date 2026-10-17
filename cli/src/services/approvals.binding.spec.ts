@@ -10,6 +10,7 @@ import {
   stampManifest,
 } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
+import { fixturePhonePub } from './ildraAsk.testkit.js'
 /** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
 const aid = (): string => aidBytes(16).toString('hex')
 
@@ -20,7 +21,7 @@ const HOLD = 2000
 const ask: typeof askProd = (t, a, p, f, o = {}) => askProd(t, a, p, f, { kind: { manifest: stampManifest([{ name: a, send: false }], 'bridge'), tool: a }, window: new ApprovalWindow(), agentId: 'agent', ...o })
 /** Pair through the full F6 flow: device touch, phone offers code + key, device touch confirms the match. */
 function complete(p: PhonePairing, id: string, code: string, origin?: { shared?: boolean }): boolean {
-  const o = p.offer(id, `pub-${id}`, code, origin)
+  const o = p.offer(id, fixturePhonePub(`pub-${id}`), code, origin)
   return o.ok && p.confirm(id, 'touch', true)
 }
 /** locked_ask and money Asks are answered on the paired phone only (pilot review A1). */

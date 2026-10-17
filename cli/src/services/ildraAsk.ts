@@ -23,7 +23,7 @@ export const UNPAIR_SKEW_MS = 60_000
 const UNPAIR_ACTION = 'Unpair a phone'
 const UNPAIR_TEMPLATE: ApprovalTemplate = { permissions: { locked_ask: [UNPAIR_ACTION] } }
 const UNPAIR_MANIFEST = stampManifest([{ name: 'ildra.pairing.unpair', send: false }], 'first_party')
-import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, stampedChannel, unpairMessage, unpairTouchMessage, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
+import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, rawPhoneKey, settingsSetMessage, stampedChannel, unpairMessage, unpairTouchMessage, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
 
 export type IldraAskEvent =
   | { type: 'ildra.ask.attempt'; body: AskAttempt }
@@ -105,7 +105,7 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
       const via = stampedChannel(ans) ?? a.via
       let by: AskAnsweredBy['by'] | null = null
       if (via === 'phone' && typeof a.from?.phoneId === 'string' && typeof a.from.machinePub === 'string') {
-        by = { kind: 'phone', phoneId: a.from.phoneId, key: denyKey ? 'deny_only' : 'main', fingerprint: denyKey ? deviceFingerprint(j.pairing.denyKey(a.from.phoneId) ?? '') : deviceFingerprint(a.from.machinePub) }
+        by = { kind: 'phone', phoneId: a.from.phoneId, key: denyKey ? 'deny_only' : 'main', fingerprint: deviceFingerprint((denyKey ? j.pairing.denyKey(a.from.phoneId) : j.pairing.phoneKey(a.from.phoneId)) ?? '') }
       } else if ((via === 'touch' || via === 'voice') && j.device.device()) {
         by = { kind: 'device', key: 'device', fingerprint: deviceFingerprint(j.device.device()!) }
       }
@@ -150,7 +150,7 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
       || typeof msg.nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(msg.nonce)
       || !(ENROLL_UV as readonly unknown[]).includes(msg.uv)) return { ok: false, reason: 'malformed' }
     const uv = msg.uv as EnrollUv
-    if (msg.denyKey !== undefined && !rawDeviceKey(msg.denyKey)) return { ok: false, reason: 'malformed' }
+    if (msg.denyKey !== undefined && !rawPhoneKey(msg.denyKey)) return { ok: false, reason: 'malformed' }
     const denyKey = msg.denyKey as string | undefined
     // Shield deny key conditions 1 and 2: only the main key signs a confirm (and a deny key inside it); the deny key
     // signing one, with or without a deny key, is verifier_rejected (logged).

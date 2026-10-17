@@ -166,7 +166,7 @@
         "transcript": { "description": "Voice answers: what speech-to-text heard. Must contain the challenge words, adjacent, in order.", "type": "string" },
         "from": { "$ref": "#/$defs/AnswerOrigin" },
         "signature": { "description": "Reserved for D5 (b) signed answers (Volt). Not checked yet.", "type": "string", "minLength": 1 },
-        "phoneSignature": { "description": "Shield deny key (batch A): a phone answer signed by one of the paired phone's keys, Ed25519 base64 over ildra-answer bytes ildra-ask-answer:v1|<approve or deny>|<id>|<digest8>|<answerId> (UTF-8). The verifier is chosen from the stored key role, never from the message: the main (paired) key may sign approve or deny; the deny-only key (installed by DeviceEnrollConfirm.denyKey) is valid only for deny on a pending Ask. A deny-key signature on approve, or on any answer from the device (touch or voice), is verifier_rejected and journaled; a signature by neither key is bad_signature. Bound to id, digest8 and the single-use answerId, with the same expiry as an approve: a replay is replayed, a Deny after the Ask settled changes nothing. Every Deny settled by the deny key is journaled with source deny_key.", "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
+        "phoneSignature": { "description": "Shield deny key (batch A): a phone answer signed by one of the paired phone's keys, ECDSA P-256 / SHA-256 (PhoneSignature) over the UTF-8 bytes ildra-ask-answer:v1|<approve or deny>|<id>|<digest8>|<answerId> (UTF-8). The verifier is chosen from the stored key role, never from the message: the main (paired) key may sign approve or deny; the deny-only key (installed by DeviceEnrollConfirm.denyKey) is valid only for deny on a pending Ask. A deny-key signature on approve, or on any answer from the device (touch or voice), is verifier_rejected and journaled; a signature by neither key is bad_signature. Bound to id, digest8 and the single-use answerId, with the same expiry as an approve: a replay is replayed, a Deny after the Ask settled changes nothing. Every Deny settled by the deny key is journaled with source deny_key.", "$ref": "#/$defs/PhoneSignature" }
       }
     },
 
@@ -257,7 +257,7 @@
       "properties": {
         "key": { "enum": ["ask.deviceWindowSec"] },
         "value": { "type": "number" },
-        "signature": { "description": "Optional (batch A): the paired main key's Ed25519 signature, base64, over ildra-settings-set:v1|<key>|<JSON of value>. A deny-only key signature is verifier_rejected; any other bad signature is bad_signature.", "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
+        "signature": { "description": "Optional (batch A): the paired main key's ECDSA P-256 / SHA-256 signature (PhoneSignature) over the UTF-8 bytes ildra-settings-set:v1|<key>|<JSON of value>. A deny-only key signature is verifier_rejected; any other bad signature is bad_signature.", "$ref": "#/$defs/PhoneSignature" }
       }
     },
 
@@ -277,7 +277,7 @@
     "DeviceNonce": { "description": "16 random bytes as 32 lowercase hex.", "type": "string", "pattern": "^[0-9a-f]{32}$" },
 
     "PairingRefusalReason": {
-      "enum": ["unknown_code", "shared_machine", "expired", "no_phone_id", "no_phone_pub", "locked_out", "no_pending", "not_touch", "check_mismatch"]
+      "enum": ["unknown_code", "shared_machine", "expired", "no_phone_id", "no_phone_pub", "bad_phone_key", "locked_out", "no_pending", "not_touch", "check_mismatch"]
     },
 
     "PairingBegin": {
@@ -299,7 +299,7 @@
       "required": ["phoneId", "phonePub", "code"],
       "properties": {
         "phoneId": { "type": "string", "minLength": 1 },
-        "phonePub": { "type": "string", "minLength": 1 },
+        "phonePub": { "description": "P-256 move: the phone's main key (Secure Enclave, user presence), a PhonePub. Anything else (an Ed25519 key, a compressed point, SPKI) is refused with bad_phone_key. The daemon binds the authenticated session identity that delivered the offer (AnswerOrigin.machinePub, the connection key) separately; phone answers must come from that session identity (R5-1) and phone signatures verify against this key. There is no keyAlg input: the algorithm follows from the key role.", "$ref": "#/$defs/PhonePub" },
         "code": { "$ref": "#/$defs/PairingCode" },
         "origin": { "$ref": "#/$defs/AnswerOrigin" }
       }
@@ -354,9 +354,19 @@
     },
 
     "DevicePub": {
-      "description": "Shield R7-1: the Ildra device's Ed25519 public key, raw 32 bytes, base64.",
+      "description": "Shield R7-1: the Ildra device's Ed25519 public key, raw 32 bytes, base64. Device keys verify as Ed25519 only.",
       "type": "string",
       "pattern": "^[A-Za-z0-9+/]{43}=$"
+    },
+    "PhonePub": {
+      "description": "P-256 move: a phone public key (main or deny-only), a Secure Enclave ECDSA P-256 key. The uncompressed SEC1 point 0x04 || X || Y (65 bytes, X and Y big-endian 32 bytes each) in base64url without padding: 87 characters, always starting with B. The daemon checks X and Y are below p and the point is on the curve; compressed points (0x02, 0x03), SPKI or any other wrapping are refused. Phone keys verify as P-256 only; the algorithm comes from the stored key role, never from a message. Fingerprint: DeviceFingerprint over the 65 raw bytes.",
+      "type": "string",
+      "pattern": "^B[A-P][A-Za-z0-9_-]{84}[AEIMQUYcgkosw048]$"
+    },
+    "PhoneSignature": {
+      "description": "P-256 move: a phone key's ECDSA P-256 signature with SHA-256 over the exact UTF-8 bytes of the signed string (unchanged per message). Either raw r || s (64 bytes, each 32-byte big-endian) or strict DER (SEQUENCE of two INTEGERs, short-form lengths, minimal integers, no trailing bytes), encoded as standard base64 with padding or as base64url without padding, canonical. r and s must be in [1, n-1]. A high S is accepted and normalized to n - s before verifying (the Secure Enclave does not promise low-S); single-use nonces and answerIds stop a high-S copy from replaying. Anything else is bad_signature.",
+      "type": "string",
+      "pattern": "^(?:(?:[A-Za-z0-9+/]{4}){2,25}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?|[A-Za-z0-9_-]{11,100})$"
     },
 
     "DeviceFingerprint": {
@@ -415,7 +425,7 @@
     "LedgerHash": { "description": "SHA-256, 64 lowercase hex.", "type": "string", "pattern": "^[0-9a-f]{64}$" },
 
     "PairingLedgerEntry": {
-      "description": "Batch B: one entry of the daemon's authoritative pairing ledger (phones and devices), append-only and journaled with the state it records. Chained: prev is the previous entry's hash (64 zeros for seq 1) and hash = SHA-256 over the UTF-8 bytes of ildra-pairing-ledger:v1|<prev>|<JSON of the entry without prev and hash, keys in the order seq, at, kind, phoneId, fingerprint, oldFingerprint, by, via, reason, askId, verb, uv, count, since, source, absent keys omitted>, lowercase hex. A journal whose chain does not verify fails closed.",
+      "description": "Batch B: one entry of the daemon's authoritative pairing ledger (phones and devices), append-only and journaled with the state it records. Chained: prev is the previous entry's hash (64 zeros for seq 1) and hash = SHA-256 over the UTF-8 bytes of ildra-pairing-ledger:v1|<prev>|<JSON of the entry without prev and hash, keys in the order seq, at, kind, phoneId, fingerprint, oldFingerprint, by, via, reason, askId, verb, uv, count, since, source, keyAlg, absent keys omitted>, lowercase hex. A journal whose chain does not verify fails closed.",
       "type": "object",
       "additionalProperties": false,
       "required": ["seq", "at", "kind", "prev", "hash"],
@@ -435,6 +445,7 @@
         "count": { "type": "integer", "minimum": 0 },
         "since": { "$ref": "#/$defs/EpochMs" },
         "source": { "const": "deny_key" },
+        "keyAlg": { "description": "P-256 move: the key's algorithm, set by the daemon from the key role (never from input), informational: p256 on phone_paired, phone_rotated and deny_key_set; ed25519 on device_enrolled.", "enum": ["p256", "ed25519"] },
         "prev": { "$ref": "#/$defs/LedgerHash" },
         "hash": { "$ref": "#/$defs/LedgerHash" }
       }
@@ -459,15 +470,15 @@
     },
 
     "PairingUnpair": {
-      "description": "Phone to daemon (batch B): ask to unpair phoneId (this phone or another paired one). signature: the requesting phone's main key, Ed25519 base64 over ildra-pairing-unpair:v1|<phoneId>|<at>; at within 60 s of the daemon clock. The deny-only key is verifier_rejected. Rate limited: at most 3 requests that open an Ask per 10 minutes, daemon-wide, counted from the ledger. Removing the last paired phone (the last owner channel) also needs touchProof: the enrolled Ildra device key's Ed25519 signature over ildra-unpair-touch:v1|<phoneId>|<at>, made after a physical touch. Then the daemon tells the paired phones and the device (ildra.pairing.unpair_requested) and opens a locked_ask (phone only, the deny key can only deny it). Approved: the phone is unpaired, its deny key revoked in the same write, ledger phone_unpaired via locked_ask with the askId, and ildra.pairing.unpaired goes out. Otherwise ildra.pairing.unpair_refused.",
+      "description": "Phone to daemon (batch B): ask to unpair phoneId (this phone or another paired one). signature: the requesting phone's main key, a PhoneSignature over ildra-pairing-unpair:v1|<phoneId>|<at>; at within 60 s of the daemon clock. The deny-only key is verifier_rejected. Rate limited: at most 3 requests that open an Ask per 10 minutes, daemon-wide, counted from the ledger. Removing the last paired phone (the last owner channel) also needs touchProof: the enrolled Ildra device key's Ed25519 signature over ildra-unpair-touch:v1|<phoneId>|<at>, made after a physical touch. Then the daemon tells the paired phones and the device (ildra.pairing.unpair_requested) and opens a locked_ask (phone only, the deny key can only deny it). Approved: the phone is unpaired, its deny key revoked in the same write, ledger phone_unpaired via locked_ask with the askId, and ildra.pairing.unpaired goes out. Otherwise ildra.pairing.unpair_refused.",
       "type": "object",
       "additionalProperties": false,
       "required": ["phoneId", "at", "signature"],
       "properties": {
         "phoneId": { "type": "string", "minLength": 1 },
         "at": { "$ref": "#/$defs/EpochMs" },
-        "signature": { "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" },
-        "touchProof": { "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
+        "signature": { "description": "The requesting phone's main key, a PhoneSignature.", "$ref": "#/$defs/PhoneSignature" },
+        "touchProof": { "description": "The enrolled device key's Ed25519 signature (64 bytes, base64) after a physical touch.", "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
       }
     },
 
@@ -558,7 +569,7 @@
     },
 
     "DeviceEnrollConfirm": {
-      "description": "Phone to daemon (Shield R7-1, batch A, Design Q55): approved true confirms the pending device key, approved false refuses it; approved false with the enrolled key and the nonce it was enrolled with revokes it. Accepted only from the paired phone, authenticated by the key it paired with (anything else is unpaired_phone). The phone signing key requires user presence, and the signed confirm carries a uv (user verified) field that the daemon requires and journals. signature: the paired phone key's Ed25519 signature, base64, over the UTF-8 bytes of ildra-enroll-confirm:v1|<devicePub>|<nonce>|<approve or decline>|<uv>. Refused, enrolling nothing: no uv or any other value, a bad nonce or devicePub shape (malformed); a missing or wrong signature, including one over another uv or approved (bad_signature); no pending enrollment with this devicePub and nonce, also a replayed confirm (unknown_id). The daemon answers with ildra.device.enroll.status.",
+      "description": "Phone to daemon (Shield R7-1, batch A, Design Q55): approved true confirms the pending device key, approved false refuses it; approved false with the enrolled key and the nonce it was enrolled with revokes it. Accepted only from the paired phone, authenticated by the key it paired with (anything else is unpaired_phone). The phone signing key requires user presence, and the signed confirm carries a uv (user verified) field that the daemon requires and journals. signature: the paired phone main key's PhoneSignature (ECDSA P-256 / SHA-256) over the UTF-8 bytes of ildra-enroll-confirm:v1|<devicePub>|<nonce>|<approve or decline>|<uv>. Refused, enrolling nothing: no uv or any other value, a bad nonce or devicePub shape (malformed); a missing or wrong signature, including one over another uv or approved (bad_signature); no pending enrollment with this devicePub and nonce, also a replayed confirm (unknown_id). The daemon answers with ildra.device.enroll.status.",
       "type": "object",
       "additionalProperties": false,
       "required": ["devicePub", "nonce", "approved", "uv", "signature"],
@@ -567,8 +578,8 @@
         "nonce": { "$ref": "#/$defs/EnrollNonce" },
         "approved": { "type": "boolean" },
         "uv": { "$ref": "#/$defs/UserVerification" },
-        "signature": { "description": "Ed25519 signature, 64 bytes, base64.", "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" },
-        "denyKey": { "description": "Shield deny key condition 2 (optional): the phone's deny-only Ed25519 key (raw 32 bytes, base64), a key without user presence that may sign only a Deny on a pending Ask. Accepted only inside a confirm signed by the main key; it is then in the signed bytes, appended as |deny=<denyKey> after uv. Unsigned, signed without it, or signed by the deny key (verifier_rejected): refused, nothing installed. One per phone: a new confirm with denyKey replaces it. Unpairing the phone or re-pairing it with another main key revokes it in the same journal write.", "$ref": "#/$defs/DevicePub" }
+        "signature": { "description": "The paired phone's main key, a PhoneSignature (ECDSA P-256 / SHA-256).", "$ref": "#/$defs/PhoneSignature" },
+        "denyKey": { "description": "Shield deny key condition 2 (optional): the phone's deny-only key, a PhonePub (Secure Enclave P-256, uncompressed point, base64url), a key without user presence that may sign only a Deny on a pending Ask. Accepted only inside a confirm signed by the main key; it is then in the signed bytes, appended as |deny=<denyKey> after uv. Unsigned, signed without it, or signed by the deny key (verifier_rejected): refused, nothing installed. One per phone: a new confirm with denyKey replaces it. Unpairing the phone or re-pairing it with another main key revokes it in the same journal write.", "$ref": "#/$defs/PhonePub" }
       }
     },
 

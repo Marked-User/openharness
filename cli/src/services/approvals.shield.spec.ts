@@ -13,6 +13,7 @@ import {
   type AskAnswer, type AskRequest, type ApprovalTemplate, type AnswerFn,
 } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
+import { fixturePhonePub } from './ildraAsk.testkit.js'
 /** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
 const aid = (): string => aidBytes(16).toString('hex')
 
@@ -37,7 +38,7 @@ function answerWith(fn: (req: AskRequest) => Partial<AskAnswer> | null): AnswerF
 function pairedPhone(now: () => number) {
   const p = new PhonePairing({ now })
   const { code } = p.begin('touch')
-  p.offer('p1', 'pub1', code)
+  p.offer('p1', fixturePhonePub('pub1'), code)
   p.confirm('p1', 'touch', true)
   return p
 }
@@ -176,13 +177,13 @@ describe('Shield F6: pairing', () => {
   it('code is single use: a second phone with the same code is refused', () => {
     const p = new PhonePairing()
     const { code } = p.begin('touch')
-    expect(p.offer('p1', 'pub1', code).ok).toBe(true)
-    expect(p.offer('evil', 'pubE', code)).toEqual({ ok: false, reason: 'unknown_code' })
+    expect(p.offer('p1', fixturePhonePub('pub1'), code).ok).toBe(true)
+    expect(p.offer('evil', fixturePhonePub('pubE'), code)).toEqual({ ok: false, reason: 'unknown_code' })
   })
   it('offer alone does not pair; confirm needs touch and a match', () => {
     const p = new PhonePairing()
     const { code } = p.begin('touch')
-    p.offer('p1', 'pub1', code)
+    p.offer('p1', fixturePhonePub('pub1'), code)
     expect(p.isPaired('p1')).toBe(false)
     expect(p.confirm('p1', 'voice', true)).toBe(false)
     expect(p.isPaired('p1')).toBe(false)
@@ -199,15 +200,15 @@ describe('Shield F6: pairing', () => {
     const { code } = p.begin('touch')
     const other = p.begin('touch').code
     const wrong = ['000000', '111111', '222222', '333333', '444444', '555555'].filter((g) => g !== code && g !== other).slice(0, 5)
-    for (const g of wrong.slice(0, 4)) expect(p.offer('evil', 'pubE', g)).toEqual({ ok: false, reason: 'unknown_code' })
-    expect(p.offer('evil', 'pubE', wrong[4]!)).toEqual({ ok: false, reason: 'locked_out' })
+    for (const g of wrong.slice(0, 4)) expect(p.offer('evil', fixturePhonePub('pubE'), g)).toEqual({ ok: false, reason: 'unknown_code' })
+    expect(p.offer('evil', fixturePhonePub('pubE'), wrong[4]!)).toEqual({ ok: false, reason: 'locked_out' })
     expect(p.lockedOut).toBe(true)
-    expect(p.offer('p1', 'pub1', code)).toEqual({ ok: false, reason: 'locked_out' })
-    expect(p.offer('p1', 'pub1', other)).toEqual({ ok: false, reason: 'locked_out' })
+    expect(p.offer('p1', fixturePhonePub('pub1'), code)).toEqual({ ok: false, reason: 'locked_out' })
+    expect(p.offer('p1', fixturePhonePub('pub1'), other)).toEqual({ ok: false, reason: 'locked_out' })
     const fresh = p.begin('touch')
     expect(p.lockedOut).toBe(false)
-    expect(p.offer('p1', 'pub1', code)).toEqual({ ok: false, reason: 'unknown_code' })
-    expect(p.offer('p1', 'pub1', fresh.code).ok).toBe(true)
+    expect(p.offer('p1', fixturePhonePub('pub1'), code)).toEqual({ ok: false, reason: 'unknown_code' })
+    expect(p.offer('p1', fixturePhonePub('pub1'), fresh.code).ok).toBe(true)
   })
 })
 

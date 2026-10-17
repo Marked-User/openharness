@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Ajv2020Module from 'ajv/dist/2020.js'
 import { describe, expect, it } from 'vitest'
+import { fixturePhonePub } from './ildraAsk.testkit.js'
 import {
   ANSWER_ID, ApprovalDenied, AskLedger, InvalidUnicode, PhonePairing, actionDigest8, ask, askKindFor, canonicalJson, digestInput, fromDeviceReply, neverOutcome, stampManifest,
   type ApprovalTemplate, type AskRequest, type ToolManifestEntry,
@@ -130,7 +131,7 @@ describe.runIf(hasProtocol)('Ildra protocol files', () => {
 
 describe('AskRequest.kind (Design copy): safety_verification on locked_ask, daemon-set, display only', () => {
   const T = { permissions: { ask: ['Rename a file'], locked_ask: ['Brakes step', 'Torque check'] }, safety_verification: ['Brakes step'] }
-  const paired = () => { const p = new PhonePairing(); const { code } = p.begin('touch'); p.offer('p1', 'pub1', code); p.confirm('p1', 'touch', true); return p }
+  const paired = () => { const p = new PhonePairing(); const { code } = p.begin('touch'); p.offer('p1', fixturePhonePub('pub1'), code); p.confirm('p1', 'touch', true); return p }
   const run = async (action: string, manifest: ToolManifestEntry[], tool = 't', template: ApprovalTemplate = T) => {
     let req: AskRequest | undefined
     await ask(template, action, null, (_c, _p, r) => { req = r; return null }, { ledger: new AskLedger(), pairing: paired(), kind: { manifest, tool }, available: ['phone'], agentId: 'rg' })

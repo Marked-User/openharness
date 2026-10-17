@@ -11,7 +11,7 @@ import Ajv2020Module from 'ajv/dist/2020.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { createIldraAsk, type IldraAskEvent } from './ildraAsk.js'
-import { enrollBridge } from './ildraAsk.testkit.js'
+import { enrollBridge, fixturePhonePub } from './ildraAsk.testkit.js'
 import {
   ApprovalDenied, ApprovalWindow, AskLedger, DEVICE_WINDOW_SEC, MAX_SHORT_HOLDS, PRACTICE_ACTION, PhonePairing, PracticeRefused,
   ASK_REJECTION_REASONS, actionDigest8, digestInput, ask, openJournal, practiceAsk, stampManifest, toDeviceMessage,
@@ -21,7 +21,7 @@ import { CONFUSABLES_COUNT, CONFUSABLES_SHA256, CONFUSABLES_VERSION } from './un
 import { lookalikeOf, recipientAscii, skeleton } from './recipient.js'
 
 const aid = (): string => randomBytes(16).toString('hex')
-const KEY = 'P'.repeat(43) + '='
+const KEY = fixturePhonePub('P')
 const DEV = 'D'.repeat(43) + '='
 const OTHER = 'X'.repeat(43) + '='
 const T: ApprovalTemplate = { permissions: { auto: ['Note it'], ask: ['Rename a file', 'Send an email'], locked_ask: ['Brakes step'] } }

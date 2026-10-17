@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path'
 import { HIDDEN_DATA } from './unicode/hidden.js'
-import { ENROLL_UV, deviceFingerprint, rawDeviceKey, stampedChannel, verifyEd25519, type EnrollUv } from '../core/api.js'
+import { ENROLL_UV, deviceFingerprint, rawDeviceKey, rawPhoneKey, stampedChannel, verifyPhoneSignature, type EnrollUv } from '../core/api.js'
 export { deviceFingerprint, deviceProofMessage, verifyDeviceProof } from '../core/api.js'
 import { isLookalike, isNewRecipient, lookalikeOf, recipientAscii, recipientKey, type RecipientKnowledge } from './recipient.js'
 
@@ -1157,7 +1157,7 @@ export type PairingStatus = { state: 'pending' } | { state: 'paired' } | { state
 
 export type PairingOffer = { ok: true; check: string; deviceNonce: string; expiresAt: number } | { ok: false; reason: string }
 
-type PendingPair = { phonePub: string; check: string; expiresAt: number }
+type PendingPair = { phonePub: string; transport: string; check: string; expiresAt: number }
 
 /**
  * Phone pairing (F6). Three steps, all on the device's terms:
@@ -1200,9 +1200,11 @@ export interface PairingLedgerFields {
   since?: number
   /** Shield deny key condition 6: 'deny_key' on every Deny the deny key settled. */
   source?: 'deny_key'
+  /** P-256 move: the key's algorithm, set by the daemon from the key role (never from input): 'p256' for phone keys, 'ed25519' for device keys. Informational. */
+  keyAlg?: 'p256' | 'ed25519'
 }
 export interface PairingLedgerEntry extends PairingLedgerFields { seq: number; at: number; prev: string; hash: string }
-const LEDGER_FIELD_ORDER = ['seq', 'at', 'kind', 'phoneId', 'fingerprint', 'oldFingerprint', 'by', 'via', 'reason', 'askId', 'verb', 'uv', 'count', 'since', 'source'] as const
+const LEDGER_FIELD_ORDER = ['seq', 'at', 'kind', 'phoneId', 'fingerprint', 'oldFingerprint', 'by', 'via', 'reason', 'askId', 'verb', 'uv', 'count', 'since', 'source', 'keyAlg'] as const
 const LEDGER_GENESIS = '0'.repeat(64)
 function ledgerHash(prev: string, e: Omit<PairingLedgerEntry, 'prev' | 'hash'>): string {
   const body: Record<string, unknown> = {}
@@ -1258,6 +1260,12 @@ export class PhonePairing {
   private readonly pendingPairs = new Map<string, PendingPair>()
   /** Paired phones and the public key each paired with (R5-1: phone answers must come from that key). */
   private readonly phones = new Map<string, string>()
+  /**
+   * P-256 move: the phone's signing key (phones, a Secure Enclave P-256 point) is not its connection key. R5-1
+   * binds the authenticated session identity that delivered the offer (origin.machinePub; the offered key when
+   * the caller has no session) and checks answers against it (isPairedKey).
+   */
+  private readonly transports = new Map<string, string>()
   private readonly lastRefusal = new Map<string, string>()
   /** Ledger of every pairing, unpairing and refused attempt. */
   readonly log: PairingLogEntry[] = []
@@ -1337,8 +1345,12 @@ export class PhonePairing {
     if (this.now() >= c.expiresAt) return no('expired')
     if (!phoneId) return no('no_phone_id')
     if (!phonePub) return no('no_phone_pub')
+    // P-256 move (Shield rule 3): only a parsed 65-byte uncompressed P-256 point on the curve; anything else
+    // (an Ed25519 key, a compressed point, SPKI or other wrapping) is refused.
+    if (!rawPhoneKey(phonePub)) return no('bad_phone_key')
     const check = pairingCheck(code, phonePub, c.deviceNonce)
-    this.pendingPairs.set(phoneId, { phonePub, check, expiresAt: c.expiresAt })
+    const transport = typeof origin.machinePub === 'string' && origin.machinePub ? origin.machinePub : phonePub
+    this.pendingPairs.set(phoneId, { phonePub, transport, check, expiresAt: c.expiresAt })
     this.onChange?.()
     this.lastRefusal.delete(phoneId)
     return { ok: true, check, deviceNonce: c.deviceNonce, expiresAt: c.expiresAt }
@@ -1361,9 +1373,10 @@ export class PhonePairing {
     const rotated = before !== undefined && before !== '' && before !== pend.phonePub
     if (before !== pend.phonePub && this.denyKeys.delete(phoneId)) this.ledger.append({ kind: 'deny_key_revoked', phoneId, reason: 'main_key_rotated', by: 'daemon' })
     this.phones.set(phoneId, pend.phonePub)
+    this.transports.set(phoneId, pend.transport)
     this.lastRefusal.delete(phoneId)
     this.log.push({ at: this.now(), event: 'pair', phoneId })
-    this.ledger.append({ kind: rotated ? 'phone_rotated' : 'phone_paired', phoneId, fingerprint: deviceFingerprint(pend.phonePub), via: 'touch' })
+    this.ledger.append({ kind: rotated ? 'phone_rotated' : 'phone_paired', phoneId, fingerprint: deviceFingerprint(pend.phonePub), via: 'touch', keyAlg: 'p256' })
     this.onChange?.()
     return true
   }
@@ -1371,6 +1384,7 @@ export class PhonePairing {
   unpair(phoneId: string, meta: { by?: string; via?: string; askId?: string } = {}): void {
     const key = this.phones.get(phoneId)
     const was = this.phones.delete(phoneId)
+    this.transports.delete(phoneId)
     // Shield deny key condition 4: atomically with the unpair (one journal write: onChange runs once, below).
     const hadDeny = this.denyKeys.delete(phoneId)
     if (was) {
@@ -1407,17 +1421,17 @@ export class PhonePairing {
     return this.phones.get(phoneId) || null
   }
 
-  /** R5-1: paired, and `pub` (the authenticated connection key) is the key it paired with. */
+  /** R5-1: paired with a key, and `pub` (the authenticated connection key) is the session identity bound at pairing. */
   isPairedKey(phoneId: string, pub: string | undefined): boolean {
-    const want = this.phones.get(phoneId)
-    return typeof want === 'string' && want !== '' && typeof pub === 'string' && pub === want
+    const want = this.transports.get(phoneId)
+    return !!this.phones.get(phoneId) && typeof want === 'string' && want !== '' && typeof pub === 'string' && pub === want
   }
 
   /** Shield deny key condition 2: set (or replace) this paired phone's one deny-only key. The caller checked the main-key signature. */
   setDenyKey(phoneId: string, pub: string): boolean {
-    if (!this.phones.get(phoneId) || !rawKey(pub) || pub === this.phones.get(phoneId)) return false
+    if (!this.phones.get(phoneId) || !rawPhoneKey(pub) || pub === this.phones.get(phoneId)) return false
     this.denyKeys.set(phoneId, { pub, at: this.now() })
-    this.ledger.append({ kind: 'deny_key_set', phoneId, fingerprint: deviceFingerprint(pub), by: phoneId, via: 'phone' })
+    this.ledger.append({ kind: 'deny_key_set', phoneId, fingerprint: deviceFingerprint(pub), by: phoneId, via: 'phone', keyAlg: 'p256' })
     this.onChange?.()
     return true
   }
@@ -1431,9 +1445,10 @@ export class PhonePairing {
   verifyPhone(phoneId: string, verb: string, message: string, signature: unknown): { ok: true; role: 'main' | 'deny_only' } | { ok: false; reason: 'unpaired_phone' | 'verifier_rejected' | 'bad_signature' } {
     const main = this.phones.get(phoneId)
     if (!main) return { ok: false, reason: 'unpaired_phone' }
-    if (verifyEd25519(main, message, signature)) return { ok: true, role: 'main' }
+    // P-256 move (Shield rule 2): phone keys verify as ECDSA P-256 / SHA-256 only; an Ed25519 signature never passes.
+    if (verifyPhoneSignature(main, message, signature)) return { ok: true, role: 'main' }
     const deny = this.denyKeys.get(phoneId)
-    if (deny && verifyEd25519(deny.pub, message, signature)) {
+    if (deny && verifyPhoneSignature(deny.pub, message, signature)) {
       if (verb === 'ask.deny') return { ok: true, role: 'deny_only' }
       this.rejectVerifier(phoneId, verb)
       return { ok: false, reason: 'verifier_rejected' }
@@ -1477,10 +1492,11 @@ export class PhonePairing {
 
   toJSON(): {
     phones: string[]; phoneKeys: Record<string, string>; log: PairingLogEntry[]; refused: Record<string, string>
-    denyKeys: Record<string, { pub: string; at: number }>
+    denyKeys: Record<string, { pub: string; at: number }>; phoneTransports: Record<string, string>; keyAlg: 'p256'
   } {
     return {
       phones: [...this.phones.keys()], phoneKeys: Object.fromEntries(this.phones),
+      phoneTransports: Object.fromEntries(this.transports), keyAlg: 'p256',
       log: this.log.map((e) => ({ ...e })), refused: Object.fromEntries(this.lastRefusal),
       denyKeys: Object.fromEntries(this.denyKeys),
     }
@@ -1489,9 +1505,16 @@ export class PhonePairing {
   /** @internal */
   restore(data: { phones: string[]; phoneKeys?: Record<string, string>; log?: PairingLogEntry[]; refused?: Record<string, string> }): void {
     // A phone paired before keys were kept (no phoneKeys entry) stays listed but cannot answer until re-paired.
+    // P-256 move: a phone stored with a key that is not a P-256 point (an Ed25519 key from before) stays listed
+    // but cannot answer or sign until re-paired. keyAlg in the record is informational and never read back.
+    const tr = (data as { phoneTransports?: unknown }).phoneTransports
+    const trs = tr && typeof tr === 'object' && !Array.isArray(tr) ? tr as Record<string, unknown> : {}
     for (const p of data.phones) {
       const k = data.phoneKeys?.[p]
-      this.phones.set(p, typeof k === 'string' ? k : '')
+      const key = rawPhoneKey(k) ? k as string : ''
+      this.phones.set(p, key)
+      const t = trs[p]
+      if (key) this.transports.set(p, typeof t === 'string' && t ? t : key)
     }
     for (const [id, why] of Object.entries(data.refused ?? {})) this.lastRefusal.set(id, why)
     for (const e of data.log ?? []) this.log.push({ ...e })
@@ -1500,7 +1523,7 @@ export class PhonePairing {
     for (const [id, k] of Object.entries(obj(d.denyKeys))) {
       const x = k as { pub?: unknown; at?: unknown }
       // Only for a phone still paired with a key (a deny key never outlives its pairing).
-      if (this.phones.get(id) && rawKey(x?.pub) && typeof x.at === 'number') this.denyKeys.set(id, { pub: x.pub as string, at: x.at })
+      if (this.phones.get(id) && rawPhoneKey(x?.pub) && typeof x.at === 'number') this.denyKeys.set(id, { pub: x.pub as string, at: x.at })
     }
   }
 }
@@ -1811,7 +1834,7 @@ export class AskDeviceEnrollment {
     this.pending_ = null
     if (this.now() >= p.expiresAt) { this.ledger?.append({ kind: 'device_expired', fingerprint: deviceFingerprint(p.pub), by: 'daemon' }); this.onChange?.(); return 'expired' }
     if (approved) this.dev_ = { pub: p.pub, at: this.now(), uv: by.uv, phoneId: by.phoneId, nonce: p.nonce }
-    this.ledger?.append({ kind: approved ? 'device_enrolled' : 'device_refused', fingerprint: deviceFingerprint(p.pub), by: by.phoneId, via: 'phone', uv: by.uv })
+    this.ledger?.append({ kind: approved ? 'device_enrolled' : 'device_refused', fingerprint: deviceFingerprint(p.pub), by: by.phoneId, via: 'phone', uv: by.uv, ...(approved ? { keyAlg: 'ed25519' as const } : {}) })
     this.onChange?.()
     return approved ? 'enrolled' : 'refused'
   }

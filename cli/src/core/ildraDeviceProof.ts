@@ -16,7 +16,8 @@ export function rawDeviceKey(pub: unknown): Buffer | null {
  * decimal digits (zero-padded), e.g. "0412993752801146". Surfaces show it as 4 groups of 4 ("0412 9937 5280 1146").
  */
 export function deviceFingerprint(pub: string): string {
-  const h = createHash('sha256').update(rawDeviceKey(pub) ?? Buffer.alloc(0)).digest()
+  // P-256 move: the same code for a phone key, over its raw 65-byte uncompressed point.
+  const h = createHash('sha256').update(rawDeviceKey(pub) ?? rawPhoneKey(pub) ?? Buffer.alloc(0)).digest()
   return (h.readBigUInt64BE(0) % 10_000_000_000_000_000n).toString().padStart(16, '0')
 }
 /** Batch A (Design Q55): how the paired phone verified its user for an enrollment confirm. */
@@ -55,6 +56,84 @@ export function unpairTouchMessage(phoneId: string, at: number): string {
 }
 export const PHONE_VERBS = ['ask.deny', 'ask.approve', 'settings.set', 'pairing.unpair', 'device.enroll.confirm', 'deny_key.set', 'main_key.rotate'] as const
 export type PhoneVerb = (typeof PHONE_VERBS)[number]
+// ---- P-256 move: phone keys (main and deny) are Secure Enclave ECDSA P-256 with SHA-256 ----
+// The algorithm is pinned to the stored key role, never read from a message: phone keys are P-256 only
+// (verifyPhoneSignature), device keys Ed25519 only (verifyEd25519, verifyDeviceProof).
+const P256_P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffffn
+const P256_B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604bn
+const P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n
+const P256_HALF_N = P256_N >> 1n
+const toBig = (b: Buffer): bigint => (b.length === 0 ? 0n : BigInt('0x' + b.toString('hex')))
+const toBuf32 = (n: bigint): Buffer => Buffer.from(n.toString(16).padStart(64, '0'), 'hex')
+const modP = (n: bigint): bigint => ((n % P256_P) + P256_P) % P256_P
+/** Strict base64url, no padding, canonical (re-encodes to the same text). */
+const b64url = (s: string): Buffer | null => {
+  if (!/^[A-Za-z0-9_-]*$/.test(s)) return null
+  const b = Buffer.from(s, 'base64url')
+  return b.toString('base64url') === s ? b : null
+}
+/** Strict standard base64 with padding, or strict base64url without; canonical either way. */
+const b64any = (s: string): Buffer | null => {
+  if (/^[A-Za-z0-9+/]*={0,2}$/.test(s)) { const b = Buffer.from(s, 'base64'); if (b.toString('base64') === s) return b }
+  return b64url(s)
+}
+/**
+ * A phone public key: the uncompressed SEC1 point (0x04 || X || Y, 65 bytes) in base64url without padding
+ * (87 characters). X and Y must be below p and on the curve (y^2 = x^3 - 3x + b mod p); the point at
+ * infinity has no 65-byte form. Compressed (0x02/0x03), SPKI or any other wrapping is refused.
+ */
+export function rawPhoneKey(pub: unknown): Buffer | null {
+  if (typeof pub !== 'string' || pub.length !== 87) return null
+  const b = b64url(pub)
+  if (!b || b.length !== 65 || b[0] !== 0x04) return null
+  const x = toBig(b.subarray(1, 33)); const y = toBig(b.subarray(33, 65))
+  if (x >= P256_P || y >= P256_P) return null
+  if (modP(y * y) !== modP(x * x * x - 3n * x + P256_B)) return null
+  return b
+}
+/** Strict DER INTEGER at `at`: short-form length 1..33, non-negative, no superfluous leading zero. */
+function derInt(b: Buffer, at: number): { v: bigint; next: number } | null {
+  if (b[at] !== 0x02) return null
+  const len = b[at + 1]
+  if (len === undefined || len < 1 || len > 33 || at + 2 + len > b.length) return null
+  const body = b.subarray(at + 2, at + 2 + len)
+  if (body[0]! & 0x80) return null
+  if (body[0] === 0x00 && (len === 1 || !(body[1]! & 0x80))) return null
+  return { v: toBig(body), next: at + 2 + len }
+}
+/**
+ * Accept a phone signature as raw r||s (64 bytes) or strict DER (SEQUENCE of two INTEGERs, short-form lengths,
+ * minimal integers, no trailing bytes), in base64 or base64url. Refuse r or s equal to 0 or at least n.
+ * A high S (s > n/2) is normalized to n - s (Apple does not promise low-S), so both forms verify the same and
+ * single-use (nonce, answerId) still stops a replayed copy. Returns the 64-byte low-S r||s, or null.
+ */
+export function normalizePhoneSignature(signature: unknown): Buffer | null {
+  if (typeof signature !== 'string' || signature.length === 0 || signature.length > 100) return null
+  const b = b64any(signature)
+  if (!b) return null
+  let r: bigint; let s: bigint
+  if (b.length === 64) { r = toBig(b.subarray(0, 32)); s = toBig(b.subarray(32)) }
+  else {
+    if (b.length < 8 || b[0] !== 0x30 || b[1]! >= 0x80 || b[1] !== b.length - 2) return null
+    const ri = derInt(b, 2); if (!ri) return null
+    const si = derInt(b, ri.next); if (!si || si.next !== b.length) return null
+    r = ri.v; s = si.v
+  }
+  if (r <= 0n || r >= P256_N || s <= 0n || s >= P256_N) return null
+  if (s > P256_HALF_N) s = P256_N - s
+  return Buffer.concat([toBuf32(r), toBuf32(s)])
+}
+/** True when `signature` is the stored phone key `pub`'s ECDSA P-256 / SHA-256 signature over the UTF-8 bytes of `message`. */
+export function verifyPhoneSignature(pub: unknown, message: string, signature: unknown): boolean {
+  const raw = rawPhoneKey(pub)
+  const sig = normalizePhoneSignature(signature)
+  if (!raw || !sig) return false
+  try {
+    const key = createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: raw.subarray(1, 33).toString('base64url'), y: raw.subarray(33).toString('base64url') }, format: 'jwk' })
+    return cryptoVerify('sha256', Buffer.from(message, 'utf8'), { key, dsaEncoding: 'ieee-p1363' }, sig)
+  } catch { return false }
+}
+
 /** True when `signature` (base64) is `pub`'s Ed25519 signature over the UTF-8 bytes of `message`. */
 export function verifyEd25519(pub: unknown, message: string, signature: unknown): boolean {
   const raw = rawDeviceKey(pub)

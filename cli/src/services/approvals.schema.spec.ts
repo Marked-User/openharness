@@ -13,6 +13,7 @@ import {
   stampManifest,
 } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
+import { fixturePhonePub } from './ildraAsk.testkit.js'
 /** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
 const aid = (): string => aidBytes(16).toString('hex')
 
@@ -115,7 +116,7 @@ describe('real AskAnswer, AskRejection and AskOutcome outputs', () => {
   it('answers, rejections and outcomes from a run validate', async () => {
     const l = new AskLedger()
     const pairing = new PhonePairing()
-    const s = pairing.begin('touch'); pairing.offer('p1', PUB, s.code); pairing.confirm('p1', 'touch', true)
+    const s = pairing.begin('touch'); pairing.offer('p1', fixturePhonePub('pubA'), s.code, { machinePub: PUB }); pairing.confirm('p1', 'touch', true)
     const answers: AskAnswer[] = []
     const outcomes = []
     const answer = (extra: Partial<AskAnswer>) => (_c: unknown, _p: unknown, r?: AskRequest) => {
@@ -180,18 +181,18 @@ describe('real pairing outputs', () => {
     const p = new PhonePairing()
     const s = p.begin('touch')
     valid('PairingBegin', s)
-    const offer = { phoneId: 'p1', phonePub: 'pubA', code: s.code, origin: { machinePub: PUB } }
+    const offer = { phoneId: 'p1', phonePub: fixturePhonePub('pubA'), code: s.code, origin: { machinePub: PUB } }
     valid('PairingOffer', offer)
     const statuses = [p.pairingStatus('p1')]
     const res = p.offer(offer.phoneId, offer.phonePub, offer.code, offer.origin)
     valid('PairingOfferResult', res)
-    expect(res.ok && res.check).toBe(pairingCheck(s.code, 'pubA', s.deviceNonce))
+    expect(res.ok && res.check).toBe(pairingCheck(s.code, fixturePhonePub('pubA'), s.deviceNonce))
     statuses.push(p.pairingStatus('p1'))
     const confirm = { phoneId: 'p1', confirmedBy: 'touch' as const, matched: true }
     valid('PairingConfirm', confirm)
     p.confirm(confirm.phoneId, confirm.confirmedBy, confirm.matched)
     statuses.push(p.pairingStatus('p1'))
-    valid('PairingOfferResult', p.offer('p2', 'pub', '000000'))
+    valid('PairingOfferResult', p.offer('p2', fixturePhonePub('pub'), '000000'))
     statuses.push(p.pairingStatus('p2'))
     for (const st of statuses) valid('PairingStatus', st)
     expect(statuses.map((x) => x.state)).toEqual(['unknown', 'pending', 'paired', 'refused'])

@@ -13,7 +13,7 @@ import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { stampChannel as stampForTest } from '../core/ildraChannel.js'
 import { deviceFingerprint, deviceProofMessage, enrollConfirmMessage, verifyEd25519 } from '../core/ildraDeviceProof.js'
 import { createIldraAsk } from './ildraAsk.js'
-import { deviceKeyPair, phoneKeyPair, proveBridge, signedConfirm } from './ildraAsk.testkit.js'
+import { deviceKeyPair, phoneKeyPair, proveBridge, signedConfirm, fixturePhonePub } from './ildraAsk.testkit.js'
 import {
   ApprovalWindow, AskLedger, HIDDEN_SCHEMA_PATTERN, PhonePairing, UNPAIRED_NOTIFY, UNPAIRED_WINDOW_MS, ask, classifyTool, markHidden,
   openJournal, recipientFlags, resolveTool, stampManifest, toDeviceMessage,
@@ -34,7 +34,7 @@ const T: ApprovalTemplate = { permissions: { ask: ['Rename a file', 'Send an ema
 const kind = { manifest: stampManifest([{ name: 'fs.rename', send: false }], 'bridge'), tool: 'fs.rename' }
 const DEV = 'D'.repeat(43) + '='
 const DEV2 = 'E'.repeat(43) + '='
-const PHONE = 'P'.repeat(43) + '='
+const PHONE = fixturePhonePub('P')
 const OTHER = 'X'.repeat(43) + '='
 const paired = (): PhonePairing => { const p = new PhonePairing(); const { code } = p.begin('touch'); p.offer('p1', PHONE, code); p.confirm('p1', 'touch', true); return p }
 const tick = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve(); await new Promise((r) => setImmediate(r)); for (let i = 0; i < 20; i++) await Promise.resolve() }

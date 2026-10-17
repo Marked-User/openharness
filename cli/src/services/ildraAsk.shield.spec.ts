@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
-import { enrollBridge, proveBridge } from './ildraAsk.testkit.js'
+import { enrollBridge, proveBridge, fixturePhonePub } from './ildraAsk.testkit.js'
 import { createIldraAsk } from './ildraAsk.js'
 import { stampManifest, type ApprovalTemplate, type AskRequest } from './approvals.js'
 
@@ -17,7 +17,7 @@ const aid = (): string => randomBytes(16).toString('hex')
 const T: ApprovalTemplate = { permissions: { ask: ['Rename a file', 'Pay a bill'], locked_ask: ['Brakes step'] } }
 const kind = { manifest: stampManifest([{ name: 'fs.rename', send: false }], 'bridge'), tool: 'fs.rename' }
 const DEV = 'D'.repeat(43) + '='
-const PHONE = 'P'.repeat(43) + '='
+const PHONE = fixturePhonePub('P')
 const OTHER = 'X'.repeat(43) + '='
 const tick = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve() }
 

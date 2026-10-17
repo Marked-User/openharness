@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ILDRA_ASK_REQUESTS } from '../core/api.js'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
-import { enrollBridge } from './ildraAsk.testkit.js'
+import { enrollBridge, fixturePhonePub } from './ildraAsk.testkit.js'
 import { createIldraAsk } from './ildraAsk.js'
 import { PhonePairing, stampManifest, type ApprovalTemplate, type AskRequest } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
@@ -17,7 +17,7 @@ import { randomBytes as aidBytes } from 'node:crypto'
 const aid = (): string => aidBytes(16).toString('hex')
 
 const T: ApprovalTemplate = { permissions: { ask: ['Rename a file', 'Send an email'], locked_ask: ['Brakes step'] } }
-const OWN = 'O'.repeat(43) + '='
+const OWN = fixturePhonePub('O')
 const SHARED = 'S'.repeat(43) + '='
 const kind = { manifest: stampManifest([{ name: 'fs.rename', send: false }], 'bridge'), tool: 'fs.rename' }
 

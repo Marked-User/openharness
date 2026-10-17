@@ -239,16 +239,19 @@ describe('Batch B: wire', () => {
     expect(env('ildra.pairing.unpair', { phoneId: 'p2', at: 1 })).toBe(false)
     expect(env('ildra.pairing.unpair_refused', { phoneId: 'p2', reason: 'last_owner_channel' })).toBe(true)
     expect(env('ildra.pairing.unpair_refused', { phoneId: 'p2', reason: 'nope' })).toBe(false)
-    // Example vectors (RFC 8032 test 2 phone key, test 1 device key; ledger hashes recomputed).
+    // Example vectors (P-256 move): phone-1 main key = RFC 6979 A.2.5 P-256 key, device = RFC 8032 test 1; ledger hashes recomputed.
     const l = new PairingLedger()
+    const G = '0'.repeat(64); const H1 = '551014fa08104c7b170b7d4270020556b33d13caa41e796206c3bf5b87f95a26'; const H2 = '4c86462a29693f5e9192359160cdc89cd0cd020210ba4c3238341992cdb85fc9'; const H3 = '45aa7451d91871dd1dc339f0c0c4986f560a1a1d11b8ec1409972271525f7248'
     const ex = { entries: [
-      { seq: 1, at: 1760596000000, kind: 'phone_paired', phoneId: 'phone-1', fingerprint: '6828966273033535', via: 'touch', prev: '0'.repeat(64), hash: '1af63b4f44efafeabee2163011631f734ff767a07087f1fdfdedda925011f50d' },
-      { seq: 2, at: 1760596060000, kind: 'device_enrolled', fingerprint: '9450083890274913', by: 'phone-1', via: 'phone', uv: 'biometric', prev: '1af63b4f44efafeabee2163011631f734ff767a07087f1fdfdedda925011f50d', hash: '6fab087e6b8b3ed1cbb0e3f8b383e5ca2cbd0c590aec0cb65753065a29235f65' },
-      { seq: 3, at: 1760596120000, kind: 'unpair_requested', phoneId: 'phone-2', by: 'phone-1', via: 'phone', prev: '6fab087e6b8b3ed1cbb0e3f8b383e5ca2cbd0c590aec0cb65753065a29235f65', hash: 'c7b18d1825fb82009f5257b1985201b29bbbeab63d7e6cd4d874648f25a6ae3e' },
+      { seq: 1, at: 1760596000000, kind: 'phone_paired', phoneId: 'phone-1', fingerprint: '3467386125214829', via: 'touch', keyAlg: 'p256', prev: G, hash: H1 },
+      { seq: 2, at: 1760596060000, kind: 'device_enrolled', fingerprint: '9450083890274913', by: 'phone-1', via: 'phone', uv: 'biometric', keyAlg: 'ed25519', prev: H1, hash: H2 },
+      { seq: 3, at: 1760596120000, kind: 'unpair_requested', phoneId: 'phone-2', by: 'phone-1', via: 'phone', prev: H2, hash: H3 },
     ] }
     expect(() => l.restore(ex.entries)).not.toThrow()
-    const { verifyEd25519 } = await import('../core/ildraDeviceProof.js')
-    expect(verifyEd25519('PUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=', unpairMessage('phone-2', 1760596500000), '8J0GfVam7QteSztLOOekf1yb5iRy5AG29SnI1kDgQxmNbSJ+J4++h0VCGvWMrWyBbWS26TJF5Nf8yOh8/EMWDw==')).toBe(true)
+    const MAIN1 = 'BGD-1LolWp0xyWHrdMY1bWjASbiSO2H6bOZpYi5g8p-2eQP-EAi4vJmkGunpVii8ZPLxsgwtfp9Rd6PClNRGIpk'
+    expect(deviceFingerprint(MAIN1)).toBe('3467386125214829')
+    const { verifyEd25519, verifyPhoneSignature } = await import('../core/ildraDeviceProof.js')
+    expect(verifyPhoneSignature(MAIN1, unpairMessage('phone-2', 1760596500000), 'p16kaonFdhJEp1H8DD49BZ2luNfiNoZgGqaaYBdHl+BXoTxTqibOAjlDakYQNfc9ncG7iQ8u1bAGlf94qz2ecw==')).toBe(true)
     expect(verifyEd25519('11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=', unpairTouchMessage('phone-2', 1760596500000), 'JwQG05SfVwfHv6Siw1gK2raZ1McvLCR2RpBhdnVizRdvcN266DIAau6zXMz6LIWRZ22z3my9/RSnn4dpYDncAw==')).toBe(true)
     // answered_by events from the runtime validate.
     const a = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['phone'] }); await tick()

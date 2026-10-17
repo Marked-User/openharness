@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { createIldraAsk } from './ildraAsk.js'
-import { deviceKeyPair, enrollBridge, proveBridge } from './ildraAsk.testkit.js'
+import { deviceKeyPair, enrollBridge, proveBridge, fixturePhonePub } from './ildraAsk.testkit.js'
 import {
   ApprovalWindow, AskLedger, PhonePairing, ask, askKindFor, classifyTool, isSendTool, resolveTool, stampManifest, toDeviceMessage,
   type AskAnswer, type AskRequest, type ApprovalTemplate,
@@ -21,8 +21,8 @@ const T: ApprovalTemplate = { permissions: { ask: ['Rename a file', 'Send an ema
 const kind = { manifest: stampManifest([{ name: 'fs.rename', send: false }], 'bridge'), tool: 'fs.rename' }
 const DEV = 'D'.repeat(43) + '='
 const DEV2 = 'E'.repeat(43) + '='
-const PHONE = 'P'.repeat(43) + '='
-const PHONE2 = 'Q'.repeat(43) + '='
+const PHONE = fixturePhonePub('P')
+const PHONE2 = fixturePhonePub('Q')
 const tick = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve() }
 
 function rig(clients: Record<string, IldraAskClient>) {

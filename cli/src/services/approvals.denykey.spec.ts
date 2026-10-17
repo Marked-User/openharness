@@ -235,11 +235,12 @@ describe('Shield deny key: wire', () => {
     const schema = JSON.parse(rf(new URL('./ildra-messages.schema.json', import.meta.url), 'utf8'))
     const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true }); ajv.addSchema(schema)
     const env = (type: string, body: unknown): boolean => ajv.getSchema(schema.$id)!({ type, proto: 1, body }) as boolean
-    const s64 = Buffer.alloc(64, 7).toString('base64'); const k = phoneKeyPair().pub
+    const s64 = Buffer.alloc(64, 7).toString('base64'); const k = phoneKeyPair().pub; const dk = deviceKeyPair().pub
     expect(env('ildra.ask.answer', { id: '6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b', digest8: '0011aabb', answerId: aid(), approved: false, phoneSignature: s64 })).toBe(true)
     expect(env('ildra.ask.answer', { id: '6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b', digest8: '0011aabb', answerId: aid(), approved: false, phoneSignature: 'x' })).toBe(false)
-    expect(env('ildra.device.enroll.confirm', { devicePub: k, nonce: randomBytes(32).toString('base64url'), approved: true, uv: 'passcode', signature: s64, denyKey: k })).toBe(true)
-    expect(env('ildra.device.enroll.confirm', { devicePub: k, nonce: randomBytes(32).toString('base64url'), approved: true, uv: 'passcode', signature: s64, denyKey: 'nope' })).toBe(false)
+    expect(env('ildra.device.enroll.confirm', { devicePub: dk, nonce: randomBytes(32).toString('base64url'), approved: true, uv: 'passcode', signature: s64, denyKey: k })).toBe(true)
+    expect(env('ildra.device.enroll.confirm', { devicePub: dk, nonce: randomBytes(32).toString('base64url'), approved: true, uv: 'passcode', signature: s64, denyKey: dk })).toBe(false) // P-256 move: an Ed25519 deny key
+    expect(env('ildra.device.enroll.confirm', { devicePub: dk, nonce: randomBytes(32).toString('base64url'), approved: true, uv: 'passcode', signature: s64, denyKey: 'nope' })).toBe(false)
     expect(env('ildra.settings.set', { key: 'ask.deviceWindowSec', value: 45, signature: s64 })).toBe(true)
     expect(env('ildra.phone.open', {})).toBe(true)
     expect(env('ildra.phone.deny_summary', { count: 4, since: 1, at: 2 })).toBe(true)

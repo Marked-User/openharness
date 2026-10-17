@@ -14,6 +14,7 @@ import {
   stampManifest,
 } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
+import { fixturePhonePub } from './ildraAsk.testkit.js'
 /** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
 const aid = (): string => aidBytes(16).toString('hex')
 
@@ -23,7 +24,7 @@ const dir = () => mkdtempSync(join(tmpdir(), 'pilot-'))
 const notSend = (tool: string): ToolManifestEntry[] => stampManifest([{ name: tool, send: false }], 'bridge')
 function paired() {
   const p = new PhonePairing()
-  const { code } = p.begin('touch'); p.offer('p1', 'pub1', code); p.confirm('p1', 'touch', true)
+  const { code } = p.begin('touch'); p.offer('p1', fixturePhonePub('pub1'), code); p.confirm('p1', 'touch', true)
   return p
 }
 const yes = (extra: Partial<AskAnswer> = {}) => (_c: unknown, _p: unknown, req?: AskRequest): AskAnswer =>

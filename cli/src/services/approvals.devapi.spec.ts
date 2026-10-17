@@ -11,6 +11,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { fixturePhonePub } from './ildraAsk.testkit.js'
 import {
   ApprovalDenied, ApprovalWindow, AskLedger, DEVICE_HOLD_MIN_MS, MONEY_ASK_EXPIRY_MS, OTHER_ASK_EXPIRY_MS, PhonePairing,
   InvalidUnicode, USE_YOUR_PHONE, actionDigest8, ask, canonicalJson, digestInput, firstLine, neverOutcome, fromDeviceReply, toDeviceMessage,
@@ -25,7 +26,7 @@ const hex = (): string => randomBytes(16).toString('hex')
 const clock = () => { let t = NOW; return { now: () => t, set: (v: number) => { t = v } } }
 function paired(): PhonePairing {
   const p = new PhonePairing()
-  const { code } = p.begin('touch'); p.offer('phone-1', 'pub1', code); p.confirm('phone-1', 'touch', true)
+  const { code } = p.begin('touch'); p.offer('phone-1', fixturePhonePub('pub1'), code); p.confirm('phone-1', 'touch', true)
   return p
 }
 const PAIRED = { isPaired: (id: string) => id === 'phone-1' }

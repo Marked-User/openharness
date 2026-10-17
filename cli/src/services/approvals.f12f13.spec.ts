@@ -7,6 +7,7 @@ import {
   stampManifest,
 } from './approvals.js'
 import { randomBytes as aidBytes } from 'node:crypto'
+import { fixturePhonePub } from './ildraAsk.testkit.js'
 /** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
 const aid = (): string => aidBytes(16).toString('hex')
 
@@ -56,14 +57,14 @@ describe('F12: the shared flag comes from the gateway, not the answer', () => {
     const p = new PhonePairing({ isShared })
     expect(() => p.begin('touch', { machinePub: SHARED_PUB, shared: false })).toThrow(ApprovalDenied)
     const s = p.begin('touch', { machinePub: OWN_PUB })
-    expect(p.offer('ph', 'pub', s.code, { machinePub: SHARED_PUB, shared: false })).toEqual({ ok: false, reason: 'shared_machine' })
-    expect(p.offer('ph', 'pub', p.begin('touch').code, { machinePub: OWN_PUB }).ok).toBe(true)
+    expect(p.offer('ph', fixturePhonePub('pub'), s.code, { machinePub: SHARED_PUB, shared: false })).toEqual({ ok: false, reason: 'shared_machine' })
+    expect(p.offer('ph', fixturePhonePub('pub'), p.begin('touch').code, { machinePub: OWN_PUB }).ok).toBe(true)
   })
 })
 
 describe('F13: phone elicitation handler routed through the Ask gate', () => {
   const pairing = new PhonePairing()
-  const s = pairing.begin('touch'); pairing.offer('p1', 'pub1', s.code); pairing.confirm('p1', 'touch', true)
+  const s = pairing.begin('touch'); pairing.offer('p1', fixturePhonePub('pub1'), s.code); pairing.confirm('p1', 'touch', true)
   const base = () => ({ ledger: new AskLedger(), pairing, manifest: stampManifest([{ name: 'db.query', send: false }], 'bridge'), available: ['phone'], guard: new AskPaneGuard() })
   const el = { paneId: 'pane-1', server: 'db', message: 'Drop table users?', tool: 'db.query' }
   it('marker helpers', () => {
