@@ -15,7 +15,7 @@
           "enum": [
             "ildra.ask.request", "ildra.ask.answer", "ildra.ask.rejection", "ildra.ask.outcome",
             "ildra.pairing.begin", "ildra.pairing.offer", "ildra.pairing.offer_result",
-            "ildra.pairing.confirm", "ildra.pairing.status"
+            "ildra.pairing.confirm", "ildra.pairing.status", "ildra.ask.handoff", "ildra.ask.attempt"
           ]
         },
         "proto": { "const": 1 },
@@ -30,7 +30,9 @@
         { "if": { "properties": { "type": { "const": "ildra.pairing.offer" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingOffer" } } } },
         { "if": { "properties": { "type": { "const": "ildra.pairing.offer_result" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingOfferResult" } } } },
         { "if": { "properties": { "type": { "const": "ildra.pairing.confirm" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingConfirm" } } } },
-        { "if": { "properties": { "type": { "const": "ildra.pairing.status" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingStatus" } } } }
+        { "if": { "properties": { "type": { "const": "ildra.pairing.status" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingStatus" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.ask.handoff" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/AskHandoff" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.ask.attempt" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/AskAttempt" } } } }
       ]
     },
 
@@ -39,7 +41,7 @@
     "EpochMs": { "type": "integer", "minimum": 0 },
     "Channel": { "enum": ["voice", "touch", "phone"] },
     "Tier": { "enum": ["auto", "ask", "locked_ask", "never"] },
-    "Digest8": { "description": "First 8 lowercase hex of sha256 over the action and its details (amountMinor, currency, recipient, message hash).", "type": "string", "pattern": "^[0-9a-f]{8}$" },
+    "Digest8": { "description": "First 8 lowercase hex characters of SHA-256 over the RFC 8785 (JCS) canonical JSON of the object {action, agentId, tier, amountMinor, currency, recipient, messageSha256, ...details}: absent members are left out (never null); messageSha256 is the lowercase hex SHA-256 of the full UTF-8 message; details may not reuse the names action, agentId, tier, amountMinor or currency. A lone UTF-16 surrogate anywhere in the input (a value, a key, the action, the message) refuses the Ask with AskOutcome reason malformed; no request is opened. channel, id, templateId, firstLine and the times are not covered, so a handoff keeps the digest. Vectors: protocol/examples/vectors/digest8.json.", "type": "string", "pattern": "^[0-9a-f]{8}$" },
     "AskId": { "description": "Random UUID chosen by the daemon.", "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
     "Challenge": { "description": "Daemon-drawn 2-word spoken challenge, lowercase words separated by one space. Not a PIN.", "type": "string", "pattern": "^[a-z]+ [a-z]+$" },
 
@@ -62,7 +64,8 @@
         "agentId": { "type": "string", "minLength": 1 },
         "templateId": { "type": "string", "minLength": 1 },
         "recipient": { "description": "Send Asks only.", "type": "string", "minLength": 1 },
-        "firstLine": { "description": "Send Asks only: first non-empty line, trimmed, at most 80 characters.", "type": "string", "minLength": 1, "maxLength": 80 }
+        "firstLine": { "description": "Send Asks only: first non-empty line of the message, trimmed; never empty (a send whose message has no non-blank line is refused, no Ask is opened). At most 80 Unicode code points: a longer line is cut to 79 code points plus \u2026.", "type": "string", "minLength": 1, "maxLength": 80 },
+        "kind": { "description": "Display only, not in digest8: what sort of locked_ask this is, so the phone can word it (Design copy). safety_verification: a safety check step. Set by the daemon from the template (safety_verification list) or a trusted tool manifest entry (safetyVerification: true), never by the asking caller. Only on locked_ask. More values may be added.", "enum": ["safety_verification"] }
       },
       "dependentRequired": {
         "amountMinor": ["currency"],
@@ -71,6 +74,11 @@
         "firstLine": ["recipient"]
       },
       "allOf": [
+        {
+          "description": "kind is only on locked_ask.",
+          "if": { "required": ["kind"] },
+          "then": { "properties": { "tier": { "const": "locked_ask" } } }
+        },
         {
           "description": "A voice Ask always carries the challenge; other channels never do.",
           "if": { "properties": { "channel": { "const": "voice" } }, "required": ["channel"] },
@@ -97,13 +105,14 @@
     },
 
     "AskAnswer": {
-      "description": "Answering surface to daemon. Bound to the open request by id and digest8; single use. Only approved true approves. A device (touch) answer carries the digest8 of the text it showed; a device approval also needs holdMs of 1500 or more (Shield pilot review A1). The answer does not name its channel (the open request does), so the daemon checks the hold rule, not the schema.",
+      "description": "Answering surface to daemon. Bound to the open request by id and digest8. Every answerId is accepted at most once; the request is spent by its first accepted or rejected answer, except hold_too_short (a touch approval held too briefly) and stale_channel (an answer from the channel a handoff left), which leave the request open until expiresAt (the retry needs a fresh answerId). Only approved true approves. A deny needs no hold and no challenge words. A device (touch) answer carries the digest8 of the text it showed; a device approval also needs holdMs of 1500 or more (Shield pilot review A1). The answer does not name its channel (the open request does), so the daemon checks the hold rule, not the schema.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "digest8", "approved"],
+      "required": ["id", "digest8", "answerId", "approved"],
       "properties": {
         "id": { "$ref": "#/$defs/AskId" },
         "digest8": { "$ref": "#/$defs/Digest8" },
+        "answerId": { "$ref": "#/$defs/AnswerId" },
         "approved": { "type": "boolean" },
         "holdMs": { "description": "Device (touch) answers: how long the approve control was held, in milliseconds, as the device reports it. Client-claimed (Shield R3-2): for M1 the device link is daemon-owned; GA needs a firmware-measured hold signed over id, digest8, holdMs and counter (D5 b). An approval on the touch channel without holdMs of at least 1500 is rejected with hold_too_short. A deny (swipe) needs none; phone and voice answers may omit it.", "type": "number", "minimum": 0 },
         "transcript": { "description": "Voice answers: what speech-to-text heard. Must contain the challenge words, adjacent, in order.", "type": "string" },
@@ -112,12 +121,18 @@
       }
     },
 
+    "AnswerId": {
+      "description": "Chosen fresh by the answering surface for every answer, never reused: the phone sends a random UUID, the device firmware 32 hex characters from 128 random bits (Gadget prompt.reply answer_id, mapped 1:1 by the bridge). The daemon journals spent answerIds and rejects a repeat as replayed.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9-]{16,64}$"
+    },
+
     "AskRejectionReason": {
-      "enum": ["malformed", "unknown_id", "replayed", "expired", "digest_mismatch", "challenge_mismatch", "verifier_rejected", "shared_machine", "unpaired_phone", "hold_too_short"]
+      "enum": ["malformed", "unknown_id", "replayed", "expired", "digest_mismatch", "challenge_mismatch", "verifier_rejected", "shared_machine", "unpaired_phone", "hold_too_short", "stale_channel"]
     },
 
     "AskRejection": {
-      "description": "Daemon to answering surface when an answer is not accepted (approvals.ts SettleResult with ok false). The request is spent either way.",
+      "description": "Daemon to answering surface when an answer is not accepted (approvals.ts SettleResult with ok false). The request is spent by the rejection (it can no longer be answered), with two exceptions: hold_too_short and stale_channel on an unexpired request leave it open until expiresAt, and the daemon emits ildra.ask.attempt. A malformed answer changes nothing; otherwise the rejected answerId is spent too.",
       "type": "object",
       "additionalProperties": false,
       "required": ["ok", "reason"],
@@ -127,20 +142,53 @@
       }
     },
 
-    "AskOutcome": {
-      "description": "Result of one Ask (approvals.ts AskOutcome). channel is null when no prompt ran (auto, or no usable channel). The answered-by event is not defined yet (waits for Shield sign-off).",
+    "AskOutcomeReason": {
+      "description": "Why an Ask ended: approved (only with approved true); denied, a person said no on the current channel; expired, nobody answered in time; no_channel, no usable channel (for example a locked_ask with no paired phone); never, the action is never allowed; malformed, the Ask was refused before it opened (for example a lone UTF-16 surrogate in the digest input) or its answer was malformed; or the AskRejectionReason that ended it.",
+      "anyOf": [{ "enum": ["approved", "denied", "no_channel", "never"] }, { "$ref": "#/$defs/AskRejectionReason" }]
+    },
+
+    "AskHandoff": {
+      "description": "Daemon to device and phone: the open request moves from the device to the paired phone (60 s device-to-phone handoff). Same id and digest8, expiresAt unchanged. After it, an answer from the old channel (approve or deny) is rejected with stale_channel, logged as ildra.ask.attempt, and does not spend the request; only the current channel settles it. stale_channel is checked before replayed, so a reused answerId from the old channel is still stale_channel.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["approved", "channel", "tier"],
+      "required": ["id", "from", "to", "at"],
+      "properties": {
+        "id": { "$ref": "#/$defs/AskId" },
+        "from": { "const": "touch" },
+        "to": { "const": "phone" },
+        "at": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+
+    "AskAttempt": {
+      "description": "Daemon to phone, and kept in the Ask journal (activity log): an answer that did not settle the request and left it open until expiresAt. hold_too_short: a device approval held under 1500 ms. stale_channel: an answer (approve or deny) from the channel the request left by ildra.ask.handoff. channel is the channel the answer came from. holdMs is what the device reported (absent when it sent none).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "answerId", "channel", "reason", "at"],
+      "properties": {
+        "id": { "$ref": "#/$defs/AskId" },
+        "answerId": { "$ref": "#/$defs/AnswerId" },
+        "channel": { "const": "touch" },
+        "reason": { "enum": ["hold_too_short", "stale_channel"] },
+        "holdMs": { "type": "number", "minimum": 0 },
+        "at": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+
+    "AskOutcome": {
+      "description": "Result of one Ask (approvals.ts AskOutcome). reason is always present: approved exactly when approved is true (PM spec). channel is null when no prompt ran (auto, never, no usable channel, or a malformed Ask). The answered-by event is not defined yet (waits for Shield sign-off).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approved", "channel", "tier", "reason"],
       "properties": {
         "approved": { "type": "boolean" },
         "channel": { "oneOf": [{ "$ref": "#/$defs/Channel" }, { "type": "null" }] },
         "tier": { "$ref": "#/$defs/Tier" },
-        "reason": { "$ref": "#/$defs/AskRejectionReason" },
+        "reason": { "$ref": "#/$defs/AskOutcomeReason" },
         "request": { "$ref": "#/$defs/AskRequest" }
       },
       "allOf": [
-        { "if": { "properties": { "reason": true }, "required": ["reason"] }, "then": { "properties": { "approved": { "const": false } } } },
+        { "if": { "properties": { "approved": { "const": true } }, "required": ["approved"] }, "then": { "properties": { "reason": { "const": "approved" } } }, "else": { "properties": { "reason": { "not": { "const": "approved" } } } } },
         { "if": { "properties": { "tier": { "const": "auto" } }, "required": ["tier"] }, "then": { "properties": { "approved": { "const": true }, "channel": { "type": "null" } } } }
       ]
     },

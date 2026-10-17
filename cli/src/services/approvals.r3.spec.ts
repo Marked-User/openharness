@@ -11,6 +11,9 @@ import {
   ApprovalDenied, AskLedger, isSendTool, openJournal, signedHoldPayload, signedHoldVerifier, stampManifest,
   type AskAnswer,
 } from './approvals.js'
+import { randomBytes as aidBytes } from 'node:crypto'
+/** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
+const aid = (): string => aidBytes(16).toString('hex')
 
 const dir = () => mkdtempSync(join(tmpdir(), 'r3-'))
 
@@ -74,13 +77,13 @@ describe('R3-2 (GA, D5 b): signed device hold hook', () => {
     const v = signedHoldVerifier({ nextCounter: () => ++counter, verify: (payload, sig) => { seen.push(payload); return sig === 'good' } })
     const l = new AskLedger({ verifier: v })
     const t = l.open({ action: 'Rename a file', tier: 'ask', channel: 'touch' })
-    const ans = (sig?: string): AskAnswer => ({ id: t.id, digest8: t.digest8, approved: true, holdMs: 1620, ...(sig ? { signature: sig } : {}) })
+    const ans = (sig?: string): AskAnswer => ({ id: t.id, digest8: t.digest8, answerId: aid(), approved: true, holdMs: 1620, ...(sig ? { signature: sig } : {}) })
     expect(l.settle(ans('good'))).toEqual({ ok: true })
     expect(seen).toEqual([`ildra-hold-v1|${t.id}|${t.digest8}|1620|7`])
     const t2 = l.open({ action: 'Rename a file', tier: 'ask', channel: 'touch' })
-    expect(l.settle({ id: t2.id, digest8: t2.digest8, approved: true, holdMs: 1620 })).toEqual({ ok: false, reason: 'verifier_rejected' })
+    expect(l.settle({ id: t2.id, digest8: t2.digest8, answerId: aid(), approved: true, holdMs: 1620 })).toEqual({ ok: false, reason: 'verifier_rejected' })
     const p = l.open({ action: 'Rename a file', tier: 'ask', channel: 'phone' })
-    expect(v(p, { id: p.id, digest8: p.digest8, approved: true })).toBe(true)
+    expect(v(p, { id: p.id, digest8: p.digest8, answerId: aid(), approved: true })).toBe(true)
     const throwing = signedHoldVerifier({ nextCounter: () => 1, verify: () => { throw new Error('x') } })
     expect(throwing(t, ans('good'))).toBe(false)
   })

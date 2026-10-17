@@ -1,0 +1,132 @@
+{
+  "rule": "digest8 = first 8 lowercase hex of SHA-256(UTF-8(JCS({action, ...fields}))); fields absent are omitted; messageSha256 = hex SHA-256 of the full UTF-8 message. A lone UTF-16 surrogate anywhere in the input refuses the Ask (refused: malformed, digest8 null; AskOutcome reason malformed). See protocol/README.md \"Digest\".",
+  "invoiceMessage": "Hi Dana, invoice attached.\nThe total is $120.00.",
+  "vectors": [
+    {
+      "name": "money, phone",
+      "action": "Pay a bill",
+      "fields": {
+        "agentId": "bills-1",
+        "tier": "ask",
+        "amountMinor": 12000,
+        "currency": "USD"
+      },
+      "jcs": "{\"action\":\"Pay a bill\",\"agentId\":\"bills-1\",\"amountMinor\":12000,\"currency\":\"USD\",\"tier\":\"ask\"}",
+      "sha256": "cd40923d7818c494d66a26322c8a8957f3740e5ff09930e17659814da9ee6091",
+      "digest8": "cd40923d"
+    },
+    {
+      "name": "send with recipient and message hash",
+      "action": "Send an invoice",
+      "fields": {
+        "agentId": "bookkeeper-1",
+        "tier": "ask",
+        "recipient": "dana@example.com",
+        "messageSha256": "4ea3ca17cda49947573a8b42e52c0a89c4a31526b35de889596278403f6e5119"
+      },
+      "jcs": "{\"action\":\"Send an invoice\",\"agentId\":\"bookkeeper-1\",\"messageSha256\":\"4ea3ca17cda49947573a8b42e52c0a89c4a31526b35de889596278403f6e5119\",\"recipient\":\"dana@example.com\",\"tier\":\"ask\"}",
+      "sha256": "46d275abdd73b6122f1dc21a282ca58f88cef74b7ab97947d487bee8c4f66967",
+      "digest8": "46d275ab"
+    },
+    {
+      "name": "bare action, tier only",
+      "action": "a",
+      "fields": {
+        "tier": "ask"
+      },
+      "jcs": "{\"action\":\"a\",\"tier\":\"ask\"}",
+      "sha256": "104bd159f01bfefb5b8965d65c65be10cb8d8e6b51aa1cd96d3b303c2c4dd4c9",
+      "digest8": "104bd159"
+    },
+    {
+      "name": "locked_ask, same action as above",
+      "action": "a",
+      "fields": {
+        "tier": "locked_ask"
+      },
+      "jcs": "{\"action\":\"a\",\"tier\":\"locked_ask\"}",
+      "sha256": "6cb1581e4b10112f184a1e5fe2c1c48f62adb597d803967c47798e1d55e84cbf",
+      "digest8": "6cb1581e"
+    },
+    {
+      "name": "non-ASCII, null detail, nested detail, money",
+      "action": "Café ☕",
+      "fields": {
+        "agentId": "x",
+        "tier": "locked_ask",
+        "amountMinor": 5,
+        "currency": "USD",
+        "memo": null,
+        "list": [
+          1,
+          "x",
+          {
+            "z": 1,
+            "a": 2
+          }
+        ]
+      },
+      "jcs": "{\"action\":\"Café ☕\",\"agentId\":\"x\",\"amountMinor\":5,\"currency\":\"USD\",\"list\":[1,\"x\",{\"a\":2,\"z\":1}],\"memo\":null,\"tier\":\"locked_ask\"}",
+      "sha256": "19d781beb1721a18f964552b351457b7266c0d4080d30472a8b63ed03d24b2d4",
+      "digest8": "19d781be"
+    },
+    {
+      "name": "key order by UTF-16 code units, numbers in ES form",
+      "action": "Rename a file",
+      "fields": {
+        "agentId": "a",
+        "tier": "ask",
+        "😀": 1,
+        "é": 2,
+        "Z": 3,
+        "a": 4,
+        "n": [
+          1e+21,
+          0.1,
+          0,
+          1.5e-7,
+          100
+        ]
+      },
+      "jcs": "{\"Z\":3,\"a\":4,\"action\":\"Rename a file\",\"agentId\":\"a\",\"n\":[1e+21,0.1,0,1.5e-7,100],\"tier\":\"ask\",\"é\":2,\"😀\":1}",
+      "sha256": "b7183a17cdcd26873598d14617318404ee8e0ea2e0da38ef9aac37e33f04d49f",
+      "digest8": "b7183a17"
+    },
+    {
+      "name": "refused: lone high surrogate in a detail value",
+      "action": "Send an invoice",
+      "fields": {
+        "agentId": "bookkeeper-1",
+        "tier": "ask",
+        "memo": "x\ud800y"
+      },
+      "jcs": null,
+      "sha256": null,
+      "digest8": null,
+      "refused": "malformed"
+    },
+    {
+      "name": "refused: lone low surrogate in the action",
+      "action": "Pay \udc00",
+      "fields": {
+        "tier": "ask"
+      },
+      "jcs": null,
+      "sha256": null,
+      "digest8": null,
+      "refused": "malformed"
+    },
+    {
+      "name": "refused: lone surrogate in a key",
+      "action": "a",
+      "fields": {
+        "tier": "ask",
+        "k\udbff": 1
+      },
+      "jcs": null,
+      "sha256": null,
+      "digest8": null,
+      "refused": "malformed"
+    }
+  ]
+}

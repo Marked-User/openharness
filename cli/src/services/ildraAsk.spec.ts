@@ -3,7 +3,7 @@
  * `ildra_ask_answer` requests and take their origin from the connection the gateway authenticated, never
  * from the payload; the pane guard is the one the terminal input path consults.
  */
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -11,6 +11,9 @@ import { ILDRA_ASK_REQUESTS } from '../core/api.js'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { createIldraAsk } from './ildraAsk.js'
 import { PhonePairing, type ApprovalTemplate, type AskRequest } from './approvals.js'
+import { randomBytes as aidBytes } from 'node:crypto'
+/** DECISIONS ad47477: every answer carries a fresh answerId (device firmware: 32 hex from 128 random bits). */
+const aid = (): string => aidBytes(16).toString('hex')
 
 const T: ApprovalTemplate = { permissions: { ask: ['Rename a file', 'Send an email'], locked_ask: ['Brakes step'] } }
 const OWN = 'O'.repeat(43) + '='
@@ -21,14 +24,16 @@ function setup(clients: Record<string, IldraAskClient | null> = {}) {
   const d = mkdtempSync(join(tmpdir(), 'ildra-ask-'))
   const sent: { channel: string; req: AskRequest }[] = []
   const core = createIldraAskCore({ clientOf: (connId) => clients[connId] ?? null, isLoopback: (connId) => connId === 'desk' })
-  const svc = createIldraAsk({ inputs: core, journalPath: join(d, 'j', 'approvals.json'), markerPath: join(d, 'm', 'x.installed') })
+  const journalPath = join(d, 'j', 'approvals.json')
+  const svc = createIldraAsk({ inputs: core, journalPath, markerPath: join(d, 'm', 'x.installed') })
   svc.bridge = (channel, _prompt, req) => { sent.push({ channel, req }) }
   // One object for the tests: the core's requests and guard, the service's ask and journal.
   const rt = { requests: core.requests, guard: core.guard, ask: svc.ask, journal: svc.journal, cancel: core.cancel,
     set onSettled(fn: (id: string, ans: Record<string, unknown>) => void) { core.onAnswer = fn } }
-  return { rt, sent, core, svc }
+  return { rt, sent, core, svc, journalPath }
 }
-const answerFor = (req: AskRequest, extra: Record<string, unknown> = {}) => ({ id: req.id, digest8: req.digest8, approved: true, holdMs: 2000, ...extra })
+const until = async (f: () => boolean): Promise<void> => { for (let i = 0; i < 50 && !f(); i++) await new Promise((r) => setTimeout(r, 0)) }
+const answerFor = (req: AskRequest, extra: Record<string, unknown> = {}) => ({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: 2000, ...extra })
 
 describe('ildra_ask_answer', () => {
   it('with no bridge set, an Ask is denied without waiting and the pane is not left guarded', async () => {
@@ -67,6 +72,28 @@ describe('ildra_ask_answer', () => {
     expect(await p).toMatchObject({ approved: true, channel: 'touch' })
     expect(rt.guard.filterInput('agent-1', 'remote')).toBe('pass')
   })
+  it('ildra.ask.attempt: a short device hold is emitted to the phone and journaled; the Ask stays open for a proper hold', async () => {
+    const { rt, sent, svc, journalPath } = setup({ dev: { identity: OWN, role: 'device' } })
+    const events: { type: string; body: Record<string, unknown> }[] = []
+    svc.events = (type, body) => { events.push({ type, body: { ...body } }) }
+    const p = rt.ask(T, 'Rename a file', null, { kind, agentId: 'agent-1', available: ['touch'] })
+    await until(() => sent.length === 1)
+    const req = sent[0]!.req
+    const short = answerFor(req, { holdMs: 900 })
+    await rt.requests.ildra_ask_answer(short, { local: false, owner: false, connection: 'dev' })
+    await until(() => sent.length === 2)
+    expect(events).toEqual([{ type: 'ildra.ask.attempt', body: { id: req.id, answerId: short.answerId, channel: 'touch', reason: 'hold_too_short', holdMs: 900, at: expect.any(Number) } }])
+    // Kept in the journal (the activity log reads it from there) and still open: same id and digest8 re-shown.
+    const onDisk = JSON.parse(readFileSync(journalPath, 'utf8')) as { ledger: { attempts: unknown[]; open: { id: string }[] } }
+    expect(onDisk.ledger.attempts).toEqual([events[0]!.body])
+    expect(onDisk.ledger.open.map((r) => r.id)).toEqual([req.id])
+    expect(sent[1]!.req).toMatchObject({ id: req.id, digest8: req.digest8 })
+    expect(rt.guard.filterInput('agent-1', 'remote')).toBe('block')
+    // The same answerId again is a replay and spends the Ask, so the firmware must draw a fresh one per reply.
+    await rt.requests.ildra_ask_answer(answerFor(req), { local: false, owner: false, connection: 'dev' })
+    expect(await p).toMatchObject({ approved: true, channel: 'touch' })
+    expect(rt.journal().ledger.attempts()).toHaveLength(1)
+  })
   it('F12: a gateway-shared connection never approves, whatever the payload claims about itself', async () => {
     const { rt, sent } = setup({ sh: { identity: SHARED, role: 'web', shared: true } })
     const p = rt.ask(T, 'Rename a file', null, { kind, agentId: 'agent-1', available: ['touch'] })
@@ -102,7 +129,7 @@ describe('ildra_ask_answer', () => {
   })
   it('an answer for no open Ask is refused and never approves; a second answer to the same Ask is refused', async () => {
     const { rt, sent } = setup({ dev: { identity: OWN, role: 'device' } })
-    expect(await rt.requests.ildra_ask_answer({ id: 'nope', digest8: '0011aabb', approved: true }, { local: false, owner: false, connection: 'dev' })).toEqual({ ok: false, reason: 'unknown_id' })
+    expect(await rt.requests.ildra_ask_answer({ id: 'nope', digest8: '0011aabb', answerId: aid(), approved: true }, { local: false, owner: false, connection: 'dev' })).toEqual({ ok: false, reason: 'unknown_id' })
     const p = rt.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
     await Promise.resolve()
     const a = answerFor(sent[0]!.req)

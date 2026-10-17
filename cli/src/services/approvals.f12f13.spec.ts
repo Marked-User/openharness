@@ -5,6 +5,9 @@ import {
   phoneElicitationPress, sharedOriginFromPeers,
   type AskAnswer, type AskRequest, type ApprovalTemplate,
 } from './approvals.js'
+import { randomBytes as aidBytes } from 'node:crypto'
+/** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
+const aid = (): string => aidBytes(16).toString('hex')
 
 /** Shield pilot review A1: a device (touch) approval is a hold of 1.5 s or more; phone answers ignore it. */
 const HOLD = 2000
@@ -15,7 +18,7 @@ const kind = { manifest: [{ name: 'x', send: false, owner: 'bridge' }], tool: 'x
 const SHARED_PUB = 'S'.repeat(43) + '='
 const OWN_PUB = 'O'.repeat(43) + '='
 const isShared = sharedOriginFromPeers([{ machineId: 'm-shared', pub: SHARED_PUB }])
-const good = (req: AskRequest, from: AskAnswer['from']): AskAnswer => ({ id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD, from })
+const good = (req: AskRequest, from: AskAnswer['from']): AskAnswer => ({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: HOLD, from })
 
 describe('F12: the shared flag comes from the gateway, not the answer', () => {
   // A plain Ask on the device (touch): locked_ask is phone-only since the pilot review (A1).
@@ -38,7 +41,7 @@ describe('F12: the shared flag comes from the gateway, not the answer', () => {
   })
   it('an answer with no origin is looked up as empty; a non-false lookup result counts as shared', async () => {
     const seen: unknown[] = []
-    const r = await ask(T, 'Send an email', null, (_c, _p, req) => ({ id: req!.id, digest8: req!.digest8, approved: true, holdMs: HOLD }), { ledger: new AskLedger(), kind, isShared: (o) => { seen.push(o); return false } })
+    const r = await ask(T, 'Send an email', null, (_c, _p, req) => ({ id: req!.id, digest8: req!.digest8, answerId: aid(), approved: true, holdMs: HOLD }), { ledger: new AskLedger(), kind, isShared: (o) => { seen.push(o); return false } })
     expect(r.approved).toBe(true)
     expect(seen).toEqual([{}])
     const r2 = await ask(T, 'Send an email', null, (_c, _p, req) => good(req!, {}), { ledger: new AskLedger(), kind, isShared: () => undefined as never })

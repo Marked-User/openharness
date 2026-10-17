@@ -12,6 +12,9 @@ import {
   ApprovalDenied, ApprovalWindow, AskLedger, answerMcpElicitation, DEVICE_HOLD_MIN_MS, PhonePairing, ask, defaultMarkerPath, isSendTool, openJournal,
   type AskAnswer, type AskRequest, type ApprovalTemplate, type ToolManifestEntry,
 } from './approvals.js'
+import { randomBytes as aidBytes } from 'node:crypto'
+/** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
+const aid = (): string => aidBytes(16).toString('hex')
 
 const T: ApprovalTemplate = { permissions: { ask: ['Send an email', 'Pay a bill', 'Rename a file'], locked_ask: ['Brakes step'] } }
 const MIC = { speaking: () => {} }
@@ -23,7 +26,7 @@ function paired() {
   return p
 }
 const yes = (extra: Partial<AskAnswer> = {}) => (_c: unknown, _p: unknown, req?: AskRequest): AskAnswer =>
-  ({ id: req!.id, digest8: req!.digest8, approved: true, from: { phoneId: 'p1' }, ...extra })
+  ({ id: req!.id, digest8: req!.digest8, answerId: aid(), approved: true, from: { phoneId: 'p1' }, ...extra })
 
 describe('(a) unknown tools can send', () => {
   it('only an explicit send:false entry is not a send', () => {
@@ -116,7 +119,7 @@ describe('(c) on-device approval', () => {
     const base = { ledger: new AskLedger(), mic: MIC, kind: { manifest: notSend('t'), tool: 't' }, available: ['voice', 'touch', 'phone'] }
     let asked = 0
     const fn = (...a: Parameters<ReturnType<typeof yes>>) => { asked++; return yes({ holdMs: 3000 })(...a) }
-    expect(await ask(T, 'Brakes step', null, fn, base)).toEqual({ approved: false, channel: null, tier: 'locked_ask' })
+    expect(await ask(T, 'Brakes step', null, fn, base)).toEqual({ approved: false, channel: null, tier: 'locked_ask', reason: 'no_channel' })
     expect(await ask(T, 'Pay a bill', null, fn, { ...base, window: new ApprovalWindow(), agentId: 'a', amountMinor: 0 })).toMatchObject({ approved: false, channel: null })
     expect(asked).toBe(0)
   })
@@ -140,12 +143,12 @@ describe('(c) on-device approval', () => {
   it('a non-number, NaN or negative hold is not a hold', () => {
     for (const holdMs of ['2000', Number.NaN, -5, Infinity] as unknown[]) {
       const l = new AskLedger(); const req = l.open({ action: 'Rename a file', tier: 'ask', channel: 'touch' })
-      expect(l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs } as AskAnswer), String(holdMs)).toEqual({ ok: false, reason: 'hold_too_short' })
+      expect(l.settle({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs } as AskAnswer), String(holdMs)).toEqual({ ok: false, reason: 'hold_too_short' })
     }
   })
   it('a device deny needs no hold (swipe)', () => {
     const l = new AskLedger(); const req = l.open({ action: 'Rename a file', tier: 'ask', channel: 'touch' })
-    expect(l.settle({ id: req.id, digest8: req.digest8, approved: false })).toEqual({ ok: true })
+    expect(l.settle({ id: req.id, digest8: req.digest8, answerId: aid(), approved: false })).toEqual({ ok: true })
   })
   it('the hold rule applies to the device only: phone answers need no holdMs', async () => {
     const r = await ask(T, 'Rename a file', null, yes(), { ledger: new AskLedger(), pairing: paired(), kind: { manifest: notSend('t'), tool: 't' }, available: ['phone'] })
@@ -160,7 +163,7 @@ describe('(c) on-device approval', () => {
       expect(['malformed', 'digest_mismatch']).toContain((r as { reason: string }).reason)
     }
     const req = l.open({ action: 'Rename a file', tier: 'ask', channel: 'touch' })
-    expect(l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: 2000 })).toEqual({ ok: true })
+    expect(l.settle({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: 2000 })).toEqual({ ok: true })
   })
   it('a journal from before the rule: a pending money or locked_ask Ask on touch or voice is denied on restore', () => {
     const l = new AskLedger()
@@ -170,12 +173,12 @@ describe('(c) on-device approval', () => {
       mk('m-phone', 'phone', { amountMinor: 5, currency: 'USD' }), mk('plain', 'touch', {}),
     ], spent: [] })
     expect(l.pending()).toBe(2)
-    expect(l.settle({ id: 'm-touch', digest8: '0011aabb', approved: true, holdMs: 5000 })).toEqual({ ok: false, reason: 'replayed' })
-    expect(l.settle({ id: 'l-touch', digest8: '0011aabb', approved: true, holdMs: 5000 })).toEqual({ ok: false, reason: 'replayed' })
-    expect(l.settle({ id: 'plain', digest8: '0011aabb', approved: true, holdMs: 5000 })).toEqual({ ok: true })
+    expect(l.settle({ id: 'm-touch', digest8: '0011aabb', answerId: aid(), approved: true, holdMs: 5000 })).toEqual({ ok: false, reason: 'replayed' })
+    expect(l.settle({ id: 'l-touch', digest8: '0011aabb', answerId: aid(), approved: true, holdMs: 5000 })).toEqual({ ok: false, reason: 'replayed' })
+    expect(l.settle({ id: 'plain', digest8: '0011aabb', answerId: aid(), approved: true, holdMs: 5000 })).toEqual({ ok: true })
   })
   it('reference mode (parity with eng/reference) keeps its old channel order', async () => {
     const r = await ask(T, 'Brakes step', null, () => true, { reference: true, available: ['touch'] })
-    expect(r).toEqual({ approved: true, channel: 'touch', tier: 'locked_ask' })
+    expect(r).toEqual({ approved: true, channel: 'touch', tier: 'locked_ask', reason: 'approved' })
   })
 })

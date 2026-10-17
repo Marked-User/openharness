@@ -80,7 +80,7 @@ export function createIldraAskCore(deps: {
         const from = originOf(asker.connection, payload.from)
         if (!from) return { ok: false, reason: 'no_connection' }
         const answer: Record<string, unknown> = {
-          id: payload.id, digest8: payload.digest8, approved: payload.approved === true, from,
+          id: payload.id, digest8: payload.digest8, answerId: payload.answerId /* checked by the ledger (malformed) */, approved: payload.approved === true, from,
           ...(typeof payload.holdMs === 'number' ? { holdMs: payload.holdMs } : {}),
           ...(typeof payload.transcript === 'string' ? { transcript: payload.transcript } : {}),
           ...(typeof payload.signature === 'string' ? { signature: payload.signature } : {}),

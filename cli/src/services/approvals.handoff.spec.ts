@@ -5,6 +5,9 @@ import {
   answerMcpElicitation, applyOverride, ask, askExpired, askExpiryMs, resolve,
   type AskAnswer, type AskRequest, type ApprovalTemplate, type AskOptions,
 } from './approvals.js'
+import { randomBytes as aidBytes } from 'node:crypto'
+/** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
+const aid = (): string => aidBytes(16).toString('hex')
 
 /** Shield pilot review A1: a device (touch) approval is a hold of 1.5 s or more; phone answers ignore it. */
 const HOLD = 2000
@@ -25,7 +28,7 @@ function clock(t = 1_000_000) {
   return { now: () => t, advance: (ms: number) => { t += ms } }
 }
 const good = (req: AskRequest, extra: Partial<AskAnswer> = {}): AskAnswer =>
-  ({ id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD, transcript: req.challenge ? `ok ${req.challenge}` : undefined, from: { phoneId: 'p1' }, ...extra })
+  ({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: HOLD, transcript: req.challenge ? `ok ${req.challenge}` : undefined, from: { phoneId: 'p1' }, ...extra })
 // Shield pilot review (a): only an explicit send:false keeps a tool out of the send checks.
 // locked_ask and money Asks are phone-only (pilot review A1), so the default has phone p1 paired.
 const prod = (o: Partial<AskOptions> = {}): AskOptions => ({ ledger: new AskLedger(), kind: { manifest: [{ name: 'x', send: false, owner: 'bridge' }], tool: 'x' }, pairing: pairedP1(), ...o })

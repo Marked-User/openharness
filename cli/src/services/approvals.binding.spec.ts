@@ -8,6 +8,9 @@ import {
   PhonePairing, openJournal, transcriptMatches,
   type AskAnswer, type AskChannel, type AskRequest, type ApprovalTemplate,
 } from './approvals.js'
+import { randomBytes as aidBytes } from 'node:crypto'
+/** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
+const aid = (): string => aidBytes(16).toString('hex')
 
 /** Shield pilot review A1: a device (touch) approval is a hold of 1.5 s or more; phone answers ignore it. */
 const HOLD = 2000
@@ -33,7 +36,7 @@ function clock(t = 1_000_000) {
   return { now: () => t, advance: (ms: number) => { t += ms } }
 }
 function good(req: AskRequest, extra: Partial<AskAnswer> = {}): AskAnswer {
-  return { id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD, transcript: req.challenge ? `yes ${req.challenge}` : undefined, from: { phoneId: 'phone-1' }, ...extra }
+  return { id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: HOLD, transcript: req.challenge ? `yes ${req.challenge}` : undefined, from: { phoneId: 'phone-1' }, ...extra }
 }
 
 describe('F2 digest8', () => {
@@ -46,7 +49,10 @@ describe('F2 digest8', () => {
     expect(actionDigest8('a', { recipient: 'x' })).not.toBe(actionDigest8('a', { recipient: 'y' }))
     expect(actionDigest8('a', { b: 1, a: 2 })).toBe(actionDigest8('a', { a: 2, b: 1 }))
     expect(actionDigest8('a', { to: ['x', 'y'] })).not.toBe(actionDigest8('a', { to: ['y', 'x'] }))
-    expect(actionDigest8('a', { f: () => 1, n: null })).toBe(actionDigest8('a', { f: () => 2, n: null }))
+    // RFC 8785: a value JSON cannot hold is refused, not guessed at (functions used to be dropped).
+    expect(() => actionDigest8('a', { f: () => 1 })).toThrow(ApprovalDenied)
+    expect(() => actionDigest8('a', { n: Number.NaN })).toThrow(ApprovalDenied)
+    expect(actionDigest8('a', { n: null })).not.toBe(actionDigest8('a'))
     expect(actionDigest8('a', { u: undefined })).toBe(actionDigest8('a'))
   })
 })
@@ -88,10 +94,10 @@ describe('F2 AskLedger', () => {
     const l = new AskLedger({ now: c.now, ttlMs: 1000 })
     const v = l.open({ action: 'Send an invoice', tier: 'ask', channel: 'voice' })
     expect(v.id).toMatch(/^[0-9a-f-]{36}$/)
-    expect(v.digest8).toBe(actionDigest8('Send an invoice', {}))
+    expect(v.digest8).toBe(actionDigest8('Send an invoice', { tier: 'ask' }))
     // Money is phone-only (pilot review A1); the amount and currency are in the digest.
     const m = l.open({ action: 'Send an invoice', tier: 'ask', channel: 'phone', amountMinor: 100 })
-    expect(m.digest8).toBe(actionDigest8('Send an invoice', { amountMinor: 100, currency: 'USD' }))
+    expect(m.digest8).toBe(actionDigest8('Send an invoice', { tier: 'ask', amountMinor: 100, currency: 'USD' }))
     expect(m.challenge).toBeUndefined()
     expect(v.expiresAt).toBe(1_001_000)
     expect(v.challenge?.split(' ')).toHaveLength(2)
@@ -169,10 +175,10 @@ describe('F2 ask with a ledger', () => {
     const l = new AskLedger()
     const seen: [AskChannel, string, AskRequest][] = []
     const r = await ask(BK, 'Send an invoice', null, (ch, p, req) => { seen.push([ch, p, req!]); return good(req!) }, { mic: MIC, ledger: l })
-    expect(r).toMatchObject({ approved: true, channel: 'voice', tier: 'ask', reason: undefined })
+    expect(r).toMatchObject({ approved: true, channel: 'voice', tier: 'ask', reason: 'approved' })
     const [, prompt, req] = seen[0]!
     expect(prompt).toBe(`ASK: Send an invoice (running total today: 1 actions, $0.00). Say "${req.challenge}" to approve.`)
-    expect(req.digest8).toBe(actionDigest8('Send an invoice', {}))
+    expect(req.digest8).toBe(actionDigest8('Send an invoice', { agentId: 'agent', tier: 'ask' }))
   })
   it('touch Ask needs no challenge', async () => {
     const r = await ask(BK, 'Send an invoice', null, (_c, _p, req) => good(req!), { ledger: new AskLedger(), available: ['touch'] })
@@ -206,7 +212,7 @@ describe('F2 ask with a ledger', () => {
   it('passes details into the digest', async () => {
     let d = ''
     await ask(BK, 'Send an invoice', null, (_c, _p, req) => { d = req!.digest8; return good(req!) }, { ledger: new AskLedger(), pairing: pairedPhone(), available: ['phone'], amountMinor: 700, details: { recipient: 'x' } })
-    expect(d).toBe(actionDigest8('Send an invoice', { amountMinor: 700, currency: 'USD', recipient: 'x' }))
+    expect(d).toBe(actionDigest8('Send an invoice', { agentId: 'agent', tier: 'ask', amountMinor: 700, currency: 'USD', recipient: 'x' }))
   })
   it('calls the Volt mic guard around a voice prompt (hook only)', async () => {
     const events: string[] = []
@@ -231,7 +237,7 @@ describe('F2 mic guard is required for voice in bound mode', () => {
     expect(r.channel).toBe('touch')
     const calls: unknown[] = []
     const r2 = await ask(BK, 'Send an invoice', null, (c) => calls.push(c), { ledger: new AskLedger(), available: ['voice'] })
-    expect(r2).toEqual({ approved: false, channel: null, tier: 'ask' })
+    expect(r2).toEqual({ approved: false, channel: null, tier: 'ask', reason: 'no_channel' })
     expect(calls).toEqual([])
   })
 })

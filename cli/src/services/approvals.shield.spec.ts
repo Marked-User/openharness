@@ -11,6 +11,9 @@ import {
   defaultMarkerPath, openJournal, phoneElicitationPress, sharedOriginFromPeers,
   type AskAnswer, type AskRequest, type ApprovalTemplate, type AnswerFn,
 } from './approvals.js'
+import { randomBytes as aidBytes } from 'node:crypto'
+/** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
+const aid = (): string => aidBytes(16).toString('hex')
 
 /** Shield pilot review A1: a device (touch) approval is a hold of 1.5 s or more; phone answers ignore it. */
 const HOLD = 2000
@@ -27,7 +30,7 @@ function dir() { return mkdtempSync(join(tmpdir(), 'shield-')) }
 function answerWith(fn: (req: AskRequest) => Partial<AskAnswer> | null): AnswerFn {
   return (_c, _p, req) => {
     const extra = fn(req!)
-    return extra === null ? true : { id: req!.id, digest8: req!.digest8, approved: true, holdMs: HOLD, transcript: req!.challenge ? `yes ${req!.challenge}` : undefined, from: { phoneId: 'p1' }, ...extra }
+    return extra === null ? true : { id: req!.id, digest8: req!.digest8, answerId: aid(), approved: true, holdMs: HOLD, transcript: req!.challenge ? `yes ${req!.challenge}` : undefined, from: { phoneId: 'p1' }, ...extra }
   }
 }
 function pairedPhone(now: () => number) {
@@ -42,7 +45,7 @@ describe('Shield F2: replay, expiry, digest', () => {
   it('replayed answer is rejected the second time', () => {
     const c = clock(); const l = new AskLedger({ now: c.now })
     const req = l.open({ action: 'Send an email', tier: 'ask', channel: 'touch' })
-    const a: AskAnswer = { id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD }
+    const a: AskAnswer = { id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: HOLD }
     expect(l.settle(a)).toEqual({ ok: true })
     expect(l.settle(a)).toEqual({ ok: false, reason: 'replayed' })
   })
@@ -50,7 +53,7 @@ describe('Shield F2: replay, expiry, digest', () => {
     const c = clock(); const f = join(dir(), 'j.json')
     const j1 = openJournal(f, { now: c.now })
     const req = j1.ledger.open({ action: 'Send an email', tier: 'ask', channel: 'touch' })
-    const a: AskAnswer = { id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD }
+    const a: AskAnswer = { id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: HOLD }
     expect(j1.ledger.settle(a).ok).toBe(true)
     const j2 = openJournal(f, { now: c.now })
     expect(j2.ledger.settle(a)).toEqual({ ok: false, reason: 'replayed' })
@@ -60,14 +63,14 @@ describe('Shield F2: replay, expiry, digest', () => {
     const req = l.open({ action: 'Pay a bill', tier: 'ask', channel: 'phone', amountMinor: 100 })
     expect(req.expiresAt - req.openedAt).toBe(3_600_000)
     c.advance(3_600_000)
-    expect(l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD })).toEqual({ ok: false, reason: 'expired' })
+    expect(l.settle({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: HOLD })).toEqual({ ok: false, reason: 'expired' })
   })
   it('answer for a different digest is rejected and spends the request', () => {
     const c = clock(); const l = new AskLedger({ now: c.now })
     const req = l.open({ action: 'Pay a bill', tier: 'ask', channel: 'phone', amountMinor: 100 })
     const other = actionDigest8('Pay a bill', { amountMinor: 999999, currency: 'USD' })
-    expect(l.settle({ id: req.id, digest8: other, approved: true, holdMs: HOLD })).toEqual({ ok: false, reason: 'digest_mismatch' })
-    expect(l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD })).toEqual({ ok: false, reason: 'replayed' })
+    expect(l.settle({ id: req.id, digest8: other, answerId: aid(), approved: true, holdMs: HOLD })).toEqual({ ok: false, reason: 'digest_mismatch' })
+    expect(l.settle({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: HOLD })).toEqual({ ok: false, reason: 'replayed' })
   })
   it('bare true (reference style) does not approve in production', async () => {
     const c = clock()
@@ -218,7 +221,7 @@ describe('Shield F8: send Ask content', () => {
   })
   it('prompt shows recipient and first line; both bound into the digest', async () => {
     let prompt = ''; const seen: AskRequest[] = []
-    const fn: AnswerFn = (_c, p, q) => { prompt = p; seen.push(q!); return { id: q!.id, digest8: q!.digest8, approved: true, holdMs: HOLD } }
+    const fn: AnswerFn = (_c, p, q) => { prompt = p; seen.push(q!); return { id: q!.id, digest8: q!.digest8, answerId: aid(), approved: true, holdMs: HOLD } }
     await ask(T, 'Send an email', null, fn, { ...o(), send: { recipient: 'a@x.com', message: '\n  Hello Bob  \nsecret line 2' } })
     expect(prompt).toContain('a@x.com'); expect(prompt).toContain('"Hello Bob"')
     await ask(T, 'Send an email', null, fn, { ...o(), send: { recipient: 'b@x.com', message: '\n  Hello Bob  \nsecret line 2' } })
@@ -239,7 +242,7 @@ describe('Shield F8: send Ask content', () => {
     await expect(ask(T, 'Send an email', null, () => { called++; return true }, { kind, ledger: new AskLedger(), available: ['touch'], isSend: false, send: { recipient: 'a@x.com', message: 'hi' } })).rejects.toThrow(/window/)
     expect(called).toBe(0)
     let prompt = ''
-    await ask(T, 'Send an email', null, (_c, p, q) => { prompt = p; return { id: q!.id, digest8: q!.digest8, approved: true, holdMs: HOLD } },
+    await ask(T, 'Send an email', null, (_c, p, q) => { prompt = p; return { id: q!.id, digest8: q!.digest8, answerId: aid(), approved: true, holdMs: HOLD } },
       { kind, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['touch'], isSend: false, send: { recipient: 'a@x.com', message: 'hi' } })
     expect(prompt).toContain('to a@x.com: "hi"')
   })
@@ -290,17 +293,17 @@ describe('Shield R3 pilot A1: device answers', () => {
   it('touch approval with no holdMs, 1499, NaN, Infinity or a string is too short', () => {
     for (const holdMs of [undefined, 1499, Number.NaN, Number.POSITIVE_INFINITY, '2000' as unknown as number, -5]) {
       const { l, req } = ledgerTouch()
-      expect(l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs })).toEqual({ ok: false, reason: 'hold_too_short' })
+      expect(l.settle({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs })).toEqual({ ok: false, reason: 'hold_too_short' })
     }
   })
   it('REOPEN (D5 b): holdMs is whatever the answer claims; any sender on the device channel can say 1500', () => {
     const { l, req } = ledgerTouch()
-    expect(l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: 1500 })).toEqual({ ok: true })
+    expect(l.settle({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: 1500 })).toEqual({ ok: true })
   })
   it('device answer with a different digest8 is rejected even with a long hold', () => {
     const { l, req } = ledgerTouch()
     const other = actionDigest8('Send an email', { recipient: 'evil@x.com' })
-    expect(l.settle({ id: req.id, digest8: other, approved: true, holdMs: 5000 })).toEqual({ ok: false, reason: 'digest_mismatch' })
+    expect(l.settle({ id: req.id, digest8: other, answerId: aid(), approved: true, holdMs: 5000 })).toEqual({ ok: false, reason: 'digest_mismatch' })
   })
   it('device answer with no digest8 is malformed', () => {
     const { l, req } = ledgerTouch()
@@ -331,7 +334,7 @@ describe('Shield R3 pilot A1: device answers', () => {
     body.ledger.open[0].amountMinor = 4000; body.ledger.open[0].currency = 'USD'
     writeFileSync(f, JSON.stringify(body))
     const j2 = openJournal(f, { now: c.now, markerPath: m })
-    expect(j2.ledger.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: 5000 })).toEqual({ ok: false, reason: 'replayed' })
+    expect(j2.ledger.settle({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: 5000 })).toEqual({ ok: false, reason: 'replayed' })
   })
 })
 
@@ -354,7 +357,7 @@ describe('Shield R3 F8 (a): send-ness', () => {
     const c = clock(); const pairing = pairedPhone(c.now)
     let called = 0
     const out = await answerMcpElicitation(T, { server: 'srv', message: 'Proceed?', tool: 'unknown.tool' }, null,
-      (_c, _p, q) => { called++; return { id: q!.id, digest8: q!.digest8, approved: true, from: { phoneId: 'p1' } } },
+      (_c, _p, q) => { called++; return { id: q!.id, digest8: q!.digest8, answerId: aid(), approved: true, from: { phoneId: 'p1' } } },
       { manifest: [], ledger: new AskLedger({ now: c.now }), window: new ApprovalWindow({ now: c.now }), agentId: 'a', pairing, available: ['phone'] })
     expect(out.action).toBe('decline'); expect(called).toBe(0)
     const out2 = await answerMcpElicitation(T, { server: 'srv', message: 'Proceed?' }, null, () => true, { manifest: [], ledger: new AskLedger(), pairing, available: ['phone'] })
@@ -367,11 +370,11 @@ describe('Shield R3 F12 and F13', () => {
     const c = clock(); const look = sharedOriginFromPeers([{ pub: 'SHAREDPUB' }])
     const mk = () => { const l = new AskLedger({ now: c.now }); return { l, req: l.open({ action: 'Send an email', tier: 'ask', channel: 'touch' }) } }
     let t = mk()
-    expect(t.l.settle({ id: t.req.id, digest8: t.req.digest8, approved: true, holdMs: 2000, from: { machinePub: 'SHAREDPUB', shared: false } }, { isShared: look })).toEqual({ ok: false, reason: 'shared_machine' })
+    expect(t.l.settle({ id: t.req.id, digest8: t.req.digest8, answerId: aid(), approved: true, holdMs: 2000, from: { machinePub: 'SHAREDPUB', shared: false } }, { isShared: look })).toEqual({ ok: false, reason: 'shared_machine' })
     t = mk()
-    expect(t.l.settle({ id: t.req.id, digest8: t.req.digest8, approved: true, holdMs: 2000, from: { machinePub: 'OWN' } }, { isShared: () => { throw new Error('down') } })).toEqual({ ok: false, reason: 'shared_machine' })
+    expect(t.l.settle({ id: t.req.id, digest8: t.req.digest8, answerId: aid(), approved: true, holdMs: 2000, from: { machinePub: 'OWN' } }, { isShared: () => { throw new Error('down') } })).toEqual({ ok: false, reason: 'shared_machine' })
     t = mk()
-    expect(t.l.settle({ id: t.req.id, digest8: t.req.digest8, approved: true, holdMs: 2000, from: { machinePub: 'OWN' } }, { isShared: look })).toEqual({ ok: true })
+    expect(t.l.settle({ id: t.req.id, digest8: t.req.digest8, answerId: aid(), approved: true, holdMs: 2000, from: { machinePub: 'OWN' } }, { isShared: look })).toEqual({ ok: true })
   })
   it('F12: pairing from a gateway-shared machine is refused', () => {
     const p = new PhonePairing({ isShared: sharedOriginFromPeers([{ pub: 'S' }]) } as never)

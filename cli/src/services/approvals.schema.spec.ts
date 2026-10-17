@@ -11,6 +11,9 @@ import {
   ApprovalWindow, AskLedger, PhonePairing, ask, pairingCheck,
   type AskAnswer, type AskRequest, type ApprovalTemplate,
 } from './approvals.js'
+import { randomBytes as aidBytes } from 'node:crypto'
+/** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
+const aid = (): string => aidBytes(16).toString('hex')
 
 /** Shield pilot review A1: a device (touch) approval is a hold of 1.5 s or more; phone answers ignore it. */
 const HOLD = 2000
@@ -115,7 +118,7 @@ describe('real AskAnswer, AskRejection and AskOutcome outputs', () => {
     const answers: AskAnswer[] = []
     const outcomes = []
     const answer = (extra: Partial<AskAnswer>) => (_c: unknown, _p: unknown, r?: AskRequest) => {
-      const a: AskAnswer = { id: r!.id, digest8: r!.digest8, approved: true, holdMs: HOLD, transcript: r!.challenge ? `yes ${r!.challenge}` : undefined, from: { phoneId: 'p1', machinePub: PUB }, ...extra }
+      const a: AskAnswer = { id: r!.id, digest8: r!.digest8, answerId: aid(), approved: true, holdMs: HOLD, transcript: r!.challenge ? `yes ${r!.challenge}` : undefined, from: { phoneId: 'p1', machinePub: PUB }, ...extra }
       if (a.transcript === undefined) delete a.transcript
       answers.push(a)
       return a
@@ -129,23 +132,23 @@ describe('real AskAnswer, AskRejection and AskOutcome outputs', () => {
     outcomes.push(await ask(T, 'Brakes step', null, answer({}), { ...o, available: ['voice'] }))
     for (const a of answers) { valid('AskAnswer', a); expect(envelope('ildra.ask.answer', a)).toEqual([]) }
     for (const out of outcomes) { valid('AskOutcome', out); expect(envelope('ildra.ask.outcome', out)).toEqual([]) }
-    expect(outcomes.map((x) => x.reason)).toEqual([undefined, undefined, 'digest_mismatch', 'unpaired_phone', undefined, undefined])
+    expect(outcomes.map((x) => x.reason)).toEqual(['approved', 'approved', 'digest_mismatch', 'unpaired_phone', 'approved', 'no_channel'])
     for (const reason of ['malformed', 'unknown_id', 'replayed', 'expired', 'digest_mismatch', 'challenge_mismatch', 'verifier_rejected', 'shared_machine', 'unpaired_phone', 'hold_too_short']) {
       valid('AskRejection', { ok: false, reason })
     }
     const req = l.open({ action: 'a', tier: 'ask', channel: 'touch' })
-    const rej = l.settle({ id: req.id, digest8: 'deadbeef', approved: true, holdMs: HOLD })
+    const rej = l.settle({ id: req.id, digest8: 'deadbeef', answerId: aid(), approved: true, holdMs: HOLD })
     valid('AskRejection', rej)
-    l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD })
-    const replay = l.settle({ id: req.id, digest8: req.digest8, approved: true, holdMs: HOLD })
+    l.settle({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: HOLD })
+    const replay = l.settle({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: HOLD })
     valid('AskRejection', replay)
     const req2 = l.open({ action: 'a', tier: 'ask', channel: 'touch' })
-    const short = l.settle({ id: req2.id, digest8: req2.digest8, approved: true, holdMs: 600 })
+    const short = l.settle({ id: req2.id, digest8: req2.digest8, answerId: aid(), approved: true, holdMs: 600 })
     expect(short).toEqual({ ok: false, reason: 'hold_too_short' })
     valid('AskRejection', short)
   })
   it('rejects malformed answers and outcomes', () => {
-    const a = { id: '00000000-0000-4000-8000-000000000000', digest8: '0011aabb', approved: true, holdMs: HOLD }
+    const a = { id: '00000000-0000-4000-8000-000000000000', digest8: '0011aabb', answerId: aid(), approved: true, holdMs: HOLD }
     valid('AskAnswer', a)
     invalid('AskAnswer', { ...a, approved: 'yes' })
     valid('AskAnswer', { ...a, holdMs: 1500.5 })
@@ -157,9 +160,14 @@ describe('real AskAnswer, AskRejection and AskOutcome outputs', () => {
     invalid('AskRejection', { ok: false, reason: 'nope' })
     invalid('AskRejection', { ok: true })
     invalid('AskOutcome', { approved: true, channel: 'touch', tier: 'ask', reason: 'expired' })
-    invalid('AskOutcome', { approved: false, channel: 'touch', tier: 'auto' })
-    invalid('AskOutcome', { approved: true, tier: 'ask' })
-    valid('AskOutcome', { approved: false, channel: null, tier: 'locked_ask' })
+    invalid('AskOutcome', { approved: false, channel: 'touch', tier: 'auto', reason: 'denied' })
+    invalid('AskOutcome', { approved: true, tier: 'ask', reason: 'approved' })
+    // PM spec (v3): reason always present, 'approved' exactly when approved.
+    invalid('AskOutcome', { approved: false, channel: null, tier: 'locked_ask' })
+    invalid('AskOutcome', { approved: true, channel: 'touch', tier: 'ask' })
+    invalid('AskOutcome', { approved: false, channel: 'touch', tier: 'ask', reason: 'approved' })
+    valid('AskOutcome', { approved: false, channel: null, tier: 'locked_ask', reason: 'no_channel' })
+    valid('AskOutcome', { approved: true, channel: 'touch', tier: 'ask', reason: 'approved' })
   })
 })
 

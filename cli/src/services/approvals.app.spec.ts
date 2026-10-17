@@ -5,6 +5,9 @@ import {
   ApprovalDenied, ApprovalWindow, AskLedger, PAIRING_CHECK_VERSION, PhonePairing, actionDigest8, ask, openJournal, pairingCheck,
   type AskRequest, type ApprovalTemplate,
 } from './approvals.js'
+import { randomBytes as aidBytes } from 'node:crypto'
+/** DECISIONS ad47477: every answer carries a fresh answerId (32 lowercase hex). */
+const aid = (): string => aidBytes(16).toString('hex')
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -43,15 +46,19 @@ describe('AskRequest display fields', () => {
   it('currency is present whenever amountMinor is, including 0', () => {
     expect(new AskLedger().open({ action: 'a', tier: 'ask', channel: 'phone', amountMinor: 0 }).currency).toBe('USD')
   })
-  it('display ids are not in the digest; currency and content are', () => {
+  it('templateId is not in the digest; agentId, tier, currency and content are (protocol README "Digest")', () => {
     const l = new AskLedger()
     const a = l.open({ action: 'a', tier: 'ask', channel: 'phone', amountMinor: 5, agentId: 'x', templateId: 't' })
-    const b = l.open({ action: 'a', tier: 'ask', channel: 'phone', amountMinor: 5, agentId: 'y', templateId: 'u' })
+    const b = l.open({ action: 'a', tier: 'ask', channel: 'phone', amountMinor: 5, agentId: 'x', templateId: 'u' })
+    const c = l.open({ action: 'a', tier: 'ask', channel: 'phone', amountMinor: 5, agentId: 'y', templateId: 't' })
+    const d = l.open({ action: 'a', tier: 'locked_ask', channel: 'phone', amountMinor: 5, agentId: 'x' })
     expect(a.digest8).toBe(b.digest8)
-    expect(a.digest8).toBe(actionDigest8('a', { amountMinor: 5, currency: 'USD' }))
-    expect(a.digest8).not.toBe(actionDigest8('a', { amountMinor: 5 }))
+    expect(c.digest8).not.toBe(a.digest8)
+    expect(d.digest8).not.toBe(a.digest8)
+    expect(a.digest8).toBe(actionDigest8('a', { agentId: 'x', tier: 'ask', amountMinor: 5, currency: 'USD' }))
+    expect(a.digest8).not.toBe(actionDigest8('a', { agentId: 'x', tier: 'ask', amountMinor: 5 }))
     const n = l.open({ action: 'a', tier: 'ask', channel: 'touch' })
-    expect(n.digest8).toBe(actionDigest8('a'))
+    expect(n.digest8).toBe(actionDigest8('a', { tier: 'ask' }))
   })
   it('journal round-trips the new fields and rejects bad ones', () => {
     const dir = mkdtempSync(join(tmpdir(), 'app-'))
@@ -199,7 +206,7 @@ describe('App follow-up: offer returns deviceNonce, pairingStatus', () => {
 describe('prompt text still reaches the answer function', () => {
   it('ASK and LOCKED_ASK prompts are generated and passed', async () => {
     const prompts: string[] = []
-    await ask(BK, 'Send an invoice', null, (_c, p, r) => { prompts.push(p); return { id: r!.id, digest8: r!.digest8, approved: false } },
+    await ask(BK, 'Send an invoice', null, (_c, p, r) => { prompts.push(p); return { id: r!.id, digest8: r!.digest8, answerId: aid(), approved: false } },
       { ledger: new AskLedger(), kind, available: ['touch'] })
     await ask({ permissions: { locked_ask: ['Brakes step'] } }, 'Brakes step', null, (_c, p) => { prompts.push(p); return false },
       { ledger: new AskLedger(), kind, pairing: paired(), available: ['phone'] })

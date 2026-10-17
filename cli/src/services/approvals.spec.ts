@@ -142,7 +142,7 @@ describe('applyOverride', () => {
 describe('ask', () => {
   it('default order picks voice for ask tier', async () => {
     const r = recorder()
-    expect(await ask(BK, 'Send an invoice', null, r.fn)).toEqual({ approved: true, channel: 'voice', tier: 'ask' })
+    expect(await ask(BK, 'Send an invoice', null, r.fn)).toEqual({ approved: true, channel: 'voice', tier: 'ask', reason: 'approved' })
     expect(r.calls).toEqual([['voice', 'ASK: Send an invoice']])
   })
   it('profile order respected, empty list uses default', async () => {
@@ -155,13 +155,13 @@ describe('ask', () => {
     expect((await ask(BK, 'Send an invoice', { ask_channel: ['voice', 'phone'] }, yes, { available: ['touch', 'phone'] })).channel).toBe('phone')
   })
   it('denied, truthy-but-not-true and async answers', async () => {
-    expect(await ask(BK, 'Send an invoice', null, () => false)).toEqual({ approved: false, channel: 'voice', tier: 'ask' })
+    expect(await ask(BK, 'Send an invoice', null, () => false)).toEqual({ approved: false, channel: 'voice', tier: 'ask', reason: 'denied' })
     for (const a of ['yes', 1, 'true', {}]) expect((await ask(BK, 'Send an invoice', null, () => a)).approved).toBe(false)
     expect((await ask(BK, 'Send an invoice', null, async () => true)).approved).toBe(true)
   })
   it('locked_ask prompts via touch and reports tier', async () => {
     const r = recorder()
-    expect(await ask(RG, 'Brakes step', STRICT, r.fn)).toEqual({ approved: true, channel: 'touch', tier: 'locked_ask' })
+    expect(await ask(RG, 'Brakes step', STRICT, r.fn)).toEqual({ approved: true, channel: 'touch', tier: 'locked_ask', reason: 'approved' })
     expect(r.calls).toEqual([['touch', 'LOCKED_ASK: Brakes step']])
     expect((await ask(RG, 'Brakes step', null, yes, { available: ['phone'] })).channel).toBe('phone')
   })
@@ -177,9 +177,9 @@ describe('ask', () => {
   })
   it('auto approves without prompt; strict makes it prompt', async () => {
     const r = recorder()
-    expect(await ask(BK, 'Read the ledger', null, r.fn)).toEqual({ approved: true, channel: null, tier: 'auto' })
+    expect(await ask(BK, 'Read the ledger', null, r.fn)).toEqual({ approved: true, channel: null, tier: 'auto', reason: 'approved' })
     expect(r.calls).toEqual([])
-    expect(await ask(BK, 'Read the ledger', STRICT, r.fn)).toEqual({ approved: true, channel: 'voice', tier: 'ask' })
+    expect(await ask(BK, 'Read the ledger', STRICT, r.fn)).toEqual({ approved: true, channel: 'voice', tier: 'ask', reason: 'approved' })
   })
 })
 
@@ -198,8 +198,8 @@ describe('Shield F1: voice refused for locked_ask and money over $50', () => {
   })
   it('locked_ask voice-only fails closed without prompting', async () => {
     const r = recorder()
-    expect(await ask(RG, 'Brakes step', null, r.fn, { available: ['voice'] })).toEqual({ approved: false, channel: null, tier: 'locked_ask' })
-    expect(await ask(RG, 'Brakes step', { ask_channel: ['voice'] }, r.fn)).toEqual({ approved: false, channel: null, tier: 'locked_ask' })
+    expect(await ask(RG, 'Brakes step', null, r.fn, { available: ['voice'] })).toEqual({ approved: false, channel: null, tier: 'locked_ask', reason: 'no_channel' })
+    expect(await ask(RG, 'Brakes step', { ask_channel: ['voice'] }, r.fn)).toEqual({ approved: false, channel: null, tier: 'locked_ask', reason: 'no_channel' })
     expect(r.calls).toEqual([])
   })
   it('money at the limit allows voice, over it skips voice', async () => {
@@ -220,7 +220,7 @@ describe('Shield F3: only voice, touch, phone', () => {
   })
   it('profile of only unknown channels fails closed', async () => {
     const r = recorder()
-    expect(await ask(BK, 'Send an invoice', { ask_channel: ['desktop'] }, r.fn)).toEqual({ approved: false, channel: null, tier: 'ask' })
+    expect(await ask(BK, 'Send an invoice', { ask_channel: ['desktop'] }, r.fn)).toEqual({ approved: false, channel: null, tier: 'ask', reason: 'no_channel' })
     expect(r.calls).toEqual([])
   })
 })
@@ -322,7 +322,7 @@ describe('Shield F5: running totals per agent per window', () => {
 describe('F6 and F2 hooks', () => {
   it('unpaired phone is not usable', async () => {
     const r = recorder()
-    expect(await ask(RG, 'Brakes step', null, r.fn, { available: ['phone'], isPaired: () => false })).toEqual({ approved: false, channel: null, tier: 'locked_ask' })
+    expect(await ask(RG, 'Brakes step', null, r.fn, { available: ['phone'], isPaired: () => false })).toEqual({ approved: false, channel: null, tier: 'locked_ask', reason: 'no_channel' })
     expect((await ask(RG, 'Brakes step', null, yes, { available: ['phone'], isPaired: () => true })).channel).toBe('phone')
     expect(r.calls).toEqual([])
   })
