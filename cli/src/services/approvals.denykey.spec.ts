@@ -263,3 +263,50 @@ describe('Shield D2a: the confirm is all or nothing', () => {
     expect(j.device.device()).toBe(dev.pub)
   })
 })
+
+describe('Shield (a): a deny key equal to the main key is refused, compared as parsed points, all or nothing', () => {
+  it('enroll.confirm: denyKey = the main key is refused whole (malformed): no device, no deny key, nothing on the ledger', async () => {
+    const r = rig(); r.pair()
+    const dev = deviceKeyPair()
+    const before = r.svc.journal().pairingLedger.all().length
+    expect(await r.installDeny(r.MAIN.pub, r.MAIN.key, dev)).toEqual({ ok: false, reason: 'malformed' })
+    expect(r.svc.journal().device.device()).toBeNull()
+    expect(r.svc.journal().pairing.denyKey('p1')).toBeNull()
+    expect(r.svc.journal().pairingLedger.all().slice(before).some((e) => e.kind === 'device_enrolled' || e.kind === 'deny_key_set')).toBe(false)
+    expect(new PhonePairing().canSetDenyKey('p1', r.MAIN.pub)).toBe(false)
+  })
+  it('pairing: a re-pair offering the current deny key as the main key is refused whole (bad_phone_key); the pairing and deny key stand', async () => {
+    const r = rig(); r.pair(); await r.installDeny()
+    const p = r.svc.journal().pairing
+    const { code } = p.begin('touch')
+    expect(p.offer('p1', r.DENY.pub, code)).toEqual({ ok: false, reason: 'bad_phone_key' })
+    expect(p.offer('p9', r.DENY.pub, p.begin('touch').code)).toEqual({ ok: false, reason: 'bad_phone_key' })
+    expect(p.phoneKey('p1')).toBe(r.MAIN.pub)
+    expect(p.denyKey('p1')).toBe(r.DENY.pub)
+    expect(p.isPaired('p9')).toBe(false)
+  })
+  it('pairing: a deny key installed between offer and confirm still blocks that main key at confirm', async () => {
+    const r = rig(); r.pair(); await r.installDeny()
+    const p = r.svc.journal().pairing
+    // p2 offers a fresh key; meanwhile p1 makes that same point its deny key; p2's confirm is then refused.
+    const K2 = phoneKeyPair()
+    const { code } = p.begin('touch')
+    expect(p.offer('p2', K2.pub, code)).toMatchObject({ ok: true })
+    expect(await r.installDeny(K2.pub)).toEqual({ ok: true, state: 'enrolled' })
+    expect(p.confirm('p2', 'touch', true)).toBe(false)
+    expect(p.isPaired('p2')).toBe(false)
+  })
+  it('unpair revokes the deny key (ledger deny_key_revoked unpaired, it signs nothing); re-pair plus a new confirm replaces it', async () => {
+    const r = rig(); r.pair(); await r.installDeny()
+    r.svc.journal().pairing.unpair('p1')
+    expect(r.svc.journal().pairingLedger.all().some((e) => e.kind === 'deny_key_revoked' && e.reason === 'unpaired')).toBe(true)
+    expect(r.svc.journal().pairing.denyKey('p1')).toBeNull()
+    r.pair()
+    const next = phoneKeyPair()
+    expect(await r.installDeny(next.pub)).toEqual({ ok: true, state: 'enrolled' })
+    const pa = r.phoneAsk(); await tick()
+    expect(await r.keyAnswer(r.sent.at(-1)!, r.DENY.key, false)).toEqual({ ok: false, reason: 'bad_signature' })
+    expect(await r.keyAnswer(r.sent.at(-1)!, next.key, false)).toEqual({ ok: true })
+    expect(await pa).toMatchObject({ approved: false })
+  })
+})

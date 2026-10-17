@@ -1414,6 +1414,8 @@ export class PhonePairing {
     // P-256 move (Shield rule 3): only a parsed 65-byte uncompressed P-256 point on the curve; anything else
     // (an Ed25519 key, a compressed point, SPKI or other wrapping) is refused.
     if (!rawPhoneKey(phonePub)) return no('bad_phone_key')
+    // Shield (a): a main key equal to a deny key is refused, the whole offer.
+    if (this.isDenyPoint(phonePub)) return no('bad_phone_key')
     const check = pairingCheck(code, phonePub, c.deviceNonce)
     const transport = typeof origin.machinePub === 'string' && origin.machinePub ? origin.machinePub : phonePub
     this.pendingPairs.set(phoneId, { phonePub, transport, check, expiresAt: c.expiresAt })
@@ -1434,6 +1436,7 @@ export class PhonePairing {
     this.pendingPairs.delete(phoneId)
     if (this.now() >= pend.expiresAt) return this.refuse(phoneId, 'expired')
     if (matched !== true) return this.refuse(phoneId, 'check_mismatch')
+    if (this.isDenyPoint(pend.phonePub)) return this.refuse(phoneId, 'bad_phone_key')
     { const why = this.changeRefusal(); if (why) return this.refuse(phoneId, why) }
     const reset = this.ledger.pendingReset()
     // Shield deny key condition 4: a main-key rotation (re-pair with another key) revokes the deny key, in this save.
@@ -1551,7 +1554,16 @@ export class PhonePairing {
   /** Shield deny key condition 2: set (or replace) this paired phone's one deny-only key. The caller checked the main-key signature. */
   /** Shield D2a: would setDenyKey accept this key? Checked before anything changes, so a confirm is all or nothing. */
   canSetDenyKey(phoneId: string, pub: string): boolean {
-    return !this.changesLocked() && !!this.phones.get(phoneId) && !!rawPhoneKey(pub) && pub !== this.phones.get(phoneId)
+    const main = rawPhoneKey(this.phones.get(phoneId)); const deny = rawPhoneKey(pub)
+    // Shield (a): a deny key equal to the main key is refused, by the parsed points.
+    return !this.changesLocked() && !!main && !!deny && !main.equals(deny)
+  }
+  /** Shield (a): an offered main key that equals a stored deny key (parsed points) is refused. */
+  private isDenyPoint(pub: string): boolean {
+    const p = rawPhoneKey(pub)
+    if (!p) return false
+    for (const d of this.denyKeys.values()) { const q = rawPhoneKey(d.pub); if (q && q.equals(p)) return true }
+    return false
   }
   setDenyKey(phoneId: string, pub: string): boolean {
     if (!this.canSetDenyKey(phoneId, pub)) return false
