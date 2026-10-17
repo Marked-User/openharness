@@ -12,7 +12,7 @@ import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { askAnswerMessage, deviceFingerprint, ledgerAckMessage, unpairMessage, unpairTouchMessage } from '../core/ildraDeviceProof.js'
 import { createIldraAsk, UNPAIR_RATE } from './ildraAsk.js'
 import { deviceKeyPair, phoneKeyPair, proveBridge, signedConfirm } from './ildraAsk.testkit.js'
-import { PairingLedger, stampManifest, type ApprovalTemplate, type AskRequest, type PairingLedgerEntry } from './approvals.js'
+import { LEDGER_STATE_RESERVE, MAX_PAIRING_LEDGER, PairingLedger, PhonePairing, stampManifest, type ApprovalTemplate, type AskRequest, type PairingLedgerEntry } from './approvals.js'
 
 const aid = (): string => randomBytes(16).toString('hex')
 const T: ApprovalTemplate = { permissions: { ask: ['Rename a file'] } }
@@ -368,5 +368,44 @@ describe('Shield B8: a device touch proof is single use', () => {
     expect(r2.sent.at(-1)).toMatchObject({ tier: 'locked_ask' })
     await r2.answer(r2.sent.at(-1)!, 'ph1', 'p1', true); expect(await q).toMatchObject({ ok: true })
     expect(r2.svc.journal().pairing.pairedCount()).toBe(0)
+  })
+})
+
+describe('Shield B9: the pairing ledger is bounded', () => {
+  it('noisy entries: at most 5 per key per minute; the next kept one carries the dropped count; other keys are not starved', () => {
+    let t = 1_000_000
+    const l = new PairingLedger(() => t)
+    for (let i = 0; i < 50; i++) l.append({ kind: 'verifier_rejected', phoneId: 'p1', verb: 'answer.touch', reason: 'verifier_rejected' })
+    expect(l.all()).toHaveLength(5)
+    expect(l.append({ kind: 'verifier_rejected', phoneId: 'p2', verb: 'answer.touch', reason: 'verifier_rejected' })).not.toBeNull()
+    t += 60_000
+    const e = l.append({ kind: 'verifier_rejected', phoneId: 'p1', verb: 'answer.touch', reason: 'verifier_rejected' })
+    expect(e).toMatchObject({ count: 46 })
+    expect(l.append({ kind: 'phone_paired', phoneId: 'p3' })).not.toBeNull() // state kinds are never coalesced
+  })
+  it(`at ${MAX_PAIRING_LEDGER - LEDGER_STATE_RESERVE} entries noisy kinds stop; near ${MAX_PAIRING_LEDGER} pairing changes are refused (ledger_full); a longer journal ledger fails closed`, () => {
+    let t = 0
+    const l = new PairingLedger(() => t)
+    for (let i = 0; i < MAX_PAIRING_LEDGER - LEDGER_STATE_RESERVE; i++) { t += 1; l.append({ kind: 'phone_open', phoneId: 'p1' }) }
+    t += 120_000
+    expect(l.append({ kind: 'pair_refused', phoneId: 'p9', reason: 'unknown_code' })).toBeNull()
+    const p = new PhonePairing({ now: () => t, ledger: l })
+    const k = phoneKeyPair(); const { code } = p.begin('touch')
+    expect(p.offer('p1', k.pub, code).ok).toBe(true); expect(p.confirm('p1', 'touch', true)).toBe(true)
+    while (l.all().length < MAX_PAIRING_LEDGER - 2) { t += 1; l.append({ kind: 'phone_open', phoneId: 'p1' }) }
+    const c2 = p.begin('touch').code
+    expect(p.offer('p2', phoneKeyPair().pub, c2)).toEqual({ ok: false, reason: 'ledger_full' })
+    expect(p.unpair('p1')).toBe(false)
+    expect(p.isPaired('p1')).toBe(true)
+    const big = Array.from({ length: MAX_PAIRING_LEDGER + 1 }, () => ({}))
+    expect(() => new PairingLedger().restore(big)).toThrow()
+  })
+  it('a phoneId over 64 characters: offer refuses it (bad_phone_id), the ledger cuts it, no lastRefusal is kept; the unpair API refuses it as malformed', async () => {
+    const p = new PhonePairing(); const { code } = p.begin('touch')
+    expect(p.offer('y'.repeat(65), phoneKeyPair().pub, code)).toEqual({ ok: false, reason: 'bad_phone_id' })
+    expect(p.ledger.all().at(-1)!.phoneId).toBe('y'.repeat(64))
+    expect(p.pairingStatus('y'.repeat(65))).toEqual({ state: 'unknown' })
+    const r = rig(); r.pair('p1', r.K.P1.pub)
+    expect(await r.unpair('z'.repeat(65), r.K.P1.key)).toEqual({ ok: false, reason: 'malformed' })
   })
 })

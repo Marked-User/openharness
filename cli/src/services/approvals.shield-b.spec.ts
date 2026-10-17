@@ -347,17 +347,16 @@ describe('Shield batch B: pairing ledger attacks (52977f9ac)', () => {
     for (const e of (await r.ledger() as { entries: PairingLedgerEntry[] }).entries) for (const v of Object.values(e)) if (typeof v === 'string') expect(v.length).toBeLessThanOrEqual(64)
   })
 
-  it('GAP B9 (Low): the ledger has no size bound; the device connection appends a verifier_rejected per message', async () => {
+  it('FIXED B9 (Low): the ledger is bounded: verifier_rejected entries from the device connection are coalesced; a claimed phoneId over 64 is refused and cut in the ledger', async () => {
     const r = await seeded()
     const unproven = await r.core.requests.ildra_ask_answer({ id: aid(), digest8: '00000000', answerId: aid(), approved: false, holdMs: 2000, phoneSignature: 'AAAA' }, r.remote('dev'))
     expect(unproven).toMatchObject({ ok: false })
     expect(proveBridge(r.core, 'dev', r.K.DEVK.key)).toBe(true)
     const n = r.svc.journal().pairingLedger.all().length
     for (let i = 0; i < 300; i++) await r.core.requests.ildra_ask_answer({ id: aid(), digest8: '00000000', answerId: aid(), approved: false, holdMs: 2000, phoneSignature: 'AAAA' }, r.remote('dev'))
-    expect(r.svc.journal().pairingLedger.all().length).toBe(n + 300)
-    // And a pairing refusal stores the claimed phoneId at any length.
+    expect(r.svc.journal().pairingLedger.all().length).toBeLessThanOrEqual(n + 5)
     r.svc.journal().pairing.offer('x'.repeat(5000), r.K.P2.pub, 'nope')
-    expect(r.svc.journal().pairingLedger.all().at(-1)!.phoneId!.length).toBe(5000)
+    expect(r.svc.journal().pairingLedger.all().at(-1)!.phoneId!.length).toBeLessThanOrEqual(64)
   })
 
   it('answered_by names the deny key for a deny-key Deny and the main key otherwise; a forged keyRole in the payload is ignored', async () => {

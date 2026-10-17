@@ -13,7 +13,7 @@ import {
   ask as askGate, deviceFingerprint, openJournal, practiceAsk, ToolManifestLoader,
   type ApprovalJournal, type ApprovalProfile, type ApprovalTemplate, type AskAnswer, type AskAttempt, type AskChannel,
   type AskHandoff, type AskOptions, type AskOutcome, type AskRequest, type EnrollReplaced, type EnrollSource, type ToolManifestEntry,
-  type AskAnsweredBy, stampManifest, UNPAIR_RESET_COUNT,
+  type AskAnsweredBy, stampManifest, UNPAIR_RESET_COUNT, LEDGER_STRING_MAX,
 } from './approvals.js'
 
 /** Batch B: the unpair API's rate limit (from the pairing ledger, daemon-wide) and clock skew for its signed `at`. */
@@ -237,7 +237,7 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
       j.pairingLedger.append({ kind: 'unpair_refused', ...(target ? { phoneId: target } : {}), by: from.phoneId as string, via: askId ? 'locked_ask' : 'phone', reason, ...(askId ? { askId } : {}) })
       return { ok: false as const, reason }
     }
-    if (typeof msg.phoneId !== 'string' || msg.phoneId === '' || typeof msg.at !== 'number' || !Number.isFinite(msg.at)) return { ok: false, reason: 'malformed' }
+    if (typeof msg.phoneId !== 'string' || msg.phoneId === '' || msg.phoneId.length > LEDGER_STRING_MAX || typeof msg.at !== 'number' || !Number.isFinite(msg.at)) return { ok: false, reason: 'malformed' }
     const target = msg.phoneId; const at = msg.at
     const v = j.pairing.verifyPhone(from.phoneId, 'pairing.unpair', unpairMessage(target, at), msg.signature)
     if (!v.ok) return { ok: false, reason: v.reason }
@@ -246,7 +246,7 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     // Each request that opened a locked_ask counts (refusals before that open no Ask and need a valid signature).
     // Shield B5: a ledger_reset counts as UNPAIR_RESET_COUNT requests, so a broken ledger never resets the limit.
     const recent = j.pairingLedger.all().reduce((n, e) => n + (now - e.at >= UNPAIR_WINDOW_MS ? 0 : e.kind === 'unpair_requested' ? 1 : e.kind === 'ledger_reset' ? (e.count ?? UNPAIR_RESET_COUNT) : 0), 0)
-    if (j.pairing.changesLocked()) return refuse('ledger_locked', target)
+    { const why = j.pairing.changeRefusal(); if (why) return refuse(why, target) }
     if (recent >= UNPAIR_RATE) return refuse('rate_limited', target)
     // Shield B7: one open unpair at a time, so two requests can never both pass the last-owner check below.
     if (unpairOpen !== null) return refuse('unpair_pending', target)
@@ -275,7 +275,7 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     // check and the change): if it would leave no paired phone, only a touch proof given for this request allows it.
     if (!j.pairing.isPaired(target)) return refuse('unknown_phone', target, askId || undefined)
     if (j.pairing.pairedCount() <= 1 && !touched) return refuse('last_owner_channel', target, askId || undefined)
-    if (!j.pairing.unpair(target, { by: from.phoneId, via: 'locked_ask', askId })) return refuse('ledger_locked', target, askId || undefined)
+    if (!j.pairing.unpair(target, { by: from.phoneId, via: 'locked_ask', askId })) return refuse(j.pairing.changeRefusal() ?? 'unknown_phone', target, askId || undefined)
     emit('ildra.pairing.unpaired', { phoneId: target, by: from.phoneId, askId, at: (deps.now ?? Date.now)(), remaining: j.pairing.pairedCount() })
     return { ok: true, state: 'unpaired', askId }
   }

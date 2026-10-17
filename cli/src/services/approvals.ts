@@ -1215,13 +1215,50 @@ function ledgerHash(prev: string, e: Omit<PairingLedgerEntry, 'prev' | 'hash'>):
   for (const k of LEDGER_FIELD_ORDER) if ((e as Record<string, unknown>)[k] !== undefined) body[k] = (e as Record<string, unknown>)[k]
   return createHash('sha256').update(`ildra-pairing-ledger:v1|${prev}|${JSON.stringify(body)}`, 'utf8').digest('hex')
 }
+/**
+ * Shield B9: the ledger's size bound. At most MAX_PAIRING_LEDGER entries (journal restore refuses more). Noisy kinds
+ * (refusals and requests anyone on the network or the device can cause) are coalesced: at most NOISY_PER_MINUTE per
+ * (kind, phoneId, verb, reason) in any 60 s, the next one kept carries count = 1 + those dropped; and none once the
+ * ledger holds MAX_PAIRING_LEDGER - LEDGER_STATE_RESERVE entries, so the last 1,000 are only for state changes. A
+ * full ledger refuses pairing changes (ledger_full). String fields are cut to LEDGER_STRING_MAX characters.
+ */
+export const MAX_PAIRING_LEDGER = 10_000
+export const LEDGER_STATE_RESERVE = 1_000
+export const NOISY_PER_MINUTE = 5
+export const LEDGER_STRING_MAX = 64
+const NOISY_LEDGER_KINDS: ReadonlySet<string> = new Set(['verifier_rejected', 'pair_refused', 'unpair_refused', 'device_enroll_requested', 'device_enroll_replaced', 'device_refused', 'device_expired'])
+const LEDGER_CAPPED_STRINGS = ['phoneId', 'by', 'via', 'reason', 'verb', 'uv'] as const
 export class PairingLedger {
   private readonly entries_: PairingLedgerEntry[] = []
+  /** Shield B9: noisy entries dropped by coalescing, per key, not yet carried by a kept entry's count. */
+  private readonly dropped = new Map<string, number>()
   onChange?: () => void
   constructor(private readonly now: () => number = Date.now) {}
-  append(f: PairingLedgerFields): PairingLedgerEntry {
+  /** Shield B9: no room left for a state change. */
+  full(): boolean { return this.entries_.length >= MAX_PAIRING_LEDGER }
+  append(f: PairingLedgerFields): PairingLedgerEntry | null {
     const last = this.entries_.at(-1)
-    const base: Omit<PairingLedgerEntry, 'prev' | 'hash'> = { seq: (last?.seq ?? 0) + 1, at: this.now(), ...f }
+    const at = this.now()
+    const g: Record<string, unknown> = { ...f }
+    for (const k of LEDGER_CAPPED_STRINGS) if (typeof g[k] === 'string' && (g[k] as string).length > LEDGER_STRING_MAX) g[k] = (g[k] as string).slice(0, LEDGER_STRING_MAX)
+    if (NOISY_LEDGER_KINDS.has(f.kind)) {
+      const key = `${f.kind}|${g.phoneId ?? ''}|${g.verb ?? ''}|${g.reason ?? ''}`
+      let recent = 0
+      for (let i = this.entries_.length - 1; i >= 0 && recent < NOISY_PER_MINUTE; i--) {
+        const e = this.entries_[i]!
+        if (at - e.at >= 60_000) break
+        if (`${e.kind}|${e.phoneId ?? ''}|${e.verb ?? ''}|${e.reason ?? ''}` === key) recent++
+      }
+      if (recent >= NOISY_PER_MINUTE || this.entries_.length >= MAX_PAIRING_LEDGER - LEDGER_STATE_RESERVE) {
+        this.dropped.set(key, (this.dropped.get(key) ?? 0) + 1)
+        return null
+      }
+      const d = this.dropped.get(key)
+      if (d) { g.count = d + 1; this.dropped.delete(key) }
+    } else if (this.full()) {
+      throw new ApprovalDenied('the pairing ledger is full')
+    }
+    const base: Omit<PairingLedgerEntry, 'prev' | 'hash'> = { seq: (last?.seq ?? 0) + 1, at, ...(g as unknown as PairingLedgerFields) }
     for (const k of Object.keys(base)) if ((base as Record<string, unknown>)[k] === undefined) delete (base as Record<string, unknown>)[k]
     const prev = last?.hash ?? LEDGER_GENESIS
     const e: PairingLedgerEntry = { ...base, prev, hash: ledgerHash(prev, base) }
@@ -1251,7 +1288,7 @@ export class PairingLedger {
   /** @internal Throws when the chain does not verify (an edited, dropped or reordered entry): the journal fails closed. */
   restore(data: unknown): void {
     if (data === undefined) return
-    if (!Array.isArray(data)) throw new Error('bad pairing ledger')
+    if (!Array.isArray(data) || data.length > MAX_PAIRING_LEDGER) throw new Error('bad pairing ledger')
     let prev = LEDGER_GENESIS; let seq = 0
     const out: PairingLedgerEntry[] = []
     for (const raw of data) {
@@ -1321,7 +1358,14 @@ export class PhonePairing {
    * ledger_reset and a phone is paired to acknowledge it. With no phone paired, a touch pairing is the owner and
    * its confirm acknowledges the reset.
    */
-  changesLocked(): boolean { return this.ledger.pendingReset() !== null && this.pairedCount() > 0 }
+  changesLocked(): boolean { return this.changeRefusal() !== null }
+  /** Shield B5 and B9: why a pairing change is refused now (ledger_locked, ledger_full), or null. */
+  changeRefusal(): 'ledger_locked' | 'ledger_full' | null {
+    if (this.ledger.pendingReset() !== null && this.pairedCount() > 0) return 'ledger_locked'
+    // Room for the change's own entries (an unpair may write two).
+    if (this.ledger.all().length >= MAX_PAIRING_LEDGER - 2) return 'ledger_full'
+    return null
+  }
 
   /** True after too many wrong codes, until the next begin('touch'). */
   get lockedOut(): boolean {
@@ -1331,7 +1375,7 @@ export class PhonePairing {
   private refuse(phoneId: string, reason: string): false {
     this.log.push({ at: this.now(), event: 'refused', phoneId, reason })
     this.ledger.append({ kind: 'pair_refused', phoneId, reason, via: 'touch' })
-    if (phoneId) this.lastRefusal.set(phoneId, reason)
+    if (phoneId && phoneId.length <= LEDGER_STRING_MAX) this.lastRefusal.set(phoneId, reason)
     this.onChange?.()
     return false
   }
@@ -1351,7 +1395,8 @@ export class PhonePairing {
   offer(phoneId: string, phonePub: string, code: string, origin: AnswerOrigin = {}): PairingOffer {
     const no = (reason: string): PairingOffer => { this.refuse(phoneId, reason); return { ok: false, reason } }
     if (this.lockedOut) return no('locked_out')
-    if (this.changesLocked()) return no('ledger_locked')
+    { const why = this.changeRefusal(); if (why) return no(why) }
+    if (typeof phoneId === 'string' && phoneId.length > LEDGER_STRING_MAX) return no('bad_phone_id')
     const c = this.codes.get(code)
     if (!c) {
       this.wrongCodes++
@@ -1389,7 +1434,7 @@ export class PhonePairing {
     this.pendingPairs.delete(phoneId)
     if (this.now() >= pend.expiresAt) return this.refuse(phoneId, 'expired')
     if (matched !== true) return this.refuse(phoneId, 'check_mismatch')
-    if (this.changesLocked()) return this.refuse(phoneId, 'ledger_locked')
+    { const why = this.changeRefusal(); if (why) return this.refuse(phoneId, why) }
     const reset = this.ledger.pendingReset()
     // Shield deny key condition 4: a main-key rotation (re-pair with another key) revokes the deny key, in this save.
     const before = this.phones.get(phoneId)
