@@ -3,7 +3,7 @@
  * D1 to D6: the phone deny key conditions, as real tests (were it.todo in approvals.shield-r7.spec.ts).
  * B: attacks on the pairing ledger and the unpair API. A test named GAP asserts a weakness Shield reported
  * that is still there; when Build fixes it, flip the assertion and rename it FIXED.
- * P-256: tests prepared for Build's move of phone keys to P-256 ECDSA; they skip until the verifier exists.
+ * P-256: Build f1911b9b4 exports verifyP256; these run against it and the daemon path verifyPhoneSignature.
  */
 import { createHash, generateKeyPairSync, randomBytes, sign, type KeyObject } from 'node:crypto'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
@@ -409,7 +409,34 @@ describe.skipIf(!verifyP256)('Shield P-256 phone keys (prepared; runs once Build
     expect(v(k.pub, M, der(r, low))).toBe(true)
     expect(v(k.pub, M, der(r, high))).toBe(true)
   })
-  it.todo('high-S and low-S of one answer are the same answer: the second is replayed (single use keys on answerId, not signature bytes); needs Build\'s P-256 pairing helper')
+  it('high-S and low-S of one answer are the same answer: the second copy is refused (single use keys on answerId, not signature bytes)', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); await r.enrollDevice(r.K.D1.pub)
+    const { p, req } = await r.phoneAsk()
+    const answerId = aid()
+    const m = askAnswerMessage(false, req.id, req.digest8, answerId)
+    const d = parseDer(sign('sha256', Buffer.from(m), r.K.D1.key))
+    const low = d.s > N / 2n ? N - d.s : d.s
+    const body = (s: bigint) => ({ id: req.id, digest8: req.digest8, answerId, approved: false, holdMs: 2000, from: { phoneId: 'p1' }, phoneSignature: der(d.r, s).toString('base64') })
+    expect(await r.core.requests.ildra_ask_answer(body(N - low), r.remote('ph1'))).toEqual({ ok: true })
+    await p
+    expect(await r.core.requests.ildra_ask_answer(body(low), r.remote('ph1'))).toMatchObject({ ok: false })
+    expect(r.svc.journal().pairing.denyLog).toHaveLength(1)
+  })
+  it('the daemon phone path (verifyPhoneSignature) follows the same rules, and also takes raw r||s', () => {
+    const vps = (proof as Record<string, unknown>).verifyPhoneSignature as (p: string, m: string, s: string) => boolean
+    const k = p256(); const pub = k.point.toString('base64url'); const { r, s } = parseDer(sign('sha256', Buffer.from(M), k.key))
+    const low = s > N / 2n ? N - s : s
+    expect(vps(pub, M, der(r, low).toString('base64'))).toBe(true)
+    expect(vps(pub, M, der(r, N - low).toString('base64'))).toBe(true)
+    expect(vps(pub, M, Buffer.concat([Buffer.from(r.toString(16).padStart(64, '0'), 'hex'), Buffer.from((N - low).toString(16).padStart(64, '0'), 'hex')]).toString('base64'))).toBe(true)
+    for (const [rr, ss] of [[0n, s], [r, 0n], [N, s], [r, N]] as [bigint, bigint][]) expect(vps(pub, M, der(rr, ss).toString('base64'))).toBe(false)
+    const off = Buffer.from(k.point); off[64] = off[64]! ^ 1
+    expect(vps(off.toString('base64url'), M, der(r, low).toString('base64'))).toBe(false)
+    expect(vps(k.point.toString('base64'), M, der(r, low).toString('base64'))).toBe(false) // stored keys are base64url only
+    const ed = phoneKeyPair()
+    expect(vps(pub, M, sign(null, Buffer.from(M), deviceKeyPair().key).toString('base64'))).toBe(false)
+    void ed
+  })
   it('r or s equal to 0, equal to n or above n are refused', () => {
     const k = p256(); const { r, s } = parseDer(sign('sha256', Buffer.from(M), k.key))
     for (const [rr, ss] of [[0n, s], [r, 0n], [N, s], [r, N], [r + N, s], [r, s + N], [N + 1n, s]] as [bigint, bigint][]) expect(v(k.pub, M, der(rr, ss))).toBe(false)
