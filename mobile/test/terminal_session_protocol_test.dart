@@ -1019,6 +1019,22 @@ void main() {
       expect(s.errorCode, 'TERMINAL_ERROR');
     });
 
+    test('Ildra F13: input refused on an Ildra Ask pane leaves the stream and its count alone', () async {
+      final (s, streamId) = await live();
+      s.terminal.textInput('a');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await s.handleFrame('terminal_error', {
+        'streamId': streamId,
+        'code': 'ILDRA_ASK_PANE',
+      });
+      expect(s.status, TerminalSessionStatus.controlling);
+      expect(s.errorCode, isNull);
+      expect(s.ildraAskRefusedAt, isNotNull);
+      s.terminal.textInput('b');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(_inputSeqs(wire), [0, 1]);
+    });
+
     test('a refused paste leaves the stream alone', () async {
       final (s, streamId) = await live();
 
