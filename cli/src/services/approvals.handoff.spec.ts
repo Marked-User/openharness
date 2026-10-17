@@ -208,8 +208,13 @@ describe('F6 and #1358 shared machines', () => {
     const pairing = new PhonePairing()
     complete(pairing, 'p1', pairing.begin('touch').code)
     const o = prod({ pairing, available: ['phone'] })
-    expect(await ask(RG, 'Brakes step', null, (_c, _p, req) => good(req!, { from: { phoneId: 'p2' } }), o)).toMatchObject({ approved: false, reason: 'unpaired_phone' })
-    expect(await ask(RG, 'Brakes step', null, (_c, _p, req) => good(req!, { from: {} }), o)).toMatchObject({ approved: false, reason: 'unpaired_phone' })
+    // Shield R7-10: the other phone is refused and the Ask stays open; the paired phone's answer decides it.
+    for (const from of [{ phoneId: 'p2' }, {}]) {
+      let n = 0
+      const out = await ask(RG, 'Brakes step', null, (_c, _p, req) => (++n === 1 ? good(req!, { from }) : good(req!, { approved: false })), o)
+      expect(out).toMatchObject({ approved: false, reason: 'denied' })
+      expect(n).toBe(2)
+    }
     expect(await ask(RG, 'Brakes step', null, (_c, _p, req) => good(req!), o)).toMatchObject({ approved: true, channel: 'phone' })
   })
   it('a ledger settle on a phone request with no pairing context fails', () => {
@@ -237,7 +242,10 @@ describe('#1340: phone MCP Accept/Decline goes through the Ask gate', () => {
   it('a bare phone tap (true), a denial, or an unpaired phone declines', async () => {
     expect((await answerMcpElicitation(BK, el, null, () => true, base)).action).toBe('decline')
     expect((await answerMcpElicitation(BK, el, null, (_c, _p, req) => good(req!, { approved: false }), base)).action).toBe('decline')
-    expect((await answerMcpElicitation(BK, el, null, (_c, _p, req) => good(req!, { from: { phoneId: 'zz' } }), base)).action).toBe('decline')
+    // R7-10: an unpaired phone's accept is refused (the Ask stays open); the paired phone then declines.
+    let n = 0
+    expect((await answerMcpElicitation(BK, el, null, (_c, _p, req) => (++n === 1 ? good(req!, { from: { phoneId: 'zz' } }) : good(req!, { approved: false })), base)).action).toBe('decline')
+    expect(n).toBe(2)
   })
   it('a never-listed or gate error declines', async () => {
     const T = { permissions: { never: ['MCP calendar: Allow access to your work calendar?'] } }

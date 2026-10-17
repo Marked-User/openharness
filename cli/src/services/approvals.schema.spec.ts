@@ -128,12 +128,15 @@ describe('real AskAnswer, AskRejection and AskOutcome outputs', () => {
     outcomes.push(await ask(T, 'Send an invoice', null, answer({}), o))
     outcomes.push(await ask(T, 'Brakes step', null, answer({}), { ...o, available: ['phone'] }))
     outcomes.push(await ask(T, 'Brakes step', null, answer({ digest8: 'ffffffff' }), { ...o, available: ['phone'] }))
-    outcomes.push(await ask(T, 'Brakes step', null, answer({ from: { phoneId: 'zz' } }), { ...o, available: ['phone'] }))
+    // R7-10: the unpaired answer is refused and the Ask stays open; the paired phone then denies it.
+    let n = 0
+    const unpairedThenDeny = answer({ from: { phoneId: 'zz' } }); const deny = answer({ approved: false })
+    outcomes.push(await ask(T, 'Brakes step', null, (c, p, r) => (++n === 1 ? unpairedThenDeny(c, p, r) : deny(c, p, r)), { ...o, available: ['phone'] }))
     outcomes.push(await ask(T, 'Read the ledger', null, answer({}), o))
     outcomes.push(await ask(T, 'Brakes step', null, answer({}), { ...o, available: ['voice'] }))
     for (const a of answers) { valid('AskAnswer', a); expect(envelope('ildra.ask.answer', a)).toEqual([]) }
     for (const out of outcomes) { valid('AskOutcome', out); expect(envelope('ildra.ask.outcome', out)).toEqual([]) }
-    expect(outcomes.map((x) => x.reason)).toEqual(['approved', 'approved', 'digest_mismatch', 'unpaired_phone', 'approved', 'no_channel'])
+    expect(outcomes.map((x) => x.reason)).toEqual(['approved', 'approved', 'digest_mismatch', 'denied', 'approved', 'no_channel'])
     for (const reason of ['malformed', 'unknown_id', 'replayed', 'expired', 'digest_mismatch', 'challenge_mismatch', 'verifier_rejected', 'shared_machine', 'unpaired_phone', 'hold_too_short']) {
       valid('AskRejection', { ok: false, reason })
     }

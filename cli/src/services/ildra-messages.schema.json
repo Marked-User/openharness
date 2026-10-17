@@ -212,7 +212,7 @@
         "at": { "$ref": "#/$defs/EpochMs" }
       },
       "if": { "properties": { "channel": { "const": "phone" } }, "required": ["channel"] },
-      "then": { "properties": { "reason": { "not": { "enum": ["hold_too_short", "stale_channel", "unknown_id", "no_authority"] } } }, "not": { "required": ["holdMs"] } },
+      "then": { "properties": { "reason": { "not": { "enum": ["hold_too_short", "stale_channel", "unknown_id", "no_authority", "unpaired_phone"] } } }, "not": { "required": ["holdMs"] } },
       "else": { "properties": { "reason": { "enum": ["hold_too_short", "stale_channel"] } } }
     },
 
@@ -351,12 +351,12 @@
     },
 
     "AskUnpaired": {
-      "description": "Daemon to the paired phone (Shield R7-10): phone answers not authenticated by the paired phone's key were refused (unpaired_phone). Aggregate only, no request id or answerId: sent at most once per 10-minute window, when the count in that window reaches 3. since is the window start.",
+      "description": "Daemon to the paired phone (Shield R7-10): phone answers not authenticated by the paired phone's key were refused (unpaired_phone). Aggregate only, no request id or answerId. Fixed constants (daemon UNPAIRED_WINDOW_MS 600000, UNPAIRED_NOTIFY 3): refusals are counted in 10-minute windows, a window starting at the first refusal after the previous one ended; the message is sent once, on the 3rd refusal in a window, and not again in that window however many follow. So count is always 3, since is the window start and at is the time of the 3rd refusal.",
       "type": "object",
       "additionalProperties": false,
       "required": ["count", "since", "at"],
       "properties": {
-        "count": { "type": "integer", "minimum": 1 },
+        "count": { "description": "Always 3 (UNPAIRED_NOTIFY).", "const": 3 },
         "since": { "$ref": "#/$defs/EpochMs" },
         "at": { "$ref": "#/$defs/EpochMs" }
       }

@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import Ajv2020Module from 'ajv/dist/2020.js'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
+import { stampChannel as stampForTest } from '../core/ildraChannel.js'
 import { deviceProofMessage } from '../core/ildraDeviceProof.js'
 import { createIldraAsk } from './ildraAsk.js'
 import { deviceKeyPair, proveBridge } from './ildraAsk.testkit.js'
@@ -36,7 +37,7 @@ const DEV2 = 'E'.repeat(43) + '='
 const PHONE = 'P'.repeat(43) + '='
 const OTHER = 'X'.repeat(43) + '='
 const paired = (): PhonePairing => { const p = new PhonePairing(); const { code } = p.begin('touch'); p.offer('p1', PHONE, code); p.confirm('p1', 'touch', true); return p }
-const tick = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve() }
+const tick = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve(); await new Promise((r) => setImmediate(r)); for (let i = 0; i < 20; i++) await Promise.resolve() }
 
 function rig(clients: Record<string, IldraAskClient>, path?: string) {
   const d = path ?? mkdtempSync(join(tmpdir(), 'build-r7-'))
@@ -280,6 +281,48 @@ describe('R7-10: an unpaired phone answer is refused first and spends nothing', 
     await r.answer(r.sent[r.sent.length - 1]!, 'ph', { from: { phoneId: 'p1' }, answerId })
     expect(await p).toMatchObject({ approved: true, channel: 'phone', reason: 'approved' })
   })
+  it('a flood of 200 unpaired answers to a payment Ask never ends it (no reprompt cap); then the real phone approves', async () => {
+    const r = rig({ ph: { identity: PHONE, role: 'web' }, x: { identity: OTHER, role: 'web' } }); r.pair(PHONE)
+    const P: ApprovalTemplate = { permissions: { ask: ['Pay an invoice'] } }
+    const p = r.svc.ask(P, 'Pay an invoice', null, { kind, agentId: 'a', available: ['phone'], amountMinor: 900_000 })
+    await tick()
+    const req = r.sent[0]!
+    expect(req.channel).toBe('phone')
+    let settled = false
+    void p.then(() => { settled = true })
+    for (let i = 0; i < 200; i++) {
+      await r.answer(r.sent[r.sent.length - 1]!, 'x', { from: { phoneId: 'p1' } })
+      await tick()
+    }
+    expect(settled).toBe(false)
+    const l = r.svc.journal().ledger
+    expect(l.pending()).toBe(1)
+    expect(l.attempts()).toEqual([])
+    expect(l.unpairedCount().count).toBe(200)
+    expect(r.events.filter((e) => e.type === 'ildra.ask.unpaired')).toHaveLength(1) // once per window
+    expect(r.sent[r.sent.length - 1]!.id).toBe(req.id)
+    await r.answer(r.sent[r.sent.length - 1]!, 'ph', { from: { phoneId: 'p1' } })
+    expect(await p).toMatchObject({ approved: true, channel: 'phone', reason: 'approved' })
+  })
+  it('the same through ask() directly, also with no_authority (unstamped) refusals; after expiry the flood ends it as expired', async () => {
+    let now = 1_000_000
+    const pp = new PhonePairing({ now: () => now }); const { code } = pp.begin('touch'); pp.offer('p1', PHONE, code); pp.confirm('p1', 'touch', true)
+    const P: ApprovalTemplate = { permissions: { ask: ['Pay an invoice'] } }
+    for (const finalKey of [PHONE, null]) {
+      const ledger = new AskLedger({ now: () => now, requireChannelStamp: true })
+      let n = 0
+      const out = await ask(P, 'Pay an invoice', null, (_c, _p, q) => {
+        n++
+        const a = { id: q!.id, digest8: q!.digest8, answerId: aid(), approved: true, via: 'phone', from: { phoneId: 'p1', machinePub: n <= 200 || finalKey === null ? OTHER : PHONE } }
+        if (n > 200 && finalKey === null) now = q!.expiresAt // the flood outlives the Ask
+        if (n % 2 === 0 || n > 200) stampForTest(a, 'phone')
+        return a
+      }, { kind, ledger, window: new ApprovalWindow(), agentId: 'a', available: ['phone'], pairing: pp, amountMinor: 900_000 })
+      if (finalKey) expect(out).toMatchObject({ approved: true, reason: 'approved' })
+      else expect(out).toMatchObject({ approved: false, reason: 'expired' })
+      expect(n).toBe(201)
+    }
+  })
   it('it is checked before anything else: a wrong digest or a bad challenge from an unpaired key is still unpaired_phone', () => {
     const l = new AskLedger(); const pp = new PhonePairing(); const { code } = pp.begin('touch'); pp.offer('p1', PHONE, code); pp.confirm('p1', 'touch', true)
     const req = l.open({ action: 'Brakes step', tier: 'locked_ask', channel: 'phone' })
@@ -305,6 +348,11 @@ describe('R7-10: an unpaired phone answer is refused first and spends nothing', 
     expect(seen).toHaveLength(2)
     expect(l.pending()).toBe(1)
     expect(valid('AskUnpaired', seen[0])).toBe(true)
+    expect(valid('AskUnpaired', { ...seen[0], count: 4 })).toBe(false) // locked: always 3
+    expect([UNPAIRED_WINDOW_MS, UNPAIRED_NOTIFY]).toEqual([600_000, 3])
+    // App R7-10: unpaired_phone is never a phone attempt on the wire.
+    expect(valid('AskAttempt', { id: req.id, answerId: aid(), channel: 'phone', reason: 'unpaired_phone', at: 1 })).toBe(false)
+    expect(valid('AskAttempt', { id: req.id, answerId: aid(), channel: 'phone', reason: 'digest_mismatch', at: 1 })).toBe(true)
     expect(seen[0]).not.toHaveProperty('id')
   })
 })

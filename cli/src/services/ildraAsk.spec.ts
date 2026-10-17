@@ -179,7 +179,8 @@ describe('ildra_ask_answer', () => {
     await Promise.resolve()
     const before = JSON.stringify(rt.journal().ledger.toJSON())
     await rt.requests.ildra_ask_answer(answerFor(sent[0]!.req, { from: { phoneId: 'p1' } }), { local: false, owner: true, connection: 'other' })
-    for (let i = 0; i < 20; i++) await Promise.resolve()
+    // ask() yields a turn after an uncounted refusal, then prompts again (same Ask).
+    for (let i = 0; i < 50 && sent.length < 2; i++) await new Promise((r) => setImmediate(r))
     expect(JSON.stringify(rt.journal().ledger.toJSON())).toBe(before)
     expect(rt.journal().ledger.attempts()).toEqual([])
     const last = sent[sent.length - 1]!.req
