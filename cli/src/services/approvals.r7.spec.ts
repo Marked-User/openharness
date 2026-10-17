@@ -304,7 +304,7 @@ describe('R7-10: an unpaired phone answer is refused first and spends nothing', 
     await r.answer(r.sent[r.sent.length - 1]!, 'ph', { from: { phoneId: 'p1' } })
     expect(await p).toMatchObject({ approved: true, channel: 'phone', reason: 'approved' })
   })
-  it('the same through ask() directly, also with no_authority (unstamped) refusals; after expiry the flood ends it as expired', async () => {
+  it('the same through ask() directly with channel-stamped answers; after expiry the flood ends it as expired', async () => {
     let now = 1_000_000
     const pp = new PhonePairing({ now: () => now }); const { code } = pp.begin('touch'); pp.offer('p1', PHONE, code); pp.confirm('p1', 'touch', true)
     const P: ApprovalTemplate = { permissions: { ask: ['Pay an invoice'] } }
@@ -315,7 +315,7 @@ describe('R7-10: an unpaired phone answer is refused first and spends nothing', 
         n++
         const a = { id: q!.id, digest8: q!.digest8, answerId: aid(), approved: true, via: 'phone', from: { phoneId: 'p1', machinePub: n <= 200 || finalKey === null ? OTHER : PHONE } }
         if (n > 200 && finalKey === null) now = q!.expiresAt // the flood outlives the Ask
-        if (n % 2 === 0 || n > 200) stampForTest(a, 'phone')
+        stampForTest(a, 'phone') // as the core channel layer does for every remote answer
         return a
       }, { kind, ledger, window: new ApprovalWindow(), agentId: 'a', available: ['phone'], pairing: pp, amountMinor: 900_000 })
       if (finalKey) expect(out).toMatchObject({ approved: true, reason: 'approved' })
@@ -354,6 +354,17 @@ describe('R7-10: an unpaired phone answer is refused first and spends nothing', 
     expect(valid('AskAttempt', { id: req.id, answerId: aid(), channel: 'phone', reason: 'unpaired_phone', at: 1 })).toBe(false)
     expect(valid('AskAttempt', { id: req.id, answerId: aid(), channel: 'phone', reason: 'digest_mismatch', at: 1 })).toBe(true)
     expect(seen[0]).not.toHaveProperty('id')
+  })
+})
+
+describe('R7-10 bound: only channel-stamped refusals are uncounted', () => {
+  it('an unstamped in-process unpaired answerFn (no remote sender) keeps the MAX_REPROMPTS bound and ends with unpaired_phone', async () => {
+    const pp = new PhonePairing(); const { code } = pp.begin('touch'); pp.offer('p1', PHONE, code); pp.confirm('p1', 'touch', true)
+    let n = 0
+    const out = await ask(T, 'Brakes step', null, (_c, _p, q) => { n++; return { id: q!.id, digest8: q!.digest8, answerId: aid(), approved: true, from: { phoneId: 'evil' } } },
+      { kind, ledger: new AskLedger(), window: new ApprovalWindow(), agentId: 'a', available: ['phone'], pairing: pp })
+    expect(out).toMatchObject({ approved: false, reason: 'unpaired_phone' })
+    expect(n).toBe(101)
   })
 })
 

@@ -1722,25 +1722,27 @@ export const MAX_REPROMPTS = 100
 /** Rejections that leave the Ask open, so ask() waits for another answer. */
 const KEEPS_ASK_OPEN: ReadonlySet<SettleReason> = new Set(['hold_too_short', 'stale_channel', 'wrong_channel'])
 /**
- * Shield R7-10: refusals that never touch per-Ask state (only the aggregate unpaired counter). They leave the Ask
- * open and do NOT count toward MAX_REPROMPTS, so a flood of them cannot end an Ask early; the Ask still ends when
- * it expires (ledger.get turns null), then with reason expired.
+ * Shield R7-10: refusals that never touch per-Ask state (only the aggregate unpaired counter). For an answer that
+ * came through the core channel layer (stamped: every remote answer does), they leave the Ask open and do NOT count
+ * toward MAX_REPROMPTS, so a flood cannot end an Ask early; the Ask still ends when it expires (ledger.get turns
+ * null), then with reason expired. An unstamped in-process answer (a direct caller, a test) has no remote sender
+ * to flood with and keeps the old bound. (no_authority from the connection is refused by the core before ask()
+ * ever sees it.)
  */
 const UNCOUNTED_REFUSALS: ReadonlySet<SettleReason> = new Set(['unpaired_phone', 'no_authority'])
-const yieldTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
 
 /**
  * One settle step of ask()/practiceAsk(): 'again' (counted), 'free' (uncounted, Ask still live), 'expired', or
  * 'done'. An uncounted refusal ends the Ask only when no phone could ever answer it: no phone is paired (or this
  * ask() was given no pairing), so there is no real phone to keep it open for.
  */
-function nextStep(ledger: AskLedger, id: string, s: SettleResult, prompts: number, phonePaired: boolean): 'again' | 'free' | 'done' | 'expired' {
+function nextStep(ledger: AskLedger, id: string, ans: unknown, s: SettleResult, prompts: number, phonePaired: boolean): 'again' | 'free' | 'done' | 'expired' {
   if (s.ok) return 'done'
-  if (UNCOUNTED_REFUSALS.has(s.reason)) {
+  if (UNCOUNTED_REFUSALS.has(s.reason) && stampedChannel(ans) !== undefined) {
     if (s.reason === 'unpaired_phone' && !phonePaired) return 'done'
     return ledger.get(id) === null ? 'expired' : 'free'
   }
-  return KEEPS_ASK_OPEN.has(s.reason) && prompts < MAX_REPROMPTS ? 'again' : 'done'
+  return (KEEPS_ASK_OPEN.has(s.reason) || UNCOUNTED_REFUSALS.has(s.reason)) && prompts < MAX_REPROMPTS ? 'again' : 'done'
 }
 
 export function neverOutcome(): AskOutcome { return { approved: false, channel: null, tier: 'never', reason: 'never' } }
@@ -1869,11 +1871,10 @@ export async function ask(
       s = bound.settle(ans as AskAnswer, { isPaired: pairing ? (id, pub) => (pub === undefined ? pairing.isPaired(id) : pairing.isPairedKey(id, pub)) : undefined, extra: opts.verifier, isShared: opts.isShared })
       // hold_too_short and stale_channel leave the Ask open: ask again on its (current) channel. R7-10:
       // unpaired_phone and no_authority leave it open too and are not counted (UNCOUNTED_REFUSALS).
-      const step = nextStep(bound, req.id, s, prompts, !!pairing?.isPaired())
+      const step = nextStep(bound, req.id, ans, s, prompts, !!pairing?.isPaired())
       if (step === 'expired') { s = { ok: false, reason: 'expired' }; break }
       if (step === 'done') break
       if (step === 'again') prompts++
-      else await yieldTurn() // an uncounted refusal: let timers (expiry, cancel) run between answers
     }
     approved = s.ok && (ans as AskAnswer).approved === true
     reason = s.ok ? (approved ? 'approved' : 'denied') : s.reason
@@ -1913,11 +1914,10 @@ export async function practiceAsk(
     if (channel === 'voice') opts.mic!.speaking(true)
     try { ans = await answerFn(channel, prompt, req) } finally { if (channel === 'voice') opts.mic!.speaking(false) }
     s = opts.ledger.settle(ans as AskAnswer, { isPaired: pairing ? (id, pub) => (pub === undefined ? pairing.isPaired(id) : pairing.isPairedKey(id, pub)) : undefined, isShared: opts.isShared })
-    const step = nextStep(opts.ledger, req.id, s, prompts, !!pairing?.isPaired())
+    const step = nextStep(opts.ledger, req.id, ans, s, prompts, !!pairing?.isPaired())
     if (step === 'expired') { s = { ok: false, reason: 'expired' }; break }
     if (step === 'done') break
     if (step === 'again') prompts++
-    else await yieldTurn()
   }
   const approved = s.ok && (ans as AskAnswer).approved === true
   return { approved, channel, tier: 'ask', reason: s.ok ? (approved ? 'approved' : 'denied') : s.reason, request: req, practice: true }
