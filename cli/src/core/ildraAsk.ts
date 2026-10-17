@@ -46,6 +46,9 @@ export interface IldraAskCore extends IldraAskInputs {
     ildra_device_enroll: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; devicePub: string; fingerprint: string; nonce: string; expiresAt: number } | { ok: false; reason: string }>
     ildra_device_enroll_confirm: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; state: string } | { ok: false; reason: string }>
     ildra_phone_open: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; denySummary: { count: number; since: number; at: number } | null } | { ok: false; reason: string }>
+    ildra_pairing_ledger: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; entries: unknown[]; head: { seq: number; hash: string } } | { ok: false; reason: string }>
+    ildra_pairing_unpair: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; state: 'unpaired'; askId: string } | { ok: false; reason: string }>
+    ildra_ask_answered_by: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; answeredBy: unknown } | { ok: false; reason: string }>
     ildra_device_challenge: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; nonce: string } | { ok: false; reason: string }>
     ildra_device_prove: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: boolean; reason?: string }>
   } & Record<string, ServiceRequest>
@@ -200,6 +203,25 @@ export function createIldraAskCore(deps: {
         if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
         if (!core.onPhoneOpen) return { ok: false, reason: 'unavailable' }
         return core.onPhoneOpen(origin.from)
+      },
+      // Batch B: the pairing ledger read API, the unpair API (locked_ask) and the answered-by read, all phone-only.
+      ildra_pairing_ledger: async (payload, asker) => {
+        const origin = originOf(asker.connection, payload?.from)
+        if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
+        if (!core.onPairingLedger) return { ok: false, reason: 'unavailable' }
+        return core.onPairingLedger(payload?.since, origin.from)
+      },
+      ildra_pairing_unpair: async (payload, asker) => {
+        const origin = originOf(asker.connection, payload?.from)
+        if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
+        if (!core.onPairingUnpair) return { ok: false, reason: 'unavailable' }
+        return core.onPairingUnpair({ phoneId: payload?.phoneId, at: payload?.at, signature: payload?.signature, ...(payload?.touchProof !== undefined ? { touchProof: payload.touchProof } : {}) }, origin.from)
+      },
+      ildra_ask_answered_by: async (payload, asker) => {
+        const origin = originOf(asker.connection, payload?.from)
+        if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
+        if (!core.onAnsweredBy) return { ok: false, reason: 'unavailable' }
+        return core.onAnsweredBy(payload?.id, origin.from)
       },
       ildra_device_challenge: async (_payload, asker) => {
         const nonce = asker.connection ? core.challengeDevice(asker.connection) : null

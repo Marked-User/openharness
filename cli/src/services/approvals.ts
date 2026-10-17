@@ -636,6 +636,21 @@ export const UNPAIRED_NOTIFY = 3
  * timer: the device window (ask.deviceWindowSec) ran out; phone_answer: the paired phone answered while the Ask
  * was still on the device (early handoff), and that answer then settles it. Same id, digest8 and expiresAt.
  */
+/**
+ * Batch B, ildra.ask.answered_by: which channel and key settled an Ask (replaces App's mock). Sent when an answer
+ * settles it (approve or deny, any channel) and kept in the journal. by.kind phone: the paired phone (phoneId) and
+ * the key that signed (main, or deny_only for a deny-key Deny); by.kind device: the enrolled Ildra device. by.fingerprint
+ * is deviceFingerprint of that key (16 digits).
+ */
+export interface AskAnsweredBy {
+  id: string
+  approved: boolean
+  channel: AskChannel
+  by: { kind: 'phone'; phoneId: string; key: 'main' | 'deny_only'; fingerprint: string } | { kind: 'device'; key: 'device'; fingerprint: string }
+  at: number
+}
+export const MAX_ANSWERED_BY = 500
+
 export interface AskHandoff { id: string; from: 'device'; to: 'phone'; channel: 'touch' | 'voice'; cause: 'timer' | 'phone_answer'; at: number }
 
 /** The fixed action of the daemon's first-run practice Ask (PM Q52). It names nothing real. */
@@ -1027,20 +1042,37 @@ export class AskLedger {
   toJSON(): {
     open: AskRequest[]; spent: [string, number][]; spentAnswers: [string, number][]; attempts: AskAttempt[]
     handoffs: [string, AskChannel, number][]; handoffLog: AskHandoff[]; phoneAllowed: string[]; shortHolds: [string, number][]; knownRecipients: string[]
+    answeredBy: AskAnsweredBy[]
   } {
     this.prune()
     return {
       open: [...this.open_.values()].map((r) => ({ ...r })), spent: [...this.spent], spentAnswers: [...this.spentAnswers],
       attempts: this.attempts(), handoffs: [...this.handedOff].map(([id, h]) => [id, h.from, h.until]), handoffLog: this.handoffs(),
       phoneAllowed: [...this.phoneOk].filter(([, ok]) => ok).map(([id]) => id), shortHolds: [...this.shortHolds], knownRecipients: [...this.known_],
+      answeredBy: this.answeredBy_.map((a) => ({ ...a, by: { ...a.by } })),
     }
+  }
+
+  /** Batch B: who settled each Ask (ildra.ask.answered_by), the last MAX_ANSWERED_BY. */
+  private answeredBy_: AskAnsweredBy[] = []
+  noteAnsweredBy(a: AskAnsweredBy): void {
+    this.answeredBy_.push({ ...a, by: { ...a.by } })
+    if (this.answeredBy_.length > MAX_ANSWERED_BY) this.answeredBy_.splice(0, this.answeredBy_.length - MAX_ANSWERED_BY)
+  }
+  answeredBy(id: string): AskAnsweredBy | null {
+    const a = this.answeredBy_.findLast((x) => x.id === id)
+    return a ? { ...a, by: { ...a.by } } : null
   }
 
   /** @internal journal restore. */
   restore(data: {
     open: AskRequest[]; spent: [string, number][]; spentAnswers?: [string, number][]; attempts?: AskAttempt[]
     handoffs?: [string, AskChannel, number?][]; handoffLog?: AskHandoff[]; phoneAllowed?: string[]; shortHolds?: [string, number][]; knownRecipients?: string[]
+    answeredBy?: unknown
   }): void {
+    this.answeredBy_ = (Array.isArray(data.answeredBy) ? data.answeredBy as AskAnsweredBy[] : [])
+      .filter((a) => a && typeof a.id === 'string' && typeof a.approved === 'boolean' && KNOWN_CHANNELS.has(a.channel) && a.by && typeof a.by === 'object' && typeof a.by.fingerprint === 'string')
+      .slice(-MAX_ANSWERED_BY).map((a) => ({ ...a, by: { ...a.by } }))
     for (const [id, at] of data.spentAnswers ?? []) this.spentAnswers.set(id, at)
     this.attempts_ = (data.attempts ?? []).filter((a) => a && typeof a.id === 'string'
       && (a.reason === 'hold_too_short' || a.reason === 'stale_channel' || (a.channel === 'phone' && ASK_REJECTION_REASONS.includes(a.reason))))
@@ -1135,6 +1167,90 @@ type PendingPair = { phonePub: string; check: string; expiresAt: number }
  * 3. confirm(phoneId, 'touch', matched) on the device: the user taps that both strings match.
  *    Only then is the phone paired. A mismatch, any channel but touch, or expiry refuses it.
  */
+/**
+ * Batch B: the daemon's authoritative pairing ledger. Phones and devices, append-only, journaled with the Ask journal
+ * (same atomic write as the state it records). Each entry is chained to the previous one by SHA-256 (hash over prev
+ * and the entry's fields), so an edited, dropped or reordered entry breaks the chain and the journal fails closed.
+ * The paired phone reads it with `ildra.pairing.ledger.get`.
+ */
+export const PAIRING_LEDGER_KINDS = [
+  'phone_paired', 'phone_rotated', 'phone_unpaired', 'pair_refused',
+  'device_enroll_requested', 'device_enroll_replaced', 'device_enrolled', 'device_refused', 'device_revoked', 'device_expired',
+  'deny_key_set', 'deny_key_revoked', 'deny_key_deny', 'deny_burst', 'verifier_rejected', 'phone_open',
+  'unpair_requested', 'unpair_refused',
+] as const
+export type PairingLedgerKind = (typeof PAIRING_LEDGER_KINDS)[number]
+export interface PairingLedgerFields {
+  kind: PairingLedgerKind
+  /** The phone the entry is about. */
+  phoneId?: string
+  /** The device or key fingerprint the entry is about (deviceFingerprint: 16 digits). */
+  fingerprint?: string
+  oldFingerprint?: string
+  /** Who did it: a phoneId, 'local_socket', 'device' or 'daemon'. */
+  by?: string
+  /** How: 'touch', 'locked_ask', 'deny_key', 'local_socket', 'device', 'phone'. */
+  via?: string
+  reason?: string
+  /** The Ask it concerns (deny_key_deny, phone_unpaired via locked_ask). */
+  askId?: string
+  verb?: string
+  uv?: string
+  count?: number
+  since?: number
+  /** Shield deny key condition 6: 'deny_key' on every Deny the deny key settled. */
+  source?: 'deny_key'
+}
+export interface PairingLedgerEntry extends PairingLedgerFields { seq: number; at: number; prev: string; hash: string }
+const LEDGER_FIELD_ORDER = ['seq', 'at', 'kind', 'phoneId', 'fingerprint', 'oldFingerprint', 'by', 'via', 'reason', 'askId', 'verb', 'uv', 'count', 'since', 'source'] as const
+const LEDGER_GENESIS = '0'.repeat(64)
+function ledgerHash(prev: string, e: Omit<PairingLedgerEntry, 'prev' | 'hash'>): string {
+  const body: Record<string, unknown> = {}
+  for (const k of LEDGER_FIELD_ORDER) if ((e as Record<string, unknown>)[k] !== undefined) body[k] = (e as Record<string, unknown>)[k]
+  return createHash('sha256').update(`ildra-pairing-ledger:v1|${prev}|${JSON.stringify(body)}`, 'utf8').digest('hex')
+}
+export class PairingLedger {
+  private readonly entries_: PairingLedgerEntry[] = []
+  onChange?: () => void
+  constructor(private readonly now: () => number = Date.now) {}
+  append(f: PairingLedgerFields): PairingLedgerEntry {
+    const last = this.entries_.at(-1)
+    const base: Omit<PairingLedgerEntry, 'prev' | 'hash'> = { seq: (last?.seq ?? 0) + 1, at: this.now(), ...f }
+    for (const k of Object.keys(base)) if ((base as Record<string, unknown>)[k] === undefined) delete (base as Record<string, unknown>)[k]
+    const prev = last?.hash ?? LEDGER_GENESIS
+    const e: PairingLedgerEntry = { ...base, prev, hash: ledgerHash(prev, base) }
+    this.entries_.push(e)
+    this.onChange?.()
+    return { ...e }
+  }
+  /** Entries with seq greater than `since`, oldest first, at most `limit`. */
+  since(since = 0, limit = 500): PairingLedgerEntry[] {
+    return this.entries_.filter((e) => e.seq > since).slice(0, limit).map((e) => ({ ...e }))
+  }
+  all(): readonly PairingLedgerEntry[] { return this.entries_ }
+  head(): { seq: number; hash: string } {
+    const last = this.entries_.at(-1)
+    return { seq: last?.seq ?? 0, hash: last?.hash ?? LEDGER_GENESIS }
+  }
+  toJSON(): PairingLedgerEntry[] { return this.entries_.map((e) => ({ ...e })) }
+  /** @internal Throws when the chain does not verify (an edited, dropped or reordered entry): the journal fails closed. */
+  restore(data: unknown): void {
+    if (data === undefined) return
+    if (!Array.isArray(data)) throw new Error('bad pairing ledger')
+    let prev = LEDGER_GENESIS; let seq = 0
+    const out: PairingLedgerEntry[] = []
+    for (const raw of data) {
+      const e = raw as PairingLedgerEntry
+      if (!e || typeof e !== 'object' || e.seq !== seq + 1 || !Number.isFinite(e.at) || !(PAIRING_LEDGER_KINDS as readonly string[]).includes(e.kind) || e.prev !== prev) throw new Error('bad pairing ledger entry')
+      const { prev: _p, hash, ...base } = e
+      if (hash !== ledgerHash(prev, base)) throw new Error('pairing ledger chain broken')
+      out.push({ ...e }); prev = hash; seq = e.seq
+    }
+    this.entries_.length = 0
+    this.entries_.push(...out)
+  }
+}
+
 export class PhonePairing {
   private readonly now: () => number
   private readonly ttlMs: number
@@ -1151,12 +1267,19 @@ export class PhonePairing {
    * enroll.confirm; a new one replaces it). Revoked with the phone's pairing: unpair or main-key rotation (condition 4).
    */
   private readonly denyKeys = new Map<string, { pub: string; at: number }>()
-  /** Condition 1: every deny-key signature refused for a verb other than ask.deny (verifier_rejected). Last 200. */
-  readonly verifierLog: { at: number; phoneId: string; verb: string; reason: 'verifier_rejected' }[] = []
-  /** Condition 6: every Deny settled by a deny-key signature (source deny_key). Last 200. Moves to the pairing ledger in B. */
-  readonly denyLog: { at: number; phoneId: string; id: string; source: 'deny_key' }[] = []
-  /** Condition 6: phones with more than DENY_BURST deny-key Denies within DENY_BURST_WINDOW_MS, until the next phone open. */
-  private readonly denyFlags = new Map<string, { count: number; since: number; at: number }>()
+  /**
+   * Batch B: the authoritative pairing ledger (append-only, chained). openJournal shares one with the device
+   * enrollment and journals it in the same write; a bare PhonePairing keeps its own.
+   */
+  ledger: PairingLedger
+  /** Condition 1: every deny-key signature refused for a verb other than ask.deny (ledger kind verifier_rejected). */
+  get verifierLog(): { at: number; phoneId: string; verb: string; reason: 'verifier_rejected' }[] {
+    return this.ledger.all().filter((e) => e.kind === 'verifier_rejected').map((e) => ({ at: e.at, phoneId: e.phoneId ?? '', verb: e.verb ?? '', reason: 'verifier_rejected' as const }))
+  }
+  /** Condition 6: every Deny settled by a deny-key signature (ledger kind deny_key_deny, via deny_key). */
+  get denyLog(): { at: number; phoneId: string; id: string; source: 'deny_key' }[] {
+    return this.ledger.all().filter((e) => e.kind === 'deny_key_deny').map((e) => ({ at: e.at, phoneId: e.phoneId ?? '', id: e.askId ?? '', source: 'deny_key' as const }))
+  }
   static readonly DENY_BURST = 3
   static readonly DENY_BURST_WINDOW_MS = 60_000
 
@@ -1165,8 +1288,9 @@ export class PhonePairing {
   private wrongCodes = 0
   private readonly isShared?: SharedOriginLookup
 
-  constructor(opts: { now?: () => number; ttlMs?: number; isShared?: SharedOriginLookup } = {}) {
+  constructor(opts: { now?: () => number; ttlMs?: number; isShared?: SharedOriginLookup; ledger?: PairingLedger } = {}) {
     this.now = opts.now ?? Date.now
+    this.ledger = opts.ledger ?? new PairingLedger(this.now)
     this.ttlMs = opts.ttlMs ?? 5 * 60_000
     this.isShared = opts.isShared
   }
@@ -1178,6 +1302,7 @@ export class PhonePairing {
 
   private refuse(phoneId: string, reason: string): false {
     this.log.push({ at: this.now(), event: 'refused', phoneId, reason })
+    this.ledger.append({ kind: 'pair_refused', phoneId, reason, via: 'touch' })
     if (phoneId) this.lastRefusal.set(phoneId, reason)
     this.onChange?.()
     return false
@@ -1232,19 +1357,30 @@ export class PhonePairing {
     if (this.now() >= pend.expiresAt) return this.refuse(phoneId, 'expired')
     if (matched !== true) return this.refuse(phoneId, 'check_mismatch')
     // Shield deny key condition 4: a main-key rotation (re-pair with another key) revokes the deny key, in this save.
-    if (this.phones.get(phoneId) !== pend.phonePub) this.denyKeys.delete(phoneId)
+    const before = this.phones.get(phoneId)
+    const rotated = before !== undefined && before !== '' && before !== pend.phonePub
+    if (before !== pend.phonePub && this.denyKeys.delete(phoneId)) this.ledger.append({ kind: 'deny_key_revoked', phoneId, reason: 'main_key_rotated', by: 'daemon' })
     this.phones.set(phoneId, pend.phonePub)
     this.lastRefusal.delete(phoneId)
     this.log.push({ at: this.now(), event: 'pair', phoneId })
+    this.ledger.append({ kind: rotated ? 'phone_rotated' : 'phone_paired', phoneId, fingerprint: deviceFingerprint(pend.phonePub), via: 'touch' })
     this.onChange?.()
     return true
   }
 
-  unpair(phoneId: string): void {
+  unpair(phoneId: string, meta: { by?: string; via?: string; askId?: string } = {}): void {
+    const key = this.phones.get(phoneId)
     const was = this.phones.delete(phoneId)
-    this.denyKeys.delete(phoneId) // Shield deny key condition 4: atomically with the unpair (same save)
-    this.denyFlags.delete(phoneId)
-    if (was) this.log.push({ at: this.now(), event: 'unpair', phoneId })
+    // Shield deny key condition 4: atomically with the unpair (one journal write: onChange runs once, below).
+    const hadDeny = this.denyKeys.delete(phoneId)
+    if (was) {
+      this.log.push({ at: this.now(), event: 'unpair', phoneId })
+      const save = this.ledger.onChange; this.ledger.onChange = undefined
+      try {
+        if (hadDeny) this.ledger.append({ kind: 'deny_key_revoked', phoneId, reason: 'unpaired', by: meta.by ?? 'daemon' })
+        this.ledger.append({ kind: 'phone_unpaired', phoneId, ...(key ? { fingerprint: deviceFingerprint(key) } : {}), by: meta.by ?? 'local_socket', via: meta.via ?? 'local_socket', ...(meta.askId ? { askId: meta.askId } : {}) })
+      } finally { this.ledger.onChange = save }
+    }
     this.onChange?.()
     // Shield R7 ruling: the last phone gone ends the open phone Asks (no_paired_phone), by pairing state alone.
     if (was && this.phones.size === 0) { try { this.onLastUnpaired?.() } catch { /* a listener never changes the result */ } }
@@ -1281,6 +1417,7 @@ export class PhonePairing {
   setDenyKey(phoneId: string, pub: string): boolean {
     if (!this.phones.get(phoneId) || !rawKey(pub) || pub === this.phones.get(phoneId)) return false
     this.denyKeys.set(phoneId, { pub, at: this.now() })
+    this.ledger.append({ kind: 'deny_key_set', phoneId, fingerprint: deviceFingerprint(pub), by: phoneId, via: 'phone' })
     this.onChange?.()
     return true
   }
@@ -1305,41 +1442,47 @@ export class PhonePairing {
   }
   /** Log a verifier_rejected (condition 1); also for a deny-key answer off the phone path (condition 7). */
   rejectVerifier(phoneId: string, verb: string): void {
-    this.verifierLog.push({ at: this.now(), phoneId, verb, reason: 'verifier_rejected' })
-    if (this.verifierLog.length > 200) this.verifierLog.splice(0, this.verifierLog.length - 200)
+    this.ledger.append({ kind: 'verifier_rejected', phoneId, verb, reason: 'verifier_rejected' })
     this.onChange?.()
   }
   /** Condition 6: journal a Deny settled by the deny key; more than 3 within 60 s flags the phone. */
   noteDenyKeyDeny(phoneId: string, id: string): void {
     const at = this.now()
-    this.denyLog.push({ at, phoneId, id, source: 'deny_key' })
-    if (this.denyLog.length > 200) this.denyLog.splice(0, this.denyLog.length - 200)
+    this.ledger.append({ kind: 'deny_key_deny', phoneId, askId: id, by: phoneId, via: 'phone', source: 'deny_key' })
     const recent = this.denyLog.filter((e) => e.phoneId === phoneId && at - e.at < PhonePairing.DENY_BURST_WINDOW_MS)
-    if (recent.length > PhonePairing.DENY_BURST) this.denyFlags.set(phoneId, { count: recent.length, since: recent[0]!.at, at })
+    if (recent.length > PhonePairing.DENY_BURST) this.ledger.append({ kind: 'deny_burst', phoneId, count: recent.length, since: recent[0]!.at })
     this.onChange?.()
   }
-  /** Condition 6: the 'denied from this phone' summary for the next phone open; cleared once read. */
-  takeDenySummary(phoneId: string): { count: number; since: number; at: number } | null {
-    const f = this.denyFlags.get(phoneId)
-    if (!f) return null
-    this.denyFlags.delete(phoneId)
-    this.onChange?.()
-    return { ...f }
-  }
+  /** Condition 6: the summary flag lives in the ledger: the last deny_burst for this phone after its last phone_open. */
   peekDenySummary(phoneId: string): { count: number; since: number; at: number } | null {
-    const f = this.denyFlags.get(phoneId)
-    return f ? { ...f } : null
+    const all = this.ledger.all()
+    for (let i = all.length - 1; i >= 0; i--) {
+      const e = all[i]!
+      if (e.phoneId !== phoneId) continue
+      if (e.kind === 'phone_open') return null
+      if (e.kind === 'deny_burst') return { count: e.count ?? 0, since: e.since ?? e.at, at: e.at }
+    }
+    return null
   }
+  /** Condition 6: the 'denied from this phone' summary for this phone open (ledger phone_open clears it). */
+  takeDenySummary(phoneId: string): { count: number; since: number; at: number } | null {
+    const f = this.peekDenySummary(phoneId)
+    this.ledger.append({ kind: 'phone_open', phoneId, by: phoneId, via: 'phone' })
+    this.onChange?.()
+    return f
+  }
+  /** Batch B: the number of paired phones (owner channels on the phone side). */
+  pairedCount(): number { return [...this.phones.values()].filter((k) => k !== '').length }
+  pairedIds(): string[] { return [...this.phones.keys()] }
 
   toJSON(): {
     phones: string[]; phoneKeys: Record<string, string>; log: PairingLogEntry[]; refused: Record<string, string>
-    denyKeys: Record<string, { pub: string; at: number }>; verifierLog: PhonePairing['verifierLog']; denyLog: PhonePairing['denyLog']; denyFlags: Record<string, { count: number; since: number; at: number }>
+    denyKeys: Record<string, { pub: string; at: number }>
   } {
     return {
       phones: [...this.phones.keys()], phoneKeys: Object.fromEntries(this.phones),
       log: this.log.map((e) => ({ ...e })), refused: Object.fromEntries(this.lastRefusal),
-      denyKeys: Object.fromEntries(this.denyKeys), verifierLog: this.verifierLog.map((e) => ({ ...e })),
-      denyLog: this.denyLog.map((e) => ({ ...e })), denyFlags: Object.fromEntries(this.denyFlags),
+      denyKeys: Object.fromEntries(this.denyKeys),
     }
   }
 
@@ -1352,22 +1495,12 @@ export class PhonePairing {
     }
     for (const [id, why] of Object.entries(data.refused ?? {})) this.lastRefusal.set(id, why)
     for (const e of data.log ?? []) this.log.push({ ...e })
-    const d = data as { denyKeys?: unknown; verifierLog?: unknown; denyLog?: unknown; denyFlags?: unknown }
+    const d = data as { denyKeys?: unknown }
     const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {})
     for (const [id, k] of Object.entries(obj(d.denyKeys))) {
       const x = k as { pub?: unknown; at?: unknown }
       // Only for a phone still paired with a key (a deny key never outlives its pairing).
       if (this.phones.get(id) && rawKey(x?.pub) && typeof x.at === 'number') this.denyKeys.set(id, { pub: x.pub as string, at: x.at })
-    }
-    for (const e of Array.isArray(d.verifierLog) ? d.verifierLog : []) {
-      if (e && typeof e.at === 'number' && typeof e.phoneId === 'string' && typeof e.verb === 'string') this.verifierLog.push({ at: e.at, phoneId: e.phoneId, verb: e.verb, reason: 'verifier_rejected' })
-    }
-    for (const e of Array.isArray(d.denyLog) ? d.denyLog : []) {
-      if (e && typeof e.at === 'number' && typeof e.phoneId === 'string' && typeof e.id === 'string') this.denyLog.push({ at: e.at, phoneId: e.phoneId, id: e.id, source: 'deny_key' })
-    }
-    for (const [id, f] of Object.entries(obj(d.denyFlags))) {
-      const x = f as { count?: unknown; since?: unknown; at?: unknown }
-      if (x && typeof x.count === 'number' && typeof x.since === 'number' && typeof x.at === 'number') this.denyFlags.set(id, { count: x.count, since: x.since, at: x.at })
     }
   }
 }
@@ -1586,7 +1719,7 @@ function parseJournal(text: string) {
   // not enrolled (the phone confirms the device again), and does not fail the journal.
   if (d.device !== undefined && d.device !== null && (typeof d.device !== 'object' || Array.isArray(d.device)
     || (d.device.device !== undefined && d.device.device !== null && typeof d.device.device !== 'object'))) throw new Error('bad device')
-  return { window: w, ledger: l, pairing: p, settings: d.settings, device: d.device }
+  return { window: w, ledger: l, pairing: p, settings: d.settings, device: d.device, pairingLedger: d.pairingLedger as unknown }
 }
 
 /** v3.3: ask.deviceWindowSec, seconds an Ask stays on the device before it hands off to the phone. */
@@ -1638,6 +1771,8 @@ export class AskDeviceEnrollment {
   private dev_: EnrolledDevice | null = null
   private pending_: PendingEnrollment | null = null
   onChange?: () => void
+  /** Batch B: enrollment events go to the pairing ledger (openJournal shares the journal's one). */
+  ledger: PairingLedger | null = null
   constructor(private readonly now: () => number = Date.now) {}
   /**
    * Record a pending enrollment for `pub` with a fresh nonce the phone's confirm must sign. Any later request,
@@ -1651,6 +1786,8 @@ export class AskDeviceEnrollment {
     this.pending_ = { pub: pub as string, at, expiresAt: at + DEVICE_ENROLL_TTL_MS, nonce: randomBytes(32).toString('base64url'), source }
     this.onChange?.()
     const replaced = old ? { oldFingerprint: deviceFingerprint(old.pub), newFingerprint: deviceFingerprint(pub as string), source, at } : null
+    if (replaced) this.ledger?.append({ kind: 'device_enroll_replaced', fingerprint: replaced.newFingerprint, oldFingerprint: replaced.oldFingerprint, by: source, via: source })
+    this.ledger?.append({ kind: 'device_enroll_requested', fingerprint: deviceFingerprint(pub as string), by: source, via: source })
     return { devicePub: pub as string, fingerprint: deviceFingerprint(pub as string), nonce: this.pending_.nonce, expiresAt: this.pending_.expiresAt, replaced }
   }
   pending(): { devicePub: string; fingerprint: string; nonce: string; expiresAt: number; source: EnrollSource } | null {
@@ -1666,11 +1803,15 @@ export class AskDeviceEnrollment {
    */
   confirm(pub: unknown, nonce: unknown, approved: boolean, by: { uv: EnrollUv; phoneId: string }): 'enrolled' | 'refused' | 'revoked' | 'expired' | null {
     const p = this.pending_
-    if (!approved && this.dev_ && this.dev_.pub === pub && this.dev_.nonce === nonce && !(p && p.pub === pub && p.nonce === nonce)) { this.revoke(); return 'revoked' }
+    if (!approved && this.dev_ && this.dev_.pub === pub && this.dev_.nonce === nonce && !(p && p.pub === pub && p.nonce === nonce)) {
+      this.ledger?.append({ kind: 'device_revoked', fingerprint: deviceFingerprint(this.dev_.pub), by: by.phoneId, via: 'phone', uv: by.uv })
+      this.revoke(); return 'revoked'
+    }
     if (!p || p.pub !== pub || p.nonce !== nonce) return null
     this.pending_ = null
-    if (this.now() >= p.expiresAt) { this.onChange?.(); return 'expired' }
+    if (this.now() >= p.expiresAt) { this.ledger?.append({ kind: 'device_expired', fingerprint: deviceFingerprint(p.pub), by: 'daemon' }); this.onChange?.(); return 'expired' }
     if (approved) this.dev_ = { pub: p.pub, at: this.now(), uv: by.uv, phoneId: by.phoneId, nonce: p.nonce }
+    this.ledger?.append({ kind: approved ? 'device_enrolled' : 'device_refused', fingerprint: deviceFingerprint(p.pub), by: by.phoneId, via: 'phone', uv: by.uv })
     this.onChange?.()
     return approved ? 'enrolled' : 'refused'
   }
@@ -1704,6 +1845,8 @@ export interface ApprovalJournal {
   settings: AskSettings
   /** Shield R7-1: the enrolled Ildra device (its bridge alone answers touch and voice Asks). */
   device: AskDeviceEnrollment
+  /** Batch B: the authoritative pairing ledger (phones and devices, append-only, chained, journaled). */
+  pairingLedger: PairingLedger
   /** True when the file existed but could not be trusted; voice is off for one window. */
   recovered: boolean
   save(): void
@@ -1764,9 +1907,11 @@ export function openJournal(
   const now = opts.now ?? Date.now
   const window = new ApprovalWindow({ now, windowMs: opts.windowMs, voiceMoneyLimitMinor: opts.voiceMoneyLimitMinor, bulkCount: opts.bulkCount })
   const ledger = new AskLedger({ now, ttlMs: opts.ttlMs, verifier: opts.verifier, requireChannelStamp: opts.requireChannelStamp === true })
-  const pairing = new PhonePairing({ now })
+  const pairingLedger = new PairingLedger(now)
+  const pairing = new PhonePairing({ now, ledger: pairingLedger })
   const settings = new AskSettings()
   const device = new AskDeviceEnrollment(now)
+  device.ledger = pairingLedger
   let recovered = false
   const marker = resolvePath(opts.markerPath ?? defaultMarkerPath(path))
   if (foldersOverlap(dirname(marker), dirname(resolvePath(path)))) {
@@ -1784,13 +1929,14 @@ export function openJournal(
       pairing.restore(d.pairing)
       settings.restore(d.settings)
       device.restore(d.device)
+      pairingLedger.restore(d.pairingLedger)
     } catch {
       recovered = true
       window.lockedUntil = now() + window.windowMs
     }
   }
   const save = () => {
-    const body = JSON.stringify({ v: JOURNAL_VERSION, window: window.toJSON(), ledger: ledger.toJSON(), pairing: pairing.toJSON(), settings: settings.toJSON(), device: device.toJSON() })
+    const body = JSON.stringify({ v: JOURNAL_VERSION, window: window.toJSON(), ledger: ledger.toJSON(), pairing: pairing.toJSON(), settings: settings.toJSON(), device: device.toJSON(), pairingLedger: pairingLedger.toJSON() })
     mkdirSync(dirname(path), { recursive: true })
     const tmp = `${path}.${process.pid}.tmp`
     writeFileSync(tmp, body, { mode: 0o600 })
@@ -1802,12 +1948,13 @@ export function openJournal(
   pairing.onLastUnpaired = () => { ledger.endPhoneAsks('no_paired_phone') }
   settings.onChange = save
   device.onChange = save
+  pairingLedger.onChange = save
   save()
   if (!existsSync(marker)) {
     mkdirSync(dirname(marker), { recursive: true })
     writeFileSync(marker, `${now()}\n`, { mode: 0o600 })
   }
-  return { window, ledger, pairing, settings, device, recovered, save }
+  return { window, ledger, pairing, settings, device, pairingLedger, recovered, save }
 }
 
 // ---- ask ----

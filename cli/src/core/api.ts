@@ -57,7 +57,7 @@ export { FAIL, later, readFallback, ServiceUnavailableError, type PortFallbacks 
  * and the Ildra device key helpers (Ed25519 proof of the enrolled device).
  */
 export { stampedChannel } from './ildraChannel.js'
-export { ENROLL_UV, PHONE_VERBS, askAnswerMessage, deviceFingerprint, deviceProofMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, verifyDeviceProof, verifyEd25519, type EnrollUv, type PhoneVerb } from './ildraDeviceProof.js'
+export { ENROLL_UV, PHONE_VERBS, askAnswerMessage, deviceFingerprint, deviceProofMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, unpairMessage, unpairTouchMessage, verifyDeviceProof, verifyEd25519, type EnrollUv, type PhoneVerb } from './ildraDeviceProof.js'
 
 /** A service may open a terminal with a literal argv, never shell source. */
 export interface TerminalOpen {
@@ -591,11 +591,20 @@ export interface IldraAskInputs {
    * 'denied from this phone' summary when more than 3 deny-key Denies landed within 60 s.
    */
   onPhoneOpen?: ((from: IldraAnswerOrigin) => { ok: true; denySummary: { count: number; since: number; at: number } | null } | { ok: false; reason: string }) | null
+  /** Batch B: `ildra.pairing.ledger.get {since}` from the paired phone: ledger entries after seq `since`, and the head. */
+  onPairingLedger?: ((since: unknown, from: IldraAnswerOrigin) => { ok: true; entries: unknown[]; head: { seq: number; hash: string } } | { ok: false; reason: string }) | null
+  /**
+   * Batch B: `ildra.pairing.unpair {phoneId, at, signature, touchProof?}` from a paired phone. Rate limited, opens a
+   * locked_ask, refuses the last paired phone without a device touch proof; resolves when the Ask has settled.
+   */
+  onPairingUnpair?: ((msg: { phoneId: unknown; at: unknown; signature: unknown; touchProof?: unknown }, from: IldraAnswerOrigin) => Promise<{ ok: true; state: 'unpaired'; askId: string } | { ok: false; reason: string }>) | null
+  /** Batch B: `ildra.ask.answered_by.get {id}` from the paired phone: who settled that Ask, or null. */
+  onAnsweredBy?: ((id: unknown, from: IldraAnswerOrigin) => { ok: true; answeredBy: unknown } | { ok: false; reason: string }) | null
 }
 
 /** Ildra Asks (services/ildraAsk.ts): an answer from the phone or the device to an open Ask. Its origin is the
  *  connection it came over (Shield F12), never the payload. Always in the core's own process. */
-export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer', 'ildra_settings_set', 'ildra_device_enroll', 'ildra_device_enroll_confirm', 'ildra_phone_open', 'ildra_device_challenge', 'ildra_device_prove'] as const
+export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer', 'ildra_settings_set', 'ildra_device_enroll', 'ildra_device_enroll_confirm', 'ildra_phone_open', 'ildra_pairing_ledger', 'ildra_pairing_unpair', 'ildra_ask_answered_by', 'ildra_device_challenge', 'ildra_device_prove'] as const
 /** Sharing this machine with other accounts, and adding machines shared with this one, in the edge host
  *  (services/sharedMachines.ts). */
 export const SHARED_MACHINES_REQUESTS = ['shared_machines'] as const

@@ -18,7 +18,8 @@
             "ildra.pairing.confirm", "ildra.pairing.status", "ildra.ask.handoff", "ildra.ask.attempt",
             "ildra.settings.set", "ildra.settings.value", "ildra.ask.unpaired",
             "ildra.device.enroll", "ildra.device.enroll.confirm", "ildra.device.enroll.status", "ildra.device.enroll.replaced", "ildra.device.challenge", "ildra.device.proof",
-            "ildra.phone.open", "ildra.phone.deny_summary"
+            "ildra.phone.open", "ildra.phone.deny_summary",
+            "ildra.pairing.ledger.get", "ildra.pairing.ledger", "ildra.pairing.unpair", "ildra.pairing.unpair_requested", "ildra.pairing.unpaired", "ildra.pairing.unpair_refused", "ildra.ask.answered_by", "ildra.ask.answered_by.get"
           ]
         },
         "proto": { "const": 1 },
@@ -44,6 +45,14 @@
         { "if": { "properties": { "type": { "const": "ildra.device.enroll.status" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceEnrollStatus" } } } },
         { "if": { "properties": { "type": { "const": "ildra.device.enroll.replaced" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceEnrollReplaced" } } } },
         { "if": { "properties": { "type": { "const": "ildra.phone.open" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PhoneOpen" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.ledger.get" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingLedgerGet" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.ledger" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingLedgerPage" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.unpair" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingUnpair" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.unpair_requested" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingUnpairRequested" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.unpaired" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingUnpaired" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.pairing.unpair_refused" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PairingUnpairRefused" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.ask.answered_by" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/AskAnsweredBy" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.ask.answered_by.get" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/AskAnsweredByGet" } } } },
         { "if": { "properties": { "type": { "const": "ildra.phone.deny_summary" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/PhoneDenySummary" } } } },
         { "if": { "properties": { "type": { "const": "ildra.device.challenge" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceChallenge" } } } },
         { "if": { "properties": { "type": { "const": "ildra.device.proof" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceProof" } } } }
@@ -396,6 +405,124 @@
         "expiresAt": { "$ref": "#/$defs/EpochMs" },
         "source": { "$ref": "#/$defs/EnrollSource" }
       }
+    },
+
+    "PairingLedgerKind": {
+      "description": "Batch B pairing ledger entry kinds. Phones: phone_paired, phone_rotated (re-paired with another main key), phone_unpaired, pair_refused. Devices: device_enroll_requested, device_enroll_replaced, device_enrolled, device_refused, device_revoked, device_expired. Deny key: deny_key_set, deny_key_revoked, deny_key_deny (a Deny the deny key settled; source deny_key), deny_burst (more than 3 of those in 60 s), verifier_rejected (a deny-key signature on another verb), phone_open (clears the deny summary). Unpair API: unpair_requested, unpair_refused.",
+      "enum": ["phone_paired", "phone_rotated", "phone_unpaired", "pair_refused", "device_enroll_requested", "device_enroll_replaced", "device_enrolled", "device_refused", "device_revoked", "device_expired", "deny_key_set", "deny_key_revoked", "deny_key_deny", "deny_burst", "verifier_rejected", "phone_open", "unpair_requested", "unpair_refused"]
+    },
+
+    "LedgerHash": { "description": "SHA-256, 64 lowercase hex.", "type": "string", "pattern": "^[0-9a-f]{64}$" },
+
+    "PairingLedgerEntry": {
+      "description": "Batch B: one entry of the daemon's authoritative pairing ledger (phones and devices), append-only and journaled with the state it records. Chained: prev is the previous entry's hash (64 zeros for seq 1) and hash = SHA-256 over the UTF-8 bytes of ildra-pairing-ledger:v1|<prev>|<JSON of the entry without prev and hash, keys in the order seq, at, kind, phoneId, fingerprint, oldFingerprint, by, via, reason, askId, verb, uv, count, since, source, absent keys omitted>, lowercase hex. A journal whose chain does not verify fails closed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "at", "kind", "prev", "hash"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "at": { "$ref": "#/$defs/EpochMs" },
+        "kind": { "$ref": "#/$defs/PairingLedgerKind" },
+        "phoneId": { "type": "string", "minLength": 1 },
+        "fingerprint": { "$ref": "#/$defs/DeviceFingerprint" },
+        "oldFingerprint": { "$ref": "#/$defs/DeviceFingerprint" },
+        "by": { "description": "Who: a phoneId, local_socket, device or daemon.", "type": "string", "minLength": 1 },
+        "via": { "description": "How: touch, phone, locked_ask, local_socket or device.", "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 },
+        "askId": { "$ref": "#/$defs/AskId" },
+        "verb": { "type": "string" },
+        "uv": { "$ref": "#/$defs/UserVerification" },
+        "count": { "type": "integer", "minimum": 0 },
+        "since": { "$ref": "#/$defs/EpochMs" },
+        "source": { "const": "deny_key" },
+        "prev": { "$ref": "#/$defs/LedgerHash" },
+        "hash": { "$ref": "#/$defs/LedgerHash" }
+      }
+    },
+
+    "PairingLedgerGet": {
+      "description": "Phone to daemon (batch B): read the pairing ledger after seq since (default 0). Paired phone's key only (else unpaired_phone; the device, the local socket and observers no_authority). The daemon answers ildra.pairing.ledger with at most 500 entries.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "since": { "type": "integer", "minimum": 0 } }
+    },
+
+    "PairingLedgerPage": {
+      "description": "Daemon to the paired phone (batch B): ledger entries after since, oldest first, and the current head (seq and hash of the last entry; seq 0 and 64 zeros when empty). Ask again from the last seq for more.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entries", "head"],
+      "properties": {
+        "entries": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/PairingLedgerEntry" } },
+        "head": { "type": "object", "additionalProperties": false, "required": ["seq", "hash"], "properties": { "seq": { "type": "integer", "minimum": 0 }, "hash": { "$ref": "#/$defs/LedgerHash" } } }
+      }
+    },
+
+    "PairingUnpair": {
+      "description": "Phone to daemon (batch B): ask to unpair phoneId (this phone or another paired one). signature: the requesting phone's main key, Ed25519 base64 over ildra-pairing-unpair:v1|<phoneId>|<at>; at within 60 s of the daemon clock. The deny-only key is verifier_rejected. Rate limited: at most 3 requests that open an Ask per 10 minutes, daemon-wide, counted from the ledger. Removing the last paired phone (the last owner channel) also needs touchProof: the enrolled Ildra device key's Ed25519 signature over ildra-unpair-touch:v1|<phoneId>|<at>, made after a physical touch. Then the daemon tells the paired phones and the device (ildra.pairing.unpair_requested) and opens a locked_ask (phone only, the deny key can only deny it). Approved: the phone is unpaired, its deny key revoked in the same write, ledger phone_unpaired via locked_ask with the askId, and ildra.pairing.unpaired goes out. Otherwise ildra.pairing.unpair_refused.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phoneId", "at", "signature"],
+      "properties": {
+        "phoneId": { "type": "string", "minLength": 1 },
+        "at": { "$ref": "#/$defs/EpochMs" },
+        "signature": { "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" },
+        "touchProof": { "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
+      }
+    },
+
+    "PairingUnpairRequested": {
+      "description": "Daemon to every paired phone and the device (batch B): a paired phone asked to unpair phoneId; a locked_ask follows on the phone (any paired phone may deny it).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phoneId", "by", "at"],
+      "properties": { "phoneId": { "type": "string", "minLength": 1 }, "by": { "type": "string", "minLength": 1 }, "at": { "$ref": "#/$defs/EpochMs" } }
+    },
+
+    "PairingUnpaired": {
+      "description": "Daemon to the remaining paired phones and the device (batch B): phoneId was unpaired by the phone by, through the locked_ask askId. remaining: paired phones left.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phoneId", "by", "askId", "at", "remaining"],
+      "properties": { "phoneId": { "type": "string", "minLength": 1 }, "by": { "type": "string", "minLength": 1 }, "askId": { "$ref": "#/$defs/AskId" }, "at": { "$ref": "#/$defs/EpochMs" }, "remaining": { "type": "integer", "minimum": 0 } }
+    },
+
+    "PairingUnpairRefused": {
+      "description": "Daemon to the requesting phone (batch B). unpaired_phone, malformed, bad_signature, verifier_rejected (signed by the deny key, journaled), expired (at more than 60 s off), unknown_phone, rate_limited, last_owner_channel (the last paired phone without a valid device touch proof), not_approved (the locked_ask was denied or expired). Every refusal after the signature check is a ledger unpair_refused entry.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phoneId", "reason"],
+      "properties": {
+        "phoneId": { "type": "string" },
+        "reason": { "enum": ["unpaired_phone", "malformed", "bad_signature", "verifier_rejected", "expired", "unknown_phone", "rate_limited", "last_owner_channel", "not_approved"] }
+      }
+    },
+
+    "AskAnsweredBy": {
+      "description": "Daemon to the paired phone (batch B): which channel and key settled the Ask id (sent when an answer settles it, approve or deny; never for an expired, cancelled or refused one), also kept in the Ask journal. by.kind phone: the paired phone phoneId and the key that signed, main or deny_only (a deny-key Deny); by.kind device: the enrolled Ildra device (touch or voice). by.fingerprint: the 16-digit fingerprint of that key.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "approved", "channel", "by", "at"],
+      "properties": {
+        "id": { "$ref": "#/$defs/AskId" },
+        "approved": { "type": "boolean" },
+        "channel": { "$ref": "#/$defs/Channel" },
+        "by": {
+          "oneOf": [
+            { "type": "object", "additionalProperties": false, "required": ["kind", "phoneId", "key", "fingerprint"], "properties": { "kind": { "const": "phone" }, "phoneId": { "type": "string", "minLength": 1 }, "key": { "enum": ["main", "deny_only"] }, "fingerprint": { "$ref": "#/$defs/DeviceFingerprint" } } },
+            { "type": "object", "additionalProperties": false, "required": ["kind", "key", "fingerprint"], "properties": { "kind": { "const": "device" }, "key": { "const": "device" }, "fingerprint": { "$ref": "#/$defs/DeviceFingerprint" } } }
+          ]
+        },
+        "at": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+
+    "AskAnsweredByGet": {
+      "description": "Phone to daemon (batch B): who settled Ask id. Paired phone's key only. The daemon answers ildra.ask.answered_by, or nothing when no answer settled it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": { "id": { "$ref": "#/$defs/AskId" } }
     },
 
     "PhoneOpen": {

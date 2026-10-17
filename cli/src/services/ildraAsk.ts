@@ -13,8 +13,17 @@ import {
   ask as askGate, deviceFingerprint, openJournal, practiceAsk, ToolManifestLoader,
   type ApprovalJournal, type ApprovalProfile, type ApprovalTemplate, type AskAnswer, type AskAttempt, type AskChannel,
   type AskHandoff, type AskOptions, type AskOutcome, type AskRequest, type EnrollReplaced, type EnrollSource, type ToolManifestEntry,
+  type AskAnsweredBy, stampManifest,
 } from './approvals.js'
-import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, type EnrollUv, type IldraAskInputs } from '../core/api.js'
+
+/** Batch B: the unpair API's rate limit (from the pairing ledger, daemon-wide) and clock skew for its signed `at`. */
+export const UNPAIR_RATE = 3
+export const UNPAIR_WINDOW_MS = 600_000
+export const UNPAIR_SKEW_MS = 60_000
+const UNPAIR_ACTION = 'Unpair a phone'
+const UNPAIR_TEMPLATE: ApprovalTemplate = { permissions: { locked_ask: [UNPAIR_ACTION] } }
+const UNPAIR_MANIFEST = stampManifest([{ name: 'ildra.pairing.unpair', send: false }], 'first_party')
+import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, stampedChannel, unpairMessage, unpairTouchMessage, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
 
 export type IldraAskEvent =
   | { type: 'ildra.ask.attempt'; body: AskAttempt }
@@ -25,6 +34,9 @@ export type IldraAskEvent =
   | { type: 'ildra.device.enroll'; body: { devicePub: string; fingerprint: string; nonce: string; expiresAt: number; source: EnrollSource } }
   | { type: 'ildra.device.enroll.replaced'; body: EnrollReplaced }
   | { type: 'ildra.phone.deny_summary'; body: { count: number; since: number; at: number } }
+  | { type: 'ildra.ask.answered_by'; body: AskAnsweredBy }
+  | { type: 'ildra.pairing.unpair_requested'; body: { phoneId: string; by: string; at: number } }
+  | { type: 'ildra.pairing.unpaired'; body: { phoneId: string; by: string; askId: string; at: number; remaining: number } }
   | { type: 'ildra.device.enroll.status'; body: { state: 'enrolled' | 'refused' | 'revoked' | 'expired'; fingerprint: string; at: number; uv?: EnrollUv } }
 
 export interface IldraAsk {
@@ -86,7 +98,22 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     // Shield deny key condition 6: every Deny the deny key settled is journaled (source deny_key); a burst flags the phone.
     journal.ledger.onSettled = (ans) => {
       const a = ans as AskAnswer & { keyRole?: unknown }
-      if (a.keyRole === 'deny_only' && a.approved === false && typeof a.from?.phoneId === 'string') journal!.pairing.noteDenyKeyDeny(a.from.phoneId, a.id)
+      const j = journal!
+      const denyKey = a.keyRole === 'deny_only' && a.approved === false && typeof a.from?.phoneId === 'string'
+      if (denyKey) j.pairing.noteDenyKeyDeny(a.from!.phoneId!, a.id)
+      // Batch B: ildra.ask.answered_by: the channel and the key that settled this Ask (journaled with the ledger).
+      const via = stampedChannel(ans) ?? a.via
+      let by: AskAnsweredBy['by'] | null = null
+      if (via === 'phone' && typeof a.from?.phoneId === 'string' && typeof a.from.machinePub === 'string') {
+        by = { kind: 'phone', phoneId: a.from.phoneId, key: denyKey ? 'deny_only' : 'main', fingerprint: denyKey ? deviceFingerprint(j.pairing.denyKey(a.from.phoneId) ?? '') : deviceFingerprint(a.from.machinePub) }
+      } else if ((via === 'touch' || via === 'voice') && j.device.device()) {
+        by = { kind: 'device', key: 'device', fingerprint: deviceFingerprint(j.device.device()!) }
+      }
+      if (by && via) {
+        const rec: AskAnsweredBy = { id: a.id, approved: a.approved === true, channel: via as AskChannel, by, at: (deps.now ?? Date.now)() }
+        j.ledger.noteAnsweredBy(rec)
+        emit('ildra.ask.answered_by', rec)
+      }
     }
     return journal
   }
@@ -160,6 +187,58 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     const denySummary = j.pairing.takeDenySummary(from.phoneId)
     if (denySummary) emit('ildra.phone.deny_summary', denySummary)
     return { ok: true, denySummary }
+  }
+  const pairedFrom = (j: ApprovalJournal, from: { phoneId?: unknown; machinePub?: unknown }): from is { phoneId: string; machinePub: string } =>
+    typeof from.phoneId === 'string' && typeof from.machinePub === 'string' && j.pairing.isPairedKey(from.phoneId, from.machinePub)
+  // Batch B (1): the pairing ledger read API, for the paired phone only.
+  deps.inputs.onPairingLedger = (since, from) => {
+    const j = open()
+    if (!pairedFrom(j, from)) return { ok: false, reason: 'unpaired_phone' }
+    const s = since === undefined ? 0 : since
+    if (typeof s !== 'number' || !Number.isInteger(s) || s < 0) return { ok: false, reason: 'malformed' }
+    return { ok: true, entries: j.pairingLedger.since(s), head: j.pairingLedger.head() }
+  }
+  // Batch B (3): who settled an Ask, for the paired phone.
+  deps.inputs.onAnsweredBy = (id, from) => {
+    const j = open()
+    if (!pairedFrom(j, from)) return { ok: false, reason: 'unpaired_phone' }
+    if (typeof id !== 'string') return { ok: false, reason: 'malformed' }
+    return { ok: true, answeredBy: j.ledger.answeredBy(id) }
+  }
+  // Batch B (2): unpair through a locked_ask. Signed by the requesting phone's main key (the deny key is
+  // verifier_rejected), rate limited from the ledger, the last paired phone only with a device touch proof; the other
+  // paired phones and the device are told when it is asked and when it is done; every step is a ledger entry.
+  deps.inputs.onPairingUnpair = async (msg, from) => {
+    const j = open()
+    if (!pairedFrom(j, from)) return { ok: false, reason: 'unpaired_phone' }
+    const now = (deps.now ?? Date.now)()
+    const refuse = (reason: string, target?: string, askId?: string) => {
+      j.pairingLedger.append({ kind: 'unpair_refused', ...(target ? { phoneId: target } : {}), by: from.phoneId as string, via: askId ? 'locked_ask' : 'phone', reason, ...(askId ? { askId } : {}) })
+      return { ok: false as const, reason }
+    }
+    if (typeof msg.phoneId !== 'string' || msg.phoneId === '' || typeof msg.at !== 'number' || !Number.isFinite(msg.at)) return { ok: false, reason: 'malformed' }
+    const target = msg.phoneId; const at = msg.at
+    const v = j.pairing.verifyPhone(from.phoneId, 'pairing.unpair', unpairMessage(target, at), msg.signature)
+    if (!v.ok) return { ok: false, reason: v.reason }
+    if (Math.abs(now - at) > UNPAIR_SKEW_MS) return refuse('expired', target)
+    if (!j.pairing.isPaired(target)) return refuse('unknown_phone', target)
+    // Each request that opened a locked_ask counts (refusals before that open no Ask and need a valid signature).
+    const recent = j.pairingLedger.all().filter((e) => now - e.at < UNPAIR_WINDOW_MS && e.kind === 'unpair_requested').length
+    if (recent >= UNPAIR_RATE) return refuse('rate_limited', target)
+    // The last owner channel: removing the only paired phone needs the enrolled device's signed touch.
+    if (j.pairing.pairedCount() <= 1) {
+      const dev = j.device.device()
+      if (!dev || !verifyEd25519(dev, unpairTouchMessage(target, at), msg.touchProof)) return refuse('last_owner_channel', target)
+    }
+    j.pairingLedger.append({ kind: 'unpair_requested', phoneId: target, by: from.phoneId, via: 'phone' })
+    emit('ildra.pairing.unpair_requested', { phoneId: target, by: from.phoneId, at: now })
+    const outcome = await rt.ask(UNPAIR_TEMPLATE, UNPAIR_ACTION, null, { agentId: 'ildra', kind: { tool: 'ildra.pairing.unpair', manifest: UNPAIR_MANIFEST }, available: ['phone'] })
+    const askId = outcome.request?.id ?? ''
+    if (!outcome.approved) return refuse('not_approved', target, askId || undefined)
+    if (!j.pairing.isPaired(target)) return refuse('unknown_phone', target)
+    j.pairing.unpair(target, { by: from.phoneId, via: 'locked_ask', askId })
+    emit('ildra.pairing.unpaired', { phoneId: target, by: from.phoneId, askId, at: (deps.now ?? Date.now)(), remaining: j.pairing.pairedCount() })
+    return { ok: true, state: 'unpaired', askId }
   }
   deps.inputs.onSettings = (msg, from) => {
     const j = open()

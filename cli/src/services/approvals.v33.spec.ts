@@ -191,7 +191,7 @@ describe('v3.3 runtime: handoff, settings, race', () => {
     expect(await r.send(req, 'ph')).toEqual({ ok: true })
     const out = await p
     expect(out).toMatchObject({ approved: true, channel: 'phone', reason: 'approved' })
-    expect(r.events.map((e) => e.type)).toEqual(['ildra.ask.handoff', 'ildra.ask.outcome'])
+    expect(r.events.map((e) => e.type)).toEqual(['ildra.ask.handoff', 'ildra.ask.answered_by', 'ildra.ask.outcome'])
     expect(r.events[0]!.body).toMatchObject({ from: 'device', to: 'phone', cause: 'phone_answer' })
     expect(r.withdrawn).toEqual([{ channel: 'touch', id: req.id }])
     expect(await r.send(req, 'dev')).toEqual({ ok: false, reason: 'stale_channel' })

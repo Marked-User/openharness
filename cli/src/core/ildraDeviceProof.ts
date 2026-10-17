@@ -45,6 +45,14 @@ export function settingsSetMessage(key: string, value: unknown): string {
  * Shield deny key condition 1: every verb a phone key may sign. A deny-only key is valid for exactly one,
  * 'ask.deny' (on a pending Ask); every other verb, and any verb not listed here, is verifier_rejected.
  */
+/** Batch B: what the requesting phone's main key signs to ask for an unpair (`at` within 60 s of the daemon's clock). */
+export function unpairMessage(phoneId: string, at: number): string {
+  return `ildra-pairing-unpair:v1|${phoneId}|${at}`
+}
+/** Batch B: what the enrolled device key signs after a physical touch to allow removing the last paired phone. */
+export function unpairTouchMessage(phoneId: string, at: number): string {
+  return `ildra-unpair-touch:v1|${phoneId}|${at}`
+}
 export const PHONE_VERBS = ['ask.deny', 'ask.approve', 'settings.set', 'pairing.unpair', 'device.enroll.confirm', 'deny_key.set', 'main_key.rotate'] as const
 export type PhoneVerb = (typeof PHONE_VERBS)[number]
 /** True when `signature` (base64) is `pub`'s Ed25519 signature over the UTF-8 bytes of `message`. */
