@@ -282,7 +282,7 @@ describe('Shield batch A (6d55f205c): signed enroll.confirm', () => {
   })
 })
 
-describe('Shield D: phone deny key (pending: not in Build\'s commits yet)', () => {
+describe('Shield D: phone deny key (before 91c70791c)', () => {
   it('today a deny_key carried in a signed enroll.confirm grants nothing', async () => {
     const r = rig()
     r.pairPhone()
@@ -292,10 +292,5 @@ describe('Shield D: phone deny key (pending: not in Build\'s commits yet)', () =
     expect(JSON.stringify(r.svc.journal().pairing)).not.toContain(deny.pub)
     expect(r.svc.journal().pairing.isPairedKey('p1', deny.pub)).toBe(false)
   })
-  it.todo('D1: a deny_only key settles only Deny on a pending Ask; Approve, settings.set, unpair, enroll.confirm, deny-key add or replace, main-key rotation and unknown verbs are verifier_rejected and logged')
-  it.todo('D2: deny_key accepted only inside an enroll.confirm signed by the main key; one per phone; a new confirm replaces it')
-  it.todo('D3: a Deny is bound to answerId and digest8, single use, expires; replay and cross-Ask refused; Deny after settle is a no-op')
-  it.todo('D4: unpair or main-key rotation revokes the deny key')
-  it.todo('D5: ledger entry source deny_key; one summary alert after more than 3 in 60 s')
-  it.todo('D6: a deny key settles a locked_ask only as denied and has no voice path')
+  // D1 to D6 are real tests now: approvals.shield-b.spec.ts (Shield D, on 91c70791c).
 })
