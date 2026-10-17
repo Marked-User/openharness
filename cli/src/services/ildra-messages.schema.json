@@ -34,7 +34,7 @@
       ]
     },
 
-    "AmountMinor": { "description": "Integer minor units (cents for USD). Present means a money Ask: 1 h expiry and the $50 (5000) voice cap.", "type": "integer", "minimum": 0 },
+    "AmountMinor": { "description": "Integer minor units (cents for USD). Present means a money Ask: 1 h expiry. In the pilot, money of any amount is answered on the paired phone only. The $50 voice cap is deferred to the funded product pending Shield sign-off (DECISIONS.md 6c208e8, cb46812).", "type": "integer", "minimum": 0 },
     "Currency": { "description": "ISO 4217. Only USD for now.", "const": "USD" },
     "EpochMs": { "type": "integer", "minimum": 0 },
     "Channel": { "enum": ["voice", "touch", "phone"] },
@@ -78,7 +78,7 @@
           "else": { "not": { "required": ["challenge"] } }
         },
         {
-          "description": "Shield pilot review A1: locked_ask and money Asks (amountMinor present) are answered on the paired phone only, never on the device (touch) or by voice. Covers F1 (no voice for locked_ask or money over 5000) as well.",
+          "description": "Shield pilot review A1: locked_ask and money Asks (amountMinor present) are answered on the paired phone only, never on the device (touch) or by voice. In the pilot this replaces the $50 voice cap, which is deferred to the funded product pending Shield sign-off (DECISIONS.md 6c208e8, cb46812).",
           "if": { "anyOf": [{ "properties": { "tier": { "const": "locked_ask" } }, "required": ["tier"] }, { "required": ["amountMinor"] }] },
           "then": { "properties": { "channel": { "const": "phone" } } }
         }
@@ -105,7 +105,7 @@
         "id": { "$ref": "#/$defs/AskId" },
         "digest8": { "$ref": "#/$defs/Digest8" },
         "approved": { "type": "boolean" },
-        "holdMs": { "description": "Device (touch) answers: how long the approve control was held, in milliseconds, measured by the firmware. An approval on the touch channel without holdMs of at least 1500 is rejected with hold_too_short. A deny (swipe) needs none; phone and voice answers may omit it.", "type": "number", "minimum": 0 },
+        "holdMs": { "description": "Device (touch) answers: how long the approve control was held, in milliseconds, as the device reports it. Client-claimed (Shield R3-2): for M1 the device link is daemon-owned; GA needs a firmware-measured hold signed over id, digest8, holdMs and counter (D5 b). An approval on the touch channel without holdMs of at least 1500 is rejected with hold_too_short. A deny (swipe) needs none; phone and voice answers may omit it.", "type": "number", "minimum": 0 },
         "transcript": { "description": "Voice answers: what speech-to-text heard. Must contain the challenge words, adjacent, in order.", "type": "string" },
         "from": { "$ref": "#/$defs/AnswerOrigin" },
         "signature": { "description": "Reserved for D5 (b) signed answers (Volt). Not checked yet.", "type": "string", "minLength": 1 }
