@@ -121,7 +121,7 @@ describe('(c) on-device approval', () => {
     const base = { ledger: new AskLedger(), mic: MIC, kind: { manifest: notSend('t'), tool: 't' }, available: ['voice', 'touch', 'phone'] }
     let asked = 0
     const fn = (...a: Parameters<ReturnType<typeof yes>>) => { asked++; return yes({ holdMs: 3000 })(...a) }
-    expect(await ask(T, 'Brakes step', null, fn, base)).toEqual({ approved: false, channel: null, tier: 'locked_ask', reason: 'no_channel' })
+    expect(await ask(T, 'Brakes step', null, fn, base)).toEqual({ approved: false, channel: null, tier: 'locked_ask', reason: 'no_paired_phone' }) // Shield R7 ruling
     expect(await ask(T, 'Pay a bill', null, fn, { ...base, window: new ApprovalWindow(), agentId: 'a', amountMinor: 0 })).toMatchObject({ approved: false, channel: null })
     expect(asked).toBe(0)
   })

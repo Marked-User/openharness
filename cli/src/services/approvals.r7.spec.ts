@@ -384,7 +384,7 @@ describe('Shield R7 ruling: pairing state, not an unpaired answer, ends a phone 
     r.pair(PHONE)
     expect(await r.answer(r.sent[r.sent.length - 1]!, 'ph', { from: { phoneId: 'p1' } })).toMatchObject({ ok: false })
   })
-  it('direct ask() on a journal: the unpair ends the waiting Ask; a device Ask is untouched; opening with no phone is no_channel', async () => {
+  it('direct ask() on a journal: the unpair ends the waiting Ask; a device Ask is untouched; opening with no phone paired is no_paired_phone', async () => {
     const d = mkdtempSync(join(tmpdir(), 'build-r7n-'))
     const j = openJournal(join(d, 'j', 'j.json'), { markerPath: join(d, 'm', 'x') })
     const { code } = j.pairing.begin('touch'); j.pairing.offer('p1', PHONE, code); j.pairing.confirm('p1', 'touch', true)
@@ -399,6 +399,9 @@ describe('Shield R7 ruling: pairing state, not an unpaired answer, ends a phone 
     expect(n).toBe(2)
     expect(j.ledger.get(dev.id)).not.toBeNull()
     expect(await ask(T, 'Brakes step', null, () => null, { kind, ledger: j.ledger, window: j.window, agentId: 'a', available: ['phone'], pairing: j.pairing }))
+      .toMatchObject({ approved: false, channel: null, reason: 'no_paired_phone' })
+    // Only phone-only Asks whose route is the phone say no_paired_phone; no phone channel at all stays no_channel.
+    expect(await ask(T, 'Brakes step', null, () => null, { kind, ledger: j.ledger, window: j.window, agentId: 'a', available: ['touch'], pairing: j.pairing }))
       .toMatchObject({ approved: false, channel: null, reason: 'no_channel' })
   })
 })

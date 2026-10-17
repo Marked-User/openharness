@@ -1859,7 +1859,13 @@ export async function ask(
   // v3.3: phone-only also for a flagged recipient; the phone may take over a device Ask only when this
   // Ask's policy would also route it to the phone (early or timed handoff never upgrades a touch-only Ask).
   const channel = askChannelFor(tier, profile, opts.available, opts.amountMinor, { allowVoice, isPaired, phoneOnly: prod && phoneOnly(tier, opts.amountMinor, flags) })
-  if (channel === null) return { approved: false, channel: null, tier, reason: 'no_channel' }
+  if (channel === null) {
+    // Shield R7 ruling: a phone-only Ask whose only route is the phone, refused because no phone is paired, says
+    // so (no_paired_phone); any other missing route stays no_channel.
+    const noPhone = !!isPaired && phoneOnly(tier, opts.amountMinor, flags)
+      && askChannelFor(tier, profile, opts.available, opts.amountMinor, { allowVoice, phoneOnly: true }) === 'phone'
+    return { approved: false, channel: null, tier, reason: noPhone ? 'no_paired_phone' : 'no_channel' }
+  }
   const phoneAllowed = channel === 'phone' || askChannelFor(tier, profile, opts.available, opts.amountMinor, { allowVoice, isPaired, phoneOnly: true }) === 'phone'
 
   const what = send ? `${action} to ${recipientDisplay(send.recipient, flags)}: "${firstLine(send.message)}"` : action

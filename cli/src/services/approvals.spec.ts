@@ -328,7 +328,7 @@ describe('Shield F5: running totals per agent per window', () => {
 describe('F6 and F2 hooks', () => {
   it('unpaired phone is not usable', async () => {
     const r = recorder()
-    expect(await ask(RG, 'Brakes step', null, r.fn, { available: ['phone'], isPaired: () => false })).toEqual({ approved: false, channel: null, tier: 'locked_ask', reason: 'no_channel' })
+    expect(await ask(RG, 'Brakes step', null, r.fn, { available: ['phone'], isPaired: () => false })).toEqual({ approved: false, channel: null, tier: 'locked_ask', reason: 'no_paired_phone' }) // Shield R7 ruling
     expect((await ask(RG, 'Brakes step', null, yes, { available: ['phone'], isPaired: () => true })).channel).toBe('phone')
     expect(r.calls).toEqual([])
   })
