@@ -167,7 +167,7 @@ import { createEngineHooks, installEngineHooks, installOpencodePluginBeforeSpawn
 import { createCursorDiscovery } from './engines/cursorDiscovery.js'
 import { createCursorTaskHooks, loadPendingCursorTasks } from './engines/cursorTasks.js'
 import { databaseHistory, hermesDb } from './transcripts/databaseHistory.js'
-import { CLOUD_FALLBACKS, CLOUD_REQUESTS, type CloudCore, CONNECTORS_REQUESTS, SHARED_MACHINES_REQUESTS, MEMORY_REQUESTS, ROUTER_REQUESTS, createCoreApi, DEVICES_FALLBACKS, DEVICES_REQUESTS, emptyPorts, HANDOFF_REQUESTS, EXPERIMENTS, LONG_ANSWERS, MODELS_FALLBACKS, MODELS_OFF, MODELS_REQUESTS, MONITOR_FALLBACKS, MONITOR_OFF, MONITOR_REQUESTS, ORCHESTRATOR_FALLBACKS, OS_DEVICE_REQUESTS, ORCHESTRATOR_REQUESTS, SHARE_REQUESTS, SHARING_FALLBACKS, PROJECTS_REQUESTS, SEARCH_FALLBACKS, SEARCH_REQUESTS, STORE_FALLBACKS, STORE_OFF, STORE_REQUESTS, MESSAGES_FALLBACKS, MESSAGES_REQUESTS, TURN_DELIVERERS, USAGE_FALLBACKS, USAGE_REQUESTS, VIEWERS_FALLBACKS, WIFI_FALLBACKS, WINDOW_NAMES_REQUESTS, WORKSPACES_FALLBACKS, type GatewayAccount, type GatewayOps, type GatewayStatus, type RouteAnswer, type WindowFocus } from './api.js'
+import { ILDRA_ASK_REQUESTS, CLOUD_FALLBACKS, CLOUD_REQUESTS, type CloudCore, CONNECTORS_REQUESTS, SHARED_MACHINES_REQUESTS, MEMORY_REQUESTS, ROUTER_REQUESTS, createCoreApi, DEVICES_FALLBACKS, DEVICES_REQUESTS, emptyPorts, HANDOFF_REQUESTS, EXPERIMENTS, LONG_ANSWERS, MODELS_FALLBACKS, MODELS_OFF, MODELS_REQUESTS, MONITOR_FALLBACKS, MONITOR_OFF, MONITOR_REQUESTS, ORCHESTRATOR_FALLBACKS, OS_DEVICE_REQUESTS, ORCHESTRATOR_REQUESTS, SHARE_REQUESTS, SHARING_FALLBACKS, PROJECTS_REQUESTS, SEARCH_FALLBACKS, SEARCH_REQUESTS, STORE_FALLBACKS, STORE_OFF, STORE_REQUESTS, MESSAGES_FALLBACKS, MESSAGES_REQUESTS, TURN_DELIVERERS, USAGE_FALLBACKS, USAGE_REQUESTS, VIEWERS_FALLBACKS, WIFI_FALLBACKS, WINDOW_NAMES_REQUESTS, WORKSPACES_FALLBACKS, type GatewayAccount, type GatewayOps, type GatewayStatus, type RouteAnswer, type WindowFocus } from './api.js'
 import { createServiceHost, testFaults } from './serviceHost.js'
 import { startStalls } from './stall.js'
 import { createServiceLinks, type ServiceLinks } from './serviceLinks.js'
@@ -199,6 +199,7 @@ import { localSocketPath, refuseServedDataFolder, type LocalSocketServer } from 
 import { saveDaemonPort } from '../lib/daemonEndpoint.js'
 import { publishHookRoute } from '../lib/hookRoutes.js'
 import { BackendSocket, isLocalClientId } from '../backendSocket.js'
+import { createIldraAskCore } from './ildraAsk.js'
 import { createGatewayLink, laneOf } from './gatewayLink.js'
 import { createWifiCore, WIFI_START_MS } from './wifi.js'
 import { createDevicesWake, DEVICES_ON_DEMAND } from './devicesWake.js'
@@ -760,7 +761,16 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     ask: (agentId, requestId, question) => cloudAgents?.doors.ask(agentId, requestId, question),
     unask: (agentId, requestId) => cloudAgents?.doors.unask(agentId, requestId),
   }
+  // Ildra Asks, the core's half (core/ildraAsk.ts): Shield F12 and F13 in the daemon's own input paths. Answers
+  // come in as `ildra_ask_answer` with their origin from the gateway-authenticated connection; the guard stops
+  // remote keystrokes to a pane whose agent waits on an Ask (the terminal streams below). The Ask itself is
+  // services/ildraAsk.ts, reached through CoreApi.ildraAsk.
+  const ildraAsk = createIldraAskCore({
+    clientOf: (connId) => backend.remoteClient(connId),
+    isLoopback: isLocalClientId,
+  })
   const coreApi = createCoreApi({
+    ildraAsk,
     cloud: cloudDoors,
     cloudRows: () => (cloudAgents?.dialRows() ?? []) as unknown as RegisteredSession[],
     // Agents' terminals: a literal-argv launch, and a read-only view for Share's observers (core/terminalWatch.ts).
@@ -1028,6 +1038,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // The script every pane's BROWSER names asks this daemon first; rewritten as it starts (the CLI may have moved).
   writeBrowserShim(daemonCommand())
   const terminalStreams = new TerminalStreamManager({
+    askPanes: ildraAsk.guard,
     terminals,
     resolveAgent: (agentId) => registry.resolve(agentId),
     sendTarget: (connId, type, payload) => backend.sendTerminalTo(connId, type, payload),
@@ -1512,6 +1523,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // media file from an agent's project (services/projects.ts), and a window's name (services/windowNames.ts):
   // in this process, or in the edge host.
   if (!outOfProcess.has('projects')) serviceHost.serve('projects', inline!.startProjects, coreApi, PROJECTS_REQUESTS)
+  serviceHost.serve('ildraAsk', () => ildraAsk.requests, coreApi, ILDRA_ASK_REQUESTS)
   if (!outOfProcess.has('windowNames')) serviceHost.serve('windowNames', inline!.startWindowNames, coreApi, WINDOW_NAMES_REQUESTS)
   if (!outOfProcess.has('memory')) serviceHost.serve('memory', inline!.startMemory, coreApi, MEMORY_REQUESTS)
   if (!outOfProcess.has('router')) serviceHost.serve('router', inline!.startRouter, coreApi, ROUTER_REQUESTS)

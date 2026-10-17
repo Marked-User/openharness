@@ -122,6 +122,8 @@ export interface UsagePort {
 export const USAGE_FALLBACKS: PortFallbacks<UsagePort> = { read: later(FAIL), stop: undefined }
 
 export interface CoreApi {
+  /** Ildra Asks' input paths (core/ildraAsk.ts). Absent in a service process that was not handed them. */
+  ildraAsk?: IldraAskInputs
   /** Last aggregate observation, never a transcript read. Optional for services that do not ask. */
   usage?: (target: AgentUsageTarget) => Promise<AgentTokenUsage | null>
   /** An agent's token totals read from its transcript now, not the cached snapshot (the devices' turn tokens);
@@ -524,6 +526,37 @@ export const WINDOW_NAMES_REQUESTS = ['window_name'] as const
 export const HANDOFF_REQUESTS = ['agent_handoff_prepare'] as const
 /** Connected services for every local agent, and their MCP bridge, in the edge host (services/connectors.ts). */
 export const CONNECTORS_REQUESTS = ['connectors'] as const
+/** The pane guard the terminal input path consults (Shield F13): structurally services/approvals.ts AskPaneGuard. */
+export interface IldraPaneGuard {
+  open(paneId: string, requestId: string): void
+  close(paneId: string): void
+  requestFor(paneId: string): string | null
+  filterInput(paneId: string, from: 'local' | 'remote'): 'pass' | 'block'
+}
+
+/** Where an Ask answer came from, as the core established it from the connection (Shield F12). */
+export interface IldraAnswerOrigin { phoneId?: string; machinePub?: string }
+
+/**
+ * The core's half of Ildra Asks (core/ildraAsk.ts): the input paths. Answers arrive as `ildra_ask_answer` and get
+ * their origin from the gateway-authenticated connection; the guard blocks remote keys to a pane with an open Ask.
+ * The Ask itself (ledger, journal, gate) is services/ildraAsk.ts, which reaches these through CoreApi.ildraAsk.
+ */
+export interface IldraAskInputs {
+  readonly guard: IldraPaneGuard
+  /**
+   * Wait for the answer to an open request: the guard holds `pane` while it waits, `deliver` shows the Ask, and
+   * the promise settles with the answer (origin rewritten) or null on expiry, cancel or a delivery that throws.
+   */
+  awaitAnswer(req: { id: string; expiresAt: number }, pane: string, deliver: () => void): Promise<Record<string, unknown> | null>
+  /** F12 lookup for the ledger: true unless the gateway said this identity key is the account's own. */
+  isShared(origin: IldraAnswerOrigin): boolean
+  cancel(id: string): void
+}
+
+/** Ildra Asks (services/ildraAsk.ts): an answer from the phone or the device to an open Ask. Its origin is the
+ *  connection it came over (Shield F12), never the payload. Always in the core's own process. */
+export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer'] as const
 /** Sharing this machine with other accounts, and adding machines shared with this one, in the edge host
  *  (services/sharedMachines.ts). */
 export const SHARED_MACHINES_REQUESTS = ['shared_machines'] as const
@@ -1162,6 +1195,8 @@ export interface RemoteClient {
   label: string | null
   identity: string
   direct: boolean
+  /** Ildra F12: the peer is trusted here only because a machine is shared with it (gateway/sharedTrust.ts). */
+  shared?: true
 }
 
 /** How a remote client's frame arrived: the backend's relay, or a paired client's own P2P channel. */
@@ -1463,6 +1498,7 @@ export function emptyPorts(): CorePorts {
 }
 
 export interface CoreApiDeps {
+  ildraAsk?: IldraAskInputs
   terminals?: TerminalsPort
   conversations?: ConversationReads
   dataDir: string
@@ -1529,7 +1565,7 @@ export function createCoreApi({
   dataDir, registry, stoppedAgents, databaseHistory, syncSession, runtimeModels, viewerChanged,
   gridNamed, gridModelsChanged, dshInstallStatus, mintGridName, accessToken, lane, observerKey, connectorVault, observer, privateGridName, machineName, backend, onNotice,
   runtimeProfile, setRuntime, fork, create, dsh, windows, daemon, turns, questions, terminals = TERMINALS_OFF, conversations = CONVERSATIONS_OFF, viewerFrame, machine, activityText, activitySnapshot,
-  closeAgent, activityAt,
+  closeAgent, activityAt, ildraAsk,
   signedIn, environment, machines, sendLocal, sendToWindow, hasWindow, devicesChanged, dialWatching, wifi, cloud, cloudRows, lastTurn, turnCard, turnSummary,
   log = (line) => console.warn(line),
 }: CoreApiDeps): CoreApi {
@@ -1541,6 +1577,7 @@ export function createCoreApi({
   // The recaps reach the devices and the apps through their own two doors, and only with their own frames.
   const refusedRecap = (type: unknown): void => log(`[services] the recaps sent ${String(type).slice(0, 40)}, which is not theirs to send`)
   return {
+    ...(ildraAsk ? { ildraAsk } : {}),
     dataDir,
     terminals,
     machine,

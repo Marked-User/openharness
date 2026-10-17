@@ -295,6 +295,45 @@ describe('TerminalStreamManager', () => {
     expect(from[0]?.connId).toBe('web-1')
   })
 
+  it('Shield F13: remote keystrokes and pastes to a pane with an open Ildra Ask are dropped; the loopback desktop types', async () => {
+    const { AskPaneGuard } = await import('../services/approvals.js')
+    const guard = new AskPaneGuard()
+    await manager.stop()
+    manager = newManager({ askPanes: guard, isLoopback: (connId) => connId === 'desk' })
+    await manager.handleFrame('phone-1', 'terminal_open', { requestId: 'o1', protocolVersion: 3, agentId: 'agent-1', cols: 120, rows: 40 })
+    const remote = sent.find((f) => f.type === 'terminal_ready' && f.connId === 'phone-1')!.payload.streamId as string
+    await manager.handleBinary('phone-1', { kind: TerminalBinaryKind.input, streamId: remote, seq: 0, compressed: false, bytes: Buffer.from('a') })
+    expect(stream.writes.map((b) => Buffer.from(b).toString())).toEqual(['a'])
+
+    guard.open('agent-1', 'req-1')
+    await manager.handleBinary('phone-1', { kind: TerminalBinaryKind.input, streamId: remote, seq: 1, compressed: false, bytes: Buffer.from('\r') })
+    await manager.handleBinary('phone-1', { kind: TerminalBinaryKind.paste, streamId: remote, seq: 0, compressed: false, bytes: Buffer.from('1\r') })
+    expect(stream.writes.map((b) => Buffer.from(b).toString())).toEqual(['a'])
+    expect(stream.pastes).toEqual([])
+    expect(sent.filter((f) => f.type === 'terminal_error' && f.payload.code === 'ILDRA_ASK_PANE')).toHaveLength(2)
+
+    // The dropped keystroke spent its seq, so the stream carries on in order once the Ask closes.
+    guard.close('agent-1')
+    await manager.handleBinary('phone-1', { kind: TerminalBinaryKind.input, streamId: remote, seq: 2, compressed: false, bytes: Buffer.from('b') })
+    expect(stream.writes.map((b) => Buffer.from(b).toString())).toEqual(['a', 'b'])
+
+    // The desktop on this computer's loopback is local: it may answer at the keyboard.
+    guard.open('agent-1', 'req-2')
+    await manager.handleFrame('desk', 'terminal_open', { requestId: 'o2', protocolVersion: 3, agentId: 'agent-1', cols: 120, rows: 40 })
+    const local = sent.find((f) => f.type === 'terminal_ready' && f.connId === 'desk')!.payload.streamId as string
+    await manager.handleBinary('desk', { kind: TerminalBinaryKind.input, streamId: local, seq: 0, compressed: false, bytes: Buffer.from('y') })
+    expect(stream.writes.map((b) => Buffer.from(b).toString())).toEqual(['a', 'b', 'y'])
+  })
+
+  it('Shield F13: a guard that throws blocks remote input (fails closed)', async () => {
+    await manager.stop()
+    manager = newManager({ askPanes: { filterInput: () => { throw new Error('down') } } })
+    await manager.handleFrame('phone-1', 'terminal_open', { requestId: 'o1', protocolVersion: 3, agentId: 'agent-1', cols: 120, rows: 40 })
+    const remote = sent.find((f) => f.type === 'terminal_ready')!.payload.streamId as string
+    await manager.handleBinary('phone-1', { kind: TerminalBinaryKind.input, streamId: remote, seq: 0, compressed: false, bytes: Buffer.from('a') })
+    expect(stream.writes).toEqual([])
+  })
+
   it('opens with a keyframe, streams coalesced output, and writes ordered raw input', async () => {
     await manager.handleFrame('web-1', 'terminal_open', {
       requestId: 'open-1', protocolVersion: 3, agentId: 'agent-1', cols: 120, rows: 40, compression: ['zlib'],
