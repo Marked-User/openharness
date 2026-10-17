@@ -12,10 +12,10 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import * as proof from '../core/ildraDeviceProof.js'
-import { askAnswerMessage, denySummaryAckMessage, deviceFingerprint, settingsSetMessage, unpairMessage, unpairTouchMessage } from '../core/ildraDeviceProof.js'
-import { createIldraAsk, UNPAIR_RATE } from './ildraAsk.js'
+import { askAnswerMessage, denySummaryAckMessage, ledgerAckMessage, deviceFingerprint, settingsSetMessage, unpairMessage, unpairTouchMessage } from '../core/ildraDeviceProof.js'
+import { createIldraAsk, UNPAIR_RATE, UNPAIR_WINDOW_MS } from './ildraAsk.js'
 import { deviceKeyPair, phoneKeyPair, proveBridge, signedConfirm } from './ildraAsk.testkit.js'
-import { stampManifest, type ApprovalTemplate, type AskRequest, type PairingLedgerEntry } from './approvals.js'
+import { MAX_PAIRING_LEDGER, stampManifest, type ApprovalTemplate, type AskRequest, type PairingLedgerEntry } from './approvals.js'
 
 const aid = (): string => randomBytes(16).toString('hex')
 const T: ApprovalTemplate = { permissions: { ask: ['Rename a file'], locked_ask: ['Brakes step'] } }
@@ -179,7 +179,7 @@ describe('Shield D: phone deny key (91c70791c)', () => {
     expect(reopen(r2).svc.journal().pairing.denyKey('p2')).toBeNull()
   })
 
-  it('D5: every deny-key Deny is a ledger entry with source deny_key; more than 3 in 60 s gives the summary on each phone open until the phone acknowledges it (Shield S1)', async () => {
+  it('D5: every deny-key Deny is a ledger entry with source deny_key; more than 3 in 60 s gives the summary on each phone open until the phone acknowledges it with its main key (Shield S1; the deny-key ack is GAP S1b below)', async () => {
     const r = rig(); r.pair('p1', r.K.P1.pub); await r.enrollDevice(r.K.D1.pub)
     for (let i = 0; i < 5; i++) { const { p, req } = await r.phoneAsk(); expect(await r.signed(req, r.K.D1.key, false)).toEqual({ ok: true }); await p; r.clock.t += 1000 }
     const denies = r.svc.journal().pairingLedger.all().filter((e) => e.kind === 'deny_key_deny')
@@ -192,7 +192,7 @@ describe('Shield D: phone deny key (91c70791c)', () => {
     // Shield S1 (k): sending it no longer clears it; it is resent on each phone open until the phone's signed ack.
     expect(await r.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r.remote('ph1'))).toEqual(open1)
     const ackAt = r.clock.t; const since = open1.denySummary!.since
-    expect(await r.core.requests.ildra_deny_summary_ack({ since, at: ackAt, phoneSignature: sig(r.K.D1.key, denySummaryAckMessage(since, ackAt)), from: { phoneId: 'p1' } }, r.remote('ph1'))).toEqual({ ok: true })
+    expect(await r.core.requests.ildra_deny_summary_ack({ since, at: ackAt, phoneSignature: sig(r.K.P1.key, denySummaryAckMessage(since, ackAt)), from: { phoneId: 'p1' } }, r.remote('ph1'))).toEqual({ ok: true })
     expect(await r.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r.remote('ph1'))).toEqual({ ok: true, denySummary: null })
     // Only the paired phone collects it.
     expect(await r.core.requests.ildra_phone_open({ from: { phoneId: 'p1' } }, r.remote('ph2'))).toMatchObject({ ok: false })
@@ -471,5 +471,221 @@ describe.skipIf(!verifyP256)('Shield P-256 phone keys (prepared; runs once Build
     const k = p256(); const ed = phoneKeyPair()
     expect(v(k.pub, M, sign(null, Buffer.from(M), ed.key))).toBe(false)
     expect(proof.verifyEd25519(ed.pub, M, sign('sha256', Buffer.from(M), k.key).toString('base64'))).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------
+describe('Shield batch B round 2: attacks on the fixes (b5279a562)', () => {
+  const seeded = async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); r.pair('p2', r.K.P2.pub); await r.enrollDevice(r.K.D1.pub)
+    return r
+  }
+  /** Append n state entries fast (no journal write per entry), then one write. */
+  const fill = (r: ReturnType<typeof rig>, n: number, kind: 'phone_open' = 'phone_open') => {
+    const L = r.svc.journal().pairingLedger; const oc = L.onChange; L.onChange = undefined
+    for (let i = 0; i < n; i++) L.append({ kind, phoneId: 'p1', by: 'p1', via: 'phone' })
+    L.onChange = oc; oc?.()
+  }
+  const reset = async () => {
+    const r = await seeded(); const d = r.readJ(); d.pairingLedger[1].phoneId = 'zz'; r.writeJ(d)
+    return reopen(r)
+  }
+  const ack = (r: ReturnType<typeof rig>, key = r.K.P1.key, phoneId = 'p1', conn = 'ph1') => {
+    const e = r.svc.journal().pairingLedger.pendingReset()!
+    return r.core.requests.ildra_pairing_ledger_ack({ seq: e.seq, hash: e.hash, signature: sig(key, ledgerAckMessage(e.seq, e.hash)), from: { phoneId } }, r.remote(conn))
+  }
+
+  // --- HMAC key ---
+  it('GAP R1 (Medium): rolling the whole journal back to an older copy passes the chain and the MAC (the MAC binds the head, not its freshness): an unpaired phone comes back, no ledger_reset, recovered false', async () => {
+    const r = await seeded()
+    const old = readFileSync(r.path, 'utf8')
+    const p = r.unpair('p2', r.K.P1.key); await tick(); await r.answer(r.sent.at(-1)!, 'ph1', 'p1', true); expect(await p).toMatchObject({ ok: true })
+    expect(r.svc.journal().pairing.isPaired('p2')).toBe(false)
+    writeFileSync(r.path, old)
+    const r2 = reopen(r)
+    expect(r2.svc.journal().recovered).toBe(false)
+    expect(r2.svc.journal().pairing.isPaired('p2')).toBe(true)
+    expect(r2.kinds()).not.toContain('ledger_reset')
+  })
+
+  it('HOLDS: key deleted with pairings present gives ledger_key_missing; a key moved away (another ledgerKeyPath) is the same; a non-hex or short MAC is mac_mismatch, never a throw', async () => {
+    const r = await seeded()
+    const { rmSync } = await import('node:fs')
+    rmSync(join(r.dir, 'm', 'x.installed.ledger-key'))
+    const r2 = reopen(r)
+    expect(r2.svc.journal().pairingLedger.all()[0]).toMatchObject({ kind: 'ledger_reset', reason: 'ledger_key_missing' })
+    expect(r2.svc.journal().pairing.changeRefusal()).toBe('ledger_locked')
+    for (const mac of ['zz', 'ab', 'A'.repeat(64), 12345, null]) {
+      const r3 = await seeded(); const d = r3.readJ(); d.pairingLedgerMac = mac; r3.writeJ(d)
+      expect(reopen(r3).svc.journal().pairingLedger.all()[0]).toMatchObject({ kind: 'ledger_reset', reason: 'mac_mismatch' })
+    }
+  })
+
+  it('NOTE: with the ledger, the pairings and the key all deleted (marker kept) the journal-missing path resets; with the marker also deleted it is a fresh install (no history to protect)', async () => {
+    const r = await seeded()
+    const { rmSync } = await import('node:fs')
+    rmSync(join(r.dir, 'j'), { recursive: true }); rmSync(join(r.dir, 'm', 'x.installed.ledger-key'))
+    expect(reopen(r).svc.journal().pairingLedger.all()[0]).toMatchObject({ kind: 'ledger_reset', reason: 'journal_missing' })
+  })
+
+  it('HOLDS: no reset loop: a restart after a reset (nothing tampered) does not reset again; the lock persists until the main-key ack, then clears', async () => {
+    const r2 = await reset()
+    const before = r2.svc.journal().pairingLedger.all().length
+    const r3 = reopen(r2)
+    expect(r3.svc.journal().pairingLedger.all().slice(before)).toEqual([])
+    expect(r3.kinds().filter((k) => k === 'ledger_reset')).toHaveLength(1)
+    expect(r3.svc.journal().recovered).toBe(false)
+    expect(r3.svc.journal().pairing.changeRefusal()).toBe('ledger_locked')
+    expect(await ack(r3, r3.K.D1.key)).toEqual({ ok: false, reason: 'verifier_rejected' })
+    expect(await ack(r3)).toEqual({ ok: true })
+    expect(reopen(r3).svc.journal().pairing.changeRefusal()).toBeNull()
+  })
+
+  it('HOLDS: the B5 lock never blocks Deny: a main-key Deny and a deny-key Deny settle while ledger_locked', async () => {
+    const r2 = await reset()
+    expect(r2.svc.journal().pairing.changeRefusal()).toBe('ledger_locked')
+    const a = await r2.phoneAsk(); expect(await r2.answer(a.req, 'ph1', 'p1', false)).toEqual({ ok: true }); expect(await a.p).toMatchObject({ approved: false })
+    const b = await r2.phoneAsk(); expect(await r2.signed(b.req, r2.K.D1.key, false)).toEqual({ ok: true }); expect(await b.p).toMatchObject({ approved: false })
+  })
+
+  it('GAP RULING-1 (new ruling to Build): after a reset every phone is Deny only until re-confirmed with a fresh device presence bound to its fingerprint; today an Approve still settles', async () => {
+    const r2 = await reset()
+    const a = await r2.phoneAsk()
+    expect(await r2.answer(a.req, 'ph1', 'p1', true)).toEqual({ ok: true }) // ruling: { ok: false, reason: 'phone_suspended' }
+    expect(await a.p).toMatchObject({ approved: true })
+  })
+
+  it('GAP RULING-2 (new ruling to Build): ledger_ack needs device presence too; today the main-key signature alone clears the lock, and any paired phone (also a stolen one) may send it', async () => {
+    const r2 = await reset()
+    expect(await ack(r2, r2.K.P2.key, 'p2', 'ph2')).toEqual({ ok: true }) // ruling: presence_missing until a device presence for p2's fingerprint
+    expect(r2.svc.journal().pairing.changeRefusal()).toBeNull()
+    expect(r2.kinds()).not.toContain('device_presence')
+  })
+
+  // --- B7 ---
+  it('HOLDS B7: two unpairs fired in the same tick: exactly one opens an Ask, the other is unpair_pending (check and set have no await between them)', async () => {
+    const r = await seeded()
+    const n = r.sent.length
+    const a = r.unpair('p2', r.K.P1.key); const b = r.unpair('p1', r.K.P2.key, { conn: 'ph2', phoneId: 'p2' })
+    expect(await b).toEqual({ ok: false, reason: 'unpair_pending' })
+    await tick(); expect(r.sent.length).toBe(n + 1)
+    await r.answer(r.sent.at(-1)!, 'ph1', 'p1', false); expect(await a).toMatchObject({ ok: false, reason: 'not_approved' })
+    expect(r.svc.journal().pairing.pairedCount()).toBe(2)
+  })
+
+  it('GAP B7b (Medium): a paired phone (say a stolen one) blocks its own removal: its unpair requests, each denied, use the daemon-wide limit, so the owner phone is rate_limited (and unpair_pending while one is open); there is no other revoke path', async () => {
+    const r = await seeded()
+    for (let i = 0; i < UNPAIR_RATE; i++) {
+      const p = r.unpair('p1', r.K.P2.key, { conn: 'ph2', phoneId: 'p2' }); await tick()
+      if (i === 0) expect(await r.unpair('p2', r.K.P1.key)).toEqual({ ok: false, reason: 'unpair_pending' })
+      await r.answer(r.sent.at(-1)!, 'ph1', 'p1', false); await p; r.clock.t += 1000
+    }
+    expect(await r.unpair('p2', r.K.P1.key)).toEqual({ ok: false, reason: 'rate_limited' })
+    r.clock.t += UNPAIR_WINDOW_MS
+    // Next window: the stolen phone goes first again.
+    const p = r.unpair('p1', r.K.P2.key, { conn: 'ph2', phoneId: 'p2' }); await tick()
+    expect(await r.unpair('p2', r.K.P1.key)).toEqual({ ok: false, reason: 'unpair_pending' })
+    await r.answer(r.sent.at(-1)!, 'ph1', 'p1', false); await p
+    expect(r.svc.journal().pairing.isPaired('p2')).toBe(true)
+  })
+
+  // --- D2a ---
+  it('GAP D2a-2 (Low): with the ledger three short of full, a confirm carrying a deny key enrolls the device, then setDenyKey hits ledger_full: the reply is malformed but the device stays enrolled with no deny key', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub)
+    fill(r, MAX_PAIRING_LEDGER - 3 - r.svc.journal().pairingLedger.all().length)
+    expect(await r.enrollDevice(r.K.D1.pub)).toEqual({ ok: false, reason: 'malformed' })
+    expect(r.svc.journal().device.device()).not.toBeNull() // fix: null (check room for both entries first, or set the deny key before the device)
+    expect(r.svc.journal().pairing.denyKey('p1')).toBeNull()
+  })
+
+  // --- B8 ---
+  it('HOLDS B8: a spent touch proof is refused on a new connection and after a restart; one signed before a ledger reset is refused', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); await r.enrollDevice()
+    const at = r.clock.t; const tp = sig(r.K.DEVK.key, unpairTouchMessage('p1', at))
+    const p = r.unpair('p1', r.K.P1.key, { at, touchProof: tp }); await tick(); await r.answer(r.sent.at(-1)!, 'ph1', 'p1', true); expect(await p).toMatchObject({ ok: true })
+    r.pair('p1', r.K.P1.pub); r.clock.t += 5000
+    const r2 = reopen(r)
+    expect(await r2.unpair('p1', r.K.P1.key, { at, touchProof: tp })).toEqual({ ok: false, reason: 'last_owner_channel' })
+    // A proof never used, signed before a reset.
+    const at2 = r2.clock.t; const tp2 = sig(r2.K.DEVK.key, unpairTouchMessage('p1', at2))
+    r2.clock.t += 1000
+    const d = r2.readJ(); d.pairingLedger[0].at += 1; r2.writeJ(d)
+    const r3 = reopen(r2); await ack(r3)
+    expect(await r3.unpair('p1', r3.K.P1.key, { at: at2, touchProof: tp2 })).toMatchObject({ ok: false })
+  })
+
+  // --- B9 ---
+  it('HOLDS B9: a proven device connection claiming a new phoneId each time is still coalesced (the key does not follow the claimed phoneId)', async () => {
+    const r = await seeded()
+    expect(proveBridge(r.core, 'dev', r.K.DEVK.key)).toBe(true)
+    const n = r.svc.journal().pairingLedger.all().length
+    for (let i = 0; i < 200; i++) await r.core.requests.ildra_ask_answer({ id: aid(), digest8: '00000000', answerId: aid(), approved: false, holdMs: 2000, phoneSignature: 'AAAA', from: { phoneId: `x${i}` } }, r.remote('dev'))
+    expect(r.svc.journal().pairingLedger.all().length - n).toBeLessThanOrEqual(5)
+  })
+
+  it('GAP B9c (Medium): the ledger never compacts: every phone open is a state entry, so ordinary use reaches ledger_full and then the owner cannot unpair a lost phone', async () => {
+    const r = await seeded()
+    fill(r, MAX_PAIRING_LEDGER - 2 - r.svc.journal().pairingLedger.all().length)
+    expect(r.svc.journal().pairing.changeRefusal()).toBe('ledger_full')
+    expect(await r.unpair('p2', r.K.P1.key)).toEqual({ ok: false, reason: 'ledger_full' })
+  })
+
+  it('HOLDS B9: a noise flood near the cap cannot evict state (the ledger is append only) and stops at MAX - reserve; Deny by the deny key still settles at the noise cap', async () => {
+    const r = await seeded()
+    const L = r.svc.journal().pairingLedger
+    const oc = L.onChange; L.onChange = undefined
+    for (let i = 0; L.all().length < MAX_PAIRING_LEDGER - 1000; i++) L.append({ kind: 'pair_refused', phoneId: `n${i}`, by: 'daemon', reason: 'bad_code' })
+    expect(L.append({ kind: 'pair_refused', phoneId: 'late', by: 'daemon', reason: 'bad_code' })).toBeNull()
+    L.onChange = oc
+    expect(L.all().slice(0, 3).map((e) => e.kind)).toEqual(r.kinds().slice(0, 3))
+    const { p, req } = await r.phoneAsk(); expect(await r.signed(req, r.K.D1.key, false)).toEqual({ ok: true }); expect(await p).toMatchObject({ approved: false })
+    expect(r.kinds().at(-1)).toBe('deny_key_deny')
+  })
+
+  it('Deny at a full ledger: the deny-key Deny settles even when its deny_key_deny entry cannot be written', async () => {
+    const r = await seeded()
+    const { p, req } = await r.phoneAsk()
+    fill(r, MAX_PAIRING_LEDGER - r.svc.journal().pairingLedger.all().length)
+    const res = await r.signed(req, r.K.D1.key, false)
+    expect(res).toEqual({ ok: true })
+    expect(await p).toMatchObject({ approved: false })
+  })
+
+  // --- S3 paging ---
+  it('HOLDS S3: paging always ends: nextSeq strictly grows, more is false on the last page, since past the head is empty with more false', async () => {
+    const r = await seeded(); fill(r, 1234)
+    const L = r.svc.journal().pairingLedger
+    let since = 0; let pages = 0; let got = 0
+    for (;;) {
+      const pg = L.page(since); pages++; got += pg.entries.length
+      if (!pg.more) { expect(pg.nextSeq).toBeUndefined(); break }
+      expect(pg.nextSeq!).toBeGreaterThan(since); since = pg.nextSeq!
+      expect(pages).toBeLessThan(10)
+    }
+    expect(got).toBe(L.head().seq)
+    expect(L.page(L.head().seq + 50)).toMatchObject({ entries: [], more: false })
+    expect(L.page(-5).entries[0]!.seq).toBe(1)
+  })
+
+  // --- S1 ack ---
+  it('GAP S1b (Medium): the deny-only key can acknowledge the deny summary, so whoever holds it can Deny in a burst and then clear the warning the owner was meant to see', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); await r.enrollDevice(r.K.D1.pub)
+    for (let i = 0; i < 5; i++) { const { p, req } = await r.phoneAsk(); await r.signed(req, r.K.D1.key, false); await p; r.clock.t += 1000 }
+    const s = r.svc.journal().pairing.peekDenySummary('p1')!
+    expect(await r.core.requests.ildra_deny_summary_ack({ since: s.since, at: r.clock.t, phoneSignature: sig(r.K.D1.key, denySummaryAckMessage(s.since, r.clock.t)), from: { phoneId: 'p1' } }, r.remote('ph1'))).toEqual({ ok: true }) // fix: verifier_rejected
+    expect(r.svc.journal().pairing.peekDenySummary('p1')).toBeNull()
+  })
+
+  it('GAP S1c (Low): an ack is not bound to the burst it saw (count, at) and its at is never checked, so a replay of an old ack clears a burst that kept going inside the same 60 s window (same since)', async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); await r.enrollDevice(r.K.D1.pub)
+    for (let i = 0; i < 5; i++) { const { p, req } = await r.phoneAsk(); await r.signed(req, r.K.D1.key, false); await p; r.clock.t += 1000 }
+    const s = r.svc.journal().pairing.peekDenySummary('p1')!
+    const msg = { since: s.since, at: r.clock.t, phoneSignature: sig(r.K.P1.key, denySummaryAckMessage(s.since, r.clock.t)), from: { phoneId: 'p1' } }
+    expect(await r.core.requests.ildra_deny_summary_ack(msg, r.remote('ph1'))).toEqual({ ok: true })
+    for (let i = 0; i < 5; i++) { const { p, req } = await r.phoneAsk(); await r.signed(req, r.K.D1.key, false); await p; r.clock.t += 1000 }
+    const s2 = r.svc.journal().pairing.peekDenySummary('p1')!
+    expect(s2.since).toBe(s.since); expect(s2.count).toBeGreaterThan(s.count)
+    expect(await r.core.requests.ildra_deny_summary_ack(msg, r.remote('ph1'))).toEqual({ ok: true }) // fix: stale (bind count and at, or refuse at older than the burst's at)
+    expect(r.svc.journal().pairing.peekDenySummary('p1')).toBeNull()
   })
 })
