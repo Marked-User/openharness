@@ -50,6 +50,7 @@ export interface IldraAskCore extends IldraAskInputs {
     ildra_pairing_unpair: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; state: 'unpaired'; askId: string } | { ok: false; reason: string }>
     ildra_ask_answered_by: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; answeredBy: unknown } | { ok: false; reason: string }>
     ildra_pairing_ledger_ack: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true } | { ok: false; reason: string }>
+    ildra_ledger_confirm: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; head: string; seq: number; at: number } | { ok: false; reason: string }>
     ildra_device_challenge: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; nonce: string } | { ok: false; reason: string }>
     ildra_device_prove: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: boolean; reason?: string }>
   } & Record<string, ServiceRequest>
@@ -230,6 +231,13 @@ export function createIldraAskCore(deps: {
         if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
         if (!core.onPairingLedgerAck) return { ok: false, reason: 'unavailable' }
         return core.onPairingLedgerAck({ seq: payload?.seq, hash: payload?.hash, signature: payload?.signature }, origin.from)
+      },
+      // (h): the paired phone asks the device to confirm the phone and device list (main key only).
+      ildra_ledger_confirm: async (payload, asker) => {
+        const origin = originOf(asker.connection, payload?.from)
+        if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'unpaired_phone' }
+        if (!core.onLedgerConfirm) return { ok: false, reason: 'unavailable' }
+        return core.onLedgerConfirm({ head: payload?.head, seq: payload?.seq, at: payload?.at, phoneSignature: payload?.phoneSignature }, origin.from)
       },
       ildra_device_challenge: async (_payload, asker) => {
         const nonce = asker.connection ? core.challengeDevice(asker.connection) : null

@@ -740,6 +740,8 @@ export class AskLedger {
     known?: RecipientKnowledge
     /** @internal practiceAsk only. */
     tool?: unknown
+    /** @internal deviceHoldConfirm only: a shorter expiry than the decided one. */
+    expiryMs?: number
   }): AskRequest {
     if (o.kind === 'practice') {
       if (o.action !== PRACTICE_ACTION) throw new PracticeRefused('action')
@@ -781,7 +783,7 @@ export class AskLedger {
       ...(o.kind !== undefined ? { kind: o.kind } : {}),
       ...(currency ? { currency } : {}),
       openedAt,
-      expiresAt: openedAt + (this.ttlMs ?? askExpiryMs(o.amountMinor)),
+      expiresAt: openedAt + (o.expiryMs ?? this.ttlMs ?? askExpiryMs(o.amountMinor)),
       channel: o.channel,
       tier: o.tier,
       ...(o.amountMinor !== undefined ? { amountMinor: o.amountMinor } : {}),
@@ -1180,6 +1182,8 @@ export const PAIRING_LEDGER_KINDS = [
   'unpair_requested', 'unpair_refused',
   // Shield B5: the ledger could not be trusted at load (kept aside, never restarted empty) and the phone's acknowledgement.
   'ledger_reset', 'ledger_ack',
+  // (h): the device confirmed the phone and device list at a head (prev = that head, since = its seq), or a refusal.
+  'ledger_confirmed', 'ledger_confirm_refused',
 ] as const
 export type PairingLedgerKind = (typeof PAIRING_LEDGER_KINDS)[number]
 export interface PairingLedgerFields {
@@ -1226,7 +1230,7 @@ export const MAX_PAIRING_LEDGER = 10_000
 export const LEDGER_STATE_RESERVE = 1_000
 export const NOISY_PER_MINUTE = 5
 export const LEDGER_STRING_MAX = 64
-const NOISY_LEDGER_KINDS: ReadonlySet<string> = new Set(['verifier_rejected', 'pair_refused', 'unpair_refused', 'device_enroll_requested', 'device_enroll_replaced', 'device_refused', 'device_expired'])
+const NOISY_LEDGER_KINDS: ReadonlySet<string> = new Set(['verifier_rejected', 'pair_refused', 'unpair_refused', 'device_enroll_requested', 'device_enroll_replaced', 'device_refused', 'device_expired', 'ledger_confirm_refused'])
 const LEDGER_CAPPED_STRINGS = ['phoneId', 'by', 'via', 'reason', 'verb', 'uv'] as const
 export class PairingLedger {
   private readonly entries_: PairingLedgerEntry[] = []
@@ -2448,6 +2452,35 @@ export async function practiceAsk(
   }
   const approved = s.ok && (ans as AskAnswer).approved === true
   return { approved, channel, tier: 'ask', reason: s.ok ? (approved ? 'approved' : 'denied') : s.reason, request: req, practice: true }
+}
+
+/** (h): the device prompt text for ildra.ledger.confirm.request, and its expiry. */
+export const LEDGER_CONFIRM_PROMPT = 'Confirm your phone and device list?'
+export const LEDGER_CONFIRM_MS = 60_000
+/**
+ * (h): a device hold prompt (touch channel only, never the phone, never voice) that executes nothing. Same ledger,
+ * same hold rules (DEVICE_HOLD_MIN_MS, short holds, hold_limit) and the same authority proof as any touch answer.
+ */
+export async function deviceHoldConfirm(
+  answerFn: AnswerFn,
+  opts: { ledger: AskLedger; pairing?: PhonePairing; isShared?: SharedOriginLookup; prompt: string; expiryMs: number; agentId?: string },
+): Promise<{ approved: boolean; reason: string; request: AskRequest }> {
+  const req = opts.ledger.open({ action: opts.prompt, tier: 'ask', channel: 'touch', phoneAllowed: false, expiryMs: opts.expiryMs, ...(opts.agentId ? { agentId: opts.agentId } : {}) })
+  const pairing = opts.pairing
+  let ans: unknown
+  let s: SettleResult
+  for (let prompts = 0; ; ) {
+    ans = await answerFn('touch', `${opts.prompt} Hold to confirm.`, req)
+    const endedBy = opts.ledger.endedReason(req.id)
+    if (endedBy !== null) return { approved: false, reason: endedBy, request: req }
+    s = opts.ledger.settle(ans as AskAnswer, { isPaired: pairing ? (id, pub) => (pub === undefined ? pairing.isPaired(id) : pairing.isPairedKey(id, pub)) : undefined, isShared: opts.isShared })
+    const step = nextStep(opts.ledger, req.id, ans, s, prompts)
+    if (step === 'expired') { s = { ok: false, reason: 'expired' }; break }
+    if (step === 'done') break
+    if (step === 'again') prompts++
+  }
+  const approved = s.ok && (ans as AskAnswer).approved === true
+  return { approved, reason: s.ok ? (approved ? 'approved' : 'denied') : s.reason, request: req }
 }
 
 // ---- Upstream #1340: phone Accept/Decline on MCP elicitations goes through the Ask gate ----

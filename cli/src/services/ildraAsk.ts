@@ -13,7 +13,7 @@ import {
   ask as askGate, deviceFingerprint, openJournal, practiceAsk, ToolManifestLoader,
   type ApprovalJournal, type ApprovalProfile, type ApprovalTemplate, type AskAnswer, type AskAttempt, type AskChannel,
   type AskHandoff, type AskOptions, type AskOutcome, type AskRequest, type EnrollReplaced, type EnrollSource, type ToolManifestEntry,
-  type AskAnsweredBy, stampManifest, UNPAIR_RESET_COUNT, LEDGER_STRING_MAX,
+  type AskAnsweredBy, stampManifest, UNPAIR_RESET_COUNT, LEDGER_STRING_MAX, deviceHoldConfirm, LEDGER_CONFIRM_PROMPT, LEDGER_CONFIRM_MS,
 } from './approvals.js'
 
 /** Batch B: the unpair API's rate limit (from the pairing ledger, daemon-wide) and clock skew for its signed `at`. */
@@ -23,7 +23,7 @@ export const UNPAIR_SKEW_MS = 60_000
 const UNPAIR_ACTION = 'Unpair a phone'
 const UNPAIR_TEMPLATE: ApprovalTemplate = { permissions: { locked_ask: [UNPAIR_ACTION] } }
 const UNPAIR_MANIFEST = stampManifest([{ name: 'ildra.pairing.unpair', send: false }], 'first_party')
-import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, rawPhoneKey, settingsSetMessage, stampedChannel, ledgerAckMessage, unpairMessage, unpairTouchMessage, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
+import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, rawPhoneKey, settingsSetMessage, stampedChannel, ledgerAckMessage, ledgerConfirmMessage, unpairMessage, unpairTouchMessage, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
 
 export type IldraAskEvent =
   | { type: 'ildra.ask.attempt'; body: AskAttempt }
@@ -38,6 +38,8 @@ export type IldraAskEvent =
   | { type: 'ildra.pairing.unpair_requested'; body: { phoneId: string; by: string; at: number } }
   | { type: 'ildra.pairing.unpaired'; body: { phoneId: string; by: string; askId: string; at: number; remaining: number } }
   | { type: 'ildra.pairing.ledger_reset'; body: { seq: number; hash: string; reason: string; at: number; oldHead?: string } }
+  | { type: 'ildra.ledger.confirmed'; body: { head: string; seq: number; at: number } }
+  | { type: 'ildra.ledger.confirm_refused'; body: { reason: string } }
   | { type: 'ildra.device.enroll.status'; body: { state: 'enrolled' | 'refused' | 'revoked' | 'expired'; fingerprint: string; at: number; uv?: EnrollUv } }
 
 export interface IldraAsk {
@@ -226,6 +228,43 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     if (!v.ok) return { ok: false, reason: v.reason }
     if (!j.pairing.ackReset(from.phoneId, msg.seq, msg.hash)) return { ok: false, reason: 'unknown_id' }
     return { ok: true }
+  }
+  // (h): the paired phone asks the device to confirm the phone and device list at the head it read. Main key only
+  // (the deny key is verifier_rejected), at the daemon's current head (else stale_head), one at a time (busy), then a
+  // 60 s device hold prompt with the touch hold rules and authority proof. Every refusal is a ledger entry and an
+  // ildra.ledger.confirm_refused; success appends ledger_confirmed (prev = the confirmed head, since = its seq).
+  // The daemon keeps no per-phone head: pausing on a mismatch is the phone's.
+  let confirmOpen = false
+  deps.inputs.onLedgerConfirm = async (msg, from) => {
+    const j = open()
+    const who = typeof from.phoneId === 'string' && from.phoneId.length <= LEDGER_STRING_MAX ? from.phoneId : undefined
+    const refuse = (reason: string, askId?: string) => {
+      j.pairingLedger.append({ kind: 'ledger_confirm_refused', ...(who ? { phoneId: who, by: who } : {}), via: askId ? 'touch' : 'phone', reason, ...(askId ? { askId } : {}) })
+      emit('ildra.ledger.confirm_refused', { reason })
+      return { ok: false as const, reason }
+    }
+    if (!pairedFrom(j, from)) return refuse('unpaired_phone')
+    const { head, seq, at } = msg
+    if (typeof head !== 'string' || !/^[0-9a-f]{64}$/.test(head) || typeof seq !== 'number' || !Number.isInteger(seq) || seq < 0
+      || typeof at !== 'number' || !Number.isFinite(at) || typeof msg.phoneSignature !== 'string') return refuse('malformed')
+    const v = j.pairing.verifyPhone(from.phoneId, 'ledger.confirm', ledgerConfirmMessage(head, seq, at), msg.phoneSignature)
+    if (!v.ok) return refuse(v.reason === 'verifier_rejected' ? 'verifier_rejected' : v.reason === 'unpaired_phone' ? 'unpaired_phone' : 'bad_signature')
+    const atHead = () => { const h = j.pairingLedger.head(); return h.seq === seq && h.hash === head }
+    if (!atHead()) return refuse('stale_head')
+    if (confirmOpen) return refuse('busy')
+    confirmOpen = true
+    let out: Awaited<ReturnType<typeof deviceHoldConfirm>>
+    try {
+      out = await deviceHoldConfirm(answerVia('ildra'), { ledger: j.ledger, pairing: j.pairing, isShared: (o) => deps.inputs.isShared(o), prompt: LEDGER_CONFIRM_PROMPT, expiryMs: LEDGER_CONFIRM_MS, agentId: 'ildra' })
+    } finally { confirmOpen = false; }
+    done(out.request.id)
+    if (!out.approved) return refuse('timeout', out.request.id)
+    // The head may have moved while the hold prompt was up: then the person confirmed a list that is no longer current.
+    if (!atHead()) return refuse('stale_head', out.request.id)
+    if (!j.pairing.isPairedKey(from.phoneId, from.machinePub)) return refuse('unpaired_phone', out.request.id)
+    j.pairingLedger.append({ kind: 'ledger_confirmed', phoneId: from.phoneId, by: from.phoneId, via: 'touch', since: seq, askId: out.request.id })
+    emit('ildra.ledger.confirmed', { head, seq, at })
+    return { ok: true, head, seq, at }
   }
   /** Shield B7: at most one unpair open at a time (its locked_ask is pending). */
   let unpairOpen: string | null = null

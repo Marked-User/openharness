@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
-import { askAnswerMessage, deviceFingerprint, ledgerAckMessage, unpairMessage, unpairTouchMessage } from '../core/ildraDeviceProof.js'
+import { askAnswerMessage, deviceFingerprint, ledgerAckMessage, ledgerConfirmMessage, unpairMessage, unpairTouchMessage } from '../core/ildraDeviceProof.js'
 import { createIldraAsk, UNPAIR_RATE } from './ildraAsk.js'
 import { deviceKeyPair, phoneKeyPair, proveBridge, signedConfirm } from './ildraAsk.testkit.js'
 import { LEDGER_STATE_RESERVE, MAX_PAIRING_LEDGER, PairingLedger, PhonePairing, stampManifest, type ApprovalTemplate, type AskRequest, type PairingLedgerEntry } from './approvals.js'
@@ -457,5 +457,85 @@ describe('Shield B1 to B4, B6: the ledger is MACed with a host-held key and auth
     const tail = j.pairingLedger.all().slice(-2)
     expect(tail).toEqual([expect.objectContaining({ kind: 'deny_key_revoked', phoneId: 'p1', reason: 'not_in_ledger' }), expect.objectContaining({ kind: 'phone_unpaired', phoneId: 'p2', reason: 'missing_from_state' })])
     expect(j.pairing.isPaired('p1')).toBe(true)
+  })
+})
+
+describe('(h) ildra.ledger.confirm.request: the device confirms the phone and device list at the current head', () => {
+  type Head = { seq: number; hash: string }
+  const setup = async () => {
+    const r = rig(); r.pair('p1', r.K.P1.pub); await r.enrollDevice(r.K.D1.pub)
+    expect(proveBridge(r.core, 'dev', r.K.DEVK.key)).toBe(true)
+    const head = (await r.ledger() as { head: Head }).head
+    const confirm = (o: { key?: KeyObject; head?: string; seq?: number; at?: number; conn?: string; phoneId?: string; extra?: Record<string, unknown> } = {}) => {
+      const h = o.head ?? head.hash; const s = o.seq ?? head.seq; const at = o.at ?? r.clock.t
+      return r.core.requests.ildra_ledger_confirm({ head: h, seq: s, at, phoneSignature: sig(o.key ?? r.K.P1.key, ledgerConfirmMessage(h, s, at)), from: { phoneId: o.phoneId ?? 'p1' }, ...o.extra }, r.remote(o.conn ?? 'ph1'))
+    }
+    const hold = (req: AskRequest, holdMs = 2000, approved = true) => r.core.requests.ildra_ask_answer({ id: req.id, digest8: req.digest8, answerId: aid(), approved, holdMs }, r.remote('dev'))
+    const refused = () => r.events.filter((e) => e.type === 'ildra.ledger.confirm_refused').map((e) => (e.body as { reason: string }).reason)
+    return { r, head, confirm, hold, refused }
+  }
+  it('signed by the main key at the current head: a 60 s touch-only hold prompt; a held answer sends ildra.ledger.confirmed and appends ledger_confirmed', async () => {
+    const { r, head, confirm, hold } = await setup()
+    const at = r.clock.t
+    const p = confirm({ at }); await tick()
+    const req = r.sent.at(-1)!
+    expect(req).toMatchObject({ action: 'Confirm your phone and device list?', channel: 'touch', tier: 'ask' })
+    expect(req.expiresAt - req.openedAt).toBe(60_000)
+    expect(await hold(req)).toEqual({ ok: true })
+    expect(await p).toEqual({ ok: true, head: head.hash, seq: head.seq, at })
+    expect(r.events.filter((e) => e.type === 'ildra.ledger.confirmed').map((e) => e.body)).toEqual([{ head: head.hash, seq: head.seq, at }])
+    const last = r.svc.journal().pairingLedger.all().at(-1)!
+    expect(last).toMatchObject({ kind: 'ledger_confirmed', phoneId: 'p1', via: 'touch', since: head.seq, prev: head.hash, askId: req.id })
+    // The same request again: the head moved (by the ledger_confirmed itself), so it cannot be replayed.
+    expect(await confirm({ at })).toEqual({ ok: false, reason: 'stale_head' })
+  })
+  it('the deny key is verifier_rejected; another key is bad_signature; refusals are logged and sent as ildra.ledger.confirm_refused', async () => {
+    const { r, confirm, refused } = await setup()
+    expect(await confirm({ key: r.K.D1.key })).toEqual({ ok: false, reason: 'verifier_rejected' })
+    expect(r.svc.journal().pairing.verifierLog.at(-1)).toMatchObject({ verb: 'ledger.confirm', reason: 'verifier_rejected' })
+    expect(await confirm({ key: phoneKeyPair().key })).toEqual({ ok: false, reason: 'bad_signature' })
+    expect(refused()).toEqual(['verifier_rejected', 'bad_signature'])
+    expect(r.svc.journal().pairingLedger.all().filter((e) => e.kind === 'ledger_confirm_refused').map((e) => e.reason)).toEqual(['verifier_rejected', 'bad_signature'])
+    expect(r.sent.some((q) => q.action === 'Confirm your phone and device list?')).toBe(false)
+  })
+  it('stale_head, malformed and unpaired_phone are refused before any prompt', async () => {
+    const { r, head, confirm, refused } = await setup()
+    expect(await confirm({ seq: head.seq - 1 })).toEqual({ ok: false, reason: 'stale_head' })
+    expect(await confirm({ head: 'f'.repeat(64) })).toEqual({ ok: false, reason: 'stale_head' })
+    expect(await r.core.requests.ildra_ledger_confirm({ head: 'x', seq: 1, at: 1, phoneSignature: 'AAAA', from: { phoneId: 'p1' } }, r.remote('ph1'))).toEqual({ ok: false, reason: 'malformed' })
+    expect(await confirm({ conn: 'ph2', phoneId: 'p2', key: r.K.P2.key })).toEqual({ ok: false, reason: 'unpaired_phone' })
+    expect(refused()).toEqual(['stale_head', 'stale_head', 'malformed', 'unpaired_phone'])
+    expect(r.sent).toHaveLength(0)
+  })
+  it('one confirm at a time (busy); unanswered within 60 s, or not held, it ends as timeout', async () => {
+    const { r, confirm, hold, refused } = await setup()
+    const p = confirm(); await tick()
+    const req = r.sent.at(-1)!
+    expect(await confirm()).toEqual({ ok: false, reason: 'busy' })
+    r.clock.t += 60_001
+    await hold(req)
+    expect(await p).toEqual({ ok: false, reason: 'timeout' })
+    expect(refused()).toEqual(['busy', 'timeout'])
+    expect(r.svc.journal().pairingLedger.all().some((e) => e.kind === 'ledger_confirmed')).toBe(false)
+    // A device Deny confirms nothing either.
+    const head2 = (await r.ledger() as { head: Head }).head
+    const p2 = confirm({ head: head2.hash, seq: head2.seq }); await tick()
+    await hold(r.sent.at(-1)!, 2000, false)
+    expect(await p2).toEqual({ ok: false, reason: 'timeout' })
+  })
+  it('same hold rules as touch: a short hold is an attempt (prompt stays); the phone cannot answer it; a head that moves during the prompt is stale_head', async () => {
+    const { r, confirm, hold } = await setup()
+    const p = confirm(); await tick()
+    const req = r.sent.at(-1)!
+    await hold(req, 100); await tick()
+    expect(r.events.some((e) => e.type === 'ildra.ask.attempt')).toBe(true)
+    expect(r.svc.journal().ledger.get(req.id)).not.toBeNull()
+    await r.answer(req, 'ph1', 'p1', true); await tick()
+    expect(r.svc.journal().ledger.get(req.id)).not.toBeNull() // the phone did not settle it
+    expect(r.events.some((e) => e.type === 'ildra.ledger.confirmed')).toBe(false)
+    r.pair('p2', r.K.P2.pub) // the list changes while the prompt is up
+    await hold(req)
+    expect(await p).toEqual({ ok: false, reason: 'stale_head' })
+    expect(r.svc.journal().pairingLedger.all().at(-1)).toMatchObject({ kind: 'ledger_confirm_refused', reason: 'stale_head', askId: req.id })
   })
 })
