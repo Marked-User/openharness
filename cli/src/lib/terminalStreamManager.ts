@@ -192,6 +192,13 @@ export interface TerminalStreamManagerDeps {
    * pane opens can go to the phone the person is typing on (core/terminals/browser.ts).
    */
   onInput?: (agentId: string, typed: boolean, from: { connId: string, kind: string | null }) => void
+  /**
+   * Shield F13 (Ildra): the panes showing an open Ildra Ask (services/approvals.ts AskPaneGuard, keyed by
+   * agent id). Input, pastes and uploads from any stream that is not this computer's loopback desktop are
+   * dropped while the agent's pane has one open: an Ask is answered through the daemon's Ask ledger, never by
+   * keys pressed from a phone or another machine. A guard that throws blocks.
+   */
+  askPanes?: { filterInput(paneId: string, from: 'local' | 'remote'): 'pass' | 'block' }
 }
 
 function sizeFrom(payload: FramePayload): TerminalStreamSize | null {
@@ -345,6 +352,12 @@ export class TerminalStreamManager {
       && frame.kind !== TerminalBinaryKind.imagePaste && frame.kind !== TerminalBinaryKind.pasteFile) return
     const state = this.streams.get(frame.streamId)
     if (!state || state.connId !== connId || state.closing) return
+    if (this.askPaneBlocks(state)) {
+      // Spend an in-order keystroke's seq so the stream carries on in order once the Ask closes.
+      if (frame.kind === TerminalBinaryKind.input && frame.seq === state.lastInputSeq + 1) state.lastInputSeq = frame.seq
+      this.sendError(connId, 'ILDRA_ASK_PANE', { streamId: state.streamId, message: 'this pane is showing an Ildra Ask: answer it in the Ask, not with keys' })
+      return
+    }
     if (frame.kind === TerminalBinaryKind.imagePaste || frame.kind === TerminalBinaryKind.pasteFile) {
       await this.receiveUploadChunk(state, frame.kind, frame.seq, frame.bytes)
       return
@@ -354,6 +367,17 @@ export class TerminalStreamManager {
       return
     }
     await this.input(state, frame.seq, frame.bytes)
+  }
+
+  /** Shield F13: whether the agent's pane shows an open Ildra Ask and this stream is not the loopback desktop. */
+  private askPaneBlocks(state: ActiveStream): boolean {
+    const guard = this.deps.askPanes
+    if (!guard) return false
+    try {
+      return guard.filterInput(state.agentId, state.loopback ? 'local' : 'remote') !== 'pass'
+    } catch {
+      return true
+    }
   }
 
   private capabilities(connId: string, requestId: unknown): void {

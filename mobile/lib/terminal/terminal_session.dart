@@ -405,6 +405,9 @@ class TerminalSession extends ChangeNotifier {
   int _renderedSinceAckBytes = 0;
   int _inputSeq = 0;
 
+  /// When the daemon last refused input because this pane shows an Ildra Ask (Shield F13); null if never.
+  DateTime? ildraAskRefusedAt;
+
   /// The last `expectedSeq` a TERMINAL_INPUT_INVALID realigned the counter to.
   /// The daemon refuses every in-flight frame it cannot accept, each naming
   /// the SAME expected seq; only the first of those may rewind the counter,
@@ -977,6 +980,15 @@ class TerminalSession extends ChangeNotifier {
         // to show the user something better than silence, and silence beats losing the terminal.
         // A malformed upload chunk (bad seq/size) is the same shape of non-event for the same
         // reason — nothing it describes ever reached tmux either.
+        // Ildra (Shield F13): the daemon dropped this input because the pane is showing an Ildra Ask,
+        // which is answered in the Ask, never by keys. Nothing reached tmux and the stream is fine; the
+        // dropped keystroke spent its seq on the daemon's side, so the counter needs no realigning.
+        if (errorCode == 'ILDRA_ASK_PANE') {
+          ildraAskRefusedAt = DateTime.now();
+          notifyListeners();
+          debugPrint('TerminalSession: input refused: pane shows an Ildra Ask');
+          return true;
+        }
         if (errorCode == 'TERMINAL_PASTE_INVALID' ||
             errorCode == 'TERMINAL_CHUNKED_UPLOAD_INVALID') {
           _abortActiveUpload();

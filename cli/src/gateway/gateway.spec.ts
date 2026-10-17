@@ -54,12 +54,12 @@ const queuedFor = (socket: BackendSocket, connId: string): Frame[] =>
 
 /** A paired client with a live session on `connId`: it proves its identity with a hello and reads the
  *  welcome, as the phone app does, so what it seals opens under the gateway's real session. */
-async function pairedClient(socket: BackendSocket, connId: string, opts: { role?: 'web' | 'device'; label?: string } = {}) {
+async function pairedClient(socket: BackendSocket, connId: string, opts: { role?: 'web' | 'device'; label?: string; shared?: boolean } = {}) {
   const gateway = gatewayOf(socket)
   const identity = C.newIdentity()
   const pub = C.b64e(identity.pub)
-  const store = (gateway.e2ee as unknown as { store: { addPaired(pub: string, label: string, at: number, role: string): void } }).store
-  store.addPaired(pub, opts.label ?? 'Dee’s phone', Date.now(), opts.role ?? 'web')
+  const store = (gateway.e2ee as unknown as { store: { addPaired(pub: string, label: string, at: number, role: string, extra?: { machineId?: string; kind?: string; shared?: true }): void } }).store
+  store.addPaired(pub, opts.label ?? 'Dee’s phone', Date.now(), opts.role ?? 'web', opts.shared ? { machineId: 'm-shared', kind: 'machine', shared: true } : undefined)
   const eph = C.newEphemeral()
   await dispatchDown(socket, { type: 'e2e_hello', payload: { identityPub: pub, ephPub: C.b64e(eph.pub), sig: C.b64e(C.helloSig(identity.priv, MACHINE, eph.pub)) } }, connId)
   const welcome = queuedFor(socket, connId).find((frame) => frame.type === 'e2e_welcome')!
@@ -81,6 +81,21 @@ describe('a remote client, as the core hears it', () => {
     expect(socket.remoteClient('phone-1')).toEqual({ role: 'web', label: 'Dee’s phone', identity: phone.pub, direct: false })
     await dispatchDown(socket, { type: '__client_disconnected', payload: {} }, 'phone-1')
     expect(socket.remoteClient('phone-1')).toBeNull()
+    await socket.stop()
+  })
+
+  it('Ildra F12: a peer trusted only through machine sharing is marked shared, by the gateway', async () => {
+    const socket = relaySocket(MACHINE)
+    const own = await pairedClient(socket, 'phone-1')
+    const other = await pairedClient(socket, 'shared-1', { label: 'Machine · eve@example.com', shared: true })
+    expect(socket.remoteClient('phone-1')).toEqual({ role: 'web', label: 'Dee’s phone', identity: own.pub, direct: false })
+    expect(socket.remoteClient('shared-1')).toMatchObject({ identity: other.pub, shared: true })
+    // An Ask answer is opened from its E2EE envelope and routed with the connection it came over.
+    const asked: Array<{ type: string; payload: Record<string, unknown>; asker: Asker }> = []
+    socket.serviceRouter = (type, payload, asker, reply) => { asked.push({ type, payload, asker }); reply({ ok: true }); return true }
+    await dispatchDown(socket, other.seal('ildra_ask_answer', { requestId: 'a1', id: 'x', digest8: '0011aabb', approved: true, from: { shared: false } }), 'shared-1')
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toMatchObject({ type: 'ildra_ask_answer', payload: { id: 'x', digest8: '0011aabb' }, asker: { connection: 'shared-1' } })
     await socket.stop()
   })
 

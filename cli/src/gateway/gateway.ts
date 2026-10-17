@@ -37,6 +37,7 @@ import {
   type TerminalP2pSignal,
 } from '../lib/terminalP2p.js'
 import { UpstreamLink } from './upstream.js'
+import { isSharedKey } from './sharedTrust.js'
 
 type Frame = Record<string, unknown>
 
@@ -145,6 +146,9 @@ export class RelayGateway implements GatewayPort {
       onIdentityRevoked: identity => { this.deviceUnpaired(identity); this.onDirectDeviceRevoked?.(fingerprint(b64d(identity))) },
       onSessionOpened: (connId, role, identity) => this.core.client(connId, {
         role, label: this.e2ee.sessionLabel(connId), identity, direct: this.directDeviceSinks.has(connId),
+        // Ildra Shield F12: the gateway's word on whether this peer is trusted only through machine sharing
+        // (gateway/sharedTrust.ts). An Ask answer over a shared session never approves (services/ildraAsk.ts).
+        ...(isSharedKey(this.e2ee.pairedPeers(), identity) ? { shared: true } : {}),
       }),
       onSessionDropped: (connId) => this.core.client(connId, null),
       onPeerLinked: (peer) => {

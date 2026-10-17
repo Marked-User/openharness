@@ -52,6 +52,12 @@ export type { RouteAnswer }
 /** What a service guards its own parts with, as the core guards a service (core/serviceHost.ts): the
  *  devices keep a dial failing from costing ⌘K its routing (services/devices.ts). */
 export { FAIL, later, readFallback, ServiceUnavailableError, type PortFallbacks }
+/**
+ * Shield R7, for services/approvals.ts: the read side of the core channel stamp (only core/ildraAsk.ts stamps)
+ * and the Ildra device key helpers (Ed25519 proof of the enrolled device).
+ */
+export { stampedChannel } from './ildraChannel.js'
+export { ENROLL_UV, PHONE_VERBS, askAnswerMessage, deviceFingerprint, deviceProofMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, ledgerAckMessage, ledgerConfirmMessage, denySummaryAckMessage, presencePattern, presenceMessage, presenceAbortMessage, DEVICE_INPUTS, DEVICE_FORMS, PRESENCE_TTL_MS, PRESENCE_MIN_HELD_MS, unpairMessage, unpairTouchMessage, verifyDeviceProof, verifyEd25519, rawPhoneKey, normalizePhoneSignature, verifyP256, verifyPhoneSignature, type EnrollUv, type PhoneVerb } from './ildraDeviceProof.js'
 
 /** A service may open a terminal with a literal argv, never shell source. */
 export interface TerminalOpen {
@@ -122,6 +128,8 @@ export interface UsagePort {
 export const USAGE_FALLBACKS: PortFallbacks<UsagePort> = { read: later(FAIL), stop: undefined }
 
 export interface CoreApi {
+  /** Ildra Asks' input paths (core/ildraAsk.ts). Absent in a service process that was not handed them. */
+  ildraAsk?: IldraAskInputs
   /** Last aggregate observation, never a transcript read. Optional for services that do not ask. */
   usage?: (target: AgentUsageTarget) => Promise<AgentTokenUsage | null>
   /** An agent's token totals read from its transcript now, not the cached snapshot (the devices' turn tokens);
@@ -524,6 +532,92 @@ export const WINDOW_NAMES_REQUESTS = ['window_name'] as const
 export const HANDOFF_REQUESTS = ['agent_handoff_prepare'] as const
 /** Connected services for every local agent, and their MCP bridge, in the edge host (services/connectors.ts). */
 export const CONNECTORS_REQUESTS = ['connectors'] as const
+/** The pane guard the terminal input path consults (Shield F13): structurally services/approvals.ts AskPaneGuard. */
+export interface IldraPaneGuard {
+  open(paneId: string, requestId: string): void
+  close(paneId: string): void
+  requestFor(paneId: string): string | null
+  filterInput(paneId: string, from: 'local' | 'remote'): 'pass' | 'block'
+}
+
+/** Where an Ask answer came from, as the core established it from the connection (Shield F12). */
+export interface IldraAnswerOrigin { phoneId?: string; machinePub?: string }
+
+/**
+ * The core's half of Ildra Asks (core/ildraAsk.ts): the input paths. Answers arrive as `ildra_ask_answer` and get
+ * their origin from the gateway-authenticated connection; the guard blocks remote keys to a pane with an open Ask.
+ * The Ask itself (ledger, journal, gate) is services/ildraAsk.ts, which reaches these through CoreApi.ildraAsk.
+ */
+export interface IldraAskInputs {
+  readonly guard: IldraPaneGuard
+  /**
+   * Wait for the answer to an open request: the guard holds `pane` while it waits, `deliver` shows the Ask, and
+   * the promise settles with the answer (origin rewritten) or null on expiry, cancel or a delivery that throws.
+   */
+  awaitAnswer(req: { id: string; expiresAt: number }, pane: string, deliver: () => void): Promise<Record<string, unknown> | null>
+  /** F12 lookup for the ledger: true unless the gateway said this identity key is the account's own. */
+  isShared(origin: IldraAnswerOrigin): boolean
+  cancel(id: string): void
+  /**
+   * v3.3, set by services/ildraAsk.ts: an answer (origin rewritten) that no open Ask waits for. The service
+   * records it (stale_channel after a handoff, replayed) and returns the reason; it never approves anything.
+   * Unset: such answers are unknown_id.
+   */
+  onUnclaimed?: ((answer: Record<string, unknown>) => string | null) | null
+  /**
+   * v3.3, set by services/ildraAsk.ts: `ildra.settings.set {key, value}` with the sender's origin from the
+   * connection; the service accepts it only from the paired phone's key and returns the stored value.
+   */
+  onSettings?: ((msg: { key: unknown; value: unknown; signature?: unknown }, from: IldraAnswerOrigin) => { ok: true; key: string; value: number } | { ok: false; reason: string }) | null
+  /**
+   * Shield R7-1, set by services/ildraAsk.ts: the enrolled Ildra device's Ed25519 key (journal), or null. A
+   * device-role connection answers touch only after signing a core nonce with it. Unset: none answers.
+   */
+  deviceKey?: (() => string | null) | null
+  /** R7-1: `ildra_device_enroll {devicePub}`: records a pending enrollment, grants nothing. */
+  onDeviceEnroll?: ((devicePub: unknown, source: 'local_socket' | 'device', caps?: { inputs?: unknown; form?: unknown }) => { ok: true; devicePub: string; fingerprint: string; nonce: string; expiresAt: number } | { ok: false; reason: string }) | null
+  /**
+   * R7-1, batch A: `ildra.device.enroll.confirm {devicePub, nonce, approved, uv, signature}` from the paired phone's
+   * key; the service checks the key, uv and the signature (enrollConfirmMessage).
+   */
+  onDeviceConfirm?: ((msg: { devicePub: unknown; nonce: unknown; approved: unknown; uv: unknown; signature: unknown; denyKey?: unknown }, from: IldraAnswerOrigin) => { ok: true; state: string } | { ok: false; reason: string }) | null
+  /**
+   * Shield deny key, set by services/ildraAsk.ts: checks an answer (origin rewritten, channel-stamped) before it
+   * reaches an open Ask. A reason refuses it (verifier_rejected, bad_signature); null lets it through.
+   */
+  checkAnswer?: ((answer: Record<string, unknown>) => string | null) | null
+  /**
+   * Shield deny key condition 6: `ildra.phone.open` from the paired phone. Returns, and clears, the
+   * 'denied from this phone' summary when more than 3 deny-key Denies landed within 60 s.
+   */
+  onPhoneOpen?: ((from: IldraAnswerOrigin) => { ok: true; denySummary: { count: number; since: number; at: number } | null } | { ok: false; reason: string }) | null
+  /** Batch B: `ildra.pairing.ledger.get {since}` from the paired phone: ledger entries after seq `since`, and the head. */
+  onPairingLedger?: ((since: unknown, from: IldraAnswerOrigin) => { ok: true; entries: unknown[]; pageHead: string; more: boolean; nextSeq?: number; head: { seq: number; hash: string } } | { ok: false; reason: string }) | null
+  /** (k): `ildra.phone.deny_summary.ack {since, at, phoneSignature}` from the paired phone (main or deny key): clears the summary. */
+  /** (i): `ildra.device.presence {requestId, kind, heldMs, nonce, signature}` from a device-role connection. */
+  onDevicePresence?: ((msg: { requestId: unknown; kind: unknown; heldMs: unknown; nonce: unknown; signature: unknown }) => { ok: true } | { ok: false; reason: string }) | null
+  /** (i): `ildra.presence.abort {requestId, at, phoneSignature}` from the paired phone (main or deny key): refuses only. */
+  onPresenceAbort?: ((msg: { requestId: unknown; at: unknown; phoneSignature: unknown }, from: IldraAnswerOrigin) => { ok: true } | { ok: false; reason: string }) | null
+  onDenySummaryAck?: ((msg: { since: unknown; at: unknown; phoneSignature: unknown }, from: IldraAnswerOrigin) => { ok: true } | { ok: false; reason: string }) | null
+  /**
+   * Batch B: `ildra.pairing.unpair {phoneId, at, signature, touchProof?}` from a paired phone. Rate limited, opens a
+   * locked_ask, refuses the last paired phone without a device touch proof; resolves when the Ask has settled.
+   */
+  onPairingUnpair?: ((msg: { phoneId: unknown; at: unknown; signature: unknown; touchProof?: unknown; presence?: boolean }, from: IldraAnswerOrigin) => Promise<{ ok: true; state: 'unpaired'; askId: string } | { ok: false; reason: string }>) | null
+  /** Batch B: `ildra.ask.answered_by.get {id}` from the paired phone: who settled that Ask, or null. */
+  onAnsweredBy?: ((id: unknown, from: IldraAnswerOrigin) => { ok: true; answeredBy: unknown } | { ok: false; reason: string }) | null
+  /** Shield B5: `ildra.pairing.ledger_ack {seq, hash, signature}` from the paired phone (main key): acknowledges a ledger_reset. */
+  onPairingLedgerAck?: ((msg: { seq: unknown; hash: unknown; signature: unknown }, from: IldraAnswerOrigin) => { ok: true } | { ok: false; reason: string }) | null
+  /**
+   * (h): `ildra.ledger.confirm.request {head, seq, at, phoneSignature}` from the paired phone (main key). At the current
+   * head, opens a 60 s device hold prompt; resolves with ildra.ledger.confirmed or ildra.ledger.confirm_refused.
+   */
+  onLedgerConfirm?: ((msg: { head: unknown; seq: unknown; at: unknown; phoneSignature: unknown }, from: IldraAnswerOrigin) => Promise<{ ok: true; head: string; seq: number; at: number } | { ok: false; reason: string }>) | null
+}
+
+/** Ildra Asks (services/ildraAsk.ts): an answer from the phone or the device to an open Ask. Its origin is the
+ *  connection it came over (Shield F12), never the payload. Always in the core's own process. */
+export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer', 'ildra_settings_set', 'ildra_device_enroll', 'ildra_device_enroll_confirm', 'ildra_phone_open', 'ildra_pairing_ledger', 'ildra_pairing_unpair', 'ildra_ask_answered_by', 'ildra_pairing_ledger_ack', 'ildra_ledger_confirm', 'ildra_deny_summary_ack', 'ildra_device_presence', 'ildra_presence_abort', 'ildra_device_challenge', 'ildra_device_prove'] as const
 /** Sharing this machine with other accounts, and adding machines shared with this one, in the edge host
  *  (services/sharedMachines.ts). */
 export const SHARED_MACHINES_REQUESTS = ['shared_machines'] as const
@@ -1162,6 +1256,8 @@ export interface RemoteClient {
   label: string | null
   identity: string
   direct: boolean
+  /** Ildra F12: the peer is trusted here only because a machine is shared with it (gateway/sharedTrust.ts). */
+  shared?: true
 }
 
 /** How a remote client's frame arrived: the backend's relay, or a paired client's own P2P channel. */
@@ -1463,6 +1559,7 @@ export function emptyPorts(): CorePorts {
 }
 
 export interface CoreApiDeps {
+  ildraAsk?: IldraAskInputs
   terminals?: TerminalsPort
   conversations?: ConversationReads
   dataDir: string
@@ -1529,7 +1626,7 @@ export function createCoreApi({
   dataDir, registry, stoppedAgents, databaseHistory, syncSession, runtimeModels, viewerChanged,
   gridNamed, gridModelsChanged, dshInstallStatus, mintGridName, accessToken, lane, observerKey, connectorVault, observer, privateGridName, machineName, backend, onNotice,
   runtimeProfile, setRuntime, fork, create, dsh, windows, daemon, turns, questions, terminals = TERMINALS_OFF, conversations = CONVERSATIONS_OFF, viewerFrame, machine, activityText, activitySnapshot,
-  closeAgent, activityAt,
+  closeAgent, activityAt, ildraAsk,
   signedIn, environment, machines, sendLocal, sendToWindow, hasWindow, devicesChanged, dialWatching, wifi, cloud, cloudRows, lastTurn, turnCard, turnSummary,
   log = (line) => console.warn(line),
 }: CoreApiDeps): CoreApi {
@@ -1541,6 +1638,7 @@ export function createCoreApi({
   // The recaps reach the devices and the apps through their own two doors, and only with their own frames.
   const refusedRecap = (type: unknown): void => log(`[services] the recaps sent ${String(type).slice(0, 40)}, which is not theirs to send`)
   return {
+    ...(ildraAsk ? { ildraAsk } : {}),
     dataDir,
     terminals,
     machine,
