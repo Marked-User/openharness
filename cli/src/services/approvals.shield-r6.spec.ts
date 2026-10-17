@@ -97,6 +97,23 @@ describe('Shield R6 R5-1: who may answer, end to end through the runtime', () =>
     await r.answer(r.sent[0]!, 'other')
     expect(await p).toMatchObject({ approved: true, channel: 'touch' })
   })
+  it("Build's ildraAsk.shield.spec.ts:80 edit: an unknown connection gets no_authority, approves nothing, records nothing, spends nothing", async () => {
+    const r = rig({})
+    const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
+    await tick()
+    const before = JSON.stringify(r.svc.journal().ledger.toJSON())
+    for (const conn of ['ghost', '', 'local:x']) {
+      const out = await r.answer(r.sent[0]!, conn)
+      expect(out.ok, conn).toBe(false)
+    }
+    await tick()
+    const j = r.svc.journal().ledger
+    expect(j.pending()).toBe(1)
+    expect(j.attempts()).toEqual([])
+    expect(JSON.stringify(j.toJSON())).toBe(before)
+    r.core.cancel(r.sent[0]!.id)
+    expect(await p).toMatchObject({ approved: false })
+  })
   it('RESIDUAL (in-process only): a ledger answer with no via and no key is checked by phone id alone', () => {
     const l = new AskLedger(); const p = new PhonePairing(); const { code } = p.begin('touch'); p.offer('p1', PHONE, code); p.confirm('p1', 'touch', true)
     const r = l.open({ action: 'Brakes step', tier: 'locked_ask', channel: 'phone' })
