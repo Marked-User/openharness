@@ -57,7 +57,7 @@ export { FAIL, later, readFallback, ServiceUnavailableError, type PortFallbacks 
  * and the Ildra device key helpers (Ed25519 proof of the enrolled device).
  */
 export { stampedChannel } from './ildraChannel.js'
-export { deviceFingerprint, deviceProofMessage, rawDeviceKey, verifyDeviceProof } from './ildraDeviceProof.js'
+export { ENROLL_UV, deviceFingerprint, deviceProofMessage, enrollConfirmMessage, rawDeviceKey, verifyDeviceProof, verifyEd25519, type EnrollUv } from './ildraDeviceProof.js'
 
 /** A service may open a terminal with a literal argv, never shell source. */
 export interface TerminalOpen {
@@ -575,9 +575,12 @@ export interface IldraAskInputs {
    */
   deviceKey?: (() => string | null) | null
   /** R7-1: `ildra_device_enroll {devicePub}`: records a pending enrollment, grants nothing. */
-  onDeviceEnroll?: ((devicePub: unknown) => { ok: true; devicePub: string; fingerprint: string; expiresAt: number } | { ok: false; reason: string }) | null
-  /** R7-1: `ildra.device.enroll.confirm {devicePub, approved}` from the paired phone's key (checked by the service). */
-  onDeviceConfirm?: ((msg: { devicePub: unknown; approved: boolean }, from: IldraAnswerOrigin) => { ok: true; state: string } | { ok: false; reason: string }) | null
+  onDeviceEnroll?: ((devicePub: unknown, source: 'local_socket' | 'device') => { ok: true; devicePub: string; fingerprint: string; nonce: string; expiresAt: number } | { ok: false; reason: string }) | null
+  /**
+   * R7-1, batch A: `ildra.device.enroll.confirm {devicePub, nonce, approved, uv, signature}` from the paired phone's
+   * key; the service checks the key, uv and the signature (enrollConfirmMessage).
+   */
+  onDeviceConfirm?: ((msg: { devicePub: unknown; nonce: unknown; approved: unknown; uv: unknown; signature: unknown }, from: IldraAnswerOrigin) => { ok: true; state: string } | { ok: false; reason: string }) | null
 }
 
 /** Ildra Asks (services/ildraAsk.ts): an answer from the phone or the device to an open Ask. Its origin is the

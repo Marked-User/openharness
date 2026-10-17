@@ -43,7 +43,7 @@ export interface IldraAskCore extends IldraAskInputs {
   readonly requests: {
     ildra_ask_answer: (payload: Record<string, unknown>, asker: Asker) => Promise<IldraAnswerReply>
     ildra_settings_set: (payload: Record<string, unknown>, asker: Asker) => Promise<IldraSettingsReply>
-    ildra_device_enroll: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; devicePub: string; fingerprint: string; expiresAt: number } | { ok: false; reason: string }>
+    ildra_device_enroll: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; devicePub: string; fingerprint: string; nonce: string; expiresAt: number } | { ok: false; reason: string }>
     ildra_device_enroll_confirm: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; state: string } | { ok: false; reason: string }>
     ildra_device_challenge: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; nonce: string } | { ok: false; reason: string }>
     ildra_device_prove: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: boolean; reason?: string }>
@@ -176,15 +176,16 @@ export function createIldraAskCore(deps: {
       // or local owner may ask; it grants nothing). Only the paired phone's key confirms it, by
       // `ildra.device.enroll.confirm` (ildra_device_enroll_confirm, checked by the service).
       ildra_device_enroll: async (payload, asker) => {
-        if (!(asker.local && asker.owner) && !deviceRole(asker.connection)) return { ok: false, reason: 'no_authority' }
+        const local = asker.local && asker.owner
+        if (!local && !deviceRole(asker.connection)) return { ok: false, reason: 'no_authority' }
         if (!core.onDeviceEnroll) return { ok: false, reason: 'unavailable' }
-        return core.onDeviceEnroll(payload?.devicePub)
+        return core.onDeviceEnroll(payload?.devicePub, local ? 'local_socket' : 'device')
       },
       ildra_device_enroll_confirm: async (payload, asker) => {
         const origin = originOf(asker.connection, payload?.from)
         if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
         if (!core.onDeviceConfirm) return { ok: false, reason: 'unavailable' }
-        const r = core.onDeviceConfirm({ devicePub: payload?.devicePub, approved: payload?.approved === true }, origin.from)
+        const r = core.onDeviceConfirm({ devicePub: payload?.devicePub, nonce: payload?.nonce, approved: payload?.approved, uv: payload?.uv, signature: payload?.signature }, origin.from)
         if (r.ok && r.state !== 'enrolled') bridges.clear()
         return r
       },

@@ -5,7 +5,7 @@
  * private key (a restarted core proves again with it), or null when the rig has no device-role client.
  */
 import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
-import { deviceProofMessage } from '../core/api.js'
+import { deviceProofMessage, enrollConfirmMessage } from '../core/api.js'
 import type { IldraAsk } from './ildraAsk.js'
 
 /** The two core calls a bridge uses to prove its key (core/ildraAsk.ts IldraAskCore). */
@@ -29,8 +29,19 @@ export function enrollBridge(core: DeviceProver, svc: IldraAsk, clients: Record<
   if (!dev) return null
   const { pub, key } = deviceKeyPair()
   const j = svc.journal()
-  j.device.begin(pub)
-  if (j.device.confirm(pub, true) !== 'enrolled') throw new Error('enrollBridge: enroll failed')
+  const p = j.device.begin(pub)
+  if (!p || j.device.confirm(pub, p.nonce, true, { uv: 'biometric', phoneId: 'testkit' }) !== 'enrolled') throw new Error('enrollBridge: enroll failed')
   if (!proveBridge(core, dev[0], key)) throw new Error('enrollBridge: proof failed')
   return key
+}
+
+/** Batch A: a real Ed25519 phone key (the paired phone signs enroll confirms with it). Same shape as deviceKeyPair. */
+export const phoneKeyPair = deviceKeyPair
+
+/** Batch A: the signed `ildra.device.enroll.confirm` body for the journal's pending (or enrolled) enrollment. */
+export function signedConfirm(svc: IldraAsk, phoneKey: KeyObject, devicePub: string, approved = true, uv: string = 'biometric'): Record<string, unknown> {
+  const d = svc.journal().device
+  const nonce = d.pending()?.nonce ?? d.enrolled()?.nonce ?? 'none'
+  const signature = sign(null, Buffer.from(enrollConfirmMessage(devicePub, nonce, approved, uv), 'utf8'), phoneKey).toString('base64')
+  return { devicePub, nonce, approved, uv, signature }
 }

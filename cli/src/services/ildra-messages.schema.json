@@ -17,7 +17,7 @@
             "ildra.pairing.begin", "ildra.pairing.offer", "ildra.pairing.offer_result",
             "ildra.pairing.confirm", "ildra.pairing.status", "ildra.ask.handoff", "ildra.ask.attempt",
             "ildra.settings.set", "ildra.settings.value", "ildra.ask.unpaired",
-            "ildra.device.enroll", "ildra.device.enroll.confirm", "ildra.device.enroll.status", "ildra.device.challenge", "ildra.device.proof"
+            "ildra.device.enroll", "ildra.device.enroll.confirm", "ildra.device.enroll.status", "ildra.device.enroll.replaced", "ildra.device.challenge", "ildra.device.proof"
           ]
         },
         "proto": { "const": 1 },
@@ -41,6 +41,7 @@
         { "if": { "properties": { "type": { "const": "ildra.device.enroll" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceEnroll" } } } },
         { "if": { "properties": { "type": { "const": "ildra.device.enroll.confirm" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceEnrollConfirm" } } } },
         { "if": { "properties": { "type": { "const": "ildra.device.enroll.status" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceEnrollStatus" } } } },
+        { "if": { "properties": { "type": { "const": "ildra.device.enroll.replaced" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceEnrollReplaced" } } } },
         { "if": { "properties": { "type": { "const": "ildra.device.challenge" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceChallenge" } } } },
         { "if": { "properties": { "type": { "const": "ildra.device.proof" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/DeviceProof" } } } }
       ]
@@ -345,9 +346,25 @@
     },
 
     "DeviceFingerprint": {
-      "description": "First 16 lowercase hex characters of SHA-256 over the raw device public key; the device and the phone both show it so the user can compare.",
+      "description": "The device key's human-comparable code (batch A): SHA-256 over the raw 32-byte device public key, its first 8 bytes as a big-endian unsigned 64-bit integer, mod 10^16, as 16 decimal digits zero-padded. The device and the phone both show it as 4 groups of 4 separated by spaces (e.g. 9450 0838 9027 4913) so the user can compare.",
       "type": "string",
-      "pattern": "^[0-9a-f]{16}$"
+      "pattern": "^[0-9]{16}$"
+    },
+
+    "EnrollNonce": {
+      "description": "Batch A: 32 random bytes, base64url without padding, chosen by the daemon for one pending enrollment. The phone's signed confirm must carry it; a later enroll request gets a new one.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+
+    "EnrollSource": {
+      "description": "Who asked to enroll: local_socket (the daemon owner's local socket) or device (a device-role connection).",
+      "enum": ["local_socket", "device"]
+    },
+
+    "UserVerification": {
+      "description": "Batch A (Design Q55): how the user unlocked the phone signing key for this confirm. biometric: Face ID, Touch ID or a strong Android biometric; passcode: the device passcode or credential.",
+      "enum": ["biometric", "passcode"]
     },
 
     "AskUnpaired": {
@@ -363,25 +380,43 @@
     },
 
     "DeviceEnroll": {
-      "description": "Daemon to the paired phone (Shield R7-1): an Ildra device asked to enroll its Ed25519 key (from the daemon owner's local socket or a device-role connection). Pending only: the key gets no touch authority until the paired phone confirms it with ildra.device.enroll.confirm before expiresAt (10 minutes after the request). The device shows the same fingerprint. Gateway pairing (harness pair, loopback or not) never enrolls a device.",
+      "description": "Daemon to the paired phone (Shield R7-1): an Ildra device asked to enroll its Ed25519 key (from the daemon owner's local socket or a device-role connection, see source). Pending only: the key gets no touch authority until the paired phone confirms it with a signed ildra.device.enroll.confirm carrying this nonce before expiresAt (10 minutes after the request). The device shows the same fingerprint. One pending enrollment at a time: a later request replaces it (ildra.device.enroll.replaced, then a new ildra.device.enroll with a new nonce). Gateway pairing (harness pair, loopback or not) never enrolls a device.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["devicePub", "fingerprint", "expiresAt"],
+      "required": ["devicePub", "fingerprint", "nonce", "expiresAt", "source"],
       "properties": {
         "devicePub": { "$ref": "#/$defs/DevicePub" },
         "fingerprint": { "$ref": "#/$defs/DeviceFingerprint" },
-        "expiresAt": { "$ref": "#/$defs/EpochMs" }
+        "nonce": { "$ref": "#/$defs/EnrollNonce" },
+        "expiresAt": { "$ref": "#/$defs/EpochMs" },
+        "source": { "$ref": "#/$defs/EnrollSource" }
+      }
+    },
+
+    "DeviceEnrollReplaced": {
+      "description": "Daemon to the paired phone (batch A): a pending enrollment was replaced by a later enroll request (from either source, the local socket included) before the phone answered it. The phone closes the old confirm and warns; the old nonce is dead, so a confirm signed for it is refused. Sent only when a pending (unexpired) enrollment existed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["oldFingerprint", "newFingerprint", "source", "at"],
+      "properties": {
+        "oldFingerprint": { "$ref": "#/$defs/DeviceFingerprint" },
+        "newFingerprint": { "$ref": "#/$defs/DeviceFingerprint" },
+        "source": { "$ref": "#/$defs/EnrollSource" },
+        "at": { "$ref": "#/$defs/EpochMs" }
       }
     },
 
     "DeviceEnrollConfirm": {
-      "description": "Phone to daemon (Shield R7-1): approved true confirms the pending device key, approved false refuses it; approved false on the enrolled key revokes it. Accepted only from the paired phone, authenticated by the key it paired with; anything else is unpaired_phone. The daemon answers with ildra.device.enroll.status.",
+      "description": "Phone to daemon (Shield R7-1, batch A, Design Q55): approved true confirms the pending device key, approved false refuses it; approved false with the enrolled key and the nonce it was enrolled with revokes it. Accepted only from the paired phone, authenticated by the key it paired with (anything else is unpaired_phone). The phone signing key requires user presence, and the signed confirm carries a uv (user verified) field that the daemon requires and journals. signature: the paired phone key's Ed25519 signature, base64, over the UTF-8 bytes of ildra-enroll-confirm:v1|<devicePub>|<nonce>|<approve or decline>|<uv>. Refused, enrolling nothing: no uv or any other value, a bad nonce or devicePub shape (malformed); a missing or wrong signature, including one over another uv or approved (bad_signature); no pending enrollment with this devicePub and nonce, also a replayed confirm (unknown_id). The daemon answers with ildra.device.enroll.status.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["devicePub", "approved"],
+      "required": ["devicePub", "nonce", "approved", "uv", "signature"],
       "properties": {
         "devicePub": { "$ref": "#/$defs/DevicePub" },
-        "approved": { "type": "boolean" }
+        "nonce": { "$ref": "#/$defs/EnrollNonce" },
+        "approved": { "type": "boolean" },
+        "uv": { "$ref": "#/$defs/UserVerification" },
+        "signature": { "description": "Ed25519 signature, 64 bytes, base64.", "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
       }
     },
 
@@ -393,7 +428,8 @@
       "properties": {
         "state": { "enum": ["enrolled", "refused", "revoked", "expired"] },
         "fingerprint": { "$ref": "#/$defs/DeviceFingerprint" },
-        "at": { "$ref": "#/$defs/EpochMs" }
+        "at": { "$ref": "#/$defs/EpochMs" },
+        "uv": { "description": "On enrolled only: the uv from the phone's signed confirm, as journaled.", "$ref": "#/$defs/UserVerification" }
       }
     },
 

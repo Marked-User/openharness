@@ -12,9 +12,9 @@
 import {
   ask as askGate, deviceFingerprint, openJournal, practiceAsk, ToolManifestLoader,
   type ApprovalJournal, type ApprovalProfile, type ApprovalTemplate, type AskAnswer, type AskAttempt, type AskChannel,
-  type AskHandoff, type AskOptions, type AskOutcome, type AskRequest, type ToolManifestEntry,
+  type AskHandoff, type AskOptions, type AskOutcome, type AskRequest, type EnrollReplaced, type EnrollSource, type ToolManifestEntry,
 } from './approvals.js'
-import type { IldraAskInputs } from '../core/api.js'
+import { ENROLL_UV, enrollConfirmMessage, rawDeviceKey, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
 
 export type IldraAskEvent =
   | { type: 'ildra.ask.attempt'; body: AskAttempt }
@@ -22,8 +22,9 @@ export type IldraAskEvent =
   | { type: 'ildra.ask.outcome'; body: AskOutcome }
   | { type: 'ildra.settings.value'; body: { key: string; value: number } }
   | { type: 'ildra.ask.unpaired'; body: { count: number; since: number; at: number } }
-  | { type: 'ildra.device.enroll'; body: { devicePub: string; fingerprint: string; expiresAt: number } }
-  | { type: 'ildra.device.enroll.status'; body: { state: 'enrolled' | 'refused' | 'revoked' | 'expired'; fingerprint: string; at: number } }
+  | { type: 'ildra.device.enroll'; body: { devicePub: string; fingerprint: string; nonce: string; expiresAt: number; source: EnrollSource } }
+  | { type: 'ildra.device.enroll.replaced'; body: EnrollReplaced }
+  | { type: 'ildra.device.enroll.status'; body: { state: 'enrolled' | 'refused' | 'revoked' | 'expired'; fingerprint: string; at: number; uv?: EnrollUv } }
 
 export interface IldraAsk {
   journal(): ApprovalJournal
@@ -99,18 +100,27 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
   }
   // Shield R7-1: the enrolled Ildra device key, kept in the journal; enrollment confirmed by the paired phone.
   deps.inputs.deviceKey = () => open().device.device()
-  deps.inputs.onDeviceEnroll = (devicePub) => {
-    const p = open().device.begin(devicePub)
+  deps.inputs.onDeviceEnroll = (devicePub, source) => {
+    const p = open().device.begin(devicePub, source)
     if (!p) return { ok: false, reason: 'malformed' }
-    emit('ildra.device.enroll', p)
-    return { ok: true, ...p }
+    const { replaced, ...pending } = p
+    // Batch A: a later request (any source, the local socket included) replaced a pending one: alert the phone.
+    if (replaced) emit('ildra.device.enroll.replaced', replaced)
+    emit('ildra.device.enroll', { ...pending, source })
+    return { ok: true, ...pending }
   }
   deps.inputs.onDeviceConfirm = (msg, from) => {
     const j = open()
     if (typeof from.phoneId !== 'string' || typeof from.machinePub !== 'string' || !j.pairing.isPairedKey(from.phoneId, from.machinePub)) return { ok: false, reason: 'unpaired_phone' }
-    const state = j.device.confirm(msg.devicePub, msg.approved)
+    // Batch A (Design Q55): uv is required and signed, with the nonce of the pending enrollment, by the paired key.
+    if (typeof msg.approved !== 'boolean' || typeof msg.devicePub !== 'string' || !rawDeviceKey(msg.devicePub)
+      || typeof msg.nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(msg.nonce)
+      || !(ENROLL_UV as readonly unknown[]).includes(msg.uv)) return { ok: false, reason: 'malformed' }
+    const uv = msg.uv as EnrollUv
+    if (!verifyEd25519(from.machinePub, enrollConfirmMessage(msg.devicePub, msg.nonce, msg.approved, uv), msg.signature)) return { ok: false, reason: 'bad_signature' }
+    const state = j.device.confirm(msg.devicePub, msg.nonce, msg.approved, { uv, phoneId: from.phoneId })
     if (state === null) return { ok: false, reason: 'unknown_id' }
-    emit('ildra.device.enroll.status', { state, fingerprint: deviceFingerprint(msg.devicePub as string), at: (deps.now ?? Date.now)() })
+    emit('ildra.device.enroll.status', { state, fingerprint: deviceFingerprint(msg.devicePub), at: (deps.now ?? Date.now)(), ...(state === 'enrolled' ? { uv } : {}) })
     return { ok: true, state }
   }
   deps.inputs.onSettings = (msg, from) => {

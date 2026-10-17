@@ -3,7 +3,7 @@
  * rule (lookalike requires an ASCII lookalikeOf). Shield's own GAP tests in approvals.shield-r6.spec.ts flip
  * (fail) when these hold, as intended.
  */
-import { generateKeyPairSync, randomBytes, sign } from 'node:crypto'
+import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto'
 import { mkdtempSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,9 +11,9 @@ import Ajv2020Module from 'ajv/dist/2020.js'
 import { describe, expect, it } from 'vitest'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { stampChannel as stampForTest } from '../core/ildraChannel.js'
-import { deviceProofMessage } from '../core/ildraDeviceProof.js'
+import { deviceFingerprint, deviceProofMessage, enrollConfirmMessage, verifyEd25519 } from '../core/ildraDeviceProof.js'
 import { createIldraAsk } from './ildraAsk.js'
-import { deviceKeyPair, proveBridge } from './ildraAsk.testkit.js'
+import { deviceKeyPair, phoneKeyPair, proveBridge, signedConfirm } from './ildraAsk.testkit.js'
 import {
   ApprovalWindow, AskLedger, HIDDEN_SCHEMA_PATTERN, PhonePairing, UNPAIRED_NOTIFY, UNPAIRED_WINDOW_MS, ask, classifyTool, markHidden,
   openJournal, recipientFlags, resolveTool, stampManifest, toDeviceMessage,
@@ -55,7 +55,11 @@ function rig(clients: Record<string, IldraAskClient>, path?: string) {
 }
 
 describe('R7-1: only the phone-confirmed, proven Ildra device answers on touch', () => {
-  const full = () => rig({ dev: { identity: DEV, role: 'device' }, dev2: { identity: DEV2, role: 'device' }, ph: { identity: PHONE, role: 'web' }, x: { identity: OTHER, role: 'web' } })
+  // Batch A: the paired phone's key is a real Ed25519 key; it signs every enroll confirm.
+  const PK = phoneKeyPair()
+  const full = () => rig({ dev: { identity: DEV, role: 'device' }, dev2: { identity: DEV2, role: 'device' }, ph: { identity: PK.pub, role: 'web' }, x: { identity: OTHER, role: 'web' } })
+  const conf = (r: ReturnType<typeof full>, pub: string, approved = true) => ({ ...signedConfirm(r.svc, PK.key, pub, approved), from: { phoneId: 'p1' } })
+  const enrolled = (r: ReturnType<typeof full>, pub: string) => { const j = r.svc.journal(); const b = j.device.begin(pub)!; j.device.confirm(pub, b.nonce, true, { uv: 'biometric', phoneId: 'p1' }) }
 
   it('with no enrolled key, a device-role connection is no_authority and gets no challenge', async () => {
     const r = full()
@@ -68,7 +72,7 @@ describe('R7-1: only the phone-confirmed, proven Ildra device answers on touch',
   })
 
   it('enroll is pending until the paired phone confirms; the device itself, another key or an unpaired phone cannot confirm', async () => {
-    const r = full(); r.pair(PHONE)
+    const r = full(); r.pair(PK.pub)
     const { pub, key } = deviceKeyPair()
     const begun = await r.core.requests.ildra_device_enroll({ devicePub: pub }, r.remote('dev'))
     expect(begun).toMatchObject({ ok: true, devicePub: pub })
@@ -76,19 +80,19 @@ describe('R7-1: only the phone-confirmed, proven Ildra device answers on touch',
     expect(r.svc.journal().device.device()).toBeNull()
     expect(proveBridge(r.core, 'dev', key)).toBe(false) // pending grants nothing
     // The device (device role), a web key that is not the paired phone, or a loopback owner cannot confirm.
-    expect(await r.core.requests.ildra_device_enroll_confirm({ devicePub: pub, approved: true, from: { phoneId: 'p1' } }, r.remote('dev'))).toMatchObject({ ok: false })
-    expect(await r.core.requests.ildra_device_enroll_confirm({ devicePub: pub, approved: true, from: { phoneId: 'p1' } }, r.remote('x'))).toEqual({ ok: false, reason: 'unpaired_phone' })
-    expect(await r.core.requests.ildra_device_enroll_confirm({ devicePub: pub, approved: true }, { local: true, owner: true, connection: 'local:sock' })).toMatchObject({ ok: false })
+    expect(await r.core.requests.ildra_device_enroll_confirm(conf(r, pub), r.remote('dev'))).toMatchObject({ ok: false })
+    expect(await r.core.requests.ildra_device_enroll_confirm(conf(r, pub), r.remote('x'))).toEqual({ ok: false, reason: 'unpaired_phone' })
+    expect(await r.core.requests.ildra_device_enroll_confirm(conf(r, pub), { local: true, owner: true, connection: 'local:sock' })).toMatchObject({ ok: false })
     expect(r.svc.journal().device.device()).toBeNull()
-    expect(await r.core.requests.ildra_device_enroll_confirm({ devicePub: pub, approved: true, from: { phoneId: 'p1' } }, r.remote('ph'))).toEqual({ ok: true, state: 'enrolled' })
+    expect(await r.core.requests.ildra_device_enroll_confirm(conf(r, pub), r.remote('ph'))).toEqual({ ok: true, state: 'enrolled' })
     expect(r.events.find((e) => e.type === 'ildra.device.enroll.status')?.body).toMatchObject({ state: 'enrolled' })
     expect(r.svc.journal().device.device()).toBe(pub)
     expect(proveBridge(r.core, 'dev', key)).toBe(true)
   })
 
   it('after enrollment only the proven connection answers; an unproven device-role connection or a second key is no_authority, even with holdMs 2000', async () => {
-    const r = full(); r.pair(PHONE)
-    const { pub, key } = deviceKeyPair(); const j = r.svc.journal(); j.device.begin(pub); j.device.confirm(pub, true)
+    const r = full(); r.pair(PK.pub)
+    const { pub, key } = deviceKeyPair(); enrolled(r, pub)
     expect(proveBridge(r.core, 'dev', key)).toBe(true)
     const other = deviceKeyPair()
     expect(proveBridge(r.core, 'dev2', other.key)).toBe(false)
@@ -119,14 +123,14 @@ describe('R7-1: only the phone-confirmed, proven Ildra device answers on touch',
     expect(core.proveDevice('dev', sign(null, Buffer.from(deviceProofMessage(n3)), key).toString('base64'))).toBe(false)
   })
 
-  it('the phone revokes with approved false: the bridge loses authority at once; the journal stores only the public key', async () => {
-    const r = full(); r.pair(PHONE)
-    const { pub, key } = deviceKeyPair(); const j = r.svc.journal(); j.device.begin(pub); j.device.confirm(pub, true)
+  it('the phone revokes with a signed approved false on the enrollment nonce: the bridge loses authority at once; the journal stores only the public key', async () => {
+    const r = full(); r.pair(PK.pub)
+    const { pub, key } = deviceKeyPair(); enrolled(r, pub)
     expect(proveBridge(r.core, 'dev', key)).toBe(true)
     const text = readFileSync(join(r.d, 'j', 'a.json'), 'utf8')
     expect(text).toContain(pub)
     expect(text).not.toMatch(/PRIVATE|privateKey/)
-    expect(await r.core.requests.ildra_device_enroll_confirm({ devicePub: pub, approved: false, from: { phoneId: 'p1' } }, r.remote('ph'))).toEqual({ ok: true, state: 'revoked' })
+    expect(await r.core.requests.ildra_device_enroll_confirm(conf(r, pub, false), r.remote('ph'))).toEqual({ ok: true, state: 'revoked' })
     const p = r.svc.ask(T, 'Rename a file', null, { kind, agentId: 'a', available: ['touch'] })
     await tick()
     expect(await r.answer(r.sent[0]!, 'dev')).toEqual({ ok: false, reason: 'no_authority' })
@@ -137,21 +141,123 @@ describe('R7-1: only the phone-confirmed, proven Ildra device answers on touch',
     let now = 5_000_000
     const j = openJournal(join(mkdtempSync(join(tmpdir(), 'build-r7e-')), 'j.json'), { now: () => now, markerPath: join(mkdtempSync(join(tmpdir(), 'build-r7m-')), 'x') })
     const { pub } = deviceKeyPair()
-    j.device.begin(pub)
+    const b = j.device.begin(pub)!
     now += 10 * 60_000 + 1
-    expect(j.device.confirm(pub, true)).toBe('expired')
+    expect(j.device.confirm(pub, b.nonce, true, { uv: 'biometric', phoneId: 'p1' })).toBe('expired')
     expect(j.device.device()).toBeNull()
   })
 
   it('wire: the device messages and the examples match the schema', () => {
     const { pub } = deviceKeyPair()
-    expect(env('ildra.device.enroll', { devicePub: pub, fingerprint: '0123456789abcdef', expiresAt: 1 })).toBe(true)
-    expect(env('ildra.device.enroll.confirm', { devicePub: pub, approved: true })).toBe(true)
-    expect(env('ildra.device.enroll.confirm', { devicePub: pub })).toBe(false)
-    expect(env('ildra.device.enroll.status', { state: 'revoked', fingerprint: '0123456789abcdef', at: 1 })).toBe(true)
+    const fp = deviceFingerprint(pub)
+    const nonce = randomBytes(32).toString('base64url')
+    const signature = Buffer.alloc(64, 1).toString('base64')
+    expect(env('ildra.device.enroll', { devicePub: pub, fingerprint: fp, nonce, expiresAt: 1, source: 'device' })).toBe(true)
+    expect(env('ildra.device.enroll', { devicePub: pub, fingerprint: '0123456789abcdef', nonce, expiresAt: 1, source: 'device' })).toBe(false)
+    expect(env('ildra.device.enroll.confirm', { devicePub: pub, nonce, approved: true, uv: 'biometric', signature })).toBe(true)
+    expect(env('ildra.device.enroll.confirm', { devicePub: pub, nonce, approved: true, uv: 'passcode', signature })).toBe(true)
+    expect(env('ildra.device.enroll.confirm', { devicePub: pub, nonce, approved: true, signature })).toBe(false) // uv required
+    expect(env('ildra.device.enroll.confirm', { devicePub: pub, nonce, approved: true, uv: 'face', signature })).toBe(false)
+    expect(env('ildra.device.enroll.confirm', { devicePub: pub, nonce, approved: true, uv: 'biometric' })).toBe(false) // signature required
+    expect(env('ildra.device.enroll.confirm', { devicePub: pub, approved: true })).toBe(false)
+    expect(env('ildra.device.enroll.status', { state: 'revoked', fingerprint: fp, at: 1 })).toBe(true)
+    expect(env('ildra.device.enroll.status', { state: 'enrolled', fingerprint: fp, at: 1, uv: 'passcode' })).toBe(true)
+    expect(env('ildra.device.enroll.replaced', { oldFingerprint: fp, newFingerprint: fp, source: 'local_socket', at: 1 })).toBe(true)
+    expect(env('ildra.device.enroll.replaced', { oldFingerprint: fp, newFingerprint: fp, source: 'other', at: 1 })).toBe(false)
     expect(env('ildra.device.challenge', { nonce: randomBytes(32).toString('base64url') })).toBe(true)
     expect(env('ildra.device.proof', { signature: Buffer.alloc(64, 1).toString('base64') })).toBe(true)
     expect(env('ildra.device.proof', { signature: 'x' })).toBe(false)
+  })
+})
+
+describe('Batch A: fingerprint, enroll.replaced, and the signed uv on enroll.confirm (Design Q55)', () => {
+  const PK = phoneKeyPair()
+  const clients = (): Record<string, IldraAskClient> => ({ dev: { identity: DEV, role: 'device' }, ph: { identity: PK.pub, role: 'web' } })
+  const setup = () => { const r = rig(clients()); r.pair(PK.pub); return r }
+  const send = (r: ReturnType<typeof setup>, body: Record<string, unknown>) => r.core.requests.ildra_device_enroll_confirm({ ...body, from: { phoneId: 'p1' } }, r.remote('ph'))
+
+  it('the fingerprint is 16 digits (shown 4 groups of 4) from SHA-256 of the raw key, deterministic, and the RFC 8032 key gives the pinned value', () => {
+    const rfc = '11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo='
+    expect(deviceFingerprint(rfc)).toMatch(/^[0-9]{16}$/) // shown as 4 groups of 4
+    expect(deviceFingerprint(rfc)).toBe(deviceFingerprint(rfc))
+    const raw = Buffer.from(rfc, 'base64')
+    const n = BigInt('0x' + createHash('sha256').update(raw).digest().subarray(0, 8).toString('hex')) % 10n ** 16n
+    expect(deviceFingerprint(rfc)).toBe(n.toString().padStart(16, '0'))
+    expect(deviceFingerprint(deviceKeyPair().pub)).not.toBe(deviceFingerprint(rfc))
+  })
+
+  it('enroll and enroll.status carry the same fingerprint; status carries the journaled uv', async () => {
+    const r = setup(); const { pub } = deviceKeyPair()
+    await r.core.requests.ildra_device_enroll({ devicePub: pub }, r.remote('dev'))
+    const e = r.events.find((x) => x.type === 'ildra.device.enroll')!.body as { fingerprint: string; nonce: string; source: string }
+    expect(e).toMatchObject({ fingerprint: deviceFingerprint(pub), source: 'device' })
+    expect(e.nonce).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(await send(r, signedConfirm(r.svc, PK.key, pub, true, 'passcode'))).toEqual({ ok: true, state: 'enrolled' })
+    expect(r.events.find((x) => x.type === 'ildra.device.enroll.status')!.body).toMatchObject({ state: 'enrolled', fingerprint: e.fingerprint, uv: 'passcode' })
+    expect(r.svc.journal().device.enrolled()).toMatchObject({ pub, uv: 'passcode', phoneId: 'p1' })
+    const text = readFileSync(join(r.d, 'j', 'a.json'), 'utf8')
+    expect(text).toContain('"uv":"passcode"')
+    // The journaled uv survives a restart.
+    const r2 = rig(clients(), r.d)
+    expect(r2.svc.journal().device.enrolled()).toMatchObject({ pub, uv: 'passcode', phoneId: 'p1' })
+  })
+
+  it('a confirm without uv, with any other uv, or with uv outside the signature is refused and enrolls nothing', async () => {
+    const r = setup(); const { pub } = deviceKeyPair()
+    await r.core.requests.ildra_device_enroll({ devicePub: pub }, r.remote('dev'))
+    const good = signedConfirm(r.svc, PK.key, pub, true, 'biometric')
+    const { uv: _uv, ...noUv } = good
+    expect(await send(r, noUv)).toEqual({ ok: false, reason: 'malformed' })
+    expect(await send(r, { ...good, uv: 'face' })).toEqual({ ok: false, reason: 'malformed' })
+    expect(await send(r, { ...good, uv: null })).toEqual({ ok: false, reason: 'malformed' })
+    expect(await send(r, signedConfirm(r.svc, PK.key, pub, true, 'face'))).toEqual({ ok: false, reason: 'malformed' })
+    expect(await send(r, { ...good, uv: 'passcode' })).toEqual({ ok: false, reason: 'bad_signature' }) // uv is inside the signature
+    expect(await send(r, { ...good, approved: false })).toEqual({ ok: false, reason: 'bad_signature' })
+    const { signature: _s, ...noSig } = good
+    expect(await send(r, noSig)).toEqual({ ok: false, reason: 'bad_signature' })
+    expect(await send(r, signedConfirm(r.svc, deviceKeyPair().key, pub))).toEqual({ ok: false, reason: 'bad_signature' }) // not the paired key
+    expect(r.svc.journal().device.device()).toBeNull()
+    expect(r.events.some((x) => x.type === 'ildra.device.enroll.status')).toBe(false)
+    expect(await send(r, good)).toEqual({ ok: true, state: 'enrolled' })
+    expect(await send(r, good)).toEqual({ ok: false, reason: 'unknown_id' }) // a replay finds no pending enrollment
+  })
+
+  it('a signature over another nonce or another key is unknown_id; a signed decline is refused with the fingerprint', async () => {
+    const r = setup(); const { pub } = deviceKeyPair()
+    await r.core.requests.ildra_device_enroll({ devicePub: pub }, r.remote('dev'))
+    const wrongNonce = randomBytes(32).toString('base64url')
+    const sig = (dp: string, n: string, a: boolean) => sign(null, Buffer.from(enrollConfirmMessage(dp, n, a, 'biometric'), 'utf8'), PK.key).toString('base64')
+    expect(await send(r, { devicePub: pub, nonce: wrongNonce, approved: true, uv: 'biometric', signature: sig(pub, wrongNonce, true) })).toEqual({ ok: false, reason: 'unknown_id' })
+    const other = deviceKeyPair().pub; const n = r.svc.journal().device.pending()!.nonce
+    expect(await send(r, { devicePub: other, nonce: n, approved: true, uv: 'biometric', signature: sig(other, n, true) })).toEqual({ ok: false, reason: 'unknown_id' })
+    expect(await send(r, signedConfirm(r.svc, PK.key, pub, false))).toEqual({ ok: true, state: 'refused' })
+    expect(r.events.find((x) => x.type === 'ildra.device.enroll.status')!.body).toEqual({ state: 'refused', fingerprint: deviceFingerprint(pub), at: expect.any(Number) })
+    expect(r.svc.journal().device.device()).toBeNull()
+  })
+
+  it('the protocol example confirm is a real signature by the RFC 8032 test 2 phone key over the test 1 device key', () => {
+    const phonePub = 'PUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw='
+    const b = { devicePub: '11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=', nonce: 'aWxkcmEtZW5yb2xsLWV4YW1wbGUtbm9uY2UtMzItYnk', approved: true, uv: 'biometric' as const,
+      signature: 'jGPFORgmzKO7buZgTluXSuZbKnSjohKAtqpXR13aDUDHnPAxUkZG+elNQHP71W047eLaeUwqWkg3UdGLu0RpAw==' }
+    expect(env('ildra.device.enroll.confirm', b)).toBe(true)
+    expect(verifyEd25519(phonePub, enrollConfirmMessage(b.devicePub, b.nonce, b.approved, b.uv), b.signature)).toBe(true)
+    expect(verifyEd25519(phonePub, enrollConfirmMessage(b.devicePub, b.nonce, b.approved, 'passcode'), b.signature)).toBe(false)
+    expect(deviceFingerprint(b.devicePub)).toBe('9450083890274913')
+  })
+
+  it('a later enroll request, from the local socket too, replaces the pending one and alerts the phone with both fingerprints and the source', async () => {
+    const r = setup(); const real = deviceKeyPair(); const evil = deviceKeyPair()
+    await r.core.requests.ildra_device_enroll({ devicePub: real.pub }, r.remote('dev'))
+    expect(r.events.some((x) => x.type === 'ildra.device.enroll.replaced')).toBe(false) // nothing pending before
+    const realConfirm = signedConfirm(r.svc, PK.key, real.pub)
+    await r.core.requests.ildra_device_enroll({ devicePub: evil.pub }, { local: true, owner: true, connection: 'local:sock' })
+    expect(r.events.find((x) => x.type === 'ildra.device.enroll.replaced')!.body).toEqual({ oldFingerprint: deviceFingerprint(real.pub), newFingerprint: deviceFingerprint(evil.pub), source: 'local_socket', at: expect.any(Number) })
+    expect(r.events.filter((x) => x.type === 'ildra.device.enroll').map((x) => (x.body as { source: string }).source)).toEqual(['device', 'local_socket'])
+    expect(await send(r, realConfirm)).toEqual({ ok: false, reason: 'unknown_id' }) // the pushed-out one cannot be confirmed
+    await r.core.requests.ildra_device_enroll({ devicePub: real.pub }, r.remote('dev'))
+    expect(r.events.filter((x) => x.type === 'ildra.device.enroll.replaced').at(-1)!.body).toMatchObject({ oldFingerprint: deviceFingerprint(evil.pub), source: 'device' })
+    expect(await send(r, realConfirm)).toEqual({ ok: false, reason: 'unknown_id' }) // a fresh nonce: the old signature is dead
+    expect(await send(r, signedConfirm(r.svc, PK.key, real.pub))).toEqual({ ok: true, state: 'enrolled' })
   })
 })
 

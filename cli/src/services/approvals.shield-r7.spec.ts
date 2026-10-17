@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest'
 import { deviceProofMessage } from '../core/api.js'
 import { createIldraAskCore, type IldraAskClient } from '../core/ildraAsk.js'
 import { createIldraAsk } from './ildraAsk.js'
-import { deviceKeyPair, proveBridge } from './ildraAsk.testkit.js'
+import { deviceKeyPair, phoneKeyPair, proveBridge, signedConfirm } from './ildraAsk.testkit.js'
 import { AskLedger, ApprovalWindow, MAX_REPROMPTS, ask, openJournal, stampManifest, type ApprovalTemplate, type AskAnswer, type AskRequest } from './approvals.js'
 
 const aid = (): string => randomBytes(16).toString('hex')
@@ -20,7 +20,9 @@ const T: ApprovalTemplate = { permissions: { ask: ['Rename a file'], locked_ask:
 const kind = { manifest: stampManifest([{ name: 'fs.rename', send: false }], 'bridge'), tool: 'fs.rename' }
 const DEV = 'D'.repeat(43) + '='
 const DEV2 = 'E'.repeat(43) + '='
-const PHONE = 'P'.repeat(43) + '='
+// Fixture (Build, batch A): the phone key is a real Ed25519 key, since enroll confirms are now signed by it.
+const PHONE_KP = phoneKeyPair()
+const PHONE = PHONE_KP.pub
 const OTHER = 'X'.repeat(43) + '='
 const tick = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve() }
 const CLIENTS: Record<string, IldraAskClient> = {
@@ -40,7 +42,7 @@ function rig(dir = mkdtempSync(join(tmpdir(), 'shield-r7-')), now?: () => number
     core.requests.ildra_ask_answer({ id: req.id, digest8: req.digest8, answerId: aid(), approved: true, holdMs: 2000, ...extra }, asker(connection))
   const pairPhone = () => { const p = svc.journal().pairing; const { code } = p.begin('touch'); p.offer('p1', PHONE, code); p.confirm('p1', 'touch', true) }
   const confirm = (connection: string, devicePub: string, approved = true, phoneId = 'p1') =>
-    core.requests.ildra_device_enroll_confirm({ devicePub, approved, from: { phoneId } }, asker(connection))
+    core.requests.ildra_device_enroll_confirm({ ...signedConfirm(svc, PHONE_KP.key, devicePub, approved), from: { phoneId } }, asker(connection))
   return { core, svc, sent, events, answer, pairPhone, confirm, asker, dir }
 }
 

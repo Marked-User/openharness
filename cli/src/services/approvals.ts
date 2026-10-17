@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path'
 import { HIDDEN_DATA } from './unicode/hidden.js'
-import { deviceFingerprint, rawDeviceKey, stampedChannel } from '../core/api.js'
+import { ENROLL_UV, deviceFingerprint, rawDeviceKey, stampedChannel, type EnrollUv } from '../core/api.js'
 export { deviceFingerprint, deviceProofMessage, verifyDeviceProof } from '../core/api.js'
 import { isLookalike, isNewRecipient, lookalikeOf, recipientAscii, recipientKey, type RecipientKnowledge } from './recipient.js'
 
@@ -1484,7 +1484,10 @@ function parseJournal(text: string) {
   if (p.log !== undefined && (!Array.isArray(p.log) || !p.log.every(isLog))) throw new Error('bad pairing log')
   if (p.refused !== undefined && (!p.refused || typeof p.refused !== 'object' || Array.isArray(p.refused) || !Object.values(p.refused).every((x) => typeof x === 'string'))) throw new Error('bad pairing refused')
   if (d.settings !== undefined && (!d.settings || typeof d.settings !== 'object')) throw new Error('bad settings')
-  if (d.device !== undefined && d.device !== null && (typeof d.device !== 'object' || (d.device.pub !== null && typeof d.device.pub !== 'string'))) throw new Error('bad device')
+  // Batch A: { device: EnrolledDevice | null, pending }. A pre-batch-A record ({ pub, at }) carries no uv: it restores as
+  // not enrolled (the phone confirms the device again), and does not fail the journal.
+  if (d.device !== undefined && d.device !== null && (typeof d.device !== 'object' || Array.isArray(d.device)
+    || (d.device.device !== undefined && d.device.device !== null && typeof d.device.device !== 'object'))) throw new Error('bad device')
   return { window: w, ledger: l, pairing: p, settings: d.settings, device: d.device }
 }
 
@@ -1527,54 +1530,71 @@ const rawKey = (pub: unknown): Buffer | null => rawDeviceKey(pub)
  * nothing else makes a key the device. A connection then answers touch only after signing a fresh core nonce with
  * that key (core/ildraAsk.ts challenge and prove). confirm(pub, false) on the enrolled key revokes it.
  */
+export type EnrollSource = 'local_socket' | 'device'
+export interface EnrolledDevice { pub: string; at: number; uv: EnrollUv; phoneId: string; nonce: string }
+export interface PendingEnrollment { pub: string; at: number; expiresAt: number; nonce: string; source: EnrollSource }
+/** Batch A: a pending enrollment replaced by a later enroll request (any source); the paired phone is alerted. */
+export interface EnrollReplaced { oldFingerprint: string; newFingerprint: string; source: EnrollSource; at: number }
+
 export class AskDeviceEnrollment {
-  private pub_: string | null = null
-  private at_ = 0
-  private pending_: { pub: string; at: number; expiresAt: number } | null = null
+  private dev_: EnrolledDevice | null = null
+  private pending_: PendingEnrollment | null = null
   onChange?: () => void
   constructor(private readonly now: () => number = Date.now) {}
-  /** Record a pending enrollment for `pub`; returns its fingerprint and expiry, or null for a malformed key. */
-  begin(pub: unknown): { devicePub: string; fingerprint: string; expiresAt: number } | null {
+  /**
+   * Record a pending enrollment for `pub` with a fresh nonce the phone's confirm must sign. Any later request,
+   * from the device or the local socket, replaces a pending one (returned as `replaced`, for the phone alert).
+   * Null for a malformed key.
+   */
+  begin(pub: unknown, source: EnrollSource = 'device'): { devicePub: string; fingerprint: string; nonce: string; expiresAt: number; replaced: EnrollReplaced | null } | null {
     if (!rawKey(pub)) return null
     const at = this.now()
-    this.pending_ = { pub: pub as string, at, expiresAt: at + DEVICE_ENROLL_TTL_MS }
+    const old = this.pending_ && at < this.pending_.expiresAt ? this.pending_ : null
+    this.pending_ = { pub: pub as string, at, expiresAt: at + DEVICE_ENROLL_TTL_MS, nonce: randomBytes(32).toString('base64url'), source }
     this.onChange?.()
-    return { devicePub: pub as string, fingerprint: deviceFingerprint(pub as string), expiresAt: this.pending_.expiresAt }
+    const replaced = old ? { oldFingerprint: deviceFingerprint(old.pub), newFingerprint: deviceFingerprint(pub as string), source, at } : null
+    return { devicePub: pub as string, fingerprint: deviceFingerprint(pub as string), nonce: this.pending_.nonce, expiresAt: this.pending_.expiresAt, replaced }
   }
-  pending(): { devicePub: string; fingerprint: string; expiresAt: number } | null {
+  pending(): { devicePub: string; fingerprint: string; nonce: string; expiresAt: number; source: EnrollSource } | null {
     const p = this.pending_
     if (!p || this.now() >= p.expiresAt) return null
-    return { devicePub: p.pub, fingerprint: deviceFingerprint(p.pub), expiresAt: p.expiresAt }
+    return { devicePub: p.pub, fingerprint: deviceFingerprint(p.pub), nonce: p.nonce, expiresAt: p.expiresAt, source: p.source }
   }
   /**
-   * The paired phone's answer (the caller has checked the phone key). approved on the pending key enrolls it,
-   * replacing any earlier device; not approved refuses the pending key, or revokes `pub` when it is the
-   * enrolled one. Returns the resulting state, or null when there is nothing for that key.
+   * The paired phone's signed answer (the caller has checked the phone key, uv and the signature). On the current
+   * pending enrollment with this key and nonce: approved enrolls it (replacing any earlier device) and journals uv
+   * and the phone; declined refuses it. Declined with the enrolled key and its enrollment nonce revokes it. Null
+   * when there is no such enrollment.
    */
-  confirm(pub: unknown, approved: boolean): 'enrolled' | 'refused' | 'revoked' | 'expired' | null {
+  confirm(pub: unknown, nonce: unknown, approved: boolean, by: { uv: EnrollUv; phoneId: string }): 'enrolled' | 'refused' | 'revoked' | 'expired' | null {
     const p = this.pending_
-    if (p && p.pub === pub) {
-      this.pending_ = null
-      if (this.now() >= p.expiresAt) { this.onChange?.(); return 'expired' }
-      if (approved) { this.pub_ = p.pub; this.at_ = this.now() }
-      this.onChange?.()
-      return approved ? 'enrolled' : 'refused'
-    }
-    if (!approved && this.pub_ !== null && pub === this.pub_) { this.revoke(); return 'revoked' }
-    return null
+    if (!approved && this.dev_ && this.dev_.pub === pub && this.dev_.nonce === nonce && !(p && p.pub === pub && p.nonce === nonce)) { this.revoke(); return 'revoked' }
+    if (!p || p.pub !== pub || p.nonce !== nonce) return null
+    this.pending_ = null
+    if (this.now() >= p.expiresAt) { this.onChange?.(); return 'expired' }
+    if (approved) this.dev_ = { pub: p.pub, at: this.now(), uv: by.uv, phoneId: by.phoneId, nonce: p.nonce }
+    this.onChange?.()
+    return approved ? 'enrolled' : 'refused'
   }
-  revoke(): void { this.pub_ = null; this.at_ = 0; this.onChange?.() }
+  revoke(): void { this.dev_ = null; this.onChange?.() }
   /** The enrolled device key, or null. */
-  device(): string | null { return this.pub_ }
-  toJSON(): { pub: string | null; at: number; pending: { pub: string; at: number; expiresAt: number } | null } {
-    return { pub: this.pub_, at: this.at_, pending: this.pending_ }
+  device(): string | null { return this.dev_?.pub ?? null }
+  /** The enrolled device record (key, when, the phone's uv and phone id), or null. */
+  enrolled(): EnrolledDevice | null { return this.dev_ ? { ...this.dev_ } : null }
+  toJSON(): { device: EnrolledDevice | null; pending: PendingEnrollment | null } {
+    return { device: this.dev_, pending: this.pending_ }
   }
   restore(d: unknown): void {
-    const x = d as { pub?: unknown; at?: unknown; pending?: { pub?: unknown; at?: unknown; expiresAt?: unknown } | null } | null
+    const x = d as { device?: Partial<EnrolledDevice> | null; pending?: Partial<PendingEnrollment> | null } | null
     if (!x || typeof x !== 'object') return
-    if (rawKey(x.pub)) { this.pub_ = x.pub as string; this.at_ = typeof x.at === 'number' ? x.at : 0 }
+    const v = x.device
+    if (v && rawKey(v.pub) && typeof v.at === 'number' && (ENROLL_UV as readonly unknown[]).includes(v.uv) && typeof v.phoneId === 'string' && typeof v.nonce === 'string') {
+      this.dev_ = { pub: v.pub as string, at: v.at, uv: v.uv as EnrollUv, phoneId: v.phoneId, nonce: v.nonce }
+    }
     const p = x.pending
-    if (p && rawKey(p.pub) && typeof p.at === 'number' && typeof p.expiresAt === 'number') this.pending_ = { pub: p.pub as string, at: p.at, expiresAt: p.expiresAt }
+    if (p && rawKey(p.pub) && typeof p.at === 'number' && typeof p.expiresAt === 'number' && typeof p.nonce === 'string' && (p.source === 'local_socket' || p.source === 'device')) {
+      this.pending_ = { pub: p.pub as string, at: p.at, expiresAt: p.expiresAt, nonce: p.nonce, source: p.source }
+    }
   }
 }
 
