@@ -52,6 +52,8 @@ export interface IldraAskCore extends IldraAskInputs {
     ildra_pairing_ledger_ack: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true } | { ok: false; reason: string }>
     ildra_ledger_confirm: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; head: string; seq: number; at: number } | { ok: false; reason: string }>
     ildra_deny_summary_ack: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true } | { ok: false; reason: string }>
+    ildra_device_presence: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true } | { ok: false; reason: string }>
+    ildra_presence_abort: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true } | { ok: false; reason: string }>
     ildra_device_challenge: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: true; nonce: string } | { ok: false; reason: string }>
     ildra_device_prove: (payload: Record<string, unknown>, asker: Asker) => Promise<{ ok: boolean; reason?: string }>
   } & Record<string, ServiceRequest>
@@ -147,6 +149,8 @@ export function createIldraAskCore(deps: {
     requests: {
       ildra_ask_answer: async (payload, asker) => {
         if (!payload || typeof payload !== 'object' || typeof payload.id !== 'string' || typeof payload.digest8 !== 'string') return { ok: false, reason: 'malformed' }
+        // (i): a presence proof (button or screen hold) is never an Ask answer.
+        if (payload.kind === 'button_hold' || payload.kind === 'screen_hold' || payload.presence !== undefined) return { ok: false, reason: 'no_authority' }
         const origin = originOf(asker.connection, payload.from)
         if (typeof origin === 'string') return { ok: false, reason: origin }
         const answer: Record<string, unknown> = {
@@ -190,7 +194,7 @@ export function createIldraAskCore(deps: {
         const local = asker.local && asker.owner
         if (!local && !deviceRole(asker.connection)) return { ok: false, reason: 'no_authority' }
         if (!core.onDeviceEnroll) return { ok: false, reason: 'unavailable' }
-        return core.onDeviceEnroll(payload?.devicePub, local ? 'local_socket' : 'device')
+        return core.onDeviceEnroll(payload?.devicePub, local ? 'local_socket' : 'device', { inputs: payload?.inputs, form: payload?.form })
       },
       ildra_device_enroll_confirm: async (payload, asker) => {
         const origin = originOf(asker.connection, payload?.from)
@@ -218,7 +222,7 @@ export function createIldraAskCore(deps: {
         const origin = originOf(asker.connection, payload?.from)
         if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'no_authority' }
         if (!core.onPairingUnpair) return { ok: false, reason: 'unavailable' }
-        return core.onPairingUnpair({ phoneId: payload?.phoneId, at: payload?.at, signature: payload?.signature, ...(payload?.touchProof !== undefined ? { touchProof: payload.touchProof } : {}) }, origin.from)
+        return core.onPairingUnpair({ phoneId: payload?.phoneId, at: payload?.at, signature: payload?.signature, ...(payload?.touchProof !== undefined ? { touchProof: payload.touchProof } : {}), ...(payload?.presence === true ? { presence: true } : {}) }, origin.from)
       },
       ildra_ask_answered_by: async (payload, asker) => {
         const origin = originOf(asker.connection, payload?.from)
@@ -246,6 +250,19 @@ export function createIldraAskCore(deps: {
         if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'unpaired_phone' }
         if (!core.onDenySummaryAck) return { ok: false, reason: 'unavailable' }
         return core.onDenySummaryAck({ since: payload?.since, at: payload?.at, phoneSignature: payload?.phoneSignature }, origin.from)
+      },
+      // (i): a device presence proof, from a device-role connection (not loopback); the service checks the challenge
+      // and the enrolled key's signature. Presence is never an Ask answer (ildra_ask_answer refuses it).
+      ildra_device_presence: async (payload, asker) => {
+        if (!deviceRole(asker.connection)) return { ok: false, reason: 'no_authority' }
+        if (!core.onDevicePresence) return { ok: false, reason: 'unavailable' }
+        return core.onDevicePresence({ requestId: payload?.requestId, kind: payload?.kind, heldMs: payload?.heldMs, nonce: payload?.nonce, signature: payload?.signature })
+      },
+      ildra_presence_abort: async (payload, asker) => {
+        const origin = originOf(asker.connection, payload?.from)
+        if (typeof origin === 'string' || origin.via !== 'phone') return { ok: false, reason: 'unpaired_phone' }
+        if (!core.onPresenceAbort) return { ok: false, reason: 'unavailable' }
+        return core.onPresenceAbort({ requestId: payload?.requestId, at: payload?.at, phoneSignature: payload?.phoneSignature }, origin.from)
       },
       ildra_device_challenge: async (_payload, asker) => {
         const nonce = asker.connection ? core.challengeDevice(asker.connection) : null

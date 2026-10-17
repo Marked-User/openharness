@@ -57,7 +57,7 @@ export { FAIL, later, readFallback, ServiceUnavailableError, type PortFallbacks 
  * and the Ildra device key helpers (Ed25519 proof of the enrolled device).
  */
 export { stampedChannel } from './ildraChannel.js'
-export { ENROLL_UV, PHONE_VERBS, askAnswerMessage, deviceFingerprint, deviceProofMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, ledgerAckMessage, ledgerConfirmMessage, denySummaryAckMessage, unpairMessage, unpairTouchMessage, verifyDeviceProof, verifyEd25519, rawPhoneKey, normalizePhoneSignature, verifyP256, verifyPhoneSignature, type EnrollUv, type PhoneVerb } from './ildraDeviceProof.js'
+export { ENROLL_UV, PHONE_VERBS, askAnswerMessage, deviceFingerprint, deviceProofMessage, enrollConfirmMessage, rawDeviceKey, settingsSetMessage, ledgerAckMessage, ledgerConfirmMessage, denySummaryAckMessage, presencePattern, presenceMessage, presenceAbortMessage, DEVICE_INPUTS, DEVICE_FORMS, PRESENCE_TTL_MS, PRESENCE_MIN_HELD_MS, unpairMessage, unpairTouchMessage, verifyDeviceProof, verifyEd25519, rawPhoneKey, normalizePhoneSignature, verifyP256, verifyPhoneSignature, type EnrollUv, type PhoneVerb } from './ildraDeviceProof.js'
 
 /** A service may open a terminal with a literal argv, never shell source. */
 export interface TerminalOpen {
@@ -575,7 +575,7 @@ export interface IldraAskInputs {
    */
   deviceKey?: (() => string | null) | null
   /** R7-1: `ildra_device_enroll {devicePub}`: records a pending enrollment, grants nothing. */
-  onDeviceEnroll?: ((devicePub: unknown, source: 'local_socket' | 'device') => { ok: true; devicePub: string; fingerprint: string; nonce: string; expiresAt: number } | { ok: false; reason: string }) | null
+  onDeviceEnroll?: ((devicePub: unknown, source: 'local_socket' | 'device', caps?: { inputs?: unknown; form?: unknown }) => { ok: true; devicePub: string; fingerprint: string; nonce: string; expiresAt: number } | { ok: false; reason: string }) | null
   /**
    * R7-1, batch A: `ildra.device.enroll.confirm {devicePub, nonce, approved, uv, signature}` from the paired phone's
    * key; the service checks the key, uv and the signature (enrollConfirmMessage).
@@ -594,12 +594,16 @@ export interface IldraAskInputs {
   /** Batch B: `ildra.pairing.ledger.get {since}` from the paired phone: ledger entries after seq `since`, and the head. */
   onPairingLedger?: ((since: unknown, from: IldraAnswerOrigin) => { ok: true; entries: unknown[]; pageHead: string; more: boolean; nextSeq?: number; head: { seq: number; hash: string } } | { ok: false; reason: string }) | null
   /** (k): `ildra.phone.deny_summary.ack {since, at, phoneSignature}` from the paired phone (main or deny key): clears the summary. */
+  /** (i): `ildra.device.presence {requestId, kind, heldMs, nonce, signature}` from a device-role connection. */
+  onDevicePresence?: ((msg: { requestId: unknown; kind: unknown; heldMs: unknown; nonce: unknown; signature: unknown }) => { ok: true } | { ok: false; reason: string }) | null
+  /** (i): `ildra.presence.abort {requestId, at, phoneSignature}` from the paired phone (main or deny key): refuses only. */
+  onPresenceAbort?: ((msg: { requestId: unknown; at: unknown; phoneSignature: unknown }, from: IldraAnswerOrigin) => { ok: true } | { ok: false; reason: string }) | null
   onDenySummaryAck?: ((msg: { since: unknown; at: unknown; phoneSignature: unknown }, from: IldraAnswerOrigin) => { ok: true } | { ok: false; reason: string }) | null
   /**
    * Batch B: `ildra.pairing.unpair {phoneId, at, signature, touchProof?}` from a paired phone. Rate limited, opens a
    * locked_ask, refuses the last paired phone without a device touch proof; resolves when the Ask has settled.
    */
-  onPairingUnpair?: ((msg: { phoneId: unknown; at: unknown; signature: unknown; touchProof?: unknown }, from: IldraAnswerOrigin) => Promise<{ ok: true; state: 'unpaired'; askId: string } | { ok: false; reason: string }>) | null
+  onPairingUnpair?: ((msg: { phoneId: unknown; at: unknown; signature: unknown; touchProof?: unknown; presence?: boolean }, from: IldraAnswerOrigin) => Promise<{ ok: true; state: 'unpaired'; askId: string } | { ok: false; reason: string }>) | null
   /** Batch B: `ildra.ask.answered_by.get {id}` from the paired phone: who settled that Ask, or null. */
   onAnsweredBy?: ((id: unknown, from: IldraAnswerOrigin) => { ok: true; answeredBy: unknown } | { ok: false; reason: string }) | null
   /** Shield B5: `ildra.pairing.ledger_ack {seq, hash, signature}` from the paired phone (main key): acknowledges a ledger_reset. */
@@ -613,7 +617,7 @@ export interface IldraAskInputs {
 
 /** Ildra Asks (services/ildraAsk.ts): an answer from the phone or the device to an open Ask. Its origin is the
  *  connection it came over (Shield F12), never the payload. Always in the core's own process. */
-export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer', 'ildra_settings_set', 'ildra_device_enroll', 'ildra_device_enroll_confirm', 'ildra_phone_open', 'ildra_pairing_ledger', 'ildra_pairing_unpair', 'ildra_ask_answered_by', 'ildra_pairing_ledger_ack', 'ildra_ledger_confirm', 'ildra_deny_summary_ack', 'ildra_device_challenge', 'ildra_device_prove'] as const
+export const ILDRA_ASK_REQUESTS = ['ildra_ask_answer', 'ildra_settings_set', 'ildra_device_enroll', 'ildra_device_enroll_confirm', 'ildra_phone_open', 'ildra_pairing_ledger', 'ildra_pairing_unpair', 'ildra_ask_answered_by', 'ildra_pairing_ledger_ack', 'ildra_ledger_confirm', 'ildra_deny_summary_ack', 'ildra_device_presence', 'ildra_presence_abort', 'ildra_device_challenge', 'ildra_device_prove'] as const
 /** Sharing this machine with other accounts, and adding machines shared with this one, in the edge host
  *  (services/sharedMachines.ts). */
 export const SHARED_MACHINES_REQUESTS = ['shared_machines'] as const

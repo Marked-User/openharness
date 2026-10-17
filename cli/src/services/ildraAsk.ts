@@ -9,12 +9,16 @@
  * early handoff (ledger). Either way the daemon emits ildra.ask.handoff, withdraws the device prompt
  * (`withdraw`) and shows the Ask on the phone (`bridge('phone', ...)`).
  */
+import { randomBytes, randomUUID } from 'node:crypto'
 import {
   ask as askGate, deviceFingerprint, openJournal, practiceAsk, ToolManifestLoader,
   type ApprovalJournal, type ApprovalProfile, type ApprovalTemplate, type AskAnswer, type AskAttempt, type AskChannel,
   type AskHandoff, type AskOptions, type AskOutcome, type AskRequest, type EnrollReplaced, type EnrollSource, type ToolManifestEntry,
-  type AskAnsweredBy, stampManifest, UNPAIR_RESET_COUNT, LEDGER_STRING_MAX, deviceHoldConfirm, LEDGER_CONFIRM_PROMPT, LEDGER_CONFIRM_MS,
+  type AskAnsweredBy, stampManifest, UNPAIR_RESET_COUNT, LEDGER_STRING_MAX, deviceHoldConfirm, LEDGER_CONFIRM_PROMPT, LEDGER_CONFIRM_MS, parseDeviceCaps,
 } from './approvals.js'
+
+/** (i): a presence challenge, sent to the paired phone and the device. */
+export interface PresenceChallenge { requestId: string; method: 'hold_screen' | 'blink_button'; groups?: [number, number]; pattern?: { on_ms: number; off_ms: number }[]; nonce: string; expiresAt: number }
 
 /** Batch B: the unpair API's rate limit (from the pairing ledger, daemon-wide) and clock skew for its signed `at`. */
 export const UNPAIR_RATE = 3
@@ -23,7 +27,7 @@ export const UNPAIR_SKEW_MS = 60_000
 const UNPAIR_ACTION = 'Unpair a phone'
 const UNPAIR_TEMPLATE: ApprovalTemplate = { permissions: { locked_ask: [UNPAIR_ACTION] } }
 const UNPAIR_MANIFEST = stampManifest([{ name: 'ildra.pairing.unpair', send: false }], 'first_party')
-import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, rawPhoneKey, settingsSetMessage, stampedChannel, ledgerAckMessage, ledgerConfirmMessage, denySummaryAckMessage, unpairMessage, unpairTouchMessage, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
+import { ENROLL_UV, askAnswerMessage, enrollConfirmMessage, rawDeviceKey, rawPhoneKey, settingsSetMessage, stampedChannel, ledgerAckMessage, ledgerConfirmMessage, denySummaryAckMessage, presencePattern, presenceMessage, presenceAbortMessage, PRESENCE_TTL_MS, PRESENCE_MIN_HELD_MS, unpairMessage, unpairTouchMessage, verifyEd25519, type EnrollUv, type IldraAskInputs } from '../core/api.js'
 
 export type IldraAskEvent =
   | { type: 'ildra.ask.attempt'; body: AskAttempt }
@@ -39,6 +43,7 @@ export type IldraAskEvent =
   | { type: 'ildra.pairing.unpaired'; body: { phoneId: string; by: string; askId: string; at: number; remaining: number } }
   | { type: 'ildra.pairing.ledger_reset'; body: { seq: number; hash: string; reason: string; at: number; oldHead?: string } }
   | { type: 'ildra.ledger.confirmed'; body: { head: string; seq: number; at: number } }
+  | { type: 'ildra.presence.challenge'; body: PresenceChallenge }
   | { type: 'ildra.ledger.confirm_refused'; body: { reason: string } }
   | { type: 'ildra.device.enroll.status'; body: { state: 'enrolled' | 'refused' | 'revoked' | 'expired'; fingerprint: string; at: number; uv?: EnrollUv } }
 
@@ -138,8 +143,15 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
   }
   // Shield R7-1: the enrolled Ildra device key, kept in the journal; enrollment confirmed by the paired phone.
   deps.inputs.deviceKey = () => open().device.device()
-  deps.inputs.onDeviceEnroll = (devicePub, source) => {
-    const p = open().device.begin(devicePub, source)
+  deps.inputs.onDeviceEnroll = (devicePub, source, rawCaps) => {
+    const caps = parseDeviceCaps(rawCaps ?? {})
+    if (!caps) return { ok: false, reason: 'malformed' }
+    // (i) point 3: the household has one Ildra device; enrolling one with no physical input would leave it none.
+    if (caps.inputs.length === 0) {
+      open().pairingLedger.append({ kind: 'device_refused', by: source, via: source, reason: 'no_physical_input' })
+      return { ok: false, reason: 'no_physical_input' }
+    }
+    const p = open().device.begin(devicePub, source, caps)
     if (!p) return { ok: false, reason: 'malformed' }
     const { replaced, ...pending } = p
     // Batch A: a later request (any source, the local socket included) replaced a pending one: alert the phone.
@@ -167,7 +179,8 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     const state = j.device.confirm(msg.devicePub, msg.nonce, msg.approved, { uv, phoneId: from.phoneId })
     if (state === null) return { ok: false, reason: 'unknown_id' }
     if (denyKey !== undefined && !j.pairing.setDenyKey(from.phoneId, denyKey)) return { ok: false, reason: 'malformed' }
-    emit('ildra.device.enroll.status', { state, fingerprint: deviceFingerprint(msg.devicePub), at: (deps.now ?? Date.now)(), ...(state === 'enrolled' ? { uv } : {}) })
+    const rec = j.device.enrolled()
+    emit('ildra.device.enroll.status', { state, fingerprint: deviceFingerprint(msg.devicePub), at: (deps.now ?? Date.now)(), ...(state === 'enrolled' && rec ? { uv, inputs: rec.inputs, ...(rec.form ? { form: rec.form } : {}) } : {}) })
     return { ok: true, state }
   }
   // Shield deny key: an answer carrying phoneSignature is checked against the stored keys of the paired phone. The
@@ -244,6 +257,73 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
   // 60 s device hold prompt with the touch hold rules and authority proof. Every refusal is a ledger entry and an
   // ildra.ledger.confirm_refused; success appends ledger_confirmed (prev = the confirmed head, since = its seq).
   // The daemon keeps no per-phone head: pausing on a mismatch is the phone's.
+  // (i): device presence. The daemon issues a challenge (requestId, nonce, 60 s) to the phone and the device; the
+  // enrolled device answers with a signed hold (ildra.device.presence). Accepted only for the challenge's own purpose
+  // (ledger.confirm, removing the last owner phone); never as an Ask answer. The phone may abort it (refuse only).
+  type Open = PresenceChallenge & { purpose: 'ledger_confirm' | 'unpair_last'; done: (r: 'ok' | 'aborted' | 'missing') => void }
+  const presenceOpen = new Map<string, Open>()
+  const presenceEnded = new Map<string, 'spent' | 'aborted' | 'expired'>()
+  const endPresence = (c: Open, how: 'spent' | 'aborted' | 'expired') => {
+    presenceOpen.delete(c.requestId)
+    presenceEnded.set(c.requestId, how)
+    if (presenceEnded.size > 1000) presenceEnded.delete(presenceEnded.keys().next().value!)
+    c.done(how === 'spent' ? 'ok' : how === 'aborted' ? 'aborted' : 'missing')
+  }
+  const runPresence = (purpose: Open['purpose'], inputs: readonly string[]): Promise<{ result: 'ok' | 'aborted' | 'missing'; requestId: string }> => {
+    const now = (deps.now ?? Date.now)()
+    const requestId = randomUUID()
+    const nonce = randomBytes(32).toString('base64url')
+    const method = inputs.includes('touch') ? 'hold_screen' as const : 'blink_button' as const
+    const blink = method === 'blink_button' ? presencePattern(requestId, nonce) : null
+    const ch: PresenceChallenge = { requestId, method, ...(blink ? { groups: blink.groups, pattern: blink.pattern } : {}), nonce, expiresAt: now + PRESENCE_TTL_MS }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => { const c = presenceOpen.get(requestId); if (c) endPresence(c, 'expired') }, PRESENCE_TTL_MS)
+      timer.unref?.()
+      presenceOpen.set(requestId, { ...ch, purpose, done: (result) => { clearTimeout(timer); resolve({ result, requestId }) } })
+      emit('ildra.presence.challenge', ch)
+    })
+  }
+  deps.inputs.onDevicePresence = (msg) => {
+    const j = open()
+    const refuse = (reason: string, id?: string) => {
+      j.pairingLedger.append({ kind: 'presence_refused', by: 'device', via: 'device', reason, ...(typeof id === 'string' && /^[0-9a-f-]{36}$/.test(id) ? { askId: id } : {}) })
+      return { ok: false as const, reason }
+    }
+    const id = msg.requestId
+    if (typeof id !== 'string' || id.length > LEDGER_STRING_MAX) return refuse('presence_missing')
+    const c = presenceOpen.get(id)
+    if (!c) {
+      const ended = presenceEnded.get(id)
+      if (ended === 'aborted') return refuse('aborted', id)
+      if (ended === 'spent') return refuse('presence_replayed', id)
+      if (ended === 'expired') return refuse('presence_expired', id)
+      // Presence is not an Ask answer: a hold sent against an open Ask id is no_authority.
+      if (j.ledger.get(id)) return { ok: false, reason: 'no_authority' }
+      return refuse('presence_wrong_request', id)
+    }
+    if (msg.nonce !== c.nonce) return refuse('presence_wrong_request', id)
+    if ((deps.now ?? Date.now)() >= c.expiresAt) { endPresence(c, 'expired'); return refuse('presence_expired', id) }
+    if (msg.kind !== (c.method === 'blink_button' ? 'button_hold' : 'screen_hold')) return refuse('presence_wrong_request', id)
+    if (typeof msg.heldMs !== 'number' || !Number.isInteger(msg.heldMs) || msg.heldMs < 0) return refuse('presence_missing', id)
+    if (msg.heldMs < PRESENCE_MIN_HELD_MS) return refuse('presence_too_short', id)
+    const dev = j.device.device()
+    if (!dev || !verifyEd25519(dev, presenceMessage(id, c.nonce, msg.heldMs), msg.signature)) return refuse('bad_signature', id)
+    j.pairingLedger.append({ kind: 'device_presence', fingerprint: deviceFingerprint(dev), by: 'device', via: 'device', askId: id, reason: c.purpose, verb: msg.kind as string })
+    endPresence(c, 'spent')
+    return { ok: true }
+  }
+  deps.inputs.onPresenceAbort = (msg, from) => {
+    const j = open()
+    if (!pairedFrom(j, from)) return { ok: false, reason: 'unpaired_phone' }
+    if (typeof msg.requestId !== 'string' || typeof msg.at !== 'number' || !Number.isFinite(msg.at) || typeof msg.phoneSignature !== 'string') return { ok: false, reason: 'malformed' }
+    const v = j.pairing.verifyPhone(from.phoneId, 'presence.abort', presenceAbortMessage(msg.requestId, msg.at), msg.phoneSignature)
+    if (!v.ok) return { ok: false, reason: v.reason }
+    const c = presenceOpen.get(msg.requestId)
+    if (!c) return { ok: false, reason: 'unknown_id' }
+    j.pairingLedger.append({ kind: 'presence_aborted', phoneId: from.phoneId, by: from.phoneId, via: 'phone', askId: c.requestId, reason: c.purpose })
+    endPresence(c, 'aborted')
+    return { ok: true }
+  }
   let confirmOpen = false
   deps.inputs.onLedgerConfirm = async (msg, from) => {
     const j = open()
@@ -260,17 +340,31 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     const v = j.pairing.verifyPhone(from.phoneId, 'ledger.confirm', ledgerConfirmMessage(head, seq, at), msg.phoneSignature)
     if (!v.ok) return refuse(v.reason === 'verifier_rejected' ? 'verifier_rejected' : v.reason === 'unpaired_phone' ? 'unpaired_phone' : 'bad_signature')
     const atHead = () => { const h = j.pairingLedger.head(); return h.seq === seq && h.hash === head }
+    // After the prompt: the list is still the one confirmed if no phone, device or deny key entry came after seq
+    // (refusals and the presence record written meanwhile do not change the list).
+    const STATE = new Set(['phone_paired', 'phone_rotated', 'phone_unpaired', 'device_enrolled', 'device_revoked', 'device_reset', 'deny_key_set', 'deny_key_revoked', 'ledger_reset', 'ledger_ack'])
+    const listUnchanged = () => { const all = j.pairingLedger.all(); const at = all.findIndex((e) => e.seq === seq); return (seq === 0 || (at >= 0 && all[at]!.hash === head)) && all.slice(at + 1).every((e) => !STATE.has(e.kind)) }
     if (!atHead()) return refuse('stale_head')
     if (confirmOpen) return refuse('busy')
     confirmOpen = true
-    let out: Awaited<ReturnType<typeof deviceHoldConfirm>>
+    // (i): a device without a touch screen confirms by presence (blink_button); a touch device by the hold prompt.
+    const inputs = j.device.inputs()
+    let askId: string
     try {
-      out = await deviceHoldConfirm(answerVia('ildra'), { ledger: j.ledger, pairing: j.pairing, isShared: (o) => deps.inputs.isShared(o), prompt: LEDGER_CONFIRM_PROMPT, expiryMs: LEDGER_CONFIRM_MS, agentId: 'ildra' })
-    } finally { confirmOpen = false; }
-    done(out.request.id)
-    if (!out.approved) return refuse('timeout', out.request.id)
+      if (inputs && !inputs.includes('touch')) {
+        const p = await runPresence('ledger_confirm', inputs)
+        askId = p.requestId
+        if (p.result !== 'ok') return refuse(p.result === 'aborted' ? 'aborted' : 'presence_missing', askId)
+      } else {
+        const out = await deviceHoldConfirm(answerVia('ildra'), { ledger: j.ledger, pairing: j.pairing, isShared: (o) => deps.inputs.isShared(o), prompt: LEDGER_CONFIRM_PROMPT, expiryMs: LEDGER_CONFIRM_MS, agentId: 'ildra' })
+        done(out.request.id)
+        askId = out.request.id
+        if (!out.approved) return refuse('timeout', askId)
+      }
+    } finally { confirmOpen = false }
+    const out = { request: { id: askId } }
     // The head may have moved while the hold prompt was up: then the person confirmed a list that is no longer current.
-    if (!atHead()) return refuse('stale_head', out.request.id)
+    if (!listUnchanged()) return refuse('stale_head', out.request.id)
     if (!j.pairing.isPairedKey(from.phoneId, from.machinePub)) return refuse('unpaired_phone', out.request.id)
     j.pairingLedger.append({ kind: 'ledger_confirmed', phoneId: from.phoneId, by: from.phoneId, via: 'touch', since: seq, askId: out.request.id })
     emit('ildra.ledger.confirmed', { head, seq, at })
@@ -301,7 +395,20 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
     if (unpairOpen !== null) return refuse('unpair_pending', target)
     // The last owner channel: removing the only paired phone needs the enrolled device's signed touch.
     let touched = false
-    if (j.pairing.pairedCount() <= 1) {
+    let presenceId: string | null = null
+    // (i): presence fills the touch proof slot, only for removing the last owner phone.
+    const usePresence = msg.presence === true && msg.touchProof === undefined
+    if (usePresence && j.pairing.pairedCount() > 1) return refuse('presence_not_allowed', target)
+    if (usePresence) {
+      const inputs = j.device.inputs()
+      if (!inputs || !j.device.device()) return refuse('last_owner_channel', target)
+      unpairOpen = target
+      let p: Awaited<ReturnType<typeof runPresence>>
+      try { p = await runPresence('unpair_last', inputs) } finally { unpairOpen = null }
+      if (p.result !== 'ok') return refuse(p.result === 'aborted' ? 'aborted' : 'presence_missing', target)
+      touched = true
+      presenceId = p.requestId
+    } else if (j.pairing.pairedCount() <= 1) {
       const dev = j.device.device()
       if (!dev || !verifyEd25519(dev, unpairTouchMessage(target, at), msg.touchProof)) return refuse('last_owner_channel', target)
       // Shield B8: a touch proof is single use. Its (target, at) is spent in the ledger (journaled, so also across a
@@ -311,7 +418,7 @@ export function createIldraAsk(deps: { inputs: IldraAskInputs; journalPath: stri
       if (spent) return refuse('last_owner_channel', target)
       touched = true
     }
-    j.pairingLedger.append({ kind: 'unpair_requested', phoneId: target, by: from.phoneId, via: 'phone', ...(touched ? { verb: 'touch_proof', since: at } : {}) })
+    j.pairingLedger.append({ kind: 'unpair_requested', phoneId: target, by: from.phoneId, via: 'phone', ...(presenceId ? { verb: 'presence', askId: presenceId } : touched ? { verb: 'touch_proof', since: at } : {}) })
     emit('ildra.pairing.unpair_requested', { phoneId: target, by: from.phoneId, at: now })
     unpairOpen = target
     let outcome: Awaited<ReturnType<typeof rt.ask>>

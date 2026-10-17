@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path'
 import { HIDDEN_DATA } from './unicode/hidden.js'
-import { ENROLL_UV, deviceFingerprint, rawDeviceKey, rawPhoneKey, stampedChannel, verifyPhoneSignature, type EnrollUv } from '../core/api.js'
+import { ENROLL_UV, DEVICE_FORMS, DEVICE_INPUTS, deviceFingerprint, rawDeviceKey, rawPhoneKey, stampedChannel, verifyPhoneSignature, type EnrollUv } from '../core/api.js'
 export { deviceFingerprint, deviceProofMessage, verifyDeviceProof } from '../core/api.js'
 import { isLookalike, isNewRecipient, lookalikeOf, recipientAscii, recipientKey, type RecipientKnowledge } from './recipient.js'
 
@@ -1186,6 +1186,9 @@ export const PAIRING_LEDGER_KINDS = [
   'ledger_confirmed', 'ledger_confirm_refused',
   // (k): the phone acknowledged the deny summary (since = the burst's since); only this clears the flag.
   'deny_summary_ack',
+  // (i): device presence accepted (askId = the requestId, reason = its purpose, verb = button_hold or screen_hold),
+  // refused (noisy), aborted by the phone; and a device replaced by a new enroll (oldFingerprint).
+  'device_presence', 'presence_refused', 'presence_aborted', 'device_reset',
 ] as const
 export type PairingLedgerKind = (typeof PAIRING_LEDGER_KINDS)[number]
 export interface PairingLedgerFields {
@@ -1232,7 +1235,7 @@ export const MAX_PAIRING_LEDGER = 10_000
 export const LEDGER_STATE_RESERVE = 1_000
 export const NOISY_PER_MINUTE = 5
 export const LEDGER_STRING_MAX = 64
-const NOISY_LEDGER_KINDS: ReadonlySet<string> = new Set(['verifier_rejected', 'pair_refused', 'unpair_refused', 'device_enroll_requested', 'device_enroll_replaced', 'device_refused', 'device_expired', 'ledger_confirm_refused'])
+const NOISY_LEDGER_KINDS: ReadonlySet<string> = new Set(['verifier_rejected', 'pair_refused', 'unpair_refused', 'device_enroll_requested', 'device_enroll_replaced', 'device_refused', 'device_expired', 'ledger_confirm_refused', 'presence_refused'])
 const LEDGER_CAPPED_STRINGS = ['phoneId', 'by', 'via', 'reason', 'verb', 'uv'] as const
 export class PairingLedger {
   private readonly entries_: PairingLedgerEntry[] = []
@@ -1956,8 +1959,17 @@ const rawKey = (pub: unknown): Buffer | null => rawDeviceKey(pub)
  * that key (core/ildraAsk.ts challenge and prove). confirm(pub, false) on the enrolled key revokes it.
  */
 export type EnrollSource = 'local_socket' | 'device'
-export interface EnrolledDevice { pub: string; at: number; uv: EnrollUv; phoneId: string; nonce: string }
-export interface PendingEnrollment { pub: string; at: number; expiresAt: number; nonce: string; source: EnrollSource }
+/** (i), (g): what a device reports at enroll and the daemon records: its physical inputs (empty: none) and its form. */
+export interface DeviceCaps { inputs: ('touch' | 'button')[]; form?: (typeof DEVICE_FORMS)[number] }
+/** (i): parse a device's reported capabilities. Absent inputs (older devices) are ['touch']. Null when malformed. */
+export function parseDeviceCaps(c: { inputs?: unknown; form?: unknown } = {}): DeviceCaps | null {
+  const inputs = c.inputs === undefined ? ['touch'] : c.inputs
+  if (!Array.isArray(inputs) || inputs.length > DEVICE_INPUTS.length || !inputs.every((x) => (DEVICE_INPUTS as readonly unknown[]).includes(x)) || new Set(inputs).size !== inputs.length) return null
+  if (c.form !== undefined && !(DEVICE_FORMS as readonly unknown[]).includes(c.form)) return null
+  return { inputs: inputs as DeviceCaps['inputs'], ...(c.form !== undefined ? { form: c.form as DeviceCaps['form'] } : {}) }
+}
+export interface EnrolledDevice extends DeviceCaps { pub: string; at: number; uv: EnrollUv; phoneId: string; nonce: string }
+export interface PendingEnrollment extends DeviceCaps { pub: string; at: number; expiresAt: number; nonce: string; source: EnrollSource }
 /** Batch A: a pending enrollment replaced by a later enroll request (any source); the paired phone is alerted. */
 export interface EnrollReplaced { oldFingerprint: string; newFingerprint: string; source: EnrollSource; at: number }
 
@@ -1973,17 +1985,20 @@ export class AskDeviceEnrollment {
    * from the device or the local socket, replaces a pending one (returned as `replaced`, for the phone alert).
    * Null for a malformed key.
    */
-  begin(pub: unknown, source: EnrollSource = 'device'): { devicePub: string; fingerprint: string; nonce: string; expiresAt: number; replaced: EnrollReplaced | null } | null {
+  begin(pub: unknown, source: EnrollSource = 'device', caps: DeviceCaps = { inputs: ['touch'] }): { devicePub: string; fingerprint: string; nonce: string; expiresAt: number; replaced: EnrollReplaced | null } & DeviceCaps | null {
     if (!rawKey(pub)) return null
     const at = this.now()
     const old = this.pending_ && at < this.pending_.expiresAt ? this.pending_ : null
-    this.pending_ = { pub: pub as string, at, expiresAt: at + DEVICE_ENROLL_TTL_MS, nonce: randomBytes(32).toString('base64url'), source }
+    // (i) point 4: a reset device enrolls as new; nothing of the old record (inputs, form, trust) carries over.
+    this.pending_ = { pub: pub as string, at, expiresAt: at + DEVICE_ENROLL_TTL_MS, nonce: randomBytes(32).toString('base64url'), source, inputs: [...caps.inputs], ...(caps.form ? { form: caps.form } : {}) }
     this.onChange?.()
     const replaced = old ? { oldFingerprint: deviceFingerprint(old.pub), newFingerprint: deviceFingerprint(pub as string), source, at } : null
     if (replaced) this.ledger?.append({ kind: 'device_enroll_replaced', fingerprint: replaced.newFingerprint, oldFingerprint: replaced.oldFingerprint, by: source, via: source })
     this.ledger?.append({ kind: 'device_enroll_requested', fingerprint: deviceFingerprint(pub as string), by: source, via: source })
-    return { devicePub: pub as string, fingerprint: deviceFingerprint(pub as string), nonce: this.pending_.nonce, expiresAt: this.pending_.expiresAt, replaced }
+    return { devicePub: pub as string, fingerprint: deviceFingerprint(pub as string), nonce: this.pending_.nonce, expiresAt: this.pending_.expiresAt, replaced, inputs: [...caps.inputs], ...(caps.form ? { form: caps.form } : {}) }
   }
+  /** (i): the enrolled device's recorded inputs, or null with no device. */
+  inputs(): ('touch' | 'button')[] | null { return this.dev_ ? [...this.dev_.inputs] : null }
   pending(): { devicePub: string; fingerprint: string; nonce: string; expiresAt: number; source: EnrollSource } | null {
     const p = this.pending_
     if (!p || this.now() >= p.expiresAt) return null
@@ -2004,7 +2019,10 @@ export class AskDeviceEnrollment {
     if (!p || p.pub !== pub || p.nonce !== nonce) return null
     this.pending_ = null
     if (this.now() >= p.expiresAt) { this.ledger?.append({ kind: 'device_expired', fingerprint: deviceFingerprint(p.pub), by: 'daemon' }); this.onChange?.(); return 'expired' }
-    if (approved) this.dev_ = { pub: p.pub, at: this.now(), uv: by.uv, phoneId: by.phoneId, nonce: p.nonce }
+    // (i) point 4: a new key replacing the enrolled one (a reset or replaced device) marks the old one device_reset,
+    // once the phone confirms the new enroll; the old key's trust (bridge proofs, inputs) ends here.
+    if (approved && this.dev_ && this.dev_.pub !== p.pub) this.ledger?.append({ kind: 'device_reset', fingerprint: deviceFingerprint(p.pub), oldFingerprint: deviceFingerprint(this.dev_.pub), by: by.phoneId, via: 'phone', reason: 'replaced_by_new_enroll' })
+    if (approved) this.dev_ = { pub: p.pub, at: this.now(), uv: by.uv, phoneId: by.phoneId, nonce: p.nonce, inputs: [...p.inputs], ...(p.form ? { form: p.form } : {}) }
     this.ledger?.append({ kind: approved ? 'device_enrolled' : 'device_refused', fingerprint: deviceFingerprint(p.pub), by: by.phoneId, via: 'phone', uv: by.uv, ...(approved ? { keyAlg: 'ed25519' as const } : {}) })
     this.onChange?.()
     return approved ? 'enrolled' : 'refused'
@@ -2022,11 +2040,13 @@ export class AskDeviceEnrollment {
     if (!x || typeof x !== 'object') return
     const v = x.device
     if (v && rawKey(v.pub) && typeof v.at === 'number' && (ENROLL_UV as readonly unknown[]).includes(v.uv) && typeof v.phoneId === 'string' && typeof v.nonce === 'string') {
-      this.dev_ = { pub: v.pub as string, at: v.at, uv: v.uv as EnrollUv, phoneId: v.phoneId, nonce: v.nonce }
+      const caps = parseDeviceCaps({ inputs: v.inputs, form: v.form }) ?? { inputs: ['touch'] }
+      this.dev_ = { pub: v.pub as string, at: v.at, uv: v.uv as EnrollUv, phoneId: v.phoneId, nonce: v.nonce, ...caps }
     }
     const p = x.pending
     if (p && rawKey(p.pub) && typeof p.at === 'number' && typeof p.expiresAt === 'number' && typeof p.nonce === 'string' && (p.source === 'local_socket' || p.source === 'device')) {
-      this.pending_ = { pub: p.pub as string, at: p.at, expiresAt: p.expiresAt, nonce: p.nonce, source: p.source }
+      const caps = parseDeviceCaps({ inputs: p.inputs, form: p.form }) ?? { inputs: ['touch'] }
+      this.pending_ = { pub: p.pub as string, at: p.at, expiresAt: p.expiresAt, nonce: p.nonce, source: p.source, ...caps }
     }
   }
 }

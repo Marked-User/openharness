@@ -22,6 +22,39 @@ export function deviceFingerprint(pub: string): string {
 }
 /** Batch A (Design Q55): how the paired phone verified its user for an enrollment confirm. */
 export const ENROLL_UV = ['biometric', 'passcode'] as const
+/** (i): a device's physical inputs, reported at enroll and recorded; empty means none. */
+export const DEVICE_INPUTS = ['touch', 'button'] as const
+export type DeviceInput = (typeof DEVICE_INPUTS)[number]
+/** (g): the device form factor, reported at enroll (display only). */
+export const DEVICE_FORMS = ['core', 'sphere', 'clip', 'rugged_camera', 'lamp', 'pocket', 'tablet', 'other'] as const
+export type DeviceForm = (typeof DEVICE_FORMS)[number]
+/** (i): presence proof timing. */
+export const PRESENCE_TTL_MS = 60_000
+export const PRESENCE_MIN_HELD_MS = 3000
+export const PRESENCE_ON_MS = 300
+export const PRESENCE_OFF_MS = 300
+export const PRESENCE_GAP_MS = 1200
+/**
+ * (i), Volt's firmware rule: b = the first byte of SHA-256 over the raw UTF-8 bytes of 'ildra-presence-v1', requestId
+ * and nonce, concatenated in that order with no separator. groups = [((b >> 2) & 3) + 1, (b & 3) + 1]. The pattern:
+ * group 1 blinks, a gap, group 2 blinks, then the gap again before it repeats; each blink is on PRESENCE_ON_MS, with
+ * PRESENCE_OFF_MS between blinks of a group and PRESENCE_GAP_MS after the last blink of each group.
+ */
+export function presencePattern(requestId: string, nonce: string): { b: number; groups: [number, number]; pattern: { on_ms: number; off_ms: number }[] } {
+  const b = createHash('sha256').update(Buffer.concat([Buffer.from('ildra-presence-v1', 'utf8'), Buffer.from(requestId, 'utf8'), Buffer.from(nonce, 'utf8')])).digest()[0]!
+  const groups: [number, number] = [((b >> 2) & 3) + 1, (b & 3) + 1]
+  const pattern: { on_ms: number; off_ms: number }[] = []
+  for (const g of groups) for (let i = 0; i < g; i++) pattern.push({ on_ms: PRESENCE_ON_MS, off_ms: i === g - 1 ? PRESENCE_GAP_MS : PRESENCE_OFF_MS })
+  return { b, groups, pattern }
+}
+/** (i): what the enrolled device key (Ed25519) signs after the physical hold. No time field: the nonce is single use. */
+export function presenceMessage(requestId: string, nonce: string, heldMs: number): string {
+  return `ildra-device-presence:v1|${requestId}|${nonce}|${heldMs}`
+}
+/** (i): what the phone's main or deny key signs to abort a presence challenge ('It doesn't match'). */
+export function presenceAbortMessage(requestId: string, at: number): string {
+  return `ildra-presence-abort:v1|${requestId}|${at}`
+}
 export type EnrollUv = (typeof ENROLL_UV)[number]
 /**
  * Batch A: what the paired phone signs (Ed25519, its paired key, a key that needs user presence) to confirm or
